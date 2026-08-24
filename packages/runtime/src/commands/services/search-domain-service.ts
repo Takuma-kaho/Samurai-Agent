@@ -40,7 +40,7 @@ type SkillWithFilePath = {
 type CollectionSchemaWithFilePath = CollectionSchema & { file_path: string; resource_version?: number; updated_at?: string };
 type CollectionRecordWithFilePath = Omit<CollectionRecord, "version"> & { version: number; file_path: string };
 
-/** Narrow adapter exposed to Query services; no WorkspaceStore mutation API crosses this boundary. */
+/** Narrow adapter exposed to Query services; no storage mutation API crosses this boundary. */
 export interface SearchReadStore {
   search(query: string, input?: { sessionIds?: string[] }): Promise<SearchResult[]>;
   getBackendRun(id: string): Promise<{ id: string; session_id?: string; room_id?: string; agent_id?: string; requested_by_participant_id?: string } | undefined>;

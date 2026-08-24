@@ -16,6 +16,12 @@ export interface HttpExternalAssistProviderOptions {
   url: string;
   token?: string;
   authHeader?: string;
+  /**
+   * Raw conversation context is never sent unless the host explicitly opts
+   * in.  A configured endpoint alone is not proof that the user approved
+   * sharing message contents or search text with that endpoint.
+   */
+  shareRawContext?: boolean;
   timeoutMs?: number;
   maxHints?: number;
   fetchImpl?: typeof fetch;
@@ -84,29 +90,45 @@ export class HttpExternalAssistProvider implements ExternalAssistProvider {
   }
 
   async prefetch(input: ExternalAssistPrefetchInput): Promise<ExternalAssistHint[]> {
+    const rawContext = this.options.shareRawContext === true;
     return this.requestHints({
       phase: "prefetch",
       session_id: input.sessionId,
-      query: input.query,
-      recent_messages: input.recentMessages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        created_at: message.created_at
-      })),
-      session_search: input.sessionSearch
+      query: rawContext ? input.query : "",
+      recent_messages: rawContext
+        ? input.recentMessages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          created_at: message.created_at
+        }))
+        : input.recentMessages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          created_at: message.created_at
+        })),
+      session_search: rawContext
+        ? input.sessionSearch
+        : input.sessionSearch.map((item) => ({ kind: item.kind, id: item.id })),
+      context_redacted: !rawContext
     });
   }
 
   async syncTurn(input: ExternalAssistSyncInput): Promise<ExternalAssistHint[]> {
+    const rawContext = this.options.shareRawContext === true;
     return this.requestHints({
       phase: "sync",
       session_id: input.sessionId,
       run_id: input.runId,
       input_message_id: input.inputMessageId,
-      query: input.query,
-      user_content: input.userContent,
-      assistant_content: input.assistantContent
+      query: rawContext ? input.query : "",
+      ...(rawContext
+        ? {
+          user_content: input.userContent,
+          assistant_content: input.assistantContent
+        }
+        : {}),
+      context_redacted: !rawContext
     });
   }
 
@@ -159,6 +181,7 @@ export function createExternalAssistProvidersFromEnv(env: NodeJS.ProcessEnv = pr
       url: httpUrl,
       token: env.SAMURAI_EXTERNAL_ASSIST_TOKEN,
       authHeader: env.SAMURAI_EXTERNAL_ASSIST_AUTH_HEADER,
+      shareRawContext: env.SAMURAI_EXTERNAL_ASSIST_SHARE_RAW_CONTEXT === "1",
       timeoutMs: Number.parseInt(env.SAMURAI_EXTERNAL_ASSIST_TIMEOUT_MS ?? "", 10),
       maxHints: Number.parseInt(env.SAMURAI_EXTERNAL_ASSIST_MAX_HINTS ?? "", 10)
     })];
@@ -181,9 +204,13 @@ export function describeExternalAssistProviderConfig(env: NodeJS.ProcessEnv = pr
   const timeoutMs = normalizeTimeoutMs(Number.parseInt(env.SAMURAI_EXTERNAL_ASSIST_TIMEOUT_MS ?? "", 10));
   const tokenConfigured = Boolean(env.SAMURAI_EXTERNAL_ASSIST_TOKEN?.trim());
   const authHeader = stringValue(env.SAMURAI_EXTERNAL_ASSIST_AUTH_HEADER) ?? null;
+  const rawContextShared = env.SAMURAI_EXTERNAL_ASSIST_SHARE_RAW_CONTEXT === "1";
 
   if (httpUrl) {
-    const warnings = filePaths.length > 0 ? ["external_assist_file_ignored_because_url_is_set"] : [];
+    const warnings = [
+      ...(filePaths.length > 0 ? ["external_assist_file_ignored_because_url_is_set"] : []),
+      ...(rawContextShared ? [] : ["external_assist_raw_context_redacted_by_default"])
+    ];
     try {
       const url = normalizeHttpExternalAssistUrl(httpUrl);
       return {
@@ -197,6 +224,7 @@ export function describeExternalAssistProviderConfig(env: NodeJS.ProcessEnv = pr
         timeout_ms: timeoutMs,
         token_configured: tokenConfigured,
         auth_header: authHeader,
+        raw_context_shared: rawContextShared,
         endpoint_origin: url.origin,
         endpoint_path_configured: Boolean(url.pathname && url.pathname !== "/"),
         errors: [],
@@ -214,6 +242,7 @@ export function describeExternalAssistProviderConfig(env: NodeJS.ProcessEnv = pr
         timeout_ms: timeoutMs,
         token_configured: tokenConfigured,
         auth_header: authHeader,
+        raw_context_shared: rawContextShared,
         errors: ["invalid_external_assist_url"],
         warnings
       };
@@ -233,6 +262,7 @@ export function describeExternalAssistProviderConfig(env: NodeJS.ProcessEnv = pr
       timeout_ms: null,
       token_configured: tokenConfigured,
       auth_header: authHeader,
+      raw_context_shared: false,
       file_name: filePaths.map((filePath) => path.basename(filePath)).join(", "),
       errors: [],
       warnings: tokenConfigured ? ["external_assist_token_ignored_without_url"] : []
@@ -253,6 +283,7 @@ export function describeExternalAssistProviderConfig(env: NodeJS.ProcessEnv = pr
       timeout_ms: null,
       token_configured: tokenConfigured,
       auth_header: authHeader,
+      raw_context_shared: false,
       file_name: path.basename(filePath),
       errors: [],
       warnings: tokenConfigured ? ["external_assist_token_ignored_without_url"] : []
@@ -270,6 +301,7 @@ export function describeExternalAssistProviderConfig(env: NodeJS.ProcessEnv = pr
     timeout_ms: null,
     token_configured: tokenConfigured,
     auth_header: authHeader,
+    raw_context_shared: false,
     errors: [],
     warnings: tokenConfigured ? ["external_assist_token_ignored_without_provider"] : []
   };

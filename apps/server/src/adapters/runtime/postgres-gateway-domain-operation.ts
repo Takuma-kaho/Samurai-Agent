@@ -45,7 +45,7 @@ const gatewayDefinitions = [
 
 /**
  * Narrow Domain Operation composition for the standard PostgreSQL Gateway
- * path. It intentionally binds only Gateway definitions; the old SQLite
+ * path. It intentionally binds only Gateway definitions; the old compatibility
  * all-features registry is not imported into the Workspace Server.
  */
 export class PostgresGatewayDomainOperations {

@@ -9,7 +9,7 @@ const roomPatch = defineCommand<RoomPatchPorts>()({
   id: "room.patch", version: "1.0", availability: "active", title: "Update Room", description: "Update a Room name.",
   sources: ["runtime_api", "surface_operation"], effect: "workspace_mutation", idempotency: "required", concurrency: "optimistic_version",
   render: ["status_timeline"], resourceKinds: ["room"], proposedEffects: ["Update a Room name."], outputResourceKind: "room", uiDisplayCategory: "workspace",
-  provenance: [{ source: "samurai", commit_sha: "workspace-design-v1", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Keep Room identity in Workspace SQLite." }],
+  provenance: [{ source: "samurai", commit_sha: "workspace-design-v1", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Keep Room identity in Workspace PostgreSQL." }],
   input: Input, output: Output,
   createHandler(ports) { return { execute: async function handleRoomPatch(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> { return { ok: true, value: Output.parse(await ports.patchRoom(context, input)) }; } }; }
 });

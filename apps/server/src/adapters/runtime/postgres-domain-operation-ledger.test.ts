@@ -20,6 +20,11 @@ function database(): PostgresOperationLedgerDatabase {
             const row = rows.get(key);
             return { rows: row ? [row] : [] };
           }
+          if (text.includes("workspace_operation_outcome_unknown")) {
+            const row = rows.get(key);
+            if (row) Object.assign(row, { status: "failed", error_code: "workspace_operation_outcome_unknown" });
+            return { rows: row ? [{ id: key }] : [] };
+          }
           if (text.includes("SET status = 'failed'")) {
             const row = rows.get(key);
             if (row) Object.assign(row, { status: "failed", error_code: String(values[2]) });
@@ -27,7 +32,7 @@ function database(): PostgresOperationLedgerDatabase {
           }
           if (text.includes("SET status = 'completed'")) {
             const row = rows.get(key);
-            if (row) Object.assign(row, { status: "completed", result: JSON.parse(String(values[2])) });
+            if (row?.status === "running") Object.assign(row, { status: "completed", result: JSON.parse(String(values[2])) });
             return { rows: [] };
           }
           throw new Error(`unexpected_sql:${text}`);
@@ -102,5 +107,31 @@ describe("PostgresDomainOperationLedger", () => {
       request: { channel: "webhook" },
       execute: async () => "must_not_run"
     })).rejects.toMatchObject({ code: "workspace_operation_previously_failed", status: 409 });
+  });
+
+  it("クラッシュ後のrunning操作を結果不明として明示復旧し、再実行しない", async () => {
+    const databaseWithPending = database();
+    const ledger = new PostgresDomainOperationLedger(databaseWithPending, "workspace-a", "account-a");
+    let release: (() => void) | undefined;
+    const first = ledger.run({
+      operationId: "gateway.pairing_policy.save",
+      idempotencyKey: "request-recovery",
+      request: { channel: "webhook" },
+      execute: () => new Promise<string>((resolve) => { release = () => resolve("saved"); })
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await expect(ledger.recoverOutcomeUnknown({ idempotencyKey: "request-recovery", minAgeMs: 0 })).resolves.toEqual({
+      status: "outcome_unknown",
+      recovered: true
+    });
+    release?.();
+    await expect(first).resolves.toMatchObject({ replayed: false });
+    await expect(ledger.run({
+      operationId: "gateway.pairing_policy.save",
+      idempotencyKey: "request-recovery",
+      request: { channel: "webhook" },
+      execute: async () => "must_not_run"
+    })).rejects.toMatchObject({ code: "workspace_operation_outcome_unknown", status: 409 });
   });
 });

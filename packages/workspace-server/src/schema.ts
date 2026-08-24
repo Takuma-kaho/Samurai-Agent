@@ -7270,7 +7270,7 @@ const migrations: readonly WorkspaceServerMigration[] = [
   },
   {
     // Gateway control-plane state is Workspace-owned operational state. It is
-    // deliberately separate from the legacy SQLite tables and from prose
+    // deliberately separate from legacy local tables and from prose
     // Workspace records. Each table keeps stable lookup columns alongside the
     // validated domain record so duplicate, lease, and expiry decisions do
     // not depend on an unindexed JSON scan.

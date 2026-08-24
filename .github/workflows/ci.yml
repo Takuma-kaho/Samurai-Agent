@@ -47,8 +47,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck Domain Command packages
-        run: pnpm --filter @samurai-agent/core-schemas --filter @samurai-agent/agent-backends --filter @samurai-agent/domain-operations --filter @samurai-agent/action-catalog --filter @samurai-agent/runtime --filter @samurai-agent/workspace-store --filter @samurai-agent/server --filter @samurai-agent/web run typecheck
+      - name: Typecheck Core and PostgreSQL packages
+        run: pnpm --filter @samurai-agent/core-schemas --filter @samurai-agent/agent-backends --filter @samurai-agent/domain-operations --filter @samurai-agent/action-catalog --filter @samurai-agent/runtime --filter @samurai-agent/workspace-server --filter @samurai-agent/server --filter @samurai-agent/web run typecheck
 
       - name: Run Core03 focused tests on Linux
         if: runner.os == 'Linux'
@@ -79,21 +79,12 @@ jobs:
           }
 
           run_check "generated operation index" node scripts/generate-domain-operation-index.mjs --check
-          run_check "domain command contract" node --import tsx scripts/fixtures/domain-command-contract.ts
-          run_check "domain operation structure" node --import tsx scripts/fixtures/domain-operation-structure.ts
-          run_check "domain query purity" node --import tsx scripts/fixtures/domain-query-purity.ts
-          run_check "domain command compatibility" node --import tsx scripts/fixtures/domain-command-compatibility.ts
-          run_check "domain command version" node --import tsx scripts/fixtures/domain-command-version.ts
-          run_check "domain command parity" node --import tsx scripts/fixtures/domain-command-parity.ts
-          run_check "domain command trusted context" node --import tsx scripts/fixtures/domain-command-trusted-context.ts
-          run_check "domain command schema matrix" node --import tsx scripts/fixtures/domain-command-schema-matrix.ts
-          run_check "domain operation handler matrix" node --import tsx scripts/fixtures/domain-operation-handler-matrix.ts
-          run_check "domain operation handler shard A" node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-a.ts
-          run_check "domain operation handler shard B" node --import tsx scripts/fixtures/domain-operation-handler-matrix-shard-b.ts
-          run_check "domain operation handler matrix C" node --import tsx scripts/fixtures/domain-operation-handler-matrix-c.ts
-          run_check "domain operation handler aggregate" node --import tsx scripts/fixtures/domain-operation-handler-matrix-aggregate.ts
+          run_check "domain operation index" node scripts/generate-domain-operation-index.mjs --check
           run_check "architecture boundaries" node scripts/verify-architecture-boundaries.mjs
-          run_check "verifier self-test" node scripts/verify-domain-command-verifier-self-test.mjs
+          run_check "physical module boundaries" node scripts/verify-physical-module-boundaries.mjs
+          run_check "PostgreSQL runtime scope" node scripts/verify-postgres-runtime-scope.mjs
+          run_check "standard PostgreSQL entry" node scripts/verify-standard-postgres-entry.mjs
+          run_check "generated surface validation" node scripts/verify-generated-surface-validation.mjs
 
           if (( ${#failures[@]} > 0 )); then
             echo "Failed verifier checks:"
@@ -106,7 +97,7 @@ jobs:
         # for PRs and main pushes; the three-OS matrix above remains focused on
         # platform differences instead of repeating the same heavy suite.
         if: runner.os == 'Linux'
-        run: pnpm run core:domain-commands:check
+        run: pnpm run verify:source-quality
 
   release-readiness:
     name: release-readiness
@@ -193,6 +184,10 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
+          pnpm run server:02:postgres-entry:verify
+          pnpm run verify:postgres-runtime-scope
+          pnpm run verify:postgres-migration:static
+          pnpm run verify:source-quality
           pnpm run verify:architecture
 
       - name: Typecheck all packages
@@ -207,8 +202,8 @@ jobs:
           pnpm --filter @samurai-agent/web run build
           pnpm --filter @samurai-agent/desktop run build
 
-      - name: Dependency security audit
-        run: pnpm audit --audit-level=high
+      - name: Dependency security audit (moderate or higher)
+        run: pnpm audit --audit-level=moderate
 
   postgres-deep:
     name: postgres-deep
@@ -282,7 +277,7 @@ jobs:
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
           SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
-          SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: yes
+          SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: "yes"
         run: pnpm run verify:ci-full
 
       - name: Upload full CI verifier report
@@ -294,6 +289,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Run disposable PostgreSQL migration, RLS, recovery, bundle and load gates
+        env:
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_hosted
+          SAMURAI_SERVER_VERIFY_HOSTED_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_URL: postgresql://samurai_ci_runtime:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_ADMIN_URL: postgresql://postgres:samurai_ci_postgres_password@127.0.0.1:5432/samurai_ci_self_host
+          SAMURAI_SERVER_VERIFY_SELF_HOST_DATABASE_RUNTIME_ROLE: samurai_ci_runtime
+          SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE: "yes"
         run: CI=true pnpm run server:04:complete:verify
 
       - name: Upload PostgreSQL deep reports

@@ -44,6 +44,7 @@ import {
   collectionSchemaQueryId,
   collectionSchemaSaveCommandId
 } from "./collection-compatibility-dispatch.js";
+import { assertSafeBrowserUrl, BrowserUrlSafetyError, isNonNetworkBrowserRequest } from "./browser-url-safety.js";
 export * from "./collections/safe-collection";
 export * from "./context/user-model";
 export * from "./context/session-compaction";
@@ -1523,7 +1524,7 @@ export class AgentRuntime {
           if (!roomId) throw new RuntimeRequestError("conflict", "curator_room_context_required");
           // A legacy resource becomes formally Room-bound before this write.
           // `ensureResourceAccessBoundary` repeats the Owner's current Room
-          // membership inside its SQLite transaction.
+          // membership inside its database transaction.
           await this.store.ensureResourceAccessBoundary({
             resourceKind: input.resourceKind,
             resourceId: input.resourceId,
@@ -1893,12 +1894,14 @@ export class AgentRuntime {
       interact: async (input) => {
         const adapter = this.workspaceOptions.browserAdapter;
         if (!adapter) throw new RuntimeRequestError("provider_not_configured", "browser_interact_adapter_unavailable");
-        return { adapterId: adapter.id, ...(await adapter.interact(input)) };
+        const url = await safeBrowserUrl(input.url);
+        return { adapterId: adapter.id, ...(await adapter.interact({ ...input, url })) };
       },
       screenshot: async (input) => {
         const adapter = this.workspaceOptions.browserAdapter;
         if (!adapter) throw new RuntimeRequestError("provider_not_configured", "browser_screenshot_adapter_unavailable");
-        const capture = await adapter.screenshot(input);
+        const url = await safeBrowserUrl(input.url);
+        const capture = await adapter.screenshot({ ...input, url });
         return { adapterId: adapter.id, bytes: capture.bytes, mimeType: capture.mime_type, width: capture.width, height: capture.height };
       }
     }, {
@@ -7918,7 +7921,7 @@ export class AgentRuntime {
         signal: input.abortSignal
       });
       // Resource files and their history span several repositories, so the
-      // Domain Operation cannot make every mutation one SQLite transaction.
+      // Domain Operation cannot make every mutation one database transaction.
       // Keep a Room-scoped compensation point around the real write path.
       const compensationSnapshot = await this.store.createLearningSnapshot(reflectionRun.id);
       let applied: { suggestions: ReflectionSuggestionRecord[] };
@@ -9090,6 +9093,7 @@ function customViewSandboxContract(operation: { id?: string; view_id: string; ac
       allowed_actions: allowedActions,
       read_resource_refs: resourceRefs.map((ref) => jsonSafe(ref)),
       write_operations: ["custom_view.action"],
+      network_access: "read",
       data_url: customViewDataUrl(resourceRefs),
       data_capabilities: ["read", "write"]
     }
@@ -12893,11 +12897,15 @@ function htmlToText(html: string): string {
 }
 
 async function readBrowserPage(url: string): Promise<{ url: string; title?: string; html: string; text: string; adapter: "playwright" | "fetch" }> {
-  const playwrightPage = await readBrowserPageWithPlaywright(url).catch(() => undefined);
+  const safeUrl = await safeBrowserUrl(url);
+  const playwrightPage = await readBrowserPageWithPlaywright(safeUrl).catch(() => undefined);
   if (playwrightPage) {
     return playwrightPage;
   }
-  const response = await fetch(url);
+  const response = await fetch(safeUrl, { redirect: "manual" });
+  if (response.status >= 300 && response.status < 400) {
+    throw new RuntimeRequestError("forbidden", "browser_redirect_blocked");
+  }
   const html = await response.text();
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim();
   return {
@@ -12919,6 +12927,11 @@ async function readBrowserPageWithPlaywright(url: string): Promise<{ url: string
       goto: (targetUrl: string, options: { waitUntil: "networkidle"; timeout: number }) => Promise<unknown>;
       title: () => Promise<string>;
       content: () => Promise<string>;
+      route?: (pattern: string, handler: (route: {
+        request: () => { url: () => string };
+        abort: () => Promise<void>;
+        continue: () => Promise<void>;
+      }) => Promise<void>) => Promise<void>;
       locator: (selector: string) => { innerText: (options: { timeout: number }) => Promise<string> };
     }>;
     close: () => Promise<void>;
@@ -12929,7 +12942,29 @@ async function readBrowserPageWithPlaywright(url: string): Promise<{ url: string
   const browser = await imported.chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+    if (!page.route) throw new BrowserUrlSafetyError("network_guard_unavailable");
+    let blockedRequest: BrowserUrlSafetyError | undefined;
+    await page.route("**/*", async (route) => {
+      const target = route.request().url();
+      if (isNonNetworkBrowserRequest(target)) {
+        await route.continue();
+        return;
+      }
+      try {
+        await assertSafeBrowserUrl(target);
+        await route.continue();
+      } catch (error) {
+        blockedRequest = error instanceof BrowserUrlSafetyError ? error : new BrowserUrlSafetyError("invalid");
+        await route.abort();
+      }
+    });
+    try {
+      await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+    } catch (error) {
+      if (blockedRequest) throw blockedRequest;
+      throw error;
+    }
+    if (blockedRequest) throw blockedRequest;
     const [title, html, text] = await Promise.all([
       page.title(),
       page.content(),
@@ -12944,6 +12979,24 @@ async function readBrowserPageWithPlaywright(url: string): Promise<{ url: string
     };
   } finally {
     await browser.close();
+  }
+}
+
+async function safeBrowserUrl(value: string): Promise<string> {
+  if (isNonNetworkBrowserRequest(value.trim())) {
+    try {
+      return new URL(value.trim()).toString();
+    } catch {
+      throw new RuntimeRequestError("forbidden", "browser_url_invalid");
+    }
+  }
+  try {
+    return (await assertSafeBrowserUrl(value)).toString();
+  } catch (error) {
+    if (error instanceof BrowserUrlSafetyError) {
+      throw new RuntimeRequestError("forbidden", `browser_url_${error.reason}`);
+    }
+    throw error;
   }
 }
 

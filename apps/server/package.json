@@ -26,10 +26,10 @@
     "@samurai-agent/runtime": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",
     "@samurai-agent/workspace-server": "workspace:*",
-    "@samurai-agent/workspace-store": "workspace:*",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "tsx": "^4.22.4"
   },
   "devDependencies": {
     "@samurai-agent/agent-backends": "workspace:*"

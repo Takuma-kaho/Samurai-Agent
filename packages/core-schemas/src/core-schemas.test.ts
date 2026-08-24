@@ -1141,6 +1141,7 @@ describe("core schemas", () => {
       auth_header: "Authorization",
       endpoint_origin: "https://assist.example.test",
       endpoint_path_configured: true,
+      raw_context_shared: false,
       errors: ["invalid_external_assist_url"],
       warnings: []
     });
@@ -1171,6 +1172,7 @@ describe("core schemas", () => {
       timeout_ms: null,
       token_configured: false,
       auth_header: null,
+      raw_context_shared: false,
       file_name: "release.json, gateway.json",
       errors: [],
       warnings: []

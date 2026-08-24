@@ -110,9 +110,10 @@ const externalSendDispatch = defineCommand<ExternalSendDispatchPorts>()({
             if (result.status !== undefined) dispatchResult.status = result.status;
             if (result.idempotency_guaranteed !== undefined) dispatchResult.idempotency_guaranteed = result.idempotency_guaranteed;
             if (result.outcome_unknown || (result.dispatched && result.idempotency_guaranteed !== true)) {
-              return settleOutcomeUnknown(result.outcome_unknown
+              const unknown = await settleOutcomeUnknown(result.outcome_unknown
                 ? result.message
                 : "The external adapter did not guarantee the send_id idempotency key; human confirmation is required before any further action.", dispatchResult);
+              return unknown;
             }
             const updatedAt = ports.externalSendNow();
             const saved = await ports.settleDispatch({

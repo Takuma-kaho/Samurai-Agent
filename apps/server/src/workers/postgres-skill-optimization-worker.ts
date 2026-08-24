@@ -97,16 +97,26 @@ export class PostgresSkillOptimizationWorker implements WorkspaceSkillOptimizati
           ...(runningRun.session_id ? { sessionId: runningRun.session_id } : {}),
           workerId,
           roomId: claimedRoomId,
-          signal
+          signal,
+          retryOnAbort: true
         });
-        if (leaseLost) {
+        const settledRun = await operations.adapter.findRunByWorkItem(claimed.id);
+        if (leaseLost || !settledRun || ["queued", "failed", "cancelled"].includes(settledRun.status)) {
           failedCount += 1;
         } else {
           completedCount += 1;
         }
       } catch (error) {
         const run = await operations.adapter.findRunByWorkItem(claimed.id);
-        if (!leaseLost) await this.failClaimed(operations.adapter, claimed.id, workerId, claimedRoomId, run, error instanceof Error ? error.message : String(error));
+        if (!leaseLost) await this.failClaimed(
+          operations.adapter,
+          claimed.id,
+          workerId,
+          claimedRoomId,
+          run,
+          error instanceof Error ? error.message : String(error),
+          input.signal.aborted ? "retryable" : "non_retryable"
+        );
         failedCount += 1;
       } finally {
         clearInterval(heartbeatTimer);
@@ -122,9 +132,18 @@ export class PostgresSkillOptimizationWorker implements WorkspaceSkillOptimizati
     workerId: string,
     roomId: string,
     run: Awaited<ReturnType<PostgresSkillOptimization["getRun"]>>,
-    error: string
+    error: string,
+    failureKind: "retryable" | "non_retryable" = "non_retryable"
   ): Promise<void> {
     const now = nowIso();
+    const workItem = await adapter.failWorkItem({ workItemId, workerId, roomId, failureKind, error });
+    if (failureKind === "retryable" && workItem?.status === "queued") {
+      if (run && !["completed", "failed", "cancelled"].includes(run.status)) {
+        await adapter.saveRun({ ...run, status: "queued", phase: "dataset", progress: Math.min(run.progress, 0.1), error, updated_at: now, completed_at: undefined });
+        await adapter.releaseLock({ skillId: run.target_skill_id, runId: run.id });
+      }
+      return;
+    }
     if (run && !["completed", "failed", "cancelled"].includes(run.status)) {
       await adapter.saveRun({ ...run, status: "failed", phase: "failed", progress: 1, error, updated_at: now, completed_at: now });
       const objective = await adapter.getObjective(run.objective_id, roomId);
@@ -133,6 +152,6 @@ export class PostgresSkillOptimizationWorker implements WorkspaceSkillOptimizati
       }
       await adapter.releaseLock({ skillId: run.target_skill_id, runId: run.id });
     }
-    await adapter.failWorkItem({ workItemId, workerId, roomId, failureKind: "non_retryable", error });
+    if (!workItem) await adapter.failWorkItem({ workItemId, workerId, roomId, failureKind: "non_retryable", error });
   }
 }

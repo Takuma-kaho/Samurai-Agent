@@ -107,7 +107,7 @@ export class PostgresRuntimeExecutionWorker implements WorkspaceExecutionJobWork
             run.id,
             outcomeUnknown ? "outcome_unknown" : "failed",
             outcomeUnknown ? "runtime_recovery_outcome_unknown" : "runtime_recovery_admission_interrupted",
-            now,
+            outcomeUnknown ? null : now,
             run.status,
             run.phase
           ]

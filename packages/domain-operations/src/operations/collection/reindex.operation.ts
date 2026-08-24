@@ -20,7 +20,7 @@ const collectionReindex = defineCommand<CollectionReindexPorts>()({
   "version": "3.1",
   "availability": "active",
   "title": "Reindex collections",
-  "description": "Refresh Collection SQLite indexes from schema and record files.",
+  "description": "Refresh Collection PostgreSQL projections from schema and record files.",
   "sources": [
     "runtime_api",
     "scheduled_context"
@@ -37,7 +37,7 @@ const collectionReindex = defineCommand<CollectionReindexPorts>()({
     "collection_index"
   ],
   "proposedEffects": [
-    "Refresh Collection SQLite indexes from schema and record files."
+    "Refresh Collection PostgreSQL projections from schema and record files."
   ],
   "outputResourceKind": "collection_index",
   "uiDisplayCategory": "collection",

@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@samurai-agent/core-schemas": "workspace:*",
-    "ajv": "8.17.1",
+    "ajv": "8.18.0",
     "semver": "7.8.4",
     "zod": "^3.25.76"
   },

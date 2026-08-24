@@ -11,8 +11,10 @@ import { WorkspaceFileStore } from "./workspace-files";
 import { WorkspaceCompletionService } from "./workspace-completion-service";
 import { WorkspaceCompletionMigrationService } from "./workspace-completion-migration";
 import { WorkspaceCompletionMaintenanceService } from "./workspace-completion-maintenance";
+import { WorkspaceRuntimeActivityService } from "./workspace-runtime-activity";
 import { WorkspaceServerStore } from "./workspace-server-store";
-import type { WorkspaceBundleV3Manifest, WorkspaceExternalRoomAction, WorkspaceExternalRoomPrincipal } from "./types";
+import type { WorkspaceBundleV3Manifest, WorkspaceExternalRoomAction, WorkspaceExternalRoomPrincipal, WorkspaceRequestContext } from "./types";
+import type { ActivityRecord, ResourceUsageRecord } from "@samurai-agent/core-schemas";
 
 export interface WorkspaceServerCommandDependencies {
   store: WorkspaceServerStore;
@@ -24,6 +26,8 @@ export interface WorkspaceServerCommandDependencies {
   completion?: WorkspaceCompletionService;
   completionMigrations?: WorkspaceCompletionMigrationService;
   maintenance?: WorkspaceCompletionMaintenanceService;
+  /** Runtime Activity evidence is optional while old callers migrate. */
+  runtimeActivities?: WorkspaceRuntimeActivityService;
 }
 
 export interface ImportWorkspaceBundleTransportInput {
@@ -47,6 +51,7 @@ export class WorkspaceServerCommandService {
   private readonly completion?: WorkspaceCompletionService;
   private readonly completionMigrations?: WorkspaceCompletionMigrationService;
   private readonly maintenance?: WorkspaceCompletionMaintenanceService;
+  private readonly runtimeActivities?: WorkspaceRuntimeActivityService;
 
   constructor(dependencies: WorkspaceServerCommandDependencies) {
     this.store = dependencies.store;
@@ -56,6 +61,7 @@ export class WorkspaceServerCommandService {
     this.completion = dependencies.completion;
     this.completionMigrations = dependencies.completionMigrations;
     this.maintenance = dependencies.maintenance;
+    this.runtimeActivities = dependencies.runtimeActivities;
   }
 
   registerAccount(input: Parameters<WorkspaceServerStore["registerAccount"]>[0]) {
@@ -298,6 +304,50 @@ export class WorkspaceServerCommandService {
     return this.requireCompletion().listActivities(context, input);
   }
 
+  startRuntimeActivity(context: WorkspaceRequestContext, record: ActivityRecord) {
+    return this.requireRuntimeActivities().createActivity(context, record);
+  }
+
+  getRuntimeActivity(context: WorkspaceRequestContext, activityId: string) {
+    return this.requireRuntimeActivities().getActivity(context, activityId);
+  }
+
+  getRuntimeActivityOperation(context: WorkspaceRequestContext, operationId: string) {
+    return this.requireRuntimeActivities().getOperation(context, operationId);
+  }
+
+  linkRuntimeActivityBackendRun(
+    context: WorkspaceRequestContext,
+    input: Parameters<WorkspaceRuntimeActivityService["linkActivityBackendRun"]>[1]
+  ) {
+    return this.requireRuntimeActivities().linkActivityBackendRun(context, input);
+  }
+
+  recordRuntimeResourceUsage(context: WorkspaceRequestContext, record: ResourceUsageRecord) {
+    return this.requireRuntimeActivities().recordResourceUsage(context, record);
+  }
+
+  ingestFinalizedRuntimeActivity(
+    context: WorkspaceRequestContext,
+    input: Parameters<WorkspaceRuntimeActivityService["ingestFinalizedActivity"]>[1]
+  ) {
+    return this.requireRuntimeActivities().ingestFinalizedActivity(context, input);
+  }
+
+  finalizeRuntimeActivity(
+    context: WorkspaceRequestContext,
+    input: Parameters<WorkspaceRuntimeActivityService["finalizeActivity"]>[1]
+  ) {
+    return this.requireRuntimeActivities().finalizeActivity(context, input);
+  }
+
+  listRuntimeResourceUsage(
+    context: WorkspaceRequestContext,
+    input: Parameters<WorkspaceRuntimeActivityService["listResourceUsage"]>[1]
+  ) {
+    return this.requireRuntimeActivities().listResourceUsage(context, input);
+  }
+
   createCompletionEpisode(
     context: Parameters<WorkspaceCompletionService["createEpisode"]>[0],
     input: Parameters<WorkspaceCompletionService["createEpisode"]>[1]
@@ -441,6 +491,11 @@ export class WorkspaceServerCommandService {
   private requireMaintenance(): WorkspaceCompletionMaintenanceService {
     if (!this.maintenance) throw new WorkspaceServerError("workspace_completion_maintenance_unavailable", 503);
     return this.maintenance;
+  }
+
+  private requireRuntimeActivities(): WorkspaceRuntimeActivityService {
+    if (!this.runtimeActivities) throw new WorkspaceServerError("workspace_runtime_activity_service_unavailable", 503);
+    return this.runtimeActivities;
   }
 
   beginTransfer(context: Parameters<WorkspaceBundleV3Service["beginTransfer"]>[0]) {

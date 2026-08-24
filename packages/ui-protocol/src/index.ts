@@ -683,6 +683,8 @@ const CustomViewCapabilitySchema = z.object({
   allowed_actions: z.array(z.string().min(1)),
   read_resource_refs: z.array(ResourceRefSchema),
   write_operations: z.array(z.enum(surfaceOperationKinds)),
+  /** External network is a separate capability from rendering HTML. */
+  network_access: z.enum(["none", "read"]).optional(),
   data_url: z.string().optional(),
   data_capabilities: z.array(z.enum(["read", "write"])).optional()
 });

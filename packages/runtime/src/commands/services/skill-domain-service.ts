@@ -87,7 +87,7 @@ export interface SkillOptimizationPort<TSkill extends OptimizationSkill> {
   getWorkItem(id: string, roomId: string): Promise<WorkItemRecord | undefined>;
   claimWorkItem(input: { workerId: string; leaseMs: number; now: string; roomId: string }): Promise<WorkItemRecord | undefined>;
   completeWorkItem(input: { workItemId: string; workerId: string; roomId: string }): Promise<WorkItemRecord | undefined>;
-  failWorkItem(input: { workItemId: string; workerId: string; roomId: string; failureKind: "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined>;
+  failWorkItem(input: { workItemId: string; workerId: string; roomId: string; failureKind: "retryable" | "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined>;
   getRun(id: string): Promise<SkillOptimizationRun | undefined>;
   saveRun(record: SkillOptimizationRun): Promise<SkillOptimizationRun>;
   getCandidate(id: string): Promise<OptimizationCandidate | undefined>;
@@ -258,6 +258,8 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     workerId: string;
     roomId: string;
     signal?: AbortSignal;
+    /** A supervisor shutdown must leave the durable work item retryable. */
+    retryOnAbort?: boolean;
   }): Promise<void> {
     return this.runOptimizationWorker(input);
   }
@@ -305,7 +307,7 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     const workItem: WorkItemRecord = WorkItemRecordSchema.parse({
       id: createId("work"), objective_id: objective.id, room_id: input.roomId,
       instruction: `GEPAでSkill ${skill.id} の改善候補を生成・評価する`, status: "ready", priority: 5,
-      attempt: 0, max_attempts: 1, idempotency_key: `skill-optimization:${runId}`, created_at: now, updated_at: now
+      attempt: 0, max_attempts: 3, idempotency_key: `skill-optimization:${runId}`, created_at: now, updated_at: now
     });
     const run: SkillOptimizationRun = {
       id: runId, ...(sessionId ? { session_id: sessionId } : {}), target_skill_id: skill.id,
@@ -403,7 +405,7 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     return examples;
   }
 
-  private async runOptimizationWorker(input: { run: SkillOptimizationRun; dataset: SkillOptimizationDataset; skillBody: string; skillId: string; sessionId?: string; workerId: string; roomId: string; signal?: AbortSignal }): Promise<void> {
+  private async runOptimizationWorker(input: { run: SkillOptimizationRun; dataset: SkillOptimizationDataset; skillBody: string; skillId: string; sessionId?: string; workerId: string; roomId: string; signal?: AbortSignal; retryOnAbort?: boolean }): Promise<void> {
     const worker = startPythonSkillOptimization({
       run_id: input.run.id, skill_id: input.skillId, skill_body: input.skillBody, dataset: input.dataset,
       worker_script: path.resolve(this.dependencies.optimization.repoRoot(), "workers/skill-optimization/worker.py"),
@@ -434,14 +436,14 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
     return this.dependencies.optimization.saveRun({ ...current, ...patch, updated_at: nowIso() });
   }
 
-  private async finishOptimization(input: { run: SkillOptimizationRun; dataset: SkillOptimizationDataset; skillBody: string; skillId: string; sessionId?: string; workerId: string; roomId: string; result: PythonSkillOptimizationResult }): Promise<void> {
+  private async finishOptimization(input: { run: SkillOptimizationRun; dataset: SkillOptimizationDataset; skillBody: string; skillId: string; sessionId?: string; workerId: string; roomId: string; signal?: AbortSignal; retryOnAbort?: boolean; result: PythonSkillOptimizationResult }): Promise<void> {
     const port = this.dependencies.optimization;
     const current = await port.getRun(input.run.id) ?? input.run;
-    const settleWork = async (kind: "complete" | "failed" | "cancelled", error?: string) => {
+    const settleWork = async (kind: "complete" | "failed" | "cancelled" | "retryable", error?: string) => {
       const settled = kind === "complete"
         ? await port.completeWorkItem({ workItemId: current.work_item_id, workerId: input.workerId, roomId: input.roomId })
         : await port.failWorkItem({ workItemId: current.work_item_id, workerId: input.workerId, roomId: input.roomId,
-          failureKind: kind === "cancelled" ? "cancelled" : "non_retryable", error: error ?? kind });
+          failureKind: kind === "cancelled" ? "cancelled" : kind === "failed" ? "non_retryable" : "retryable", error: error ?? kind });
       if (!settled) throw new Error("skill_optimization_work_item_lease_lost");
     };
     const settleObjective = async (status: ObjectiveRecord["status"]) => {
@@ -460,6 +462,13 @@ export class SkillDomainService<TSkill extends OptimizationSkill = OptimizationS
         evaluations: input.result.evaluations ?? [], feedback: input.result.feedback });
     }
     if (input.result.status !== "completed" || candidateInputs.length === 0) {
+      if (input.retryOnAbort && input.signal?.aborted) {
+        const error = input.result.error || "skill_optimization_worker_shutdown";
+        await port.saveRun({ ...current, status: "queued", phase: "dataset", progress: Math.min(current.progress, 0.1), error, updated_at: nowIso(), completed_at: undefined });
+        await settleWork("retryable", error);
+        await port.releaseLock({ skillId: input.skillId, runId: current.id });
+        return;
+      }
       const status = input.result.status === "cancelled" ? "cancelled" : "failed";
       const error = input.result.error || "gepa_candidate_not_created";
       await port.saveRun({ ...current, status, phase: status, progress: 1, error, updated_at: nowIso(), completed_at: nowIso() });

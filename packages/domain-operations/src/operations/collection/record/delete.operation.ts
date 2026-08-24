@@ -80,7 +80,7 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
         if (!record) throw ports.collectionMutationError("not_found", `Collection record not found: ${input.collection_id}/${input.record_id}`);
         const result = await ports.runCollectionMutation({
           trustedContext: context, inputSummary: `Delete collection record: ${input.collection_id}/${input.record_id}`, operationName: "collection.record.delete",
-          proposedEffects: ["Delete a collection record file and SQLite index row."],
+          proposedEffects: ["Delete a collection record file and PostgreSQL projection row."],
           execute: async (operation) => {
             let deleted;
             try {

@@ -978,6 +978,7 @@ export class WorkspaceServerStore {
          FROM workspace_records
          WHERE workspace_id = $1
            AND room_id = $2
+           AND ($3::TEXT IS NOT NULL OR record_type <> 'artifact_transaction')
            AND ($3::TEXT IS NULL OR record_type = $3)
          ORDER BY updated_at DESC
          LIMIT $4`,
@@ -998,6 +999,7 @@ export class WorkspaceServerStore {
          WHERE workspace_id = $1
            AND search_text ILIKE '%' || $2 || '%'
            AND room_id = $3
+           AND record_type <> 'artifact_transaction'
          ORDER BY similarity(search_text, $2) DESC, updated_at DESC
          LIMIT $4`,
         [context.workspaceId, input.query.trim(), input.roomId, limit]

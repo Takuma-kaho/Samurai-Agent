@@ -17,6 +17,8 @@ import {
   normalizeExternalIntegrationError,
   normalizeConnectorEvent,
   officialConnectorManifests,
+  redactExternalText,
+  redactExternalValue,
   validateMcpSchema,
   type ConnectorEvent,
   type ContextSnapshotSource,
@@ -502,6 +504,13 @@ describe("external integration contracts", () => {
     expect(JSON.stringify(stored)).not.toContain("s3cr3t-value");
     expect(ingested.activity.instruction).toBe("token=[REDACTED]");
     expect(ingested.activity.payload).toMatchObject({ access_token: "[REDACTED]", nested: { cookie: "[REDACTED]" } });
+  });
+
+  it("redacts camelCase secrets in JSON text and nested Activity payloads", () => {
+    const text = redactExternalText('{"accessToken":"s3cr3t-value","privateKey":"s3cr3t-key"}');
+    expect(text).toBe('{"accessToken":[REDACTED],"privateKey":[REDACTED]}');
+    const value = redactExternalValue({ accessToken: "s3cr3t-value", nested: { privateKey: "s3cr3t-key" } });
+    expect(value).toEqual({ accessToken: "[REDACTED]", nested: { privateKey: "[REDACTED]" } });
   });
 
   it("creates one frozen startup snapshot within the token budget", async () => {

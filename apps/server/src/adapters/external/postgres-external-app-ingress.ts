@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import {
   ExternalAppConnectionRecordSchema,
   ActivityRecordSchema,
+  ResourceUsageRecordSchema,
+  createId,
+  nowIso,
+  stableStringify,
   type ExternalAppConnectionRecord,
   type JsonValue,
   type TrustedWorkspaceContext
@@ -715,71 +719,151 @@ class PostgresExternalActivityIngest implements ActivityIngestPort {
     const accountId = delegatedAccountId(context.principal);
     const request = requestContextFromWorkspaceContext(context, accountId);
     await this.authorization.assertRoom(participantPrincipal(context.principal), context.room_id, "execute");
-    const result = await this.dependencies.commands.ingestCompletionActivity(request, {
-      id: `completion_activity_${hash(`${context.workspace_id}|${input.idempotencyKey}`)}`,
-      roomId: context.room_id,
-      sourceApp: `external-app:${context.source.app_id ?? "unknown"}`,
-      sourceId: context.source.connector_id,
-      operationId: input.idempotencyKey,
-      instructionSummary: input.instructionSummary,
-      ...(input.resultSummary ? { resultSummary: input.resultSummary } : {}),
-      ...(input.correctionOfActivityId ? { correctionOfActivityId: input.correctionOfActivityId } : {}),
-      changedResources: (input.resourceUsage ?? []).map((usage) => usage.resource_ref.id),
-      verificationOutcome: verificationOutcome(input.verification),
-      failureState: input.failure ? "unresolved" : input.status === "completed" ? "none" : "unresolved",
-      outcome: input.status === "outcome_unknown" ? "unknown" : input.status,
-      payload: {
-        external_activity: true,
-        connector_id: context.source.connector_id ?? "",
-        app_id: context.source.app_id ?? "",
-        ...(input.domainOperationIds?.length ? { domain_operation_ids: input.domainOperationIds } : {}),
-        ...(input.resourceUsage?.length ? {
-          resource_usage: input.resourceUsage.map((usage) => ({
-            id: usage.id,
-            resource_ref: usage.resource_ref,
-            stage: usage.stage,
-            ...(usage.resource_version ? { resource_version: usage.resource_version } : {}),
-            ...(usage.content_hash ? { content_hash: usage.content_hash } : {})
-          }))
-        } : {})
-      },
-      ...(context.session_ref ? { sessionRef: { appId: context.session_ref.app_id, sessionId: context.session_ref.session_id, ...(context.session_ref.turn_id ? { turnId: context.session_ref.turn_id } : {}), ...(context.session_ref.message_id ? { messageId: context.session_ref.message_id } : {}) } } : {})
-    });
-    const finalizedAt = result.activity.finalizedAt ?? new Date().toISOString();
-    return ActivityRecordSchema.parse({
-      id: result.activity.id,
+    const now = nowIso();
+    const activity = ActivityRecordSchema.parse({
+      id: `activity_${hash(`${context.workspace_id}|${input.idempotencyKey}`)}`,
       workspace_id: context.workspace_id,
       room_id: context.room_id,
       principal: context.principal,
       source: context.source,
-      status: input.status,
+      status: "recording",
       idempotency_key: input.idempotencyKey,
       instruction_summary: input.instructionSummary,
-      ...(input.resultSummary ? { result_summary: input.resultSummary } : {}),
-      verification: input.verification ?? [],
-      ...(input.failure
-        ? { failure: input.failure }
-        : input.status === "completed"
-          ? {}
-          : { failure: { code: `external_activity_${input.status}`, summary: `External activity ended with ${input.status}.` } }),
+      verification: [],
       ...(input.correctionOfActivityId ? { correction_of_activity_id: input.correctionOfActivityId } : {}),
-      ...(input.backendRunId ? { backend_run_id: input.backendRunId } : {}),
-      domain_operation_ids: input.domainOperationIds ?? [],
+      ...(context.session_ref ? { session_ref: context.session_ref } : {}),
+      domain_operation_ids: [],
       provenance: {
-        kind: input.provenanceKind === "system" ? "system" : "domain_operation",
+        kind: input.provenanceKind ?? "domain_operation",
         source_id: context.source.connector_id ?? context.source.app_id,
-        recorded_at: result.activity.createdAt
+        recorded_at: now
       },
-      created_at: result.activity.createdAt,
-      updated_at: finalizedAt,
-      finalized_at: finalizedAt
+      created_at: now,
+      updated_at: now
+    });
+    const resourceUsage = (input.resourceUsage ?? []).map((usage) => {
+      if (context.principal.kind === "external_app"
+        && (usage.usage_scope.kind !== "room" || usage.usage_scope.room_id !== context.room_id)) {
+        throw new Error("resource_usage_room_scope_mismatch");
+      }
+      return ResourceUsageRecordSchema.parse({ ...usage, activity_id: activity.id, created_at: now });
+    });
+    const failure = input.failure ?? (input.status === "completed" ? undefined : {
+      code: `external_activity_${input.status}`,
+      summary: `External activity ended with ${input.status}.`
+    });
+    return this.dependencies.commands.ingestFinalizedRuntimeActivity(request, {
+      activity,
+      resourceUsage,
+      finalization: {
+        status: input.status,
+        ...(input.resultSummary !== undefined ? { resultSummary: input.resultSummary } : {}),
+        ...(input.verification !== undefined ? { verification: input.verification } : {}),
+        ...(failure ? { failure } : {}),
+        ...(input.backendRunId !== undefined ? { backendRunId: input.backendRunId } : {}),
+        ...(input.domainOperationIds !== undefined ? { domainOperationIds: input.domainOperationIds } : {}),
+        now
+      }
     });
   }
 
-  async startActivity(): Promise<never> { throw new Error("external_activity_recording_not_supported"); }
-  async linkBackendRun(): Promise<never> { throw new Error("external_activity_backend_link_not_supported"); }
-  async recordResourceUsage(): Promise<never> { throw new Error("external_activity_resource_usage_not_supported"); }
-  async finalizeActivity(): Promise<never> { throw new Error("external_activity_finalization_not_supported"); }
+  async startActivity(input: Parameters<ActivityIngestPort["startActivity"]>[0]): Promise<ActivityRecord> {
+    const context = input.context;
+    if (!context.room_id) throw new Error("external_app_activity_room_required");
+    const accountId = delegatedAccountId(context.principal);
+    const request = requestContextFromWorkspaceContext(context, accountId);
+    await this.authorization.assertRoom(participantPrincipal(context.principal), context.room_id, "execute");
+    const now = nowIso();
+    const activity = ActivityRecordSchema.parse({
+      id: createId("activity"),
+      workspace_id: context.workspace_id,
+      room_id: context.room_id,
+      principal: context.principal,
+      source: context.source,
+      status: "recording",
+      idempotency_key: input.idempotencyKey,
+      instruction_summary: input.instructionSummary,
+      verification: [],
+      ...(input.correctionOfActivityId ? { correction_of_activity_id: input.correctionOfActivityId } : {}),
+      ...(context.session_ref ? { session_ref: context.session_ref } : {}),
+      domain_operation_ids: [],
+      provenance: {
+        kind: input.provenanceKind ?? "trusted_context",
+        source_id: context.correlation_id,
+        recorded_at: now
+      },
+      created_at: now,
+      updated_at: now
+    });
+    return this.dependencies.commands.startRuntimeActivity(request, activity);
+  }
+
+  async linkBackendRun(input: Parameters<ActivityIngestPort["linkBackendRun"]>[0]): Promise<ActivityRecord> {
+    const { request, activity } = await this.activityContext(input.context, input.activityId, "execute");
+    if (activity.status !== "recording" && activity.backend_run_id !== input.backendRunId) {
+      throw new Error("activity_finalized_immutable");
+    }
+    return this.dependencies.commands.linkRuntimeActivityBackendRun(request, {
+      activityId: input.activityId,
+      backendRunId: input.backendRunId,
+      now: nowIso()
+    });
+  }
+
+  async recordResourceUsage(input: Parameters<ActivityIngestPort["recordResourceUsage"]>[0]): Promise<import("@samurai-agent/core-schemas").ResourceUsageRecord> {
+    const action = input.stage === "modified" || input.stage === "reverted" ? "edit" : "read";
+    const { request } = await this.activityContext(input.context, input.activityId, action);
+    if (input.context.principal.kind === "external_app"
+      && (input.usageScope.kind !== "room" || input.usageScope.room_id !== input.context.room_id)) {
+      throw new Error("resource_usage_room_scope_mismatch");
+    }
+    const usage = ResourceUsageRecordSchema.parse({
+      id: input.id,
+      activity_id: input.activityId,
+      ...(input.resourceVersion ? { resource_version: input.resourceVersion } : {}),
+      ...(input.contentHash ? { content_hash: input.contentHash } : {}),
+      resource_ref: input.resourceRef,
+      usage_scope: input.usageScope,
+      stage: input.stage,
+      ...(input.domainOperationId ? { domain_operation_id: input.domainOperationId } : {}),
+      ...(input.workspaceChangeId ? { workspace_change_id: input.workspaceChangeId } : {}),
+      ...(input.workspaceJobAttemptId ? { workspace_job_attempt_id: input.workspaceJobAttemptId } : {}),
+      created_at: nowIso()
+    });
+    return this.dependencies.commands.recordRuntimeResourceUsage(request, usage);
+  }
+
+  async finalizeActivity(input: Parameters<ActivityIngestPort["finalizeActivity"]>[0]): Promise<ActivityRecord> {
+    const { request } = await this.activityContext(input.context, input.activityId, "execute");
+    return this.dependencies.commands.finalizeRuntimeActivity(request, {
+      activityId: input.activityId,
+      status: input.status,
+      ...(input.resultSummary !== undefined ? { resultSummary: input.resultSummary } : {}),
+      ...(input.verification !== undefined ? { verification: input.verification } : {}),
+      ...(input.failure !== undefined ? { failure: input.failure } : {}),
+      ...(input.backendRunId !== undefined ? { backendRunId: input.backendRunId } : {}),
+      ...(input.domainOperationIds !== undefined ? { domainOperationIds: input.domainOperationIds } : {}),
+      now: nowIso()
+    });
+  }
+
+  private async activityContext(
+    context: TrustedWorkspaceContext,
+    activityId: string,
+    action: WorkspaceExternalRoomAction
+  ): Promise<{ request: WorkspaceRequestContext; activity: ActivityRecord }> {
+    if (!context.room_id) throw new Error("external_app_activity_room_required");
+    const accountId = delegatedAccountId(context.principal);
+    const request = requestContextFromWorkspaceContext(context, accountId);
+    const activity = await this.dependencies.commands.getRuntimeActivity(request, activityId);
+    if (!activity || activity.workspace_id !== context.workspace_id || activity.room_id !== context.room_id
+      || stableStringify(activity.principal) !== stableStringify(context.principal)
+      || stableStringify(activity.source) !== stableStringify(context.source)) {
+      throw new Error("activity_context_mismatch");
+    }
+    await this.authorization.assertRoom(participantPrincipal(context.principal), context.room_id, action);
+    return { request, activity };
+  }
 }
 
 function connectionFromDescriptor(descriptor: WorkspaceConnectionDescriptor): ExternalAppConnectionRecord | undefined {
@@ -912,14 +996,6 @@ function normalizeRoomPrincipal(principal: ParticipantPrincipal | ExternalRoomPr
   }
   if (principal.kind === "external_app" || principal.kind === "system") return principal;
   throw new Error("external_app_principal_invalid");
-}
-
-function verificationOutcome(value: unknown): "confirmed" | "failed" | "not_run" | "unknown" {
-  if (!Array.isArray(value) || value.length === 0) return "unknown";
-  if (value.some((item) => objectValue(item).status === "failed")) return "failed";
-  if (value.every((item) => objectValue(item).status === "passed")) return "confirmed";
-  if (value.every((item) => objectValue(item).status === "not_run")) return "not_run";
-  return "unknown";
 }
 
 function labelFor(value: unknown): string | undefined {

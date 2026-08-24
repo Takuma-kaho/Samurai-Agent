@@ -84,7 +84,7 @@ export function officialConnectorManifests(): ConnectorManifest[] {
 }
 
 export async function registerOfficialConnectorManifests(registry: ConnectorRegistry): Promise<ConnectorManifest[]> {
-  // SQLite self-hosts may serialize writers. Startup registration is tiny and
+  // Self-host deployments may serialize writers. Startup registration is tiny and
   // intentionally sequential so one manifest cannot make another look like a
   // transient installation failure.
   const registered: ConnectorManifest[] = [];

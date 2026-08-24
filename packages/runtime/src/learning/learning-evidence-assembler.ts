@@ -14,7 +14,7 @@ import type {
 
 /**
  * Read-only material for a future learning decision.  It is reconstructed
- * from the Workspace and SQLite histories; no resource body is copied here.
+ * from the Workspace and durable histories; no resource body is copied here.
  */
 export interface LearningEvidenceBundle {
   backend_run: BackendRunRecord;

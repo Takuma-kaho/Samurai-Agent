@@ -437,7 +437,7 @@ export const proposalCapabilityManifest: CapabilityManifest = {
     },
     {
       operation: "wiki.reindex",
-      description: "Refresh the knowledge wiki SQLite index from markdown pages.",
+      description: "Refresh the PostgreSQL knowledge index from markdown pages.",
       input_schema_ref: "wiki.reindex.input",
       output_schema_ref: "wiki.reindex.output",
       risk: "low",
@@ -528,7 +528,7 @@ export const proposalCapabilityManifest: CapabilityManifest = {
     },
     {
       operation: "collection.reindex",
-      description: "Refresh collection SQLite indexes from schema and record files.",
+      description: "Refresh PostgreSQL collection indexes from schema and record files.",
       input_schema_ref: "collection.reindex.input",
       output_schema_ref: "collection.reindex.output",
       risk: "low",

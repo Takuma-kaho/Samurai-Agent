@@ -49,14 +49,13 @@ for (const file of sourceFiles("packages/learning/src")) {
 for (const file of [...sourceFiles("apps/web/src"), ...sourceFiles("packages/ui-protocol/src")]) {
   const source = readFileSync(path.join(root, file), "utf8");
   const ast = parse(file, source);
-  if (importsOf(ast).some((specifier) => specifier === "@samurai-agent/workspace-store" || specifier === "better-sqlite3")
-    || stringLiterals(ast).includes("workspace.sqlite")) issues.push({ code: "renderer_depends_on_store", file });
+  if (importsOf(ast).some((specifier) => specifier === "pg" || specifier === "@samurai-agent/workspace-server")) issues.push({ code: "renderer_depends_on_database", file });
 }
 for (const directory of ["packages/ui-protocol/src", "packages/agent-backends/src", "packages/gateway/src"]) {
   for (const file of sourceFiles(directory)) {
     const source = readFileSync(path.join(root, file), "utf8");
     const ast = parse(file, source);
-    if (importsOf(ast).includes("@samurai-agent/workspace-store") || identifiers(ast).includes("WorkspaceStore")) issues.push({ code: "adapter_depends_on_store", file });
+    if (importsOf(ast).includes("pg") || identifiers(ast).includes("PostgresWorkspaceDatabase")) issues.push({ code: "adapter_depends_on_database", file });
     inspectMutationCallsWithAliases(ast, file, "store", storeMutationVerbs, "adapter_direct_store_mutation");
   }
 }

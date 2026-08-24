@@ -393,7 +393,7 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     return this.transitionWorkItem(input.workItemId, input.workerId, input.roomId, "completed");
   }
 
-  async failWorkItem(input: { workItemId: string; workerId: string; roomId: string; failureKind: "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined> {
+  async failWorkItem(input: { workItemId: string; workerId: string; roomId: string; failureKind: "retryable" | "cancelled" | "non_retryable"; error: string }): Promise<WorkItemRecord | undefined> {
     if (!input.error.trim()) throw new WorkspaceServerError("skill_optimization_work_item_error_required", 400);
     return this.transitionWorkItem(input.workItemId, input.workerId, input.roomId, input.failureKind === "cancelled" ? "cancelled" : "failed", input.failureKind, input.error);
   }
@@ -650,7 +650,7 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
     return room;
   }
 
-  private async transitionWorkItem(workItemId: string, workerId: string, roomId: string, status: "completed" | "failed" | "cancelled", failureKind?: "cancelled" | "non_retryable", error?: string): Promise<WorkItemRecord | undefined> {
+  private async transitionWorkItem(workItemId: string, workerId: string, roomId: string, status: "completed" | "failed" | "cancelled", failureKind?: "retryable" | "cancelled" | "non_retryable", error?: string): Promise<WorkItemRecord | undefined> {
     assertId(workItemId, "skill_optimization_work_item_id_invalid");
     assertId(workerId, "skill_optimization_worker_id_invalid");
     const now = new Date().toISOString();
@@ -666,16 +666,22 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
       const row = result.rows[0];
       if (!row) return undefined;
       const current = parseRecord(row.record, WorkItemRecordSchema, "skill_optimization_work_item_record_invalid");
+      const canRetry = failureKind === "retryable" && current.attempt < current.max_attempts;
+      const nextStatus = canRetry ? "queued" : status;
+      const nextFailureKind = canRetry ? "retryable" : failureKind === "retryable" ? "non_retryable" : failureKind;
+      const retryAfterAt = canRetry
+        ? new Date(Date.now() + Math.min(60_000, 1_000 * (2 ** Math.max(0, current.attempt - 1)))).toISOString()
+        : undefined;
       const next = WorkItemRecordSchema.parse({
         ...current,
-        status,
+        status: nextStatus,
         lease_owner: undefined,
         lease_expires_at: undefined,
         heartbeat_at: undefined,
-        retry_after_at: undefined,
-        failure_kind: failureKind,
+        ...(retryAfterAt ? { retry_after_at: retryAfterAt } : { retry_after_at: undefined }),
+        failure_kind: nextFailureKind,
         error,
-        completed_at: now,
+        ...(nextStatus === "queued" ? { completed_at: undefined } : { completed_at: now }),
         updated_at: now
       });
       await sql.query(
@@ -683,7 +689,7 @@ export class PostgresSkillOptimization<TSkill extends OptimizationSkill = Optimi
          SET status = $3, worker_id = NULL, lease_until = NULL, record = $4::JSONB, updated_at = $5
          WHERE workspace_id = $1 AND id = $2 AND room_id = $7 AND status = 'running' AND worker_id = $6
            AND lease_until IS NOT NULL AND lease_until > $5`,
-        [this.workspaceId, workItemId, status, jsonText(next), now, workerId, roomId]
+        [this.workspaceId, workItemId, nextStatus, jsonText(next), now, workerId, roomId]
       );
       return next;
     });

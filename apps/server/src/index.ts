@@ -1,46 +1,31 @@
 import { pathToFileURL } from "node:url";
-import {
-  closeApiServer,
-  createApiServer,
-  defaultWorkspaceRoot,
-  loadServerEnv,
-  resolveWorkspaceRoot,
-  setGatewayEmailImapClientFactoryForTest,
-  startServer,
-  trustedRuntimeApiInput,
-  trustedRuntimeApiPayload,
-  type ApiServer,
-  type ApiServerLifecycleState,
-  type ApiServerShutdownState,
-  type CreateApiServerOptions
-} from "./api-server";
 import type { WorkspaceServerHttp } from "./workspace-server/http-server";
+import { defaultWorkspaceRoot, loadServerEnv, resolveWorkspaceRoot } from "./server-config";
 
 export {
-  closeApiServer,
-  createApiServer,
   defaultWorkspaceRoot,
   loadServerEnv,
-  resolveWorkspaceRoot,
-  setGatewayEmailImapClientFactoryForTest,
-  startServer,
-  trustedRuntimeApiInput,
-  trustedRuntimeApiPayload,
-  type ApiServer,
-  type ApiServerLifecycleState,
-  type ApiServerShutdownState,
-  type CreateApiServerOptions
+  resolveWorkspaceRoot
 };
 export { startAutomationScheduler, type AutomationScheduler, type AutomationSchedulerState } from "./workers/automation-scheduler";
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 const isTestRuntime = Boolean(process.env.VITEST || process.env.VITEST_WORKER_ID || process.env.NODE_ENV === "test" || process.argv.some((arg) => arg.includes("vitest")));
 
-export function installServerSignalHandlers(server: ApiServer | WorkspaceServerHttp): () => void {
+/**
+ * Public server start entry. The normal programmatic start path uses the same
+ * PostgreSQL composition as the process entry below.
+ */
+export async function startServer(port?: number): Promise<WorkspaceServerHttp> {
+  return startStandardServer(port);
+}
+
+export function installServerSignalHandlers(server: WorkspaceServerHttp): () => void {
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = () => {
     if (!shutdownPromise) {
-      shutdownPromise = ("store" in server ? closeApiServer(server) : server.close()).catch((error) => {
+      const closing = server.close();
+      shutdownPromise = closing.catch((error) => {
         console.error(error instanceof Error ? { name: error.name, message: error.message } : "server_shutdown_failed");
         process.exitCode = 1;
       });
@@ -55,11 +40,7 @@ export function installServerSignalHandlers(server: ApiServer | WorkspaceServerH
   };
 }
 
-/**
- * The normal process has one PostgreSQL-backed composition root.  The legacy
- * SQLite API remains available through createApiServer for migration and
- * characterization tests, but it is never selected by the standard entry.
- */
+/** The standard process has one PostgreSQL-backed composition root. */
 export async function startStandardServer(port?: number): Promise<WorkspaceServerHttp> {
   const [{ loadWorkspaceServerConfig }, { startWorkspaceServer }] = await Promise.all([
     import("@samurai-agent/workspace-server"),

@@ -14,6 +14,7 @@ import {
   type JsonValue,
   type ResourceRef
 } from "@samurai-agent/core-schemas";
+import { collectionRecordResourceId } from "@samurai-agent/room-permissions";
 import { createSurfaceRenderSpec, type SurfaceOperation, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   WorkspaceServerError,
@@ -35,8 +36,41 @@ export interface PostgresCollectionSchema extends CollectionSchema {
 
 export type PostgresCollectionRecord = CollectionRecord & { file_path: string };
 
+export interface PostgresCollectionRecordResolution {
+  collection_id: string;
+  record_id: string;
+  resolved_refs: Array<{
+    ref_id: string;
+    field: string;
+    target_collection_id: string;
+    target_record_id: string;
+    record: PostgresCollectionRecord;
+    resource_ref: ResourceRef;
+  }>;
+  missing_refs: Array<{
+    ref_id: string;
+    field: string;
+    target_collection_id: string;
+    target_record_id?: string;
+    reason: "empty" | "invalid" | "not_found";
+  }>;
+  embed_fields: Array<{ embed_id: string; field: string; value: JsonValue }>;
+}
+
 type PostgresCollectionSchemaMutation = PostgresCollectionSchema & { replayed: boolean };
 type PostgresCollectionRecordMutation = PostgresCollectionRecord & { replayed: boolean };
+
+export interface PostgresCollectionTriggerEnqueuer {
+  enqueue(context: WorkspaceRequestContext, input: {
+    roomId: string;
+    collectionId: string;
+    recordId: string;
+    event: "record.created" | "record.patched";
+    record: CollectionRecord;
+    patch?: CollectionPatch;
+    trigger: Record<string, JsonValue>;
+  }): Promise<void>;
+}
 
 interface CollectionIndexPayload {
   kind: "schema" | "record" | "patch";
@@ -64,7 +98,8 @@ interface CollectionIndexPayload {
 export class PostgresCollection {
   constructor(
     private readonly commands: WorkspaceServerCommandService,
-    private readonly files: WorkspaceFileStore
+    private readonly files: WorkspaceFileStore,
+    private readonly triggerEnqueuer?: PostgresCollectionTriggerEnqueuer
   ) {}
 
   async listSchemas(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string): Promise<PostgresCollectionSchema[]> {
@@ -165,6 +200,100 @@ export class PostgresCollection {
     return result.sort((left, right) => left.id.localeCompare(right.id));
   }
 
+  /**
+   * Patch history is a first-class PostgreSQL record.  The old local store
+   * exposed it through a separate legacy table; keeping the read model here
+   * ensures clients can inspect history without reopening that store.
+   */
+  async listPatches(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    roomId: string,
+    collectionId: string,
+    recordId?: string
+  ): Promise<CollectionPatch[]> {
+    const rows = await this.commands.listRecords(context, { roomId, recordType: patchRecordType, limit: 2_000 });
+    return rows
+      .map((row) => row.payload as Partial<CollectionIndexPayload>)
+      .filter((payload): payload is CollectionIndexPayload & { patch: CollectionPatch } =>
+        payload.kind === "patch"
+        && payload.state === "ready"
+        && payload.collection_id === collectionId
+        && Boolean(payload.patch && typeof payload.patch.id === "string" && typeof payload.patch.record_id === "string")
+        && (recordId === undefined || payload.patch!.record_id === recordId)
+      )
+      .map((payload) => payload.patch)
+      .sort((left, right) => right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id));
+  }
+
+  async getPatch(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    roomId: string,
+    collectionId: string,
+    recordId: string,
+    patchId: string
+  ): Promise<CollectionPatch | undefined> {
+    const row = await this.tryGetIndex(context, roomId, patchRecordType, compoundId(collectionId, `${recordId}-${patchId}`));
+    if (!row) return undefined;
+    const payload = row.payload as Partial<CollectionIndexPayload>;
+    if (payload.kind !== "patch" || payload.state !== "ready" || payload.collection_id !== collectionId || payload.patch?.record_id !== recordId || payload.patch?.id !== patchId) {
+      return undefined;
+    }
+    return payload.patch;
+  }
+
+  async resolveRecordRefs(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    roomId: string,
+    collectionId: string,
+    recordId: string
+  ): Promise<PostgresCollectionRecordResolution> {
+    const [schema, record] = await Promise.all([
+      this.getSchema(context, roomId, collectionId),
+      this.getRecord(context, roomId, collectionId, recordId)
+    ]);
+    const resolvedRefs: PostgresCollectionRecordResolution["resolved_refs"] = [];
+    const missingRefs: PostgresCollectionRecordResolution["missing_refs"] = [];
+    const embedFields: PostgresCollectionRecordResolution["embed_fields"] = [];
+    for (const ref of schema.refs) {
+      const field = collectionDefinitionField(ref);
+      if (!field) continue;
+      const refId = collectionDefinitionString(ref, "id") ?? collectionDefinitionString(ref, "field") ?? field;
+      const targetCollection = collectionDefinitionString(ref, "collection_id")
+        ?? collectionDefinitionString(ref, "target_collection_id")
+        ?? record.collection_id;
+      const value = record.data[field];
+      if (value === undefined || value === null || value === "") {
+        missingRefs.push({ ref_id: refId, field, target_collection_id: targetCollection, reason: "empty" });
+        continue;
+      }
+      const targetId = collectionRefTargetId(value);
+      if (!targetId) {
+        missingRefs.push({ ref_id: refId, field, target_collection_id: targetCollection, reason: "invalid" });
+        continue;
+      }
+      try {
+        const target = await this.getRecord(context, roomId, targetCollection, targetId);
+        resolvedRefs.push({
+          ref_id: refId,
+          field,
+          target_collection_id: targetCollection,
+          target_record_id: target.id,
+          record: target,
+          resource_ref: { kind: "collection_record", id: collectionRecordResourceId(target.collection_id, target.id), uri: target.file_path, label: `${target.collection_id}/${target.id}` }
+        });
+      } catch (error) {
+        if (!(error instanceof WorkspaceServerError) || error.status !== 404) throw error;
+        missingRefs.push({ ref_id: refId, field, target_collection_id: targetCollection, target_record_id: targetId, reason: "not_found" });
+      }
+    }
+    for (const embed of schema.embeds) {
+      const field = collectionDefinitionField(embed);
+      if (!field || !(field in record.data)) continue;
+      embedFields.push({ embed_id: collectionDefinitionString(embed, "id") ?? field, field, value: record.data[field] ?? null });
+    }
+    return { collection_id: record.collection_id, record_id: record.id, resolved_refs: resolvedRefs, missing_refs: missingRefs, embed_fields: embedFields };
+  }
+
   async getRecord(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, collectionId: string, recordId: string): Promise<PostgresCollectionRecord> {
     const schema = await this.getSchema(context, roomId, collectionId);
     const row = await this.getIndex(context, roomId, recordRecordType, compoundId(collectionId, recordId));
@@ -180,6 +309,7 @@ export class PostgresCollection {
     assertRecordId(record.id);
     const id = compoundId(record.collection_id, record.id);
     const filePath = `collections/${record.collection_id}/records/${record.id}.md`;
+    const triggers = collectionTriggersFor(schema, "record.created");
     const existing = await this.tryGetIndex(context, roomId, recordRecordType, id);
     if (existing) {
       const existingPayload = indexPayload(existing, "record");
@@ -190,11 +320,20 @@ export class PostgresCollection {
       if (existingPayload.record && JSON.stringify(existingPayload.record) !== JSON.stringify(record)) {
         throw new WorkspaceServerError("collection_record_operation_conflict", 409);
       }
+      if (
+        existingPayload.state === "blocked"
+        && existingPayload.operation_id === context.operationId
+        && existingPayload.error?.startsWith("trigger_enqueue:")
+        && existingPayload.record
+      ) {
+        const resumed = await this.resumeBlockedTrigger(context, roomId, existing, existingPayload, triggers, { record: existingPayload.record });
+        return { ...resumed, replayed: true };
+      }
       if (existingPayload.state !== "pending" || existingPayload.operation_id !== context.operationId) {
         throw new WorkspaceServerError(existingPayload.state === "blocked" ? "collection_recovery_required" : "collection_record_exists", existingPayload.state === "blocked" ? 503 : 409);
       }
     }
-    assertPostgresCollectionTriggerDeliverySupported(schema, "record.created");
+    assertPostgresCollectionTriggerDeliverySupported(schema, "record.created", this.triggerEnqueuer);
     const pending = existing
       ? { record: existing, replayed: true }
       : await this.commands.putRecord(indexContext(context, "record-prepare"), {
@@ -203,10 +342,16 @@ export class PostgresCollection {
       });
     try {
       const file = await ensureCollectionFile(this.files, context, roomId, filePath, Buffer.from(renderCollectionMarkdown("record", record)), 0, "record");
-      await this.commands.putRecord(indexContext(context, "record-finalize"), {
+      const finalized = await this.commands.putRecord(indexContext(context, "record-finalize"), {
         roomId, recordType: recordRecordType, id, expectedVersion: pending.record.version,
         payload: indexPayloadValue({ kind: "record", state: "ready", collection_id: record.collection_id, file_path: filePath, file_version: file.file.version, operation_id: context.operationId, record }), searchText: recordText(record)
       });
+      try {
+        await this.enqueueCollectionTriggers(context, roomId, triggers, { record });
+      } catch (error) {
+        await this.markBlocked(context, roomId, recordRecordType, id, finalized.record.version, `trigger_enqueue:${errorCode(error)}`);
+        throw new WorkspaceServerError("collection_trigger_enqueue_failed", 503, { collection_id: record.collection_id, record_id: record.id });
+      }
       return { ...record, file_path: filePath, version: record.version ?? 1, replayed: pending.replayed };
     } catch (error) {
       await this.markBlocked(context, roomId, recordRecordType, id, pending.record.version, `record_create:${errorCode(error)}`);
@@ -218,6 +363,7 @@ export class PostgresCollection {
     const schema = await this.getSchema(context, roomId, collectionId);
     const patchId = patchInput.id ?? deterministicPatchId(context.operationId);
     const patchIndexId = compoundId(collectionId, `${recordId}-${patchId}`);
+    const triggers = collectionTriggersFor(schema, "record.patched");
     const previousPatch = await this.tryGetIndex(context, roomId, patchRecordType, patchIndexId);
     if (previousPatch) {
       const previousPayload = indexPayload(previousPatch, "patch");
@@ -225,9 +371,25 @@ export class PostgresCollection {
       if (previousPayload.state !== "ready" || previousPayload.patch?.source_operation_id !== context.operationId) {
         throw new WorkspaceServerError("collection_patch_operation_conflict", 409, { record_id: recordId });
       }
+      const current = await this.tryGetIndex(context, roomId, recordRecordType, compoundId(collectionId, recordId));
+      const currentPayload = current ? indexPayload(current, "record") : undefined;
+      if (
+        current
+        && currentPayload?.state === "blocked"
+        && currentPayload.operation_id === context.operationId
+        && currentPayload.error?.startsWith("trigger_enqueue:")
+        && currentPayload.record
+        && previousPayload.patch
+      ) {
+        const resumed = await this.resumeBlockedTrigger(context, roomId, current, currentPayload, triggers, {
+          record: currentPayload.record,
+          patch: previousPayload.patch
+        });
+        return { ...resumed, replayed: true };
+      }
       return { ...(await this.getRecord(context, roomId, collectionId, recordId)), replayed: true };
     }
-    assertPostgresCollectionTriggerDeliverySupported(schema, "record.patched");
+    assertPostgresCollectionTriggerDeliverySupported(schema, "record.patched", this.triggerEnqueuer);
     const before = await this.getRecord(context, roomId, collectionId, recordId);
     const patch: CollectionPatch = {
       id: patchId, record_id: recordId, changes: patchInput.changes,
@@ -262,6 +424,12 @@ export class PostgresCollection {
           patch
         });
         throw new WorkspaceServerError("collection_patch_history_blocked", 503, { record_id: recordId });
+      }
+      try {
+        await this.enqueueCollectionTriggers(context, roomId, triggers, { record: after, patch });
+      } catch (error) {
+        await this.markBlocked(context, roomId, recordRecordType, current.id, indexed.record.version, `trigger_enqueue:${errorCode(error)}`);
+        throw new WorkspaceServerError("collection_trigger_enqueue_failed", 503, { collection_id: collectionId, record_id: recordId });
       }
       return { ...after, file_path: payload.file_path, replayed: false };
     } catch (error) {
@@ -545,6 +713,62 @@ export class PostgresCollection {
     return true;
   }
 
+  private async enqueueCollectionTriggers(
+    context: WorkspaceRequestContext,
+    roomId: string,
+    triggers: Array<Record<string, JsonValue>>,
+    input: { record: CollectionRecord; patch?: CollectionPatch }
+  ): Promise<void> {
+    if (triggers.length === 0) return;
+    if (!this.triggerEnqueuer) throw new WorkspaceServerError("collection_trigger_delivery_not_supported", 503);
+    const event = input.patch ? "record.patched" : "record.created";
+    for (const trigger of triggers) {
+      await this.triggerEnqueuer.enqueue(context, {
+        roomId,
+        collectionId: input.record.collection_id,
+        recordId: input.record.id,
+        event,
+        record: input.record,
+        ...(input.patch ? { patch: input.patch } : {}),
+        trigger
+      });
+    }
+  }
+
+  private async resumeBlockedTrigger(
+    context: WorkspaceRequestContext,
+    roomId: string,
+    row: WorkspaceRecord,
+    payload: CollectionIndexPayload,
+    triggers: Array<Record<string, JsonValue>>,
+    input: { record: CollectionRecord; patch?: CollectionPatch }
+  ): Promise<PostgresCollectionRecord> {
+    try {
+      await this.enqueueCollectionTriggers(context, roomId, triggers, input);
+    } catch (error) {
+      throw new WorkspaceServerError("collection_trigger_enqueue_failed", 503, {
+        collection_id: input.record.collection_id,
+        record_id: input.record.id,
+        cause: errorCode(error)
+      });
+    }
+    const current = await this.tryGetIndex(context, roomId, recordRecordType, row.id);
+    if (!current || current.version !== row.version) {
+      throw new WorkspaceServerError("collection_trigger_recovery_conflict", 503, { record_id: input.record.id });
+    }
+    const currentPayload = indexPayload(current, "record");
+    const { error: _error, recovery: _recovery, ...withoutRecovery } = currentPayload;
+    await this.commands.putRecord(indexContext(context, "trigger-unblock"), {
+      roomId,
+      recordType: recordRecordType,
+      id: row.id,
+      expectedVersion: row.version,
+      payload: indexPayloadValue({ ...(withoutRecovery as CollectionIndexPayload), state: "ready" }),
+      searchText: recordText(input.record)
+    });
+    return { ...input.record, file_path: payload.file_path };
+  }
+
   private async markBlocked(context: WorkspaceRequestContext, roomId: string, recordType: string, id: string, expectedVersion: number, error: string, recovery?: CollectionIndexPayload["recovery"]): Promise<void> {
     const current = await this.tryGetIndex(context, roomId, recordType, id);
     if (!current || current.version !== expectedVersion) return;
@@ -570,25 +794,29 @@ function parseRecordSafe(value: unknown, schema: CollectionSchema): CollectionRe
 }
 
 /**
- * PostgreSQL does not yet have the SQLite file-transaction + durable job
+ * PostgreSQL does not yet have the legacy file-transaction + durable job
  * commit. Reject before any record/file write instead of silently persisting
  * a Collection mutation whose enabled trigger cannot be delivered.
  */
 export function assertPostgresCollectionTriggerDeliverySupported(
   schema: CollectionSchema,
-  event: "record.created" | "record.patched"
+  event: "record.created" | "record.patched",
+  triggerEnqueuer?: PostgresCollectionTriggerEnqueuer
 ): void {
-  const matching = schema.triggers.some((trigger) => {
-    if (trigger.enabled === false) return false;
-    const triggerEvent = jsonString(trigger, "event") ?? jsonString(trigger, "on");
-    return !triggerEvent || triggerEvent === event;
-  });
-  if (matching) {
+  if (collectionTriggersFor(schema, event).length > 0 && !triggerEnqueuer) {
     throw new WorkspaceServerError("collection_trigger_delivery_not_supported", 503, {
       collection_id: schema.id,
       event
     });
   }
+}
+
+function collectionTriggersFor(schema: CollectionSchema, event: "record.created" | "record.patched"): Array<Record<string, JsonValue>> {
+  return schema.triggers.filter((trigger) => {
+    if (trigger.enabled === false) return false;
+    const triggerEvent = jsonString(trigger, "event") ?? jsonString(trigger, "on");
+    return !triggerEvent || triggerEvent === event;
+  });
 }
 
 function indexPayload(row: WorkspaceRecord, kind: CollectionIndexPayload["kind"]): CollectionIndexPayload {
@@ -611,6 +839,27 @@ function jsonString(value: Record<string, JsonValue>, key: string): string | und
 
 function jsonObject(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined;
+}
+
+function collectionDefinitionField(definition: Record<string, JsonValue>): string | undefined {
+  const value = definition.field ?? definition.field_id ?? definition.id ?? definition.name;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function collectionDefinitionString(definition: Record<string, JsonValue>, key: string): string | undefined {
+  const value = definition[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function collectionRefTargetId(value: JsonValue): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const object = value as Record<string, JsonValue>;
+  for (const key of ["id", "record_id", "target_id", "value"]) {
+    const candidate = object[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
 }
 
 function assertCollectionId(value: string): void {

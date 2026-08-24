@@ -158,7 +158,6 @@ function runStaticAndFocusedChecks() {
   run("Native App build", "pnpm", ["--filter", "@samurai-agent/web", "run", "build"]);
   run("Room hierarchy focused tests", "pnpm", ["exec", "vitest", "run",
     "packages/workspace-server/src/schema.test.ts",
-    "packages/workspace-server/src/sqlite-migration.test.ts",
     "packages/workspace-server/src/workspace-bundle-v3.test.ts",
     "apps/server/src/workspace-server/realtime.test.ts",
     "apps/desktop/src/workspace-connections.test.ts",

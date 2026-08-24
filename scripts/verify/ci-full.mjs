@@ -44,7 +44,11 @@ function runCheck(id, kind, command, args, options = {}) {
   const stderr = sanitize(result.stderr ?? "");
   writeFileSync(stdoutPath, stdout);
   writeFileSync(stderrPath, stderr);
-  const status = result.error || result.status !== 0 ? "failed" : "passed";
+  const status = result.error || (result.status !== 0 && result.status !== 2)
+    ? "failed"
+    : result.status === 2
+      ? "unverified"
+      : "passed";
   const check = {
     id,
     kind,
@@ -94,7 +98,7 @@ function runPostgresChecks() {
     for (const target of ["HOSTED", "SELF_HOST"]) {
       unverified(`postgres-migration-${target.toLowerCase()}`, "migration", "postgres_environment_unavailable", details);
     }
-    for (const id of ["postgres-rls", "postgres-room-hierarchy", "server-worker-bundle", "completion-worker-bundle"]) {
+    for (const id of ["postgres-rls", "postgres-room-hierarchy", "server-worker-bundle", "completion-worker-bundle", "runtime-recovery-rls"]) {
       unverified(id, "postgres", "postgres_environment_unavailable", details);
     }
     return;
@@ -110,6 +114,7 @@ function runPostgresChecks() {
   runCheck("postgres-room-hierarchy", "postgres", process.execPath, ["--import", "tsx", "scripts/verify-server-03-rls.ts"], { timeoutMs: 20 * 60 * 1000 });
   runCheck("server-worker-bundle", "server-worker-bundle", process.execPath, ["--import", "tsx", "scripts/verify-server-04-rls.ts"], { timeoutMs: 30 * 60 * 1000 });
   runCheck("completion-worker-bundle", "server-worker-bundle", process.execPath, ["--import", "tsx", "scripts/verify-server-04-completion-rls.ts"], { timeoutMs: 30 * 60 * 1000 });
+  runCheck("runtime-recovery-rls", "server-worker-recovery", process.execPath, ["--import", "tsx", "scripts/verify-runtime-recovery-rls.ts"], { timeoutMs: 30 * 60 * 1000 });
 }
 
 function writeReport(report) {
@@ -120,6 +125,7 @@ function writeReport(report) {
 
 try {
   runCheck("architecture-static", "static", process.execPath, ["scripts/verify/architecture-invariants.mjs", "--strict"]);
+  runCheck("postgres-migration-readiness", "migration", "pnpm", ["run", "verify:postgres-migration"], { timeoutMs: 5 * 60 * 1000 });
   runCheck("full-typecheck", "typecheck", "pnpm", ["run", "typecheck"], { timeoutMs: 30 * 60 * 1000 });
   runCheck("web-build", "build", "pnpm", ["--filter", "@samurai-agent/web", "run", "build"], { timeoutMs: 20 * 60 * 1000 });
   runCheck("full-test", "test", "pnpm", ["run", "test"], { timeoutMs: 45 * 60 * 1000 });
@@ -141,7 +147,7 @@ const report = {
   completed_at: new Date().toISOString(),
   repository_root: root,
   postgres_environment_mode: process.env.SAMURAI_CI_FULL_POSTGRES_MODE?.trim() || "external_or_unavailable",
-  scope: ["postgresql", "migration", "server", "worker", "bundle", "web", "full-test"],
+  scope: ["postgresql", "migration", "server", "worker", "runtime-recovery", "bundle", "web", "full-test"],
   checks,
   unverified: checks.filter((check) => check.status === "unverified"),
   result_directory: resultDirectory

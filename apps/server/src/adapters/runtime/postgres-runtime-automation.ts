@@ -61,6 +61,10 @@ export interface PostgresRuntimeAutomationOptions {
   runMemoryReview?: (context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
   runLearningEvaluation?: (context: WorkspaceRequestContext, input: { roomId: string; workerId: string; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
   runSkillCurator?: (context: WorkspaceRequestContext, input: { roomId: string; workerId: string; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
+  /** Executes a Collection action after its trigger job has been durably
+   * claimed. The callback is deliberately a narrow use-case port: the
+   * scheduler never receives a Collection store or filesystem capability. */
+  runCollectionTrigger?: (context: WorkspaceRequestContext, input: { job: AutomationJobRecord; signal: AbortSignal }) => Promise<PostgresRuntimeAutomationExecutionResult>;
   maxRuns?: number;
 }
 
@@ -165,6 +169,7 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
   private readonly runMemoryReview?: PostgresRuntimeAutomationOptions["runMemoryReview"];
   private readonly runLearningEvaluation?: PostgresRuntimeAutomationOptions["runLearningEvaluation"];
   private readonly runSkillCurator?: PostgresRuntimeAutomationOptions["runSkillCurator"];
+  private readonly runCollectionTrigger?: PostgresRuntimeAutomationOptions["runCollectionTrigger"];
   private readonly maxRuns: number;
 
   constructor(options: PostgresRuntimeAutomationOptions) {
@@ -177,6 +182,7 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
     this.runMemoryReview = options.runMemoryReview;
     this.runLearningEvaluation = options.runLearningEvaluation;
     this.runSkillCurator = options.runSkillCurator;
+    this.runCollectionTrigger = options.runCollectionTrigger;
     this.maxRuns = boundedInteger(options.maxRuns ?? 10, 1, 100);
   }
 
@@ -657,6 +663,25 @@ export class PostgresRuntimeAutomation implements WorkspaceAutomationSchedulerPo
         return "failed";
       }
     }
+    if (collectionTriggerTarget(claim.job.delivery_target)) {
+      if (!this.runCollectionTrigger) {
+        await this.settleBlocked(context, claim, "automation_executor_not_connected_for_kind");
+        return "blocked";
+      }
+      if (signal.aborted) {
+        await this.settleFailed(context, claim, "automation_worker_aborted");
+        return "failed";
+      }
+      try {
+        const result = await this.runCollectionTrigger(context, { job: claim.job, signal });
+        await this.settleExecutionResult(context, claim, result);
+        return result.status;
+      } catch (error) {
+        const code = safeErrorCode(error);
+        await this.settleFailed(context, claim, code);
+        return "failed";
+      }
+    }
     if (signal.aborted) {
       await this.settleFailed(context, claim, "automation_worker_aborted");
       return "failed";
@@ -1113,6 +1138,15 @@ function automationInstructionForKind(kind: AutomationJobRecord["kind"]): string
     case "resource_translation": return "Translate the requested Room-scoped resource through an authorized Domain Operation.";
     case "custom_instruction": return "Run the configured Room-scoped automation instruction.";
   }
+}
+
+function collectionTriggerTarget(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const target = value as Record<string, unknown>;
+  return target.channel === "collection_trigger"
+    && typeof target.collection_id === "string"
+    && typeof target.record_id === "string"
+    && typeof target.action_id === "string";
 }
 
 function jsonText(value: unknown): string {

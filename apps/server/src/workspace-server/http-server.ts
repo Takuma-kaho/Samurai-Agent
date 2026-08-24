@@ -4,9 +4,10 @@ import { createHash } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
 import path from "node:path";
 import { Server as SocketServer } from "socket.io";
-import { ClientEventRecordSchema, ResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { ClientEventRecordSchema, ResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
 import { builtinSurfaceRendererRegistryEntries } from "@samurai-agent/ui-protocol";
-import { domainCommandInputSources, listDomainCommandEntries, listDomainQueryEntries, type DomainCommandInputSource } from "@samurai-agent/action-catalog";
+import { domainCommandInputSources, listActionCatalogEntries, listDomainCommandEntries, listDomainQueryEntries, pluginManifests, type DomainCommandInputSource } from "@samurai-agent/action-catalog";
+import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
 import { parseDomainOperationInput, type DomainCommandId, type GeneratedSurfaceCreateInput, type GeneratedSurfaceReviseInput, type TrustedDomainContext } from "@samurai-agent/domain-operations";
 import {
   createDefaultAgentBackendRegistry,
@@ -62,6 +63,7 @@ import { PostgresRuntimeAutomation, type PostgresRuntimeAutomationExecutionResul
 import { PostgresKnowledgeWiki } from "../adapters/runtime/postgres-knowledge-wiki";
 import { PostgresCollection } from "../adapters/runtime/postgres-collection";
 import { PostgresKnowledgeMemory } from "../adapters/runtime/postgres-knowledge-memory";
+import { PostgresKnowledgeSkill } from "../adapters/runtime/postgres-knowledge-skill";
 import { PostgresArtifact } from "../adapters/runtime/postgres-artifact";
 import { PostgresGeneratedSurface, type GeneratedSurfaceTargetCommandResult } from "../adapters/runtime/postgres-generated-surface";
 import { PostgresGatewayDomainOperations } from "../adapters/runtime/postgres-gateway-domain-operation";
@@ -79,6 +81,7 @@ import { runPostgresExternalIntegrationContext } from "../adapters/external/post
 
 const automationJobKinds = ["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"] as const;
 const postgresTemporaryContextMaxBytes = 8 * 1024 * 1024;
+const internalWorkspaceRecordTypes = new Set(["artifact_transaction"]);
 
 interface AuthenticatedRequest extends Request {
   samurai?: {
@@ -157,6 +160,7 @@ export async function createWorkspaceServerHttp(
     ? createWorkspaceLearningBackendReviewPort(backendRegistry)
     : undefined;
   let knowledgeWiki: PostgresKnowledgeWiki;
+  let collections: PostgresCollection;
   let learningRunner!: WorkspaceLearningRunner;
   const automation = new PostgresRuntimeAutomation({
     database: core.database,
@@ -168,11 +172,52 @@ export async function createWorkspaceServerHttp(
     runMemoryReview: (context, input) => learningRunner.runCycle(context, { roomId: input.roomId }, input.signal).then((jobs) => learningExecutionResult("memory_review", jobs)),
     runLearningEvaluation: (context, input) => runPostgresAutomationEvaluation(completion, completionJobs, context, input),
     runSkillCurator: (context, input) => runPostgresAutomationCurator(completion, completionJobs, curator, context, input),
+    runCollectionTrigger: async (context, input) => {
+      const target = collectionTriggerTargetFromJob(input.job.delivery_target);
+      if (!target) return { status: "blocked", summary: "Collection trigger payload is invalid.", errorCode: "automation_collection_trigger_invalid" };
+      const result = await collections.runAction(context, target.roomId, {
+        id: `collection_trigger_${input.job.id}`,
+        kind: "collection.action.run",
+        collection_id: target.collectionId,
+        action_id: target.actionId,
+        record_id: target.recordId,
+        payload: target.payload
+      });
+      return { status: "completed", summary: `Executed Collection trigger ${target.collectionId}/${target.actionId}.` };
+    },
     maxRuns: 10
   });
   knowledgeWiki = new PostgresKnowledgeWiki(completion, commands);
-  const collections = new PostgresCollection(commands, files);
+  collections = new PostgresCollection(commands, files, {
+    enqueue: async (context, input) => {
+      const targetPayload: Record<string, JsonValue> = {
+        channel: "collection_trigger",
+        room_id: input.roomId,
+        collection_id: input.collectionId,
+        record_id: input.recordId,
+        event: input.event,
+        trigger_id: stringValue(input.trigger, "id") ?? stringValue(input.trigger, "trigger_id") ?? "collection_trigger",
+        action_id: stringValue(input.trigger, "action_id") ?? stringValue(input.trigger, "action") ?? "",
+        action_kind: stringValue(input.trigger, "kind") ?? stringValue(input.trigger, "action_kind") ?? "custom_instruction",
+        record: input.record as unknown as JsonValue,
+        ...(input.patch ? { patch: input.patch as unknown as JsonValue } : {})
+      };
+      const actionId = String(targetPayload.action_id ?? "").trim();
+      if (!actionId) throw new WorkspaceServerError("collection_trigger_action_missing", 422);
+      await automation.createJob({ ...context, operationId: `collection_trigger_${context.operationId}_${targetPayload.trigger_id}` }, {
+        roomId: input.roomId,
+        title: `Collection trigger ${input.collectionId}/${actionId}`,
+        kind: "custom_instruction",
+        schedule: "once",
+        targetInstruction: "Execute the configured Collection trigger action through the Room-scoped Core.",
+        deliveryTarget: targetPayload,
+        nextRunAt: nowIso(),
+        maxAttempts: 3
+      });
+    }
+  });
   const knowledgeMemory = new PostgresKnowledgeMemory(completion, commands);
+  const knowledgeSkill = new PostgresKnowledgeSkill(completion, commands);
   const runtimeSettings = new PostgresRuntimeSettings(core.database, store);
   const artifacts = new PostgresArtifact(commands, files, (context, input) => commands.ingestCompletionActivity(context, input));
   const generatedSurfaces = new PostgresGeneratedSurface(
@@ -534,7 +579,7 @@ export async function createWorkspaceServerHttp(
 
   // PostgreSQL Gateway control-plane surface. Every mutation is bound through
   // the formal Gateway Domain Operation, while list/detail queries use the
-  // same RLS-scoped adapter and never touch the legacy SQLite Store.
+  // same RLS-scoped adapter and never touch the legacy compatibility Store.
   app.get("/api/workspaces/:workspaceId/gateway/pairings", authenticateWorkspace, asyncRoute(async (req, res) => {
     const gateway = gatewayOperationsFor(workspaceContext(req));
     res.json(await gateway.adapter.listPairings({
@@ -732,8 +777,32 @@ export async function createWorkspaceServerHttp(
       input_sources: domainCommandInputSources
     });
   }));
+  app.get("/api/workspaces/:workspaceId/surface/renderers", authenticateWorkspace, asyncRoute(async (_req, res) => {
+    res.json({ renderers: [...builtinSurfaceRendererRegistryEntries] });
+  }));
 
-  // Room-scoped Runtime entry. The old SQLite chat routes are not mounted in
+  app.get("/api/workspaces/:workspaceId/action-catalog", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json({ actions: listActionCatalogEntries(queryString(req, "category")), plugins: pluginManifests.map((plugin) => ({ id: plugin.id, name: plugin.name, version: plugin.version, action_ids: plugin.actions.map((action) => action.id) })) });
+  }));
+  app.get("/api/workspaces/:workspaceId/capabilities", authenticateWorkspace, asyncRoute(async (_req, res) => {
+    res.json({ capabilities: [proposalCapabilityManifest] });
+  }));
+  app.get("/api/workspaces/:workspaceId/capabilities/:capabilityId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    if (pathParam(req, "capabilityId") !== proposalCapabilityManifest.id) throw new WorkspaceServerError("capability_not_found", 404);
+    res.json(proposalCapabilityManifest);
+  }));
+  app.get("/api/workspaces/:workspaceId/domain/commands", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const source = queryString(req, "source");
+    if (source && !domainCommandInputSources.includes(source as DomainCommandInputSource)) throw new WorkspaceServerError("invalid_domain_command_source", 400);
+    res.json({ commands: listDomainCommandEntries(source as DomainCommandInputSource | undefined), input_sources: domainCommandInputSources });
+  }));
+  app.get("/api/workspaces/:workspaceId/domain/queries", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const source = queryString(req, "source");
+    if (source && !domainCommandInputSources.includes(source as DomainCommandInputSource)) throw new WorkspaceServerError("invalid_domain_query_source", 400);
+    res.json({ queries: listDomainQueryEntries(source as DomainCommandInputSource | undefined), input_sources: domainCommandInputSources });
+  }));
+
+  // Room-scoped Runtime entry. The old unscoped chat routes are not mounted in
   // this PostgreSQL process; every request below is signed and passes through
   // the same Workspace/Room RLS context as the other Server operations.
   app.get("/api/workspaces/:workspaceId/chat/sessions", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -765,11 +834,109 @@ export async function createWorkspaceServerHttp(
     res.status(201).json(session);
   }));
 
+  app.post("/api/workspaces/:workspaceId/chat/messages", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const roomId = stringField(body, "room_id");
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+      async (event) => recordPostgresChatCompletionActivity(commands, context, event));
+    const session = await createPostgresChatSessionThroughDomainOperation(runtimeCommands, {
+      workspaceId: context.workspaceId,
+      accountId: context.accountId,
+      operationId: context.operationId,
+      input: {
+        room_id: roomId,
+        ...(optionalStringField(body, "title") ? { title: optionalStringField(body, "title") } : {}),
+        ...(body.ui_locale === undefined ? {} : { ui_locale: supportedLocaleField(body, "ui_locale") }),
+        ...(body.output_locale === undefined ? {} : { output_locale: supportedLocaleField(body, "output_locale") })
+      }
+    });
+    const result = await runPostgresChatTurnThroughDomainOperation(runtimeCommands, {
+      workspaceId: context.workspaceId,
+      accountId: context.accountId,
+      sessionId: session.id,
+      idempotencyKey: context.operationId,
+      input: {
+        content: stringField(body, "content"),
+        ...(optionalStringField(body, "agent_id") ? { agent_id: optionalStringField(body, "agent_id") } : {}),
+        ...(optionalStringField(body, "backend_id") ? { backend_id: optionalStringField(body, "backend_id") } : {}),
+        ...(body.input_locale === undefined ? {} : { input_locale: supportedLocaleField(body, "input_locale") }),
+        ...(body.output_locale === undefined ? {} : { output_locale: supportedLocaleField(body, "output_locale") }),
+        ...(body.metadata === undefined ? {} : { metadata: jsonObjectField(body, "metadata") }),
+        ...(body.attachments === undefined ? {} : { attachments: resourceRefsField(body, "attachments") }),
+        ...(body.temporary_context === undefined ? {} : { temporary_context: temporaryContextField(body, "temporary_context") })
+      }
+    });
+    const renderSpec = postgresChatRenderSpec(result);
+    res.status(201).json({ result, render_spec: renderSpec, render_specs: [renderSpec] });
+  }));
+
   app.get("/api/workspaces/:workspaceId/chat/sessions/:sessionId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
     const detail = await runtimeCommands.getSessionDetail(pathParam(req, "sessionId"));
     if (!detail) throw new WorkspaceServerError("runtime_session_not_found", 404);
     res.json(detail);
+  }));
+
+  /**
+   * Compatibility read model for clients that need a durable transcript.
+   * The transcript is projected from PostgreSQL runtime records; it never
+   * opens a local Workspace database or exposes a second persistence path.
+   */
+  app.get("/api/workspaces/:workspaceId/chat/sessions/:sessionId/transcript", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const detail = await runtimeCommands.getSessionDetail(pathParam(req, "sessionId"));
+    if (!detail) throw new WorkspaceServerError("runtime_session_not_found", 404);
+    res.json({
+      session: detail.session,
+      messages: detail.messages,
+      message_presentations: detail.messagePresentations,
+      operations: detail.operations,
+      policy_decisions: [],
+      audit_records: detail.auditRecords,
+      artifacts: detail.artifacts,
+      backend_runs: detail.backendRuns,
+      backend_events: detail.backendEvents,
+      tool_runs: detail.toolRuns,
+      workspace_changes: detail.workspaceChanges,
+      change_history: [],
+      run_history: []
+    });
+  }));
+
+  app.get("/api/workspaces/:workspaceId/chat/sessions/:sessionId/resume-state", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const detail = await runtimeCommands.getSessionDetail(pathParam(req, "sessionId"));
+    if (!detail) throw new WorkspaceServerError("runtime_session_not_found", 404);
+    const runs = [...detail.backendRuns].sort(comparePostgresBackendRunDesc);
+    const latestRun = runs[0];
+    const resumableRuns = runs.filter((run) => run.status === "waiting_for_backend_input");
+    const eventsByRunId = new Map<string, BackendEventRecord[]>();
+    for (const event of detail.backendEvents) {
+      const events = eventsByRunId.get(event.run_id) ?? [];
+      events.push(event);
+      eventsByRunId.set(event.run_id, events);
+    }
+    const summarize = (run: BackendRunRecord) => summarizePostgresRunForResume(run, eventsByRunId.get(run.id) ?? []);
+    res.json({
+      session: detail.session,
+      can_resume: resumableRuns.length > 0,
+      next_required_action: resumableRuns.length > 0 ? "submit_backend_native_input" : "none",
+      resume_api: `/api/workspaces/${encodeURIComponent(workspaceContext(req).workspaceId)}/chat/runs/:runId/resume`,
+      latest_run: latestRun ? summarize(latestRun) : undefined,
+      resumable_runs: resumableRuns.map(summarize),
+      transcript_counts: {
+        messages: detail.messages.length,
+        operations: detail.operations.length,
+        backend_runs: detail.backendRuns.length,
+        backend_events: detail.backendEvents.length,
+        tool_runs: detail.toolRuns.length,
+        workspace_changes: detail.workspaceChanges.length,
+        artifacts: detail.artifacts.length,
+        policy_decisions: 0,
+        audit_records: detail.auditRecords.length
+      }
+    });
   }));
 
   app.post("/api/workspaces/:workspaceId/chat/sessions/:sessionId/messages", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -817,7 +984,13 @@ export async function createWorkspaceServerHttp(
 
   app.get("/api/workspaces/:workspaceId/chat/runs/:runId/events", authenticateWorkspace, asyncRoute(async (req, res) => {
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
-    res.json(await runtimeCommands.listBackendEvents(pathParam(req, "runId")));
+    const runId = pathParam(req, "runId");
+    const run = await runtimeCommands.getBackendRun(runId);
+    if (!run) throw new WorkspaceServerError("runtime_backend_run_not_found", 404);
+    const afterSequence = queryNumber(req, "after_sequence");
+    const limitValue = queryNumber(req, "limit");
+    const limit = limitValue === undefined ? undefined : Math.max(1, Math.min(limitValue, 1_000));
+    res.json(await runtimeCommands.listBackendEvents({ runId, ...(afterSequence === undefined ? {} : { afterSequence: Math.max(0, afterSequence) }), ...(limit === undefined ? {} : { limit }) }));
   }));
 
   app.post("/api/workspaces/:workspaceId/chat/runs/:runId/cancel", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -884,6 +1057,76 @@ export async function createWorkspaceServerHttp(
     res.json(await runtimeCommands.search(roomId, query));
   }));
 
+  // Runtime compatibility aliases.  The old local API exposed these names
+  // without a workspace prefix; the PostgreSQL server keeps the same public
+  // concepts under an authenticated Workspace boundary.  Each alias below
+  // calls the same PostgreSQL command service as the canonical chat route.
+  app.get("/api/workspaces/:workspaceId/activity", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("runtime_activity_room_id_required", 400);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listActivity(roomId));
+  }));
+  app.get("/api/workspaces/:workspaceId/workspace-changes", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listWorkspaceChanges(queryString(req, "session_id")));
+  }));
+  app.get("/api/workspaces/:workspaceId/backend-runs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    res.json(await runtimeCommands.listBackendRuns(queryString(req, "session_id")));
+  }));
+  app.get("/api/workspaces/:workspaceId/backend-runs/:runId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const run = await runtimeCommands.getBackendRun(pathParam(req, "runId"));
+    if (!run) throw new WorkspaceServerError("runtime_backend_run_not_found", 404);
+    res.json(run);
+  }));
+  app.get("/api/workspaces/:workspaceId/backend-runs/:runId/tool-runs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const run = await runtimeCommands.getBackendRun(pathParam(req, "runId"));
+    if (!run) throw new WorkspaceServerError("runtime_backend_run_not_found", 404);
+    if (!run.session_id) throw new WorkspaceServerError("runtime_backend_session_missing", 409);
+    const detail = await runtimeCommands.getSessionDetail(run.session_id);
+    res.json(detail?.toolRuns.filter((toolRun) => toolRun.run_id === run.id) ?? []);
+  }));
+  app.get("/api/workspaces/:workspaceId/backend-runs/:runId/tool-runs/diagnostics", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const run = await runtimeCommands.getBackendRun(pathParam(req, "runId"));
+    if (!run) throw new WorkspaceServerError("runtime_backend_run_not_found", 404);
+    if (!run.session_id) throw new WorkspaceServerError("runtime_backend_session_missing", 409);
+    const detail = await runtimeCommands.getSessionDetail(run.session_id);
+    const toolRuns = (detail?.toolRuns ?? []).filter((toolRun) => toolRun.run_id === run.id);
+    const status = queryString(req, "status");
+    res.json({ tool_runs: status ? toolRuns.filter((toolRun) => toolRun.status === status) : toolRuns });
+  }));
+  app.get("/api/workspaces/:workspaceId/tool-runs/diagnostics", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const sessionId = queryString(req, "session_id");
+    if (!sessionId) throw new WorkspaceServerError("session_id_required", 400);
+    const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, workspaceContext(req), io, store, knowledgeMemory);
+    const detail = await runtimeCommands.getSessionDetail(sessionId);
+    if (!detail) throw new WorkspaceServerError("runtime_session_not_found", 404);
+    const runId = queryString(req, "run_id");
+    const status = queryString(req, "status");
+    const toolRuns = detail.toolRuns.filter((toolRun) => (!runId || toolRun.run_id === runId) && (!status || toolRun.status === status));
+    res.json({ tool_runs: toolRuns });
+  }));
+  for (const action of ["cancel", "resume", "stream-sync"] as const) {
+    app.post(`/api/workspaces/:workspaceId/backend-runs/:runId/${action}`, authenticateWorkspace, asyncRoute(async (req, res) => {
+      const context = operationContext(req);
+      const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
+        (event) => recordPostgresChatCompletionActivity(commands, context, event));
+      const runId = pathParam(req, "runId");
+      if (action === "cancel") {
+        res.json(await runtimeCommands.cancelBackendRun(runId));
+      } else if (action === "resume") {
+        const body = objectBody(req.body);
+        res.json(await runtimeCommands.resumeBackendRun(runId, body.input === undefined ? {} : jsonObjectField(body, "input")));
+      } else {
+        res.json(await runtimeCommands.syncBackendRun(runId));
+      }
+    }));
+  }
+
   app.get("/api/workspaces/:workspaceId/client-events", authenticateWorkspace, asyncRoute(async (req, res) => {
     const targetClientKind = optionalStringField(req.query as Record<string, unknown>, "target_client_kind");
     if (targetClientKind !== undefined && targetClientKind !== "desktop" && targetClientKind !== "web" && targetClientKind !== "any") {
@@ -937,6 +1180,16 @@ export async function createWorkspaceServerHttp(
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
     res.json(await knowledgeWiki.graph(workspaceContext(req), roomId, queryString(req, "query")));
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki/active-retrieval", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.graph(workspaceContext(req), roomId, queryString(req, "q")));
+  }));
+  app.get("/api/workspaces/:workspaceId/knowledge-wiki/diagnostics", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.diagnostics(workspaceContext(req), roomId));
   }));
   app.get("/api/workspaces/:workspaceId/knowledge-wiki/lint", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
@@ -995,6 +1248,60 @@ export async function createWorkspaceServerHttp(
     const context = operationContext(req);
     res.json(await knowledgeWiki.setArchived(context, pathParam(req, "wikiId"), true, "Knowledge Wiki page archived"));
   }));
+  app.get("/api/workspaces/:workspaceId/wiki", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("wiki_room_id_required", 400);
+    res.json({ pages: await knowledgeWiki.list(workspaceContext(req), roomId, queryString(req, "include_archived") === "true") });
+  }));
+  app.get("/api/workspaces/:workspaceId/wiki/active-retrieval", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.graph(workspaceContext(req), roomId, queryString(req, "q")));
+  }));
+  app.get("/api/workspaces/:workspaceId/wiki/graph", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.graph(workspaceContext(req), roomId, queryString(req, "q")));
+  }));
+  app.get("/api/workspaces/:workspaceId/wiki/diagnostics", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.diagnostics(workspaceContext(req), roomId));
+  }));
+  app.get("/api/workspaces/:workspaceId/wiki/lint", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.diagnostics(workspaceContext(req), roomId));
+  }));
+  app.get("/api/workspaces/:workspaceId/wiki/:wikiId/backlinks", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("wiki_room_id_required", 400);
+    res.json(await knowledgeWiki.backlinks(workspaceContext(req), roomId, pathParam(req, "wikiId")));
+  }));
+  app.get("/api/workspaces/:workspaceId/wiki/:wikiId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeWiki.get(workspaceContext(req), pathParam(req, "wikiId")));
+  }));
+  app.post("/api/workspaces/:workspaceId/wiki/proposals", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    res.status(201).json(await knowledgeWiki.create(context, { roomId: stringField(body, "room_id"), title: stringField(body, "title"), content: stringField(body, "content"), ...(optionalStringField(body, "slug") ? { slug: optionalStringField(body, "slug") } : {}), ...(body.tags === undefined ? {} : { tags: stringArrayField(body, "tags") }), reason: optionalStringField(body, "reason") ?? "Knowledge Wiki proposal created" }));
+  }));
+  app.patch("/api/workspaces/:workspaceId/wiki/:wikiId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    res.json(await knowledgeWiki.update(operationContext(req), pathParam(req, "wikiId"), { ...(optionalStringField(body, "title") ? { title: optionalStringField(body, "title") } : {}), ...(body.content === undefined ? {} : { content: stringField(body, "content") }), ...(body.tags === undefined ? {} : { tags: stringArrayField(body, "tags") }), reason: optionalStringField(body, "reason") ?? "Knowledge Wiki page updated" }));
+  }));
+  app.post("/api/workspaces/:workspaceId/wiki/:wikiId/accept", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeWiki.setState(operationContext(req), pathParam(req, "wikiId"), "active", "Knowledge Wiki proposal accepted"));
+  }));
+  app.post("/api/workspaces/:workspaceId/wiki/:wikiId/reject", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeWiki.setState(operationContext(req), pathParam(req, "wikiId"), "rejected", "Knowledge Wiki proposal rejected"));
+  }));
+  app.post("/api/workspaces/:workspaceId/wiki/:wikiId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeWiki.setArchived(operationContext(req), pathParam(req, "wikiId"), true, "Knowledge Wiki page archived"));
+  }));
+  app.post("/api/workspaces/:workspaceId/wiki/reindex", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeWiki.reindex(workspaceContext(req), stringField(objectBody(req.body), "room_id")));
+  }));
 
   app.get("/api/workspaces/:workspaceId/knowledge-memory", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
@@ -1007,12 +1314,78 @@ export async function createWorkspaceServerHttp(
     if (!roomId || !query) throw new WorkspaceServerError("knowledge_memory_search_input_required", 400);
     res.json({ memories: await knowledgeMemory.search(workspaceContext(req), roomId, query, queryNumber(req, "limit") ?? 50) });
   }));
+  app.get("/api/workspaces/:workspaceId/knowledge-memory/active-retrieval", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_memory_room_id_required", 400);
+    const query = queryString(req, "q");
+    res.json({ memories: query
+      ? await knowledgeMemory.search(workspaceContext(req), roomId, query, queryNumber(req, "limit") ?? 50)
+      : await knowledgeMemory.list(workspaceContext(req), roomId, false) });
+  }));
   app.get("/api/workspaces/:workspaceId/knowledge-memory/:memoryId", authenticateWorkspace, asyncRoute(async (req, res) => {
     res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId")));
   }));
   app.post("/api/workspaces/:workspaceId/knowledge-memory/:memoryId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
     const context = operationContext(req);
     res.json(await knowledgeMemory.archive(context, pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner"));
+  }));
+  // Compatibility aliases keep the former resource names on the PostgreSQL
+  // server while all reads and writes remain Completion-backed.
+  app.get("/api/workspaces/:workspaceId/memory", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("memory_room_id_required", 400);
+    res.json({ memories: await knowledgeMemory.list(workspaceContext(req), roomId, queryString(req, "include_archived") === "true") });
+  }));
+  app.get("/api/workspaces/:workspaceId/memory/active-retrieval", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("memory_room_id_required", 400);
+    const query = queryString(req, "q");
+    res.json({ memories: query ? await knowledgeMemory.search(workspaceContext(req), roomId, query, queryNumber(req, "limit") ?? 50) : await knowledgeMemory.list(workspaceContext(req), roomId, false) });
+  }));
+  app.get("/api/workspaces/:workspaceId/memory/:memoryId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId")));
+  }));
+  app.post("/api/workspaces/:workspaceId/memory/:memoryId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeMemory.archive(operationContext(req), pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner"));
+  }));
+
+  app.get("/api/workspaces/:workspaceId/skills", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("skill_room_id_required", 400);
+    res.json({ skills: await knowledgeSkill.list(workspaceContext(req), roomId, queryString(req, "include_archived") === "true") });
+  }));
+  app.get("/api/workspaces/:workspaceId/skills/search", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    const query = queryString(req, "q");
+    if (!roomId || !query) throw new WorkspaceServerError("skill_search_input_required", 400);
+    res.json({ skills: await knowledgeSkill.search(workspaceContext(req), roomId, query, queryNumber(req, "limit") ?? 50) });
+  }));
+  app.get("/api/workspaces/:workspaceId/skills/:skillId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    res.json(await knowledgeSkill.get(workspaceContext(req), pathParam(req, "skillId")));
+  }));
+  app.get("/api/workspaces/:workspaceId/skills/:skillId/support", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const files = await knowledgeSkill.listSupportFiles(workspaceContext(req), pathParam(req, "skillId"));
+    res.json({ files: files.map((file) => ({ path: file.relativePath, file_path: file.filePath, content_hash: file.contentHash, content_size: file.contentSize })) });
+  }));
+  app.get("/api/workspaces/:workspaceId/skills/:skillId/support/{*supportPath}", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const supportPath = wildcardParam(req.params.supportPath);
+    const file = await knowledgeSkill.getSupportFile(workspaceContext(req), pathParam(req, "skillId"), supportPath);
+    res.type("application/octet-stream").send(file.content);
+  }));
+  app.patch("/api/workspaces/:workspaceId/skills/:skillId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    res.json(await knowledgeSkill.patch(operationContext(req), pathParam(req, "skillId"), {
+      ...(optionalStringField(body, "title") ? { title: optionalStringField(body, "title") } : {}),
+      ...(optionalStringField(body, "description") !== undefined ? { description: optionalStringField(body, "description") } : {}),
+      ...(body.content === undefined ? {} : { content: stringField(body, "content") }),
+      ...(body.tags === undefined ? {} : { tags: stringArrayField(body, "tags") })
+    }));
+  }));
+  app.post("/api/workspaces/:workspaceId/skills/:skillId/state", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const state = stringField(body, "state");
+    if (!(state === "candidate" || state === "project" || state === "active" || state === "stale" || state === "archived" || state === "pinned")) throw new WorkspaceServerError("skill_state_invalid", 400);
+    res.json(await knowledgeSkill.patch(operationContext(req), pathParam(req, "skillId"), { state }));
   }));
 
   // Collection files are the editable source. PostgreSQL keeps only the
@@ -1022,6 +1395,24 @@ export async function createWorkspaceServerHttp(
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
     res.json({ schemas: await collections.listSchemas(workspaceContext(req), roomId) });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/actions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    const schemas = await collections.listSchemas(workspaceContext(req), roomId);
+    res.json({ actions: schemas.flatMap((schema) => [...schema.actions, { id: "refresh", label: "更新", operation_kind: "collection.view.present", collection_id: schema.id }]) });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/triggers", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    const schemas = await collections.listSchemas(workspaceContext(req), roomId);
+    res.json({ triggers: schemas.flatMap((schema) => schema.triggers.map((trigger, index) => ({
+      ...trigger,
+      collection_id: schema.id,
+      trigger_id: typeof trigger.id === "string" ? trigger.id : `trigger_${index + 1}`,
+      delivery_supported: true,
+      status: trigger.enabled === false ? "disabled" : "ready"
+    }))) });
   }));
   app.post("/api/workspaces/:workspaceId/collections/schemas", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
@@ -1036,6 +1427,41 @@ export async function createWorkspaceServerHttp(
     if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
     res.json({ schema: await collections.getSchema(workspaceContext(req), roomId, pathParam(req, "collectionId")) });
   }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/actions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    const schema = await collections.getSchema(workspaceContext(req), roomId, pathParam(req, "collectionId"));
+    res.json({ actions: [...schema.actions, { id: "refresh", label: "更新", operation_kind: "collection.view.present" }] });
+  }));
+  app.post("/api/workspaces/:workspaceId/collections/:collectionId/actions/:actionId/run", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const roomId = stringField(body, "room_id");
+    const context = operationContext(req);
+    const operation = parseSurfaceOperation({
+      id: context.operationId,
+      kind: "collection.action.run",
+      collection_id: pathParam(req, "collectionId"),
+      action_id: pathParam(req, "actionId"),
+      ...(optionalStringField(body, "record_id") ? { record_id: optionalStringField(body, "record_id") } : {}),
+      payload: body.payload === undefined ? {} : jsonObjectField(body, "payload")
+    });
+    if (!operation || operation.kind !== "collection.action.run") throw new WorkspaceServerError("collection_action_invalid", 400);
+    const result = await collections.runAction(context, roomId, operation);
+    res.status(201).json(result);
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/triggers", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    const schema = await collections.getSchema(workspaceContext(req), roomId, pathParam(req, "collectionId"));
+    res.json({ triggers: schema.triggers.map((trigger, index) => ({
+      ...trigger,
+      collection_id: schema.id,
+      trigger_id: typeof trigger.id === "string" ? trigger.id : `trigger_${index + 1}`,
+      delivery_supported: false,
+      status: trigger.enabled === false ? "disabled" : "blocked",
+      reason: trigger.enabled === false ? undefined : "collection_trigger_delivery_not_supported"
+    })) });
+  }));
   app.put("/api/workspaces/:workspaceId/collections/:collectionId/schema", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const context = operationContext(req);
@@ -1048,6 +1474,58 @@ export async function createWorkspaceServerHttp(
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
     res.json({ records: await collections.listRecords(workspaceContext(req), roomId, pathParam(req, "collectionId")) });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/view-data", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    const records = await collections.listRecords(workspaceContext(req), roomId, pathParam(req, "collectionId"));
+    const ids = queryStringList(req, "ids");
+    const fields = queryStringList(req, "fields");
+    const selected = ids.length > 0 ? records.filter((record) => ids.includes(record.id)) : records;
+    res.json({ records: selected.map((record) => fields.length === 0 ? record : ({ ...record, data: Object.fromEntries(fields.filter((field) => field in record.data).map((field) => [field, record.data[field]])) })) });
+  }));
+  app.put("/api/workspaces/:workspaceId/collections/:collectionId/view-data", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = objectBody(req.body);
+    const context = operationContext(req);
+    const roomId = stringField(body, "room_id");
+    const mode = optionalStringField(body, "mode") ?? "upsert";
+    if (mode !== "create" && mode !== "upsert" && mode !== "merge") throw new WorkspaceServerError("collection_view_data_mode_invalid", 400);
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (items.length === 0) throw new WorkspaceServerError("collection_view_data_items_required", 400);
+    const written: string[] = [];
+    const rejected: Array<{ id: string; problem: string }> = [];
+    for (const [index, item] of items.entries()) {
+      const value = objectBody(item);
+      const recordId = optionalStringField(value, "id") ?? optionalStringField(value, "record_id");
+      if (!recordId) {
+        rejected.push({ id: "(missing)", problem: "record_id_required" });
+        continue;
+      }
+      const { id: _id, record_id: _recordId, collection_id: _collectionId, resource_refs: _resourceRefs, data: nestedData, ...flatData } = value;
+      const data = nestedData !== undefined ? jsonObjectField(value, "data") : flatData as Record<string, JsonValue>;
+      const itemContext = { ...context, operationId: `${context.operationId}:view-data:${index}` };
+      try {
+        const existing = await collections.getRecord(workspaceContext(req), roomId, pathParam(req, "collectionId"), recordId);
+        if (mode === "create") {
+          rejected.push({ id: recordId, problem: "record_already_exists" });
+          continue;
+        }
+        await collections.applyPatch(itemContext, roomId, pathParam(req, "collectionId"), recordId, { changes: data, expected_version: existing.version });
+        written.push(recordId);
+      } catch (error) {
+        if (!(error instanceof WorkspaceServerError) || error.status !== 404) {
+          rejected.push({ id: recordId, problem: error instanceof Error ? error.message : "collection_record_write_failed" });
+          continue;
+        }
+        if (mode === "merge") {
+          rejected.push({ id: recordId, problem: "record_not_found" });
+          continue;
+        }
+        await collections.createRecord(itemContext, roomId, { id: recordId, collection_id: pathParam(req, "collectionId"), data, resource_refs: [], created_at: nowIso(), updated_at: nowIso() });
+        written.push(recordId);
+      }
+    }
+    res.json({ action: "putItems", collection_id: pathParam(req, "collectionId"), mode, written, rejected });
   }));
   app.post("/api/workspaces/:workspaceId/collections/:collectionId/records", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
@@ -1068,6 +1546,33 @@ export async function createWorkspaceServerHttp(
     });
     const { replayed, ...resource } = record;
     res.json({ record: resource, replayed });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/patches", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ patches: await collections.listPatches(workspaceContext(req), roomId, pathParam(req, "collectionId")) });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ record: await collections.getRecord(workspaceContext(req), roomId, pathParam(req, "collectionId"), pathParam(req, "recordId")) });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId/refs", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json(await collections.resolveRecordRefs(workspaceContext(req), roomId, pathParam(req, "collectionId"), pathParam(req, "recordId")));
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId/patches", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    res.json({ patches: await collections.listPatches(workspaceContext(req), roomId, pathParam(req, "collectionId"), pathParam(req, "recordId")) });
+  }));
+  app.get("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId/patches/:patchId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("collection_room_id_required", 400);
+    const patch = await collections.getPatch(workspaceContext(req), roomId, pathParam(req, "collectionId"), pathParam(req, "recordId"), pathParam(req, "patchId"));
+    if (!patch) throw new WorkspaceServerError("collection_patch_not_found", 404);
+    res.json({ patch });
   }));
   app.delete("/api/workspaces/:workspaceId/collections/:collectionId/records/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
@@ -2338,9 +2843,11 @@ export async function createWorkspaceServerHttp(
   app.get("/api/workspaces/:workspaceId/records", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("workspace_records_room_id_required", 400);
+    const recordType = queryString(req, "record_type");
+    if (recordType && internalWorkspaceRecordTypes.has(recordType)) throw new WorkspaceServerError("workspace_record_not_found", 404);
     const records = await store.listRecords(workspaceContext(req), {
       roomId,
-      ...(queryString(req, "record_type") ? { recordType: queryString(req, "record_type") } : {}),
+      ...(recordType ? { recordType } : {}),
       ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
     });
     res.json({ records });
@@ -2349,12 +2856,14 @@ export async function createWorkspaceServerHttp(
   app.get("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("workspace_record_room_id_required", 400);
+    if (internalWorkspaceRecordTypes.has(pathParam(req, "recordType"))) throw new WorkspaceServerError("workspace_record_not_found", 404);
     res.json({ record: await store.getRecord(workspaceContext(req), { roomId, recordType: pathParam(req, "recordType"), id: pathParam(req, "recordId") }) });
   }));
 
   app.put("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const context = workspaceContext(req);
+    if (internalWorkspaceRecordTypes.has(pathParam(req, "recordType"))) throw new WorkspaceServerError("workspace_record_not_found", 404);
     const result = await realtimeGate.run(context.workspaceId, async () => {
       const saved = await commands.putRecord(operationContext(req), {
         roomId: stringField(body, "room_id"),
@@ -2373,6 +2882,7 @@ export async function createWorkspaceServerHttp(
   app.delete("/api/workspaces/:workspaceId/records/:recordType/:recordId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const context = workspaceContext(req);
+    if (internalWorkspaceRecordTypes.has(pathParam(req, "recordType"))) throw new WorkspaceServerError("workspace_record_not_found", 404);
     const result = await realtimeGate.run(context.workspaceId, async () => {
       const deleted = await commands.deleteRecord(operationContext(req), {
         roomId: stringField(body, "room_id"),
@@ -3332,6 +3842,27 @@ function optionalStringField(body: Record<string, unknown>, key: string): string
   return value.trim();
 }
 
+function stringValue(value: Record<string, JsonValue>, key: string): string | undefined {
+  const candidate = value[key];
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
+}
+
+function collectionTriggerTargetFromJob(value: Record<string, JsonValue>): {
+  roomId: string;
+  collectionId: string;
+  recordId: string;
+  actionId: string;
+  payload: Record<string, JsonValue>;
+} | undefined {
+  if (value.channel !== "collection_trigger") return undefined;
+  const roomId = stringValue(value, "room_id");
+  const collectionId = stringValue(value, "collection_id");
+  const recordId = stringValue(value, "record_id");
+  const actionId = stringValue(value, "action_id");
+  if (!roomId || !collectionId || !recordId || !actionId) return undefined;
+  return { roomId, collectionId, recordId, actionId, payload: value };
+}
+
 /** A move must state its destination explicitly; null means Workspace root. */
 function nullableStringField(body: Record<string, unknown>, key: string): string | undefined {
   if (!(key in body)) throw new WorkspaceServerError(`${key}_required`, 400);
@@ -3638,6 +4169,15 @@ function queryString(req: Request, key: string): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function queryStringList(req: Request, key: string): string[] {
+  const value = req.query[key];
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .flatMap((item) => typeof item === "string" ? item.split(",") : [])
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function queryNumber(req: Request, key: string): number | undefined {
   const value = queryString(req, key);
   if (value === undefined) return undefined;
@@ -3875,6 +4415,46 @@ function postgresChatRenderSpec(result: RunChatTurnResult): SurfaceRenderSpec {
       props: { run_ids: [result.backendRun.id], selected_run_id: result.backendRun.id }
     } : undefined
   });
+}
+
+function comparePostgresBackendRunDesc(left: BackendRunRecord, right: BackendRunRecord): number {
+  return right.started_at.localeCompare(left.started_at) || right.id.localeCompare(left.id);
+}
+
+function summarizePostgresRunForResume(run: BackendRunRecord, events: BackendEventRecord[]) {
+  const orderedEvents = [...events].sort((left, right) => left.sequence - right.sequence);
+  const waitingEvent = [...orderedEvents].reverse().find((event) => event.event_type === "backend_waiting_for_native_input");
+  const lastEvent = orderedEvents.at(-1);
+  return {
+    id: run.id,
+    session_id: run.session_id,
+    backend_id: run.backend_id,
+    backend_kind: run.backend_kind,
+    status: run.status,
+    started_at: run.started_at,
+    completed_at: run.completed_at,
+    error_code: run.error_code,
+    input_summary: run.input_summary,
+    output_summary: run.output_summary,
+    event_count: orderedEvents.length,
+    waiting_for_backend_input: run.status === "waiting_for_backend_input",
+    waiting_event: waitingEvent
+      ? {
+          id: waitingEvent.id,
+          sequence: waitingEvent.sequence,
+          created_at: waitingEvent.created_at,
+          payload: waitingEvent.payload
+        }
+      : undefined,
+    last_event: lastEvent
+      ? {
+          id: lastEvent.id,
+          sequence: lastEvent.sequence,
+          event_type: lastEvent.event_type,
+          created_at: lastEvent.created_at
+        }
+      : undefined
+  };
 }
 
 function summarizePostgresGatewayMcpConfig(config: GatewayMcpConfigRecord): Record<string, unknown> {

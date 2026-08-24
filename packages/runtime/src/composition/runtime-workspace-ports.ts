@@ -2,7 +2,8 @@
  * Runtimeが利用するWorkspaceの能力境界。
  *
  * ここにはRuntimeが実際に呼び出す操作だけを置き、Store実装やDB型は公開しない。
- * 実装側はSQLite、PostgreSQL、テスト用Storeのいずれでもこの契約を満たせる。
+ * 実装側はPostgreSQLの正式なWorkspace境界、または同じ契約を実装する
+ * テスト用Portでこの契約を満たす。Runtimeは保存方式を直接参照しない。
  */
 import type { BackendRunRecord, JsonValue, RoomRecord, WorkspaceFilePort } from "@samurai-agent/core-schemas";
 import type { AgentWorkspacePermission, ResourceAccessMode, RoomHumanRole, RoomShareableResourceKind, WorkspaceRole } from "@samurai-agent/room-permissions";
@@ -505,7 +506,7 @@ export type RuntimeResourceCatalogPort = Pick<RuntimeWorkspaceOperationsPort,
 
 /**
  * The production Runtime depends on this capability intersection, not on a
- * concrete WorkspaceStore. Composition roots adapt their storage implementation
+ * concrete storage implementation. Composition roots adapt their storage implementation
  * to it without granting Runtime access to the storage internals.
  */
 export type RuntimeWorkspacePort = HostStorePort & DomainCommandExecutionPort & ExecutionStorePort & ArtifactDraftStorePort &

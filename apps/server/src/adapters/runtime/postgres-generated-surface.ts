@@ -68,7 +68,7 @@ export interface GeneratedSurfaceTargetCommandResult {
  *
  * The generic Workspace record is the Room-scoped index and revision ledger;
  * HTML, CSS, JavaScript and assets remain ordinary user-owned Workspace files.
- * This keeps Surface data portable without adding a second SQLite-shaped
+ * This keeps Surface data portable without adding a second legacy-shaped
  * database to the PostgreSQL path. Every mutation still enters through the
  * formal Generated Surface Domain Operation handler.
  */

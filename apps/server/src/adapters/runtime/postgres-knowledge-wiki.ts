@@ -252,7 +252,7 @@ function currentVersion(page: KnowledgeWikiPage): { version: number } {
 
 function completionKnowledgeKind(value: WikiFrontmatter["knowledge_kind"]): "fact" | "decision" | "explanation" | "experience_rule" {
   if (value === "fact" || value === "decision" || value === "explanation" || value === "experience_rule") return value;
-  // Legacy SQLite Wiki documents used the broad `reference` label. Keep them
+  // Legacy Wiki documents used the broad `reference` label. Keep them
   // readable, but do not write that retired label back into Completion.
   return "explanation";
 }

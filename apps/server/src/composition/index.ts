@@ -1,2 +1,2 @@
-export { closeApiServer, createApiServer, startServer, type ApiServer, type CreateApiServerOptions } from "../api-server";
+export { installServerSignalHandlers, startServer, startStandardServer } from "../index";
 export { startAutomationScheduler, type AutomationScheduler, type AutomationSchedulerState } from "../workers/automation-scheduler";

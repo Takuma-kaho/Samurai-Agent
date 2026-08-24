@@ -357,8 +357,8 @@ export function redactExternalText(text: string): string {
     // Free-text Hooks can contain a JSON string rather than a parsed object.
     // Match quoted and unquoted JSON-like secret fields before the generic
     // key=value rule so `{"access_token":"..."}` cannot survive Capture.
-    .replace(/(["']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|cookie|password|secret|token|private[_-]?key)\b["']?\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\s]+)/gi, "$1[REDACTED]")
-    .replace(/(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|cookie|password|secret|token)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .replace(/(["']?\b(?:api[_-]?key|apiKey|access[_-]?token|accessToken|refresh[_-]?token|refreshToken|client[_-]?secret|clientSecret|authorization|cookie|password|secret|token|private[_-]?key|privateKey)\b["']?\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\s]+)/gi, "$1[REDACTED]")
+    .replace(/(api[_-]?key|apiKey|access[_-]?token|accessToken|refresh[_-]?token|refreshToken|client[_-]?secret|clientSecret|authorization|cookie|password|secret|token|private[_-]?key|privateKey)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
     .replace(/-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]")
     .replace(/Cookie:\s*[^\r\n]+/gi, "Cookie: [REDACTED]")
     .replace(/(?:^|\n)([A-Z][A-Z0-9_]{2,})=(?!\[REDACTED\])[^\n]*/g, "$1=[REDACTED]");

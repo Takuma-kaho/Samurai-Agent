@@ -162,6 +162,7 @@ describe("http external assist provider", () => {
     const provider = new HttpExternalAssistProvider({
       url: "https://assist.example.test/hints",
       token: "secret-token",
+      shareRawContext: true,
       maxHints: 3,
       fetchImpl
     });
@@ -207,6 +208,7 @@ describe("http external assist provider", () => {
     const calls: Array<{ init: RequestInit }> = [];
     const provider = new HttpExternalAssistProvider({
       url: "http://127.0.0.1:4317/external-assist",
+      shareRawContext: true,
       maxHints: 1,
       fetchImpl: async (_input, init) => {
         calls.push({ init: init ?? {} });
@@ -250,11 +252,37 @@ describe("http external assist provider", () => {
     }]);
   });
 
+  it("redacts raw conversation context by default", async () => {
+    let payload: Record<string, unknown> | undefined;
+    const provider = new HttpExternalAssistProvider({
+      url: "https://assist.example.test/hints",
+      fetchImpl: async (_input, init) => {
+        payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ hints: [] }), { status: 200 });
+      }
+    });
+
+    await provider.syncTurn({
+      sessionId: "session_1",
+      runId: "run_1",
+      inputMessageId: "message_1",
+      query: "private question",
+      userContent: "private user content",
+      assistantContent: "private assistant content"
+    });
+
+    expect(payload).toMatchObject({ phase: "sync", query: "", context_redacted: true });
+    expect(payload).not.toHaveProperty("user_content");
+    expect(payload).not.toHaveProperty("assistant_content");
+    expect(JSON.stringify(payload)).not.toContain("private");
+  });
+
   it("builds the HTTP provider from env before falling back to the local file provider", () => {
     const provider = createExternalAssistProviderFromEnv({
       SAMURAI_EXTERNAL_ASSIST_URL: "https://assist.example.test/hints",
       SAMURAI_EXTERNAL_ASSIST_FILE: "/tmp/ignored.json",
       SAMURAI_EXTERNAL_ASSIST_PROVIDER_ID: "env-http-assist",
+      SAMURAI_EXTERNAL_ASSIST_SHARE_RAW_CONTEXT: "1",
       SAMURAI_EXTERNAL_ASSIST_TIMEOUT_MS: "1200"
     });
 
@@ -282,6 +310,7 @@ describe("http external assist provider", () => {
       auth_header: "X-Assist-Key",
       endpoint_origin: "https://secret.example.test",
       endpoint_path_configured: true,
+      raw_context_shared: false,
       errors: []
     });
     expect(JSON.stringify(diagnostics)).not.toContain("raw-token");

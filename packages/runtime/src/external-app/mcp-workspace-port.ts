@@ -89,7 +89,7 @@ const externalMutationOperations = [
 ] as const;
 
 /** Adapter from the public MCP contract to the existing Core09 formal
- * ExternalAppIngress. No MCP operation calls WorkspaceStore directly. */
+ * ExternalAppIngress. No MCP operation calls a storage implementation directly. */
 export class RuntimeMcpWorkspacePort implements McpWorkspacePort {
   constructor(private readonly options: RuntimeMcpWorkspacePortOptions) {}
 
@@ -728,7 +728,7 @@ function formalQuery(
 
 /** Version lookup is itself a Room-authorized formal Query. This keeps the
  * optimistic concurrency check outside the MCP adapter and avoids hidden
- * WorkspaceStore reads. */
+ * storage reads. */
 async function formalResourceVersion(
   ingress: ReturnType<AgentRuntime["createExternalAppIngress"]>,
   target: ExternalWorkspaceTarget,

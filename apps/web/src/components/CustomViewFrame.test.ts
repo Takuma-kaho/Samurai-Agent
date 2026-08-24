@@ -31,6 +31,14 @@ describe("CustomViewFrame", () => {
     expect(html).toContain("allow-scripts");
     expect(html).not.toContain("allow-same-origin");
   });
+
+  it("requires an explicit capability before allowing iframe network reads", async () => {
+    const withoutCapability = await renderCustomView(customViewSpec({ html: "<main>remote</main>" }, false, "read"));
+    expect(withoutCapability).toContain("connect-src &#39;none&#39;");
+
+    const withCapability = await renderCustomView(customViewSpec({ html: "<main>remote</main>" }, false, "read", "read"));
+    expect(withCapability).toContain("connect-src https: http:");
+  });
 });
 
 async function renderCustomView(spec: SurfaceRenderSpec): Promise<string> {
@@ -46,7 +54,7 @@ async function renderCustomView(spec: SurfaceRenderSpec): Promise<string> {
   return renderToString(app);
 }
 
-function customViewSpec(data: Record<string, JsonValue>, allowSameOrigin = false): SurfaceRenderSpec {
+function customViewSpec(data: Record<string, JsonValue>, allowSameOrigin = false, networkAccess: "none" | "read" = "none", capabilityNetworkAccess?: "none" | "read"): SurfaceRenderSpec {
   return {
     id: "render_custom_board",
     kind: "custom_view",
@@ -63,14 +71,15 @@ function customViewSpec(data: Record<string, JsonValue>, allowSameOrigin = false
         allow_scripts: true,
         allow_forms: false,
         allow_same_origin: allowSameOrigin,
-        network_access: "none",
+        network_access: networkAccess,
         workspace_access: "none"
       },
       capability: {
         token_id: "custom_view:board",
         allowed_actions: ["move_card"],
         read_resource_refs: [],
-        write_operations: ["custom_view.action"]
+        write_operations: ["custom_view.action"],
+        ...(capabilityNetworkAccess ? { network_access: capabilityNetworkAccess } : {})
       },
       actions: [{
         id: "move_card",

@@ -10,7 +10,7 @@ const roomCreate = defineCommand<RoomCreatePorts>()({
   id: "room.create", version: "1.0", availability: "active", title: "Create Room", description: "Create a persistent Room in the current Workspace.",
   sources: ["runtime_api", "surface_operation", "provider_tool_call"], effect: "workspace_mutation", idempotency: "required", concurrency: "append_or_unique",
   render: ["status_timeline"], resourceKinds: ["room"], proposedEffects: ["Create a Room."], outputResourceKind: "room", uiDisplayCategory: "workspace", providerToolNames: ["samurai.room.create"],
-  provenance: [{ source: "samurai", commit_sha: "workspace-design-v1", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Keep Room identity in Workspace SQLite, separate from Backend execution." }],
+  provenance: [{ source: "samurai", commit_sha: "workspace-design-v1", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Keep Room identity in Workspace PostgreSQL, separate from Backend execution." }],
   input: Input, output: Output,
   createHandler(ports) { return { execute: async function handleRoomCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> { return { ok: true, value: Output.parse(await ports.createRoom(context, input)) }; } }; }
 });

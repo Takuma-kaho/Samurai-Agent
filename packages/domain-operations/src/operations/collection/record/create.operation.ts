@@ -84,7 +84,7 @@ const collectionRecordCreate = defineCommand<CollectionRecordCreatePorts>()({
         };
         const result = await ports.runCollectionMutation({
           trustedContext: context, inputSummary: `Create collection record: ${record.collection_id}/${record.id}`, operationName: "collection.record.create",
-          proposedEffects: ["Create a Collection record file, SQLite index row, and durable matching trigger job."],
+          proposedEffects: ["Create a Collection record file, PostgreSQL projection row, and durable matching trigger job."],
           execute: async (operation) => {
             const saved = await ports.saveCollectionRecord(record, { event: "record.created", operation, trustedContext: context });
             const ref = ports.collectionRecordRef(saved);

@@ -76,7 +76,7 @@ export class BackendEventJournal {
 
   /**
    * Builds the terminal record and lifecycle result without writing either one.
-   * The completion port owns the SQLite transaction that makes them durable.
+   * The completion port owns the database transaction that makes them durable.
    */
   async prepareTerminalSettlement(run: BackendRunRecord, input: JournalEventInput, decision: LifecycleTransitionDecision): Promise<PreparedTerminalSettlement> {
     validateJournalInput(input);

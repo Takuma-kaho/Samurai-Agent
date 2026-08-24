@@ -13,6 +13,11 @@ export interface PostgresOperationLedgerResult<T> {
   replayed: boolean;
 }
 
+export interface PostgresDomainOperationRecoveryResult {
+  status: "outcome_unknown" | "not_recovered";
+  recovered: boolean;
+}
+
 /**
  * Retry admission for PostgreSQL Domain Operations.
  *
@@ -62,8 +67,8 @@ export class PostgresDomainOperationLedger {
         [this.workspaceId, operationKey, this.accountId, requestHash]
       );
       if (inserted.rows[0]) return undefined;
-      const result = await sql.query<{ request_hash: string; status: string; result: unknown }>(
-        `SELECT request_hash, status, result
+      const result = await sql.query<{ request_hash: string; status: string; result: unknown; error_code?: string }>(
+        `SELECT request_hash, status, result, error_code
            FROM workspace_operations
           WHERE workspace_id = $1 AND idempotency_key = $2`,
         [this.workspaceId, operationKey]
@@ -73,7 +78,12 @@ export class PostgresDomainOperationLedger {
 
     if (existing) {
       if (existing.request_hash !== requestHash) throw new WorkspaceServerError("workspace_operation_id_reused", 409);
-      if (existing.status === "failed") throw new WorkspaceServerError("workspace_operation_previously_failed", 409);
+      if (existing.status === "failed") {
+        if (existing.error_code === "workspace_operation_outcome_unknown") {
+          throw new WorkspaceServerError("workspace_operation_outcome_unknown", 409);
+        }
+        throw new WorkspaceServerError("workspace_operation_previously_failed", 409);
+      }
       if (existing.status !== "completed" || existing.result === null) {
         throw new WorkspaceServerError("workspace_operation_in_progress", 409);
       }
@@ -104,6 +114,46 @@ export class PostgresDomainOperationLedger {
       );
     });
     return { value, replayed: false };
+  }
+
+  /**
+   * Explicit operator recovery for a process that stopped after admission.
+   * The action is never replayed: the durable row is finalized as an unknown
+   * outcome, represented by the existing failed status plus a dedicated code.
+   * A minimum age prevents an active long-running operation from being marked
+   * unknown by an accidental concurrent request.
+   */
+  async recoverOutcomeUnknown(input: {
+    idempotencyKey: string;
+    minAgeMs?: number;
+  }): Promise<PostgresDomainOperationRecoveryResult> {
+    assertOpaqueId(this.workspaceId, "workspace_id_invalid");
+    assertOpaqueId(this.accountId, "account_id_invalid");
+    const idempotencyKey = input.idempotencyKey?.trim();
+    if (!idempotencyKey) throw new WorkspaceServerError("workspace_operation_id_required", 400);
+    assertOpaqueId(idempotencyKey, "idempotency_key_invalid");
+    const minAgeMs = input.minAgeMs ?? 5 * 60_000;
+    if (!Number.isFinite(minAgeMs) || minAgeMs < 0) {
+      throw new WorkspaceServerError("workspace_operation_recovery_age_invalid", 400);
+    }
+    const operationKey = `account_${sha256(`${this.accountId}|${idempotencyKey}`).slice(0, 40)}`;
+    const recovered = await this.database.withContext({ workspaceId: this.workspaceId, accountId: this.accountId }, async (sql) => {
+      const result = await sql.query<{ id: string }>(
+        `UPDATE workspace_operations
+            SET status = 'failed', error_code = 'workspace_operation_outcome_unknown', updated_at = NOW()
+          WHERE workspace_id = $1
+            AND idempotency_key = $2
+            AND actor_account_id = $3
+            AND status = 'running'
+            AND updated_at <= NOW() - ($4 * INTERVAL '1 millisecond')
+          RETURNING id`,
+        [this.workspaceId, operationKey, this.accountId, Math.round(minAgeMs)]
+      );
+      return Boolean(result.rows[0]);
+    });
+    return recovered
+      ? { status: "outcome_unknown", recovered: true }
+      : { status: "not_recovered", recovered: false };
   }
 }
 

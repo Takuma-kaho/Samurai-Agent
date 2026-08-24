@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   WorkspaceServerError,
-  createWorkspaceBundleV3FromLegacySqlite,
   loadWorkspaceServerConfig,
   verifyWorkspaceBundleV3,
   verifyWorkspaceBundleV4
@@ -16,20 +15,11 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
     const directory = requiredArgument(arguments_, 0, "bundle_directory_required");
     return await bundleFormat(directory) === 4 ? verifyWorkspaceBundleV4(directory) : verifyWorkspaceBundleV3(directory);
   }
-  if (command === "sqlite-bundle") {
-    const accountId = migrationAccountId(env);
-    return createWorkspaceBundleV3FromLegacySqlite({
-      sourceWorkspaceRoot: requiredArgument(arguments_, 0, "legacy_workspace_root_required"),
-      destination: requiredArgument(arguments_, 1, "bundle_destination_required"),
-      workspaceId: requiredArgument(arguments_, 2, "workspace_id_required"),
-      ownerAccountId: accountId
-    });
-  }
-  if (command !== "bundle-export" && command !== "bundle-import" && command !== "sqlite-import" && command !== "files-recover"
+  if (command !== "bundle-export" && command !== "bundle-import" && command !== "files-recover"
     && command !== "completion-files-recover" && command !== "completion-migrate" && command !== "completion-maintenance-tick"
     && command !== "completion-physical-edit-prepare" && command !== "completion-physical-edit-import") {
     throw new WorkspaceServerError("workspace_server_cli_command_invalid", 400, {
-      commands: ["bundle-export", "bundle-verify", "bundle-import", "sqlite-bundle", "sqlite-import", "files-recover", "completion-files-recover", "completion-migrate", "completion-maintenance-tick", "completion-physical-edit-prepare", "completion-physical-edit-import"]
+      commands: ["bundle-export", "bundle-verify", "bundle-import", "files-recover", "completion-files-recover", "completion-migrate", "completion-maintenance-tick", "completion-physical-edit-prepare", "completion-physical-edit-import"]
     });
   }
   const config = loadWorkspaceServerConfig(env);
@@ -54,6 +44,12 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
     if (command === "bundle-import") {
       const sourceDirectory = requiredArgument(arguments_, 0, "bundle_directory_required");
       const targetWorkspaceId = requiredArgument(arguments_, 1, "workspace_id_required");
+      if (config.mode === "self_host" && targetWorkspaceId !== config.selfHostWorkspaceId) {
+        throw new WorkspaceServerError("self_host_workspace_mismatch", 409, {
+          configured_workspace_id: config.selfHostWorkspaceId,
+          target_workspace_id: targetWorkspaceId
+        });
+      }
       const context = { accountId, operationId: `server_cli_import_${randomUUID()}` };
       return await bundleFormat(sourceDirectory) === 4
         ? core.completionBundles.importNew(context, { sourceDirectory, targetWorkspaceId })
@@ -103,11 +99,10 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
         dryRun: arguments_.includes("--dry-run")
       });
     }
-    const sourceWorkspaceRoot = requiredArgument(arguments_, 0, "legacy_workspace_root_required");
-    const destination = requiredArgument(arguments_, 1, "bundle_destination_required");
-    const targetWorkspaceId = requiredArgument(arguments_, 2, "workspace_id_required");
-    await createWorkspaceBundleV3FromLegacySqlite({ sourceWorkspaceRoot, destination, workspaceId: targetWorkspaceId, ownerAccountId: accountId });
-    return core.bundles.importNew({ accountId, operationId: `server_cli_sqlite_import_${randomUUID()}` }, { sourceDirectory: destination, targetWorkspaceId });
+    // All currently accepted commands return above. Keep this fail-closed so
+    // a newly added command cannot accidentally fall through to a legacy
+    // database migration path.
+    throw new WorkspaceServerError("workspace_server_cli_command_invalid", 400);
   } finally {
     await core.close();
   }
@@ -130,12 +125,6 @@ function requiredArgument(values: readonly string[], index: number, code: string
   const value = values[index]?.trim();
   if (!value) throw new WorkspaceServerError(code, 400);
   return value;
-}
-
-function migrationAccountId(env: NodeJS.ProcessEnv): string {
-  const accountId = env.SAMURAI_SERVER_ADMIN_ACCOUNT_ID?.trim() || env.SAMURAI_MIGRATION_OWNER_ACCOUNT_ID?.trim();
-  if (!accountId) throw new WorkspaceServerError("samurai_server_admin_account_id_required", 500);
-  return accountId;
 }
 
 function requiredPositiveInteger(values: readonly string[], index: number, code: string): number {

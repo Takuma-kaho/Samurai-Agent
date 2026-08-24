@@ -17,6 +17,7 @@ import {
   BackendRunRecordSchema,
   MessageEnvelopeSchema,
   ResourceRefSchema,
+  ToolRunRecordSchema,
   type MessageRecord,
   type MemoryFrontmatter,
   SessionRecord,
@@ -34,6 +35,7 @@ import {
   type MessageEnvelope,
   type MessagePresentationRecord,
   type OperationRecord,
+  type ToolRunRecord,
   type ResourceRef,
   OperationRecordSchema,
   PrincipalSchema,
@@ -308,7 +310,7 @@ const RuntimeMessageRecordSchema = z.object({
 /**
  * PostgreSQLの標準Serverが使う、Room限定のRuntime入口。
  *
- * このクラスはSQLite Storeを隠れて再利用しない。Admission、RunのCAS、
+ * このクラスは旧互換Storeを隠れて再利用しない。Admission、RunのCAS、
  * Eventの重複排除、Activityの確定を、v43のRuntimeテーブルと一つのRLS
  * transaction contextで行う。KnowledgeやArtifact等の別Use Caseは、それぞれ
  * のPostgreSQLサービスへ委譲し、ここで成功したことにはしない。
@@ -438,6 +440,7 @@ export class PostgresRuntimeChat {
     auditRecords: AuditRecord[];
     backendRuns: BackendRunRecord[];
     backendEvents: BackendEventRecord[];
+    toolRuns: ToolRunRecord[];
     workspaceChanges: WorkspaceChangeRecord[];
     memory: Array<MemoryFrontmatter & { file_path: string }>;
     activity: ActivityInboxItem[];
@@ -466,6 +469,7 @@ export class PostgresRuntimeChat {
       auditRecords,
       backendRuns,
       backendEvents,
+      toolRuns: deriveToolRuns(session.id, backendEvents),
       workspaceChanges,
       memory: memory.map((page) => page.memory),
       activity
@@ -499,13 +503,33 @@ export class PostgresRuntimeChat {
     });
   }
 
-  async listBackendEvents(runId: string): Promise<BackendEventRecord[]> {
+  async listBackendEvents(input: string | { runId: string; afterSequence?: number; limit?: number }): Promise<BackendEventRecord[]> {
+    const runId = typeof input === "string" ? input : input.runId;
+    const afterSequence = typeof input === "string" ? undefined : input.afterSequence;
+    const limit = typeof input === "string" ? undefined : input.limit;
+    if (afterSequence !== undefined && (!Number.isSafeInteger(afterSequence) || afterSequence < 0)) {
+      throw new WorkspaceServerError("after_sequence_invalid", 400);
+    }
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)) {
+      throw new WorkspaceServerError("limit_invalid", 400);
+    }
     return this.database.withContext(this.context(), async (sql) => {
+      const values: unknown[] = [this.workspaceId, requireId(runId, "backend_run_id_required")];
+      const predicates = ["workspace_id = $1", "run_id = $2"];
+      if (afterSequence !== undefined) {
+        values.push(afterSequence);
+        predicates.push(`sequence > $${values.length}`);
+      }
+      let query = `SELECT * FROM workspace_runtime_events
+         WHERE ${predicates.join(" AND ")}
+         ORDER BY sequence, id`;
+      if (limit !== undefined) {
+        values.push(limit);
+        query += `\n         LIMIT $${values.length}`;
+      }
       const result = await sql.query<RuntimeEventRow>(
-        `SELECT * FROM workspace_runtime_events
-         WHERE workspace_id = $1 AND run_id = $2
-         ORDER BY sequence, id`,
-        [this.workspaceId, requireId(runId, "backend_run_id_required")]
+        query,
+        values
       );
       return result.rows.map(eventFromRow);
     });
@@ -1710,7 +1734,7 @@ export class PostgresRuntimeChat {
              error_code = $7, completed_at = $8
          WHERE workspace_id = $1 AND id = $2 AND status = $9 AND phase = $10
          RETURNING *`,
-        [this.workspaceId, current.id, finalStatus, finalPhase, outputMessage?.id ?? null, outputSummary ?? null, errorCode ?? null, finalStatus === "waiting_for_backend_input" ? null : now, current.status, currentPhase]
+        [this.workspaceId, current.id, finalStatus, finalPhase, outputMessage?.id ?? null, outputSummary ?? null, errorCode ?? null, finalStatus === "waiting_for_backend_input" || finalStatus === "outcome_unknown" ? null : now, current.status, currentPhase]
       );
       if (!updated.rows[0]) throw new WorkspaceServerError(`runtime_settlement_cas_conflict:${current.id}`, 409);
       await sql.query(
@@ -1995,7 +2019,7 @@ export class PostgresRuntimeChat {
       activity,
       reflectionRuns: [],
       reflectionSuggestions: [],
-      toolRuns: []
+      toolRuns: deriveToolRuns(session.id, backendEvents)
     };
   }
 
@@ -2141,8 +2165,8 @@ export class PostgresRuntimeCommandService {
     return this.chat.getBackendRun(runId);
   }
 
-  listBackendEvents(runId: string) {
-    return this.chat.listBackendEvents(runId);
+  listBackendEvents(input: string | { runId: string; afterSequence?: number; limit?: number }) {
+    return this.chat.listBackendEvents(input);
   }
 
   cancelBackendRun(runId: string) {
@@ -2362,6 +2386,76 @@ function activityInboxFromRow(row: RuntimeActivityRow): ActivityInboxItem {
     operation_id: record.idempotency_key,
     created_at: record.created_at
   });
+}
+
+/**
+ * Tool calls are part of the durable Runtime event journal in PostgreSQL.
+ * The old local Store had a separate tool_runs table; projecting the same
+ * read model from the two canonical tool events keeps transcript and resume
+ * consumers compatible without introducing a second PostgreSQL source of
+ * truth.
+ */
+function deriveToolRuns(sessionId: string, events: BackendEventRecord[]): ToolRunRecord[] {
+  const starts = new Map<string, BackendEventRecord>();
+  const runs: ToolRunRecord[] = [];
+  for (const event of [...events].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))) {
+    const toolCallId = stringPayload(event.payload.tool_call_id);
+    if (!toolCallId) continue;
+    if (event.event_type === "tool_call_started") {
+      starts.set(toolCallId, event);
+      continue;
+    }
+    if (event.event_type !== "tool_call_output") continue;
+    const start = starts.get(toolCallId);
+    const providerToolName = stringPayload(event.payload.provider_tool_name)
+      ?? stringPayload(start?.payload.provider_tool_name)
+      ?? stringPayload(event.payload.action_id)
+      ?? stringPayload(start?.payload.action_id)
+      ?? "unknown_tool";
+    const actionId = stringPayload(event.payload.action_id) ?? stringPayload(start?.payload.action_id);
+    const status = toolRunStatus(event.payload);
+    const output = firstPayloadValue(event.payload, ["output_summary", "summary", "text", "output", "result", "error"]);
+    const input = firstPayloadValue(start?.payload, ["input", "arguments"]);
+    const record = ToolRunRecordSchema.parse({
+      id: `tool:${event.run_id}:${toolCallId}`,
+      run_id: event.run_id,
+      session_id: sessionId,
+      tool_call_id: toolCallId,
+      provider_tool_name: providerToolName,
+      ...(actionId ? { action_id: actionId } : {}),
+      status,
+      input_summary: summarizePayload(input),
+      output_summary: summarizePayload(output),
+      ...(status === "failed" && stringPayload(event.payload.error_code) ? { error_code: stringPayload(event.payload.error_code) } : {}),
+      resource_refs: event.resource_refs,
+      created_at: start?.created_at ?? event.created_at
+    });
+    runs.push(record);
+  }
+  return runs;
+}
+
+function toolRunStatus(payload: Record<string, JsonValue>): ToolRunRecord["status"] {
+  const explicit = stringPayload(payload.status)?.toLowerCase();
+  if (explicit === "ignored" || explicit === "skipped") return "ignored";
+  if (explicit === "failed" || explicit === "error" || payload.ok === false || payload.error !== undefined) return "failed";
+  return "completed";
+}
+
+function firstPayloadValue(payload: Record<string, JsonValue> | undefined, keys: string[]): JsonValue | undefined {
+  if (!payload) return undefined;
+  for (const key of keys) if (payload[key] !== undefined) return payload[key];
+  return undefined;
+}
+
+function stringPayload(value: JsonValue | undefined): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function summarizePayload(value: JsonValue | undefined): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") return summarize(value, 2_000);
+  try { return summarize(JSON.stringify(value), 2_000); } catch { return "[unserializable]"; }
 }
 
 function isSettled(run: BackendRunRecord): boolean {

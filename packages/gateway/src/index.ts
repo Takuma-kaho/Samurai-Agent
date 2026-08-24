@@ -27,6 +27,9 @@ import {
   type SupportedLocale,
   stableHash
 } from "@samurai-agent/core-schemas";
+import { assertSafeGatewayHttpEndpoint, GatewayHttpEndpointError } from "./http-url-safety.js";
+
+export { assertSafeGatewayHttpEndpoint, GatewayHttpEndpointError } from "./http-url-safety.js";
 
 export {
   GatewayFormalWorkspaceIngress,
@@ -659,11 +662,12 @@ export function createHttpMcpToolAdapter(options: HttpMcpToolAdapterOptions): Mc
       if (!config) {
         throw new Error(`mcp_config_not_found:${input.server_name}`);
       }
+      const endpoint = await assertSafeGatewayHttpEndpoint(config.endpoint_url);
       const fetcher = options.fetch ?? fetch;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), config.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000);
       try {
-        const response = await fetcher(config.endpoint_url, {
+        const response = await fetcher(endpoint.toString(), {
           method: "POST",
           headers: buildHttpMcpHeaders(config, input.secrets),
           body: JSON.stringify({
@@ -675,8 +679,12 @@ export function createHttpMcpToolAdapter(options: HttpMcpToolAdapterOptions): Mc
               arguments: input.input
             }
           }),
-          signal: controller.signal
+          signal: controller.signal,
+          redirect: "manual"
         });
+        if (response.status >= 300 && response.status < 400) {
+          throw new GatewayHttpEndpointError("redirect_blocked");
+        }
         const body = await response.text();
         if (!response.ok) {
           throw new Error(`mcp_http_status:${response.status}:${body.slice(0, 200)}`);
@@ -902,7 +910,7 @@ export function createSandboxWorkspaceSyncAdapter(options: SandboxWorkspaceSyncA
       assertSandboxWorkspaceSyncPathAllowed(scopedInput);
       const coreRootError = await sandboxCoreWorkspaceRootError(input.workspace_root, sandbox, options.coreWorkspaceRoot);
       if (coreRootError) {
-        throw new Error(coreRootError);
+        return { status: "failed", reason: "path_not_allowed", error: coreRootError };
       }
       if (sandbox.backend === "docker") {
         return syncDockerWorkspace(scopedInput, options.spawnProcess ?? spawn);
@@ -1421,14 +1429,10 @@ async function sandboxCoreWorkspaceRootError(workspaceRoot: string, sandbox?: Sa
       return "sandbox_core_workspace_root_not_allowed";
     }
   }
+  // PostgreSQL is the only standard Core persistence. A configured Core root
+  // is rejected above; there is no local database file to discover or copy.
   if (sandbox && !sandboxWorkspaceSyncRoots(sandbox).includes("")) return undefined;
-  try {
-    const coreDatabase = await stat(path.join(path.resolve(workspaceRoot), "workspace.sqlite"));
-    return coreDatabase.isFile() ? "sandbox_core_workspace_root_not_allowed" : undefined;
-  } catch (error) {
-    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-    return code === "ENOENT" ? undefined : "sandbox_workspace_root_unavailable";
-  }
+  return undefined;
 }
 
 export const webGatewayContext: GatewayContext = {

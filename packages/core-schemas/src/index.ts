@@ -128,7 +128,7 @@ export const learningAssessments = ["helpful", "neutral", "harmful", "insufficie
 /** Evidence and use are independent axes for Core 05 learning resources. */
 export const learningEvidenceStates = ["direct_confirmed", "inferred", "supported", "conflict"] as const;
 export const learningUsageStates = ["normal", "limited", "dormant"] as const;
-/** `reference` is retained only for legacy SQLite/Wiki documents. New
+/** `reference` is retained only for legacy Wiki documents. New
  * Completion and PostgreSQL Wiki resources use the four product categories. */
 export const learningKnowledgeKinds = ["fact", "decision", "explanation", "experience_rule", "reference"] as const;
 export const learningEvaluationVerdicts = ["supported", "refuted", "indeterminate"] as const;
@@ -531,7 +531,7 @@ export type AgentRecord = z.infer<typeof AgentRecordSchema>;
 
 /**
  * A reference to an app-owned conversation or work unit.  It is metadata only:
- * it never grants Workspace or Room access and has no SQLite foreign key.
+ * it never grants Workspace or Room access and has no database foreign key.
  */
 export const SessionRefSchema = z.object({
   app_id: z.string().trim().min(1).max(200),
@@ -1501,6 +1501,8 @@ export const ExternalAssistProviderConfigDiagnosticsSchema = z.object({
   timeout_ms: z.number().int().positive().nullable(),
   token_configured: z.boolean(),
   auth_header: z.string().nullable(),
+  /** True only when the host explicitly opted into sending raw conversation context. */
+  raw_context_shared: z.boolean().default(false),
   endpoint_origin: z.string().optional(),
   endpoint_path_configured: z.boolean().optional(),
   file_name: z.string().optional(),

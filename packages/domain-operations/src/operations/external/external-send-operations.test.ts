@@ -65,6 +65,62 @@ describe("External send operation handlers", () => {
     expect(result.value.resource.status).toBe("approved");
   });
 
+  it("records a confirmed dispatch and reports the dispatched outcome", async () => {
+    const existing: ExternalSendRecord = { id: "send_dispatched", channel: "webhook", status: "approved", target: {}, title: "Notice", body: "Body", created_at: now, updated_at: now };
+    const settleDispatch = vi.fn(async ({ record }: { record: ExternalSendRecord }) => ({ ...record, status: "dispatched" as const, dispatched_at: now }));
+    const dispatchExternalSend = vi.fn(async () => ({ dispatched: true, adapter: "http", dry_run: false, idempotency_guaranteed: true, message: "sent" }));
+    const handler = externalSendDispatch.createHandler({
+      getExternalSend: async () => existing, saveExternalSend: async (record) => record, dispatchExternalSend,
+      claimDispatch: async () => ({ record: existing, claim_token: "claim_dispatched" }), settleDispatch,
+      markOutcomeUnknown: async () => { throw new Error("unexpected"); },
+      ensureExternalSendSession: async () => session, createExternalSendEnvelope: () => envelope,
+      externalSendNow: () => now, externalSendDefaultDryRun: () => false,
+      externalSendNotFound: () => new Error("external_send_not_found"),
+      runExternalSendMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, activity: [] }; }
+    });
+
+    const result = await handler.execute(context, { send_id: existing.id, dry_run: false });
+
+    expect(settleDispatch).toHaveBeenCalledWith(expect.objectContaining({ record: expect.objectContaining({ status: "dispatched", dispatched_at: now }) }));
+    expect(result.value.resource.status).toBe("dispatched");
+  });
+
+  it("converts a non-Error dispatch failure to an outcome-unknown result", async () => {
+    const existing: ExternalSendRecord = { id: "send_string_failure", channel: "webhook", status: "approved", target: {}, title: "Notice", body: "Body", created_at: now, updated_at: now };
+    const markOutcomeUnknown = vi.fn(async ({ message }: { message: string }) => ({ ...existing, status: "outcome_unknown" as const, title: message }));
+    const handler = externalSendDispatch.createHandler({
+      getExternalSend: async () => existing, saveExternalSend: async (record) => record,
+      dispatchExternalSend: async () => { throw "transport_failed"; },
+      claimDispatch: async () => ({ record: existing, claim_token: "claim_string_failure" }),
+      settleDispatch: async ({ record }) => record, markOutcomeUnknown,
+      ensureExternalSendSession: async () => session, createExternalSendEnvelope: () => envelope,
+      externalSendNow: () => now, externalSendDefaultDryRun: () => false,
+      externalSendNotFound: () => new Error("external_send_not_found"),
+      runExternalSendMutation: async (input) => input.execute(operation).then((executed) => ({ resource: executed.resource, operation, activity: [] }))
+    });
+
+    await expect(handler.execute(context, { send_id: existing.id, dry_run: false })).rejects.toMatchObject({ code: "outcome_unknown" });
+    expect(markOutcomeUnknown).toHaveBeenCalledWith(expect.objectContaining({ message: "transport_failed" }));
+  });
+
+  it("does not attempt a second settlement when the settlement result is malformed", async () => {
+    const existing: ExternalSendRecord = { id: "send_malformed_settlement", channel: "webhook", status: "approved", target: {}, title: "Notice", body: "Body", created_at: now, updated_at: now };
+    const markOutcomeUnknown = vi.fn(async () => undefined as never);
+    const handler = externalSendDispatch.createHandler({
+      getExternalSend: async () => existing, saveExternalSend: async (record) => record,
+      dispatchExternalSend: async () => ({ dispatched: false, adapter: "fixture", dry_run: false, message: "unknown", outcome_unknown: true }),
+      claimDispatch: async () => ({ record: existing, claim_token: "claim_malformed_settlement" }),
+      settleDispatch: async ({ record }) => record, markOutcomeUnknown,
+      ensureExternalSendSession: async () => session, createExternalSendEnvelope: () => envelope,
+      externalSendNow: () => now, externalSendDefaultDryRun: () => false,
+      externalSendNotFound: () => new Error("external_send_not_found"),
+      runExternalSendMutation: async (input) => input.execute(operation).then((executed) => ({ resource: executed.resource, operation, activity: [] }))
+    });
+
+    await expect(handler.execute(context, { send_id: existing.id, dry_run: false })).rejects.toThrow();
+    expect(markOutcomeUnknown).toHaveBeenCalledTimes(1);
+  });
+
   it("does not dispatch a missing send", async () => {
     const dispatchExternalSend = vi.fn();
     const handler = externalSendDispatch.createHandler({

@@ -3,6 +3,7 @@ import { isTrustedWorkspaceCallerForAccount } from "./auth";
 import { WorkspaceServerError } from "./errors";
 import { applyWorkspaceServerMigrations, workspaceServerMigrationStatus } from "./schema";
 import type { WorkspaceCaller } from "./types";
+import { inspectPostgresOperatorHealth, type OperatorHealthReport } from "./operator-health";
 
 export interface WorkspaceDatabaseContext {
   accountId: string;
@@ -201,6 +202,11 @@ export class PostgresWorkspaceAdminDatabase {
     } finally {
       client.release();
     }
+  }
+
+  /** Read-only deployment diagnostics for the short-lived operator command. */
+  async operatorHealth(): Promise<OperatorHealthReport> {
+    return this.withAdmin((sql) => inspectPostgresOperatorHealth(sql));
   }
 
   private async assertRuntimeRoleDefinition(): Promise<void> {

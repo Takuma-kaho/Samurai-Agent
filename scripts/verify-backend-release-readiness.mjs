@@ -124,7 +124,11 @@ function buildGates(options) {
     nodeGate("doctor", "Strict local workspace/backend doctor", ["scripts/doctor.mjs", "--strict"]),
     nodeGate("doctor-syntax", "Doctor script syntax", ["--check", "scripts/doctor.mjs"]),
     internalGate("public-naming-scan", "PUBLIC_NAMING forbidden source names", runPublicNamingScan),
-    nodeGate("gateway-recovery-probe", "Gateway repair preview/apply on temporary workspace", ["--import", "tsx", "scripts/verify-gateway-recovery.mjs", "--json"])
+    // The former probe exercised the removed SQLite WorkspaceStore.  Keep the
+    // release gate on the active PostgreSQL composition instead of reviving a
+    // legacy storage path just to satisfy a verifier.
+    nodeGate("postgres-entry-contract", "Standard PostgreSQL entry composition", ["scripts/verify-standard-postgres-entry.mjs"]),
+    nodeGate("postgres-runtime-scope", "PostgreSQL runtime dependency scope", ["scripts/verify-postgres-runtime-scope.mjs"])
   ];
   gates.push(nodeGate("external-channel-probe", "External channel readiness without live sends", ["scripts/verify-external-channels.mjs", "--json"], { skipped: options.skipExternalProbes }));
   gates.push(nodeGate("external-backend-status", "External backend command status without starting runs", ["scripts/verify-external-backends.mjs", "--json"], { skipped: options.skipExternalProbes }));
@@ -145,7 +149,8 @@ function releaseProfiles(manualGates) {
     "doctor",
     "doctor-syntax",
     "public-naming-scan",
-    "gateway-recovery-probe",
+    "postgres-entry-contract",
+    "postgres-runtime-scope",
     "external-channel-probe",
     "external-backend-status",
     "sandbox-capabilities",
@@ -276,9 +281,14 @@ async function runGate(gate, options) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let forceKillTimer;
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
+      // A verifier must terminate even when the child ignores SIGTERM.
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, 2_000);
     }, options.timeoutMs);
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
@@ -296,6 +306,7 @@ async function runGate(gate, options) {
     });
     child.on("close", (code, signal) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         id: gate.id,
         label: gate.label,
@@ -311,6 +322,7 @@ async function runGate(gate, options) {
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         id: gate.id,
         label: gate.label,
@@ -358,7 +370,7 @@ function printHelp() {
   console.log(`Usage: node scripts/verify-backend-release-readiness.mjs [options]
 
 Runs the non-destructive backend release-readiness gate:
-  typecheck, full tests, i18n check, web build, doctor, gateway recovery probe,
+  typecheck, full tests, i18n check, web build, doctor, PostgreSQL entry/scope probes,
   public naming scan, external backend dry probe, sandbox dry probe, and local host sandbox probe.
 
 Options:

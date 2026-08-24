@@ -15,15 +15,15 @@ const sourceFiles = (directory) => {
   }
   return files;
 };
-const entrypoints = ["packages/runtime/src/index.ts", "packages/workspace-store/src/index.ts", "apps/server/src/index.ts", "apps/web/src/App.vue"];
-const roots = ["packages/runtime/src", "packages/workspace-store/src", "apps/server/src", "apps/web/src"];
+const entrypoints = ["packages/runtime/src/index.ts", "packages/workspace-server/src/index.ts", "apps/server/src/index.ts", "apps/web/src/App.vue"];
+const roots = ["packages/runtime/src", "packages/workspace-server/src", "apps/server/src", "apps/web/src"];
 const allSources = roots.flatMap(sourceFiles);
 const oversizedEntrypoints = entrypoints.map((file) => ({ file, lines: lineCount(file) })).filter((item) => item.lines > 500);
 const normalModules = allSources.filter((file) => !entrypoints.includes(file) && !/(?:schema|migration)/i.test(path.basename(file)));
 const largeModules = normalModules.map((file) => ({ file, lines: lineCount(file) })).filter((item) => item.lines > 1_200);
 const requiredDirectories = [
   "packages/runtime/src/host", "packages/runtime/src/commands", "packages/runtime/src/execution", "packages/runtime/src/context", "packages/runtime/src/presentation", "packages/runtime/src/backend", "packages/runtime/src/learning",
-  "packages/workspace-store/src/repositories", "packages/workspace-store/src/migrations", "packages/workspace-store/src/transactions", "packages/workspace-store/src/backup", "packages/workspace-store/src/search",
+  "packages/workspace-server/src",
   "apps/server/src/routes", "apps/server/src/middleware", "apps/server/src/workers", "apps/server/src/streams", "apps/server/src/composition",
   "apps/web/src/components", "apps/web/src/lib"
 ];

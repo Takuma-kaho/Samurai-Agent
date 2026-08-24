@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { access, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -536,8 +536,6 @@ describe("gateway", () => {
   it("blocks raw sync from a Core workspace root even when the root is allowed", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-root-"));
     const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-root-remote-"));
-    await writeFile(path.join(workspaceRoot, "workspace.sqlite"), "core database marker");
-
     const result = await executeSandboxWorkspaceSync({
       mode: "all",
       scope: "session",
@@ -558,7 +556,7 @@ describe("gateway", () => {
       reason: "path_not_allowed",
       error: "sandbox_core_workspace_root_not_allowed"
     });
-    await expect(access(path.join(remoteRoot, "workspace.sqlite"))).rejects.toBeTruthy();
+    await expect(readdir(remoteRoot)).resolves.toEqual([]);
   });
 
   it("syncs only the granted subtree and skips denied descendants", async () => {
@@ -1426,7 +1424,7 @@ describe("gateway", () => {
         key: "CALENDAR_HTTP_TOKEN"
       }],
       http: {
-        endpoint_url: "https://calendar.example.test/mcp",
+        endpoint_url: "https://93.184.216.34/mcp",
         headers: { "x-client": "samurai" },
         secret_headers: { authorization: "secret_http_calendar" },
         timeout_ms: 2000

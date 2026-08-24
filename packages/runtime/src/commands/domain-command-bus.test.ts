@@ -1,26 +1,53 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceStore } from "@samurai-agent/workspace-store";
+import { describe, expect, it, vi } from "vitest";
 import type { DomainCommandExecutionRecord } from "@samurai-agent/core-schemas";
 import { DomainCommandConflictError, DomainCommandOutcomeUnknownError, DomainCommandReplayError, DurableDomainCommandBus } from "./domain-command-bus";
+import type { DomainCommandExecutionPort } from "./domain-command-bus";
 
-const roots: string[] = [];
+class MemoryDomainCommandStore implements DomainCommandExecutionPort {
+  private readonly records = new Map<string, DomainCommandExecutionRecord>();
 
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
+  async claimDomainCommandExecution(record: DomainCommandExecutionRecord): Promise<{ record: DomainCommandExecutionRecord; claimed: boolean }> {
+    const existing = this.records.get(record.idempotency_key);
+    if (existing) return { record: existing, claimed: false };
+    this.records.set(record.idempotency_key, record);
+    return { record, claimed: true };
+  }
 
-async function createStore(): Promise<WorkspaceStore> {
-  const root = await mkdtemp(path.join(tmpdir(), "samurai-domain-command-"));
-  roots.push(root);
-  return WorkspaceStore.create({ rootDir: root });
+  async updateDomainCommandExecution(record: DomainCommandExecutionRecord): Promise<DomainCommandExecutionRecord> {
+    this.records.set(record.idempotency_key, record);
+    return record;
+  }
+
+  async heartbeatDomainCommandExecution(id: string, heartbeatAt: string): Promise<boolean> {
+    const record = [...this.records.values()].find((candidate) => candidate.id === id);
+    if (!record || record.status !== "running") return false;
+    const updated = { ...record, heartbeat_at: heartbeatAt, updated_at: heartbeatAt };
+    this.records.set(updated.idempotency_key, updated);
+    return true;
+  }
+
+  async getDomainCommandExecution(idempotencyKey: string): Promise<DomainCommandExecutionRecord | undefined> {
+    return this.records.get(idempotencyKey);
+  }
+
+  async compareAndSetDomainCommandExecution(input: {
+    id: string;
+    expectedStatus: DomainCommandExecutionRecord["status"];
+    expectedHeartbeatAt: string;
+    next: DomainCommandExecutionRecord;
+  }): Promise<boolean> {
+    const current = [...this.records.values()].find((candidate) => candidate.id === input.id);
+    if (!current || current.status !== input.expectedStatus || current.heartbeat_at !== input.expectedHeartbeatAt) return false;
+    this.records.set(input.next.idempotency_key, input.next);
+    return true;
+  }
 }
+
+function createStore(): MemoryDomainCommandStore { return new MemoryDomainCommandStore(); }
 
 describe("DurableDomainCommandBus", () => {
   it("rejects commands without an idempotency key", async () => {
-    const store = {} as WorkspaceStore;
+    const store = {} as DomainCommandExecutionPort;
     await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.missing-key", inputSource: "test", payload: {} }, async () => null)).rejects.toMatchObject({
       name: "DomainCommandIdempotencyKeyRequiredError", code: "idempotency_key_required"
     });
@@ -46,7 +73,6 @@ describe("DurableDomainCommandBus", () => {
     expect(sideEffects).toBe(1);
     expect(new Set(results.map((result) => result.result_id))).toEqual(new Set(["result-1"]));
     expect(new Set(results.map((result) => result.value))).toEqual(new Set([1]));
-    await store.close();
   }, 60_000);
 
   it("rejects reuse of a key with a different payload", async () => {
@@ -65,7 +91,6 @@ describe("DurableDomainCommandBus", () => {
       payload: { value: 2 },
       idempotencyKey: "reused-key"
     }, async () => ({ ok: false }))).rejects.toBeInstanceOf(DomainCommandConflictError);
-    await store.close();
   });
 
   it("covers local conflicts, observers, undefined results, and primitive failures", async () => {
@@ -97,7 +122,6 @@ describe("DurableDomainCommandBus", () => {
     await expect(new DurableDomainCommandBus(store).execute({ commandId: "test.structured", inputSource: "test", payload: {}, idempotencyKey: "structured", executionClass: "external" }, async () => null)).rejects.toMatchObject({
       code: "fixture_error", message: "structured failure", retryable: true, details: { reason: "fixture" }
     });
-    await store.close();
   });
 
   it("freezes a committed Resource when only its evidence failed and never reruns it", async () => {
@@ -136,7 +160,6 @@ describe("DurableDomainCommandBus", () => {
       details: expect.objectContaining({ failure_stage: "resource_usage" })
     });
     expect(handlerCalls).toBe(1);
-    await store.close();
   });
 
   it("resolves every durable recovery branch", async () => {
@@ -154,14 +177,13 @@ describe("DurableDomainCommandBus", () => {
         compareAndSetDomainCommandExecution: async () => changed,
         updateDomainCommandExecution: async (value: DomainCommandExecutionRecord) => value,
         heartbeatDomainCommandExecution: async () => true
-      } as unknown as WorkspaceStore;
+      } as unknown as DomainCommandExecutionPort;
       return new DurableDomainCommandBus(store, 1).execute({ ...input, executionClass }, async () => ({ recovered: true }));
     };
     const hashStore = await createStore();
     await new DurableDomainCommandBus(hashStore).execute(input, async () => ({ hash: true }));
     const persisted = await hashStore.getDomainCommandExecution("recovery");
     expect(persisted).toBeDefined();
-    await hashStore.close();
     const base = { ...persisted!, status: "running" as const, heartbeat_at: now, updated_at: now };
 
     await expect(executeWith({ ...base, status: "outcome_unknown" }, undefined)).rejects.toBeInstanceOf(DomainCommandOutcomeUnknownError);
@@ -184,7 +206,7 @@ describe("DurableDomainCommandBus", () => {
         claimDomainCommandExecution: async (record: DomainCommandExecutionRecord) => ({ claimed: true as const, record }),
         updateDomainCommandExecution: async (record: DomainCommandExecutionRecord) => record,
         heartbeatDomainCommandExecution: heartbeat
-      } as unknown as WorkspaceStore;
+      } as unknown as DomainCommandExecutionPort;
       let finish!: () => void;
       const running = new Promise<void>((resolve) => { finish = resolve; });
       const execution = new DurableDomainCommandBus(store, 3_000).execute({ commandId: "test.heartbeat", inputSource: "test", payload: {}, idempotencyKey: "heartbeat" }, async () => running);

@@ -44,8 +44,8 @@ export interface WorkspaceCompletionLegacyMigrationResult extends WorkspaceCompl
 
 type LegacyResourceKind = "knowledge" | "memory" | "skill" | "workspace_rule";
 
-/** Converts only the old PostgreSQL learning projection. SQLite remains a
- * read-only Bundle input. The source rows are never deleted here, which makes
+/** Converts only the old PostgreSQL learning projection. Legacy bundle input
+ * remains read-only. The source rows are never deleted here, which makes
  * a failed or interrupted backfill resumable without a dual-write period. */
 export class WorkspaceCompletionMigrationService {
   constructor(readonly completion: WorkspaceCompletionService) {}

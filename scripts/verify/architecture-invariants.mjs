@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -9,7 +9,8 @@ const strict = process.argv.includes("--strict");
 const trackedFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root })
   .toString("utf8")
   .split("\0")
-  .filter(Boolean);
+  .filter(Boolean)
+  .filter((file) => existsSync(path.join(root, file)));
 
 const sourceFiles = trackedFiles.filter((file) => /\.(?:mjs|cjs|cts|ts|tsx|vue|py)$/.test(file));
 const packageFiles = trackedFiles.filter((file) => file.endsWith("package.json"));
@@ -22,7 +23,7 @@ for (const file of sourceFiles) {
   }
 }
 
-const directStoreReference = /(?:^\s*(?:import|export)[^\n]*\bWorkspaceStore\b|\bnew\s+WorkspaceStore\b|better-sqlite3|from\s+["']pg["']|from\s+["']kysely["'])/m;
+const directDatabaseReference = /(?:^\s*(?:import|export)[^\n]*\bPostgresWorkspaceDatabase\b|\bnew\s+Client\s*\()/m;
 
 const routeFiles = [];
 const socketFiles = [];
@@ -54,23 +55,23 @@ for (const [file, source] of sources) {
       ipcMethods.push({ file, method: match[1], channel: match[2] });
     }
   }
-  if (/\bWorkspaceStore\b|better-sqlite3|from\s+["']pg["']|from\s+["']kysely["']/.test(source)) {
+  if (/(?:from\s+["']pg["']|PostgresWorkspaceDatabase)/.test(source)) {
     databaseDependencies.push(file);
   }
 }
 
 for (const [file, source] of sources) {
   if (/\.test\.(?:mjs|ts|tsx)$/.test(file)) continue;
-  if (file.startsWith("packages/runtime/") && directStoreReference.test(source)) {
+  if (file.startsWith("packages/runtime/") && directDatabaseReference.test(source)) {
     findings.push({ rule: "runtime-storage-dependency", file });
   }
-  if (file.startsWith("packages/gateway/") && directStoreReference.test(source)) {
+  if (file.startsWith("packages/gateway/") && directDatabaseReference.test(source)) {
     findings.push({ rule: "gateway-storage-dependency", file });
   }
-  if (file.startsWith("packages/external-integration/") && directStoreReference.test(source)) {
+  if (file.startsWith("packages/external-integration/") && directDatabaseReference.test(source)) {
     findings.push({ rule: "external-integration-storage-dependency", file });
   }
-  if (/^apps\/(?:web|desktop)\//.test(file) && directStoreReference.test(source)) {
+  if (/^apps\/(?:web|desktop)\//.test(file) && directDatabaseReference.test(source)) {
     findings.push({ rule: "client-storage-dependency", file });
   }
   const gatewayWorkspaceBoundary = /sandboxWorkspaceSyncPathError|sandboxCoreWorkspaceRootError|sandboxWorkspaceSyncRoots/.test(source);

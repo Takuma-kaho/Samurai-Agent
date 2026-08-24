@@ -1629,7 +1629,7 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     accountIds.add(accountId);
     accountStates.set(accountId, account.status === "disabled" ? "disabled" : "active");
   }
-  // A legacy SQLite migration can safely preserve only its configured local
+  // A legacy local-store migration can safely preserve only its configured local
   // owner because old rows have no portable public-key identity. Every other
   // principal must be proven by accounts.jsonl.
   const knownAccountIds = new Set([...accountIds, sourceOwnerAccountId]);
