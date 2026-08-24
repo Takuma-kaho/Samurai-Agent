@@ -284,6 +284,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     });
     assert(!activity.eligible && !activity.job, "server04_completion_activity_unexpected_review_job");
     const snapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, activity.episode.id);
+    stage = "review_initial_apply";
     const reviewed = await completion.applyReviewResult(ownerContext("review"), {
       snapshot,
       result: {

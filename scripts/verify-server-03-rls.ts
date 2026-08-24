@@ -1121,7 +1121,6 @@ async function cleanup(
 ): Promise<void> {
   await adminDatabase.withAdmin(async (sql) => {
     const tables = [
-      "workspace_audit_entries",
       "workspace_bundles",
       "workspace_transfers",
       "workspace_invitations",
@@ -1134,17 +1133,27 @@ async function cleanup(
       "room_members",
       "rooms",
       "workspace_members",
-      "workspace_import_sessions",
-      "workspaces"
+      "workspace_import_sessions"
     ];
-    for (const workspaceId of workspaceIds) {
-      for (const table of tables) {
-        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
-        await sql.query("DELETE FROM " + table + " WHERE " + workspaceColumn + " = $1", [workspaceId]);
+    await sql.query("BEGIN");
+    try {
+      for (const workspaceId of workspaceIds) {
+        for (const table of tables) {
+          await sql.query("DELETE FROM " + table + " WHERE workspace_id = $1", [workspaceId]);
+        }
+        // Audit is also a child of Workspace. Remove it after every other
+        // probe-owned child and immediately before Workspace, making the
+        // foreign-key cleanup order explicit.
+        await sql.query("DELETE FROM workspace_audit_entries WHERE workspace_id = $1", [workspaceId]);
+        await sql.query("DELETE FROM workspaces WHERE id = $1", [workspaceId]);
       }
+      await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
+      await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK").catch(() => undefined);
+      throw error;
     }
-    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
-    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
   });
 }
 

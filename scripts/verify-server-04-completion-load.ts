@@ -396,7 +396,7 @@ async function readIndexUsage(database: PostgresWorkspaceAdminDatabase): Promise
     const result = await sql.query<{ table_name: string; index_name: string; idx_scan: number | string }>(
       `SELECT relname AS table_name, indexrelname AS index_name, idx_scan
        FROM pg_stat_user_indexes
-       WHERE schemaname = 'public' AND table_name IN (
+       WHERE schemaname = 'public' AND relname IN (
          'workspace_completion_resources', 'workspace_completion_activities',
          'workspace_completion_search_projection', 'workspace_completion_jobs'
        ) ORDER BY table_name, index_name`

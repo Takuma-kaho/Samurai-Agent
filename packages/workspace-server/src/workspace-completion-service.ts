@@ -2316,10 +2316,14 @@ export class WorkspaceCompletionService {
     const configuration = await this.effectiveConfigurationInSql(sql, context.workspaceId, episode.roomId);
     const maxItems = configuration.values.reviewSnapshotMaxItems;
     const pageSize = Math.min(500, maxItems + 1);
+    // PostgreSQL stores TIMESTAMPTZ with microsecond precision, while the
+    // default node-postgres Date parser keeps milliseconds only. Keep the
+    // database text value for SQL cursor boundaries so an immediately rebuilt
+    // snapshot cannot exclude its own high-watermark Activity.
     let watermarkFinalizedAt: string | undefined;
     if (options.highWatermarkActivityId) {
-      const watermark = await sql.query<{ finalized_at: Date | string }>(
-        `SELECT activity.finalized_at
+      const watermark = await sql.query<{ finalized_at: string }>(
+        `SELECT activity.finalized_at::TEXT AS finalized_at
          FROM workspace_completion_episode_activities link
          JOIN workspace_completion_activities activity
            ON activity.workspace_id = link.workspace_id AND activity.id = link.activity_id
@@ -2332,13 +2336,13 @@ export class WorkspaceCompletionService {
           high_watermark_activity_id: options.highWatermarkActivityId
         });
       }
-      watermarkFinalizedAt = iso(watermark.rows[0].finalized_at);
+      watermarkFinalizedAt = watermark.rows[0].finalized_at;
     }
     const activities: WorkspaceCompletionActivity[] = [];
     let activityCursor: { finalizedAt: string; id: string } | undefined;
     for (;;) {
-      const rows = await sql.query<ActivityRow>(
-        `SELECT activity.*
+      const rows = await sql.query<ActivityRow & { cursor_finalized_at: string }>(
+        `SELECT activity.*, activity.finalized_at::TEXT AS cursor_finalized_at
          FROM workspace_completion_episode_activities link
          JOIN workspace_completion_activities activity
            ON activity.workspace_id = link.workspace_id AND activity.id = link.activity_id
@@ -2358,12 +2362,15 @@ export class WorkspaceCompletionService {
           pageSize
         ]
       );
-      const page = rows.rows.map(activityFromRow);
-      activities.push(...page);
+      const page = rows.rows.map((row) => ({
+        activity: activityFromRow(row),
+        cursorFinalizedAt: row.cursor_finalized_at
+      }));
+      activities.push(...page.map((item) => item.activity));
       if (activities.length > maxItems) throw new WorkspaceServerError("workspace_completion_review_snapshot_limit_exceeded", 409, { max_items: maxItems, item: "activities" });
       if (page.length < pageSize) break;
       const last = page[page.length - 1]!;
-      activityCursor = { finalizedAt: last.finalizedAt, id: last.id };
+      activityCursor = { finalizedAt: last.cursorFinalizedAt, id: last.activity.id };
     }
     const highWatermarkActivityId = options.highWatermarkActivityId ?? activities[activities.length - 1]?.id;
     if (!highWatermarkActivityId) throw new WorkspaceServerError("workspace_completion_review_snapshot_empty", 409);
