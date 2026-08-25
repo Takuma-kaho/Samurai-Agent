@@ -8341,6 +8341,19 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "DROP POLICY workspace_completion_links_access ON workspace_completion_resource_links",
       `CREATE POLICY workspace_completion_links_access ON workspace_completion_resource_links FOR ALL USING (workspace_id = samurai_current_workspace_id() AND EXISTS (SELECT 1 FROM workspace_completion_resources source JOIN workspace_completion_resources target ON target.workspace_id = source.workspace_id AND target.id = workspace_completion_resource_links.to_resource_id WHERE source.workspace_id = workspace_completion_resource_links.workspace_id AND source.id = workspace_completion_resource_links.from_resource_id AND ((source.scope_kind = 'workspace' AND samurai_can_workspace(source.workspace_id, 'guest')) OR (source.scope_kind = 'room' AND source.room_id IS NOT NULL AND samurai_can_room(source.workspace_id, source.room_id, 'read'))) AND ((target.scope_kind = 'workspace' AND samurai_can_workspace(target.workspace_id, 'guest')) OR (target.scope_kind = 'room' AND target.room_id IS NOT NULL AND samurai_can_room(target.workspace_id, target.room_id, 'read'))))) WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))`
     ]
+  },
+  {
+    // Policy rules, use events, and evaluations are portable Completion
+    // evidence too. Permit their INSERT during the same verified V4 import,
+    // while retaining the existing resource and writable-scope checks.
+    version: 70,
+    name: "workspace_server_completion_import_evidence_policy",
+    statements: [
+      `ALTER POLICY workspace_completion_policy_rules_access ON workspace_completion_policy_rules
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)) AND EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = workspace_completion_policy_rules.workspace_id AND resource.id = workspace_completion_policy_rules.resource_id AND resource.resource_kind = 'policy' AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin')) OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'manage')))))`,
+      "ALTER POLICY workspace_completion_uses_access ON workspace_completion_uses WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))",
+      "ALTER POLICY workspace_completion_evaluations_access ON workspace_completion_evaluations WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))"
+    ]
   }
 ];
 
