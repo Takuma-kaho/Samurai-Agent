@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -276,6 +276,13 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_update");
     expect(automationCommandPolicies).not.toContain("FOR ALL");
     expect(automationCommandPolicies).not.toContain("FOR DELETE");
+    const automationUpdateSourcePolicies = migrations.find((migration) => migration.version === 73)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_update_source_room_rls");
+    expect(automationUpdateSourcePolicies).toContain("DROP POLICY IF EXISTS workspace_runtime_automation_jobs_update");
+    expect(automationUpdateSourcePolicies).toContain("DROP POLICY IF EXISTS workspace_runtime_automation_runs_update");
+    expect(automationUpdateSourcePolicies).toContain("samurai_can_room(workspace_id, room_id, 'edit')");
+    expect(automationUpdateSourcePolicies).toContain("samurai_can_room(workspace_id, room_id, 'execute')");
+    expect(automationUpdateSourcePolicies).not.toContain("samurai_can_room(workspace_id, room_id, 'read')");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
     for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);

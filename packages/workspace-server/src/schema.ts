@@ -8469,6 +8469,28 @@ const migrations: readonly WorkspaceServerMigration[] = [
         workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')
       )`
     ]
+  },
+  {
+    // UPDATE evaluates USING against the old row and WITH CHECK against the
+    // new row. Require write authority on both sides so read access to one
+    // Room cannot be combined with write access to another Room to move a Job
+    // or Run across the Room boundary.
+    version: 73,
+    name: "workspace_server_runtime_automation_update_source_room_rls",
+    statements: [
+      "DROP POLICY IF EXISTS workspace_runtime_automation_jobs_update ON workspace_runtime_automation_jobs",
+      "DROP POLICY IF EXISTS workspace_runtime_automation_runs_update ON workspace_runtime_automation_runs",
+      `CREATE POLICY workspace_runtime_automation_jobs_update ON workspace_runtime_automation_jobs FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'edit')
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'edit')
+      )`,
+      `CREATE POLICY workspace_runtime_automation_runs_update ON workspace_runtime_automation_runs FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')
+      )`
+    ]
   }
 ];
 

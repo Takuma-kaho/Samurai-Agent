@@ -191,8 +191,14 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const privateRoom = (await store.createRoom(ownerContext("private-room"), {
       name: "Other Room", expectedWorkspaceVersion: (await store.getWorkspace({ workspaceId, accountId: owner.id })).version
     })).room;
+    const automationTargetRoom = (await store.createRoom(ownerContext("automation-target-room"), {
+      name: "Automation target Room", expectedWorkspaceVersion: (await store.getWorkspace({ workspaceId, accountId: owner.id })).version
+    })).room;
     await store.setRoomMember(ownerContext("other-room-member"), {
-      roomId: privateRoom.id, accountId: otherRoomMember.id, role: "member", state: "active", expectedVersion: 0
+      roomId: privateRoom.id, accountId: otherRoomMember.id, role: "guest", state: "active", expectedVersion: 0
+    });
+    await store.setRoomMember(ownerContext("automation-target-room-member"), {
+      roomId: automationTargetRoom.id, accountId: otherRoomMember.id, role: "member", state: "active", expectedVersion: 0
     });
     await collectProbeStage(stageFailures, "automation_rls_and_worker", async () => {
       const agentId = `agent_completion04_${suffix.slice(0, 24)}`;
@@ -242,7 +248,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         nextRunAt: new Date(Date.now() - 1_000).toISOString(),
         maxAttempts: 1
       });
-      const viewerDelete = await database.withContext({ workspaceId, accountId: otherRoomMember.id }, async (sql) => {
+      const viewerMutation = await database.withContext({ workspaceId, accountId: otherRoomMember.id }, async (sql) => {
         const visible = await sql.query<{ id: string }>(
           "SELECT id FROM workspace_runtime_automation_jobs WHERE workspace_id = $1 AND id = $2",
           [workspaceId, job.job.id]
@@ -251,14 +257,36 @@ async function runProbe(target: ProbeTarget): Promise<void> {
           "DELETE FROM workspace_runtime_automation_jobs WHERE workspace_id = $1 AND id = $2 RETURNING id",
           [workspaceId, job.job.id]
         );
-        return { visible: visible.rows.length, deleted: deleted.rows.length };
+        const moved = await sql.query<{ id: string }>(
+          "UPDATE workspace_runtime_automation_jobs SET room_id = $3 WHERE workspace_id = $1 AND id = $2 RETURNING id",
+          [workspaceId, job.job.id, automationTargetRoom.id]
+        );
+        return { visible: visible.rows.length, deleted: deleted.rows.length, moved: moved.rows.length };
       });
-      assert(viewerDelete.visible === 1 && viewerDelete.deleted === 0, `server04_automation_room_reader_delete_allowed:${JSON.stringify(viewerDelete)}`);
+      assert(
+        viewerMutation.visible === 1 && viewerMutation.deleted === 0 && viewerMutation.moved === 0,
+        `server04_automation_room_reader_mutation_allowed:${JSON.stringify(viewerMutation)}`
+      );
       const workerResult = await automation.runTick(ownerContext("automation-worker"), {
         workerId: "completion04-automation-worker",
         signal: new AbortController().signal
       });
       assert(workerResult.claimed === 1 && workerResult.completed === 1, `server04_automation_worker_failed:${JSON.stringify(workerResult)}`);
+      const viewerRunMove = await database.withContext({ workspaceId, accountId: otherRoomMember.id }, async (sql) => {
+        const visible = await sql.query<{ id: string }>(
+          "SELECT id FROM workspace_runtime_automation_runs WHERE workspace_id = $1 AND job_id = $2",
+          [workspaceId, job.job.id]
+        );
+        const moved = await sql.query<{ id: string }>(
+          "UPDATE workspace_runtime_automation_runs SET room_id = $3 WHERE workspace_id = $1 AND job_id = $2 RETURNING id",
+          [workspaceId, job.job.id, automationTargetRoom.id]
+        );
+        return { visible: visible.rows.length, moved: moved.rows.length };
+      });
+      assert(
+        viewerRunMove.visible === 1 && viewerRunMove.moved === 0,
+        `server04_automation_run_room_reader_move_allowed:${JSON.stringify(viewerRunMove)}`
+      );
     });
 
     const completion = new WorkspaceCompletionService(store);
