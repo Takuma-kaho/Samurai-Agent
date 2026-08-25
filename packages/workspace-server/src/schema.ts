@@ -7961,6 +7961,26 @@ const migrations: readonly WorkspaceServerMigration[] = [
     statements: [
       "CREATE INDEX IF NOT EXISTS workspace_completion_activities_correction_index ON workspace_completion_activities(workspace_id, correction_of_activity_id)"
     ]
+  },
+  {
+    // A resource that is already machine-verified may still receive ordinary
+    // metadata/pointer updates. Only creation or a transition into the
+    // machine-verified state requires a new attestation.
+    version: 62,
+    name: "workspace_server_completion_machine_verified_transition_guard",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_guard_completion_machine_verified() RETURNS TRIGGER
+       LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+       BEGIN
+         IF NEW.creation_source = 'machine_verified'
+           AND CASE WHEN TG_OP = 'INSERT' THEN TRUE ELSE OLD.creation_source IS DISTINCT FROM 'machine_verified' END
+           AND current_setting('samurai.completion_attestation_apply', true) IS DISTINCT FROM 'on' THEN
+           RAISE EXCEPTION 'workspace_completion_machine_verified_attestation_required';
+         END IF;
+         RETURN NEW;
+       END
+       $$`
+    ]
   }
 ];
 

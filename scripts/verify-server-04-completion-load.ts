@@ -74,6 +74,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
   let report: Record<string, unknown> | undefined;
+  let probeFailure: Error | undefined;
+  let cleanupFailure: Error | undefined;
   try {
     console.log(`[Server04 completion load] ${target.label}: migrate and prepare`);
     await adminDatabase.migrate();
@@ -208,24 +210,32 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     if (report.status !== "passed") throw new Error("server04_completion_load_guard_failed");
     console.log(`[Server04 completion load] ${target.label}: p50=${p50.toFixed(2)}ms p95=${p95.toFixed(2)}ms`);
   } catch (error) {
+    probeFailure = error instanceof Error ? error : new Error(String(error));
     const failed = {
       ...(report ?? {}),
       schema_version: 1,
       generated_at: new Date().toISOString(),
       target: target.label,
       status: "failed",
-      error: error instanceof Error ? error.message : String(error)
+      error: probeFailure.message
     };
     await writeLoadReport(target.label, failed);
-    throw error;
   } finally {
     console.log(`[Server04 completion load] ${target.label}: cleanup`);
-    await cleanup(adminDatabase, workspaceId, owner.id);
-    console.log(`[Server04 completion load] ${target.label}: cleanup complete`);
-    await database.close();
-    await adminDatabase.close();
-    await rm(filesystemRoot, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await cleanup(adminDatabase, workspaceId, owner.id);
+      console.log(`[Server04 completion load] ${target.label}: cleanup complete`);
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error : new Error(String(error));
+      console.error(`[Server04 completion load] ${target.label}: cleanup failed: ${cleanupFailure.message}`);
+    }
+    await database.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await adminDatabase.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await rm(filesystemRoot, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
   }
+  if (probeFailure && cleanupFailure) throw new Error(`${probeFailure.message};cleanup:${cleanupFailure.message}`);
+  if (probeFailure) throw probeFailure;
+  if (cleanupFailure) throw new Error(`cleanup:${cleanupFailure.message}`);
 }
 
 async function bulkFixture(

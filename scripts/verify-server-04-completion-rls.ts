@@ -79,6 +79,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
   let stage = "setup";
+  let probeFailure: Error | undefined;
+  let cleanupFailure: Error | undefined;
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -839,13 +841,20 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     assert(v3RestoredLegacy.content === "This old row must become a file-backed Completion Resource.", "server04_completion_v3_to_v4_roundtrip_failed");
     console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
   } catch (error) {
-    throw new Error(`server04_completion_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
+    probeFailure = new Error(`server04_completion_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
   } finally {
-    await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
-    await database.close();
-    await adminDatabase.close();
-    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error : new Error(String(error));
+    }
+    await database.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await adminDatabase.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await rm(root, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
   }
+  if (probeFailure && cleanupFailure) throw new Error(`${probeFailure.message};cleanup:${cleanupFailure.message}`);
+  if (probeFailure) throw probeFailure;
+  if (cleanupFailure) throw new Error(`cleanup:${cleanupFailure.message}`);
 }
 
 async function verifyHttpPolicyIngress(input: {

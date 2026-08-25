@@ -36,7 +36,15 @@ if (process.env.SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE !== "yes") {
   throw new Error("server03_probe_destructive_confirmation_required");
 }
 
-for (const target of targets) await runProbe(target);
+const probeFailures: string[] = [];
+for (const target of targets) {
+  try {
+    await runProbe(target);
+  } catch (error) {
+    probeFailures.push(`${target.label}:${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+if (probeFailures.length > 0) throw new Error(`server03_targets_failed:${probeFailures.join(";")}`);
 
 function targetFromEnvironment(prefix: "HOSTED" | "SELF_HOST", label: ProbeTarget["label"]): ProbeTarget {
   const databaseUrl = process.env["SAMURAI_SERVER_VERIFY_" + prefix + "_DATABASE_URL"];
@@ -63,6 +71,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const disabledInvitationMember = accountIdentity();
   const httpInvitationMember = accountIdentity();
   const accounts = [owner, member, parentOnlyMember, missingParentMember, realtimeMember, invitationMember, disabledInvitationMember, httpInvitationMember];
+  let probeFailure: Error | undefined;
+  let cleanupFailure: Error | undefined;
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -532,7 +542,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const files = new WorkspaceFileStore(store);
     const rootFile = await files.write(ownerContext(operationId("file-root")), {
       roomId: rootRoom.id,
-      path: "knowledge/room-boundary.md",
+      path: "collections/room-boundary.md",
       content: Buffer.from("root Room file"),
       expectedVersion: 0
     });
@@ -618,12 +628,21 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       assert(JSON.stringify([...sourceParents].sort()) === JSON.stringify([...restoredParents].sort()), "server03_bundle_hierarchy_roundtrip_failed");
     }
     console.log("[Server03] " + target.label + ": Room hierarchy, RLS, search, retry, and restore probe passed");
+  } catch (error) {
+    probeFailure = error instanceof Error ? error : new Error(String(error));
   } finally {
-    await cleanup(adminDatabase, [workspaceId, ...(target.label === "hosted" ? [restoredWorkspaceId, foreignWorkspaceId] : [])], accounts.map((account) => account.id));
-    await database.close();
-    await adminDatabase.close();
-    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await cleanup(adminDatabase, [workspaceId, ...(target.label === "hosted" ? [restoredWorkspaceId, foreignWorkspaceId] : [])], accounts.map((account) => account.id));
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error : new Error(String(error));
+    }
+    await database.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await adminDatabase.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await rm(root, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
   }
+  if (probeFailure && cleanupFailure) throw new Error(`${probeFailure.message};cleanup:${cleanupFailure.message}`);
+  if (probeFailure) throw probeFailure;
+  if (cleanupFailure) throw new Error(`cleanup:${cleanupFailure.message}`);
 }
 
 /**
