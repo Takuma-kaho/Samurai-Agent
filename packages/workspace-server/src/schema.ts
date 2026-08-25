@@ -8249,6 +8249,86 @@ const migrations: readonly WorkspaceServerMigration[] = [
         )
       )`
     ]
+  },
+  {
+    // File-batch rows are recovery evidence. Reading them is allowed by the
+    // parent Room policy, but deletion is reserved for the matching import or
+    // migration capability. Keep the table-level grant compatible with those
+    // guarded paths and enforce the narrower boundary in RLS.
+    version: 68,
+    name: "workspace_server_completion_file_batch_delete_policy",
+    statements: [
+      "DROP POLICY workspace_completion_file_batches_access ON workspace_completion_file_batches",
+      `CREATE POLICY workspace_completion_file_batches_access ON workspace_completion_file_batches FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batches_insert ON workspace_completion_file_batches FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR samurai_completion_migration_write_allowed(workspace_id)
+          OR (samurai_workspace_is_writable(workspace_id) AND (
+            (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+            OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+          ))
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batches_update ON workspace_completion_file_batches FOR UPDATE
+       USING (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_completion_migration_write_allowed(workspace_id)
+           OR (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+           OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+         )
+       ) WITH CHECK (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_import_session(workspace_id)
+           OR samurai_completion_migration_write_allowed(workspace_id)
+           OR (samurai_workspace_is_writable(workspace_id) AND (
+             (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+             OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+           ))
+         )
+       )`,
+      `CREATE POLICY workspace_completion_file_batches_delete ON workspace_completion_file_batches FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id))
+      )`,
+      "DROP POLICY workspace_completion_file_batch_entries_access ON workspace_completion_file_batch_entries",
+      `CREATE POLICY workspace_completion_file_batch_entries_access ON workspace_completion_file_batch_entries FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_completion_migration_write_allowed(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_completion_file_batches batch
+            WHERE batch.workspace_id = workspace_completion_file_batch_entries.workspace_id
+              AND batch.id = workspace_completion_file_batch_entries.batch_id
+              AND ((batch.scope_kind = 'workspace' AND samurai_can_workspace(batch.workspace_id, 'guest'))
+                OR (batch.scope_kind = 'room' AND batch.room_id IS NOT NULL AND samurai_can_room(batch.workspace_id, batch.room_id, 'read')))
+          )
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batch_entries_insert ON workspace_completion_file_batch_entries FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_file_batches batch
+          WHERE batch.workspace_id = workspace_completion_file_batch_entries.workspace_id
+            AND batch.id = workspace_completion_file_batch_entries.batch_id
+            AND (
+              samurai_is_import_session(batch.workspace_id)
+              OR samurai_completion_migration_write_allowed(batch.workspace_id)
+              OR (samurai_workspace_is_writable(batch.workspace_id) AND (
+                (batch.scope_kind = 'workspace' AND samurai_can_workspace(batch.workspace_id, 'admin'))
+                OR (batch.scope_kind = 'room' AND batch.room_id IS NOT NULL AND samurai_can_room(batch.workspace_id, batch.room_id, 'execute'))
+              ))
+            )
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batch_entries_delete ON workspace_completion_file_batch_entries FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id))
+      )`
+    ]
   }
 ];
 

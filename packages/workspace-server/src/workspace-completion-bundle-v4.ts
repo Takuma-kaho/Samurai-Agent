@@ -972,12 +972,13 @@ export class WorkspaceBundleV4Service {
     manifest: WorkspaceBundleV4Manifest
   ): Promise<string> {
     return this.store.database.withContext(context, async (sql) => {
-      // A retry after rename must find the real v4 destination first. This
-      // also makes a previous verified repair idempotent without creating a
-      // second ledger row for the same Bundle.
+      // The runtime RLS policy for workspace_bundles is intentionally
+      // write-denied. A FOR UPDATE here can therefore hide rows even though
+      // they are readable. Use a plain read; the SECURITY DEFINER functions
+      // below perform the authoritative lock and state change.
       const finalRows = await sql.query<BundleLedgerRow>(
         `SELECT id, format_version, path, sha256, record_counts
-         FROM workspace_bundles WHERE workspace_id = $1 AND path = $2 FOR UPDATE`,
+         FROM workspace_bundles WHERE workspace_id = $1 AND path = $2`,
         [context.workspaceId, destination]
       );
       if (finalRows.rows.length > 0) {
@@ -995,7 +996,7 @@ export class WorkspaceBundleV4Service {
         `SELECT id, format_version, path, sha256, record_counts
          FROM workspace_bundles
          WHERE workspace_id = $1 AND path LIKE '%.staging-%/base-v3'
-         ORDER BY id ASC FOR UPDATE`,
+         ORDER BY id ASC`,
         [context.workspaceId]
       );
       const proven = suspicious.rows.filter((row) => Number(row.format_version) === 3
