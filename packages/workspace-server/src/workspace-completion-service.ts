@@ -2635,6 +2635,7 @@ export class WorkspaceCompletionService {
     mutate: (sql: WorkspaceSql) => Promise<T>
   ): Promise<{ value: T; replayed: boolean }> {
     const result = await this.store.runIdempotentResult<BatchResult<T>>(context, request, async (sql) => {
+      await this.assertFileBatchWriteAllowed(sql, context, batch);
       await this.recordBatch(sql, batch);
       const value = await mutate(sql);
       return { result: value, batchId: batch.id };
@@ -2642,6 +2643,35 @@ export class WorkspaceCompletionService {
     if (result.replayed) await this.files.rollback(batch).catch(() => undefined);
     await this.finalizeBatch(context, result.value.batchId);
     return { value: result.value.result, replayed: result.replayed };
+  }
+
+  /** Keep a rejected operation from failing first on the batch ledger RLS.
+   * The detailed Completion policy is still checked inside `mutate`; this
+   * guard only mirrors the table's base write capability so read-only and
+   * import/migration transactions return a stable domain error before the
+   * ledger row is attempted. */
+  private async assertFileBatchWriteAllowed(
+    sql: WorkspaceSql,
+    context: WorkspaceRequestContext,
+    batch: StagedWorkspaceCompletionFileBatch
+  ): Promise<void> {
+    const allowed = await sql.query<{ allowed: boolean }>(
+      `SELECT (
+         samurai_is_import_session($1)
+         OR samurai_completion_migration_write_allowed($1)
+         OR (
+           samurai_workspace_is_writable($1)
+           AND (
+             ($2::TEXT = 'workspace' AND samurai_can_workspace($1, 'admin'))
+             OR ($2::TEXT = 'room' AND $3::TEXT IS NOT NULL AND samurai_can_room($1, $3, 'execute'))
+           )
+         )
+       ) AS allowed`,
+      [context.workspaceId, batch.scope.kind, batch.scope.roomId ?? null]
+    );
+    if (allowed.rows[0]?.allowed !== true) {
+      throw new WorkspaceServerError("workspace_completion_policy_denied", 403);
+    }
   }
 
   private async recordBatch(sql: WorkspaceSql, batch: StagedWorkspaceCompletionFileBatch): Promise<void> {
