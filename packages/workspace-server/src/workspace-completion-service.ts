@@ -603,7 +603,10 @@ export class WorkspaceCompletionService {
   /** Internal review/Curator path.  It creates a provisional candidate and
    * never points an existing confirmed Resource at model output. */
   async proposeResourceVersion(context: WorkspaceRequestContext, input: WorkspaceCompletionAiResourceInput): Promise<WorkspaceCompletionResourceWriteResult> {
-    return this.writeResource(context, input, { creationSource: "ai", action: "workspace.completion.resource.propose" });
+    // This is the only public AI-proposal entry point.  Callers must not be
+    // able to create a provisional candidate that Curator later excludes just
+    // because an optional transport field was omitted.
+    return this.writeResource(context, { ...input, aiManaged: true }, { creationSource: "ai", action: "workspace.completion.resource.propose" });
   }
 
   /** Migration is the sole normal-path producer of `import` rows.  It shares

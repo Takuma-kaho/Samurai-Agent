@@ -57,16 +57,27 @@ for (const target of targets) {
 }
 if (probeFailures.length > 0) throw new Error(`server04_completion_targets_failed:${probeFailures.join(";")}`);
 
+interface ProbeStageFailure {
+  stage: string;
+  message: string;
+  code?: string;
+}
+
 /**
  * A Completion probe contains several independent product paths. Do not let
  * one failed path hide later paths which can still be checked safely against
  * the committed database state. A skipped stage is never reported as passed.
  */
-async function collectProbeStage(failures: string[], stage: string, action: () => Promise<void>): Promise<void> {
+async function collectProbeStage(failures: ProbeStageFailure[], stage: string, action: () => Promise<void>): Promise<void> {
   try {
     await action();
   } catch (error) {
-    failures.push(`${stage}:${error instanceof Error ? error.message : String(error)}`);
+    const value = error && typeof error === "object" ? error as { code?: unknown } : undefined;
+    failures.push({
+      stage,
+      message: error instanceof Error ? error.message : String(error),
+      ...(typeof value?.code === "string" ? { code: value.code } : {})
+    });
   }
 }
 
@@ -82,6 +93,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const suffix = randomUUID().replaceAll("-", "");
   const workspaceId = `workspace_completion04_${target.label}_${suffix}`;
   const restoredWorkspaceId = `workspace_completion04_restore_${suffix}`;
+  const v3SourceWorkspaceId = `workspace_completion04_v3_source_${suffix}`;
   const v3ImportedWorkspaceId = `workspace_completion04_v3_${suffix}`;
   const v3RestoredWorkspaceId = `workspace_completion04_v3_restore_${suffix}`;
   const root = await mkdtemp(path.join(os.tmpdir(), "samurai-completion04-"));
@@ -94,7 +106,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   let stage = "resources_policy";
   let probeFailure: Error | undefined;
   let cleanupFailure: Error | undefined;
-  const stageFailures: string[] = [];
+  const stageFailures: ProbeStageFailure[] = [];
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -689,7 +701,47 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       migrationRunId: pausedMigrationRunId,
       migrationOperation: "completion_backfill" as const
     };
-    await store.database.withContext(pausedBackfillContext, async (sql) => {
+    // The actual migrator derives a per-resource operation ID while retaining
+    // the signed human caller. Exercise that exact transaction shape before
+    // the wider migration so an RLS regression cannot hide behind a generic
+    // migration failure.
+    const pausedFileBatchContext = {
+      ...pausedBackfillContext,
+      operationId: operationId("migration-file-batch")
+    };
+    await store.database.withContext(pausedFileBatchContext, async (sql) => {
+      const capability = await sql.query<{ allowed: boolean }>(
+        "SELECT samurai_completion_migration_write_allowed($1) AS allowed",
+        [workspaceId]
+      );
+      assert(capability.rows[0]?.allowed === true, "server04_completion_migration_file_batch_capability_missing");
+      const batchId = `completion_migration_capability_batch_${suffix.slice(0, 18)}`;
+      await sql.query(
+        `INSERT INTO workspace_completion_file_batches(workspace_id, id, scope_kind, room_id, status)
+         VALUES ($1, $2, 'room', $3, 'db_committed')`,
+        [workspaceId, batchId, rootRoom.id]
+      );
+      await sql.query(
+        `INSERT INTO workspace_completion_file_batch_entries(workspace_id, batch_id, path, sha256, size)
+         VALUES ($1, $2, 'migration-capability.txt', $3, 1)`,
+        [workspaceId, batchId, "b".repeat(64)]
+      );
+      await sql.query(
+        "UPDATE workspace_completion_file_batches SET status = 'renamed' WHERE workspace_id = $1 AND id = $2",
+        [workspaceId, batchId]
+      );
+      await sql.query(
+        "UPDATE workspace_completion_file_batches SET status = 'db_committed' WHERE workspace_id = $1 AND id = $2",
+        [workspaceId, batchId]
+      );
+      await sql.query(
+        "DELETE FROM workspace_completion_file_batch_entries WHERE workspace_id = $1 AND batch_id = $2",
+        [workspaceId, batchId]
+      );
+      await sql.query(
+        "DELETE FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",
+        [workspaceId, batchId]
+      );
       await sql.query(
         "SELECT samurai_transition_completion_migration_run($1, $2, 'rolling_back', '{}'::JSONB, $3, NULL, NULL)",
         [workspaceId, pausedMigrationRunId, "a".repeat(64)]
@@ -808,9 +860,28 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     // legacy portable Workspace is first restored through its old path, then
     // migrated to the file-backed Completion model, exported as v4, and
     // restored again without losing the old body.
-    const v3LegacyResource = await new WorkspaceLearningService(store).putResource(ownerContext("v3-legacy-resource"), {
+    const v3SourceStore = target.label === "self_host"
+      ? new WorkspaceServerStore({
+        database,
+        mode: "self_host",
+        selfHostWorkspaceId: v3SourceWorkspaceId,
+        selfHostInitialAdminId: owner.id,
+        storageRoot: path.join(root, "v3-source-store"),
+        invitationTokenSecret: "x".repeat(32)
+      })
+      : store;
+    const v3Source = await v3SourceStore.createWorkspace({
+      id: v3SourceWorkspaceId,
+      name: "V3 source completion probe",
+      ownerAccountId: owner.id,
+      operationId: operationId("v3-source-create"),
+      hostingMode: target.label,
+      databasePlacement: target.label === "hosted" ? "shared" : "dedicated"
+    });
+    const v3SourceContext = (label: string) => humanContext(v3SourceWorkspaceId, owner, `v3-source-${label}`);
+    const v3LegacyResource = await new WorkspaceLearningService(v3SourceStore).putResource(v3SourceContext("legacy-resource"), {
       id: `legacy_v3_knowledge_${suffix.slice(0, 20)}`,
-      scope: { kind: "room", roomId: rootRoom.id },
+      scope: { kind: "room", roomId: v3Source.defaultRoom.id },
       kind: "knowledge",
       title: "V3 legacy knowledge",
       content: "This V3 row must become a file-backed Completion Resource.",
@@ -818,7 +889,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       reason: "V3 compatibility probe"
     });
     const v3Directory = path.join(root, "legacy.bundle.v3");
-    await new WorkspaceBundleV3Service(store).export(ownerContext("v3-export"), { destination: v3Directory });
+    await new WorkspaceBundleV3Service(v3SourceStore).export(v3SourceContext("export"), { destination: v3Directory });
     const v3MembershipRows = (await readFile(path.join(v3Directory, "memberships.jsonl"), "utf8"))
       .split("\n")
       .filter(Boolean)
@@ -884,7 +955,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         status: "failed",
         failed_stages: stageFailures
       }, null, 2));
-      probeFailure = new Error(`server04_completion_probe_${target.label}_stages_failed:${stageFailures.join(";")}`);
+      probeFailure = new Error(`server04_completion_probe_${target.label}_stages_failed:${stageFailures.map((failure) => `${failure.stage}:${failure.message}`).join(";")}`);
     } else {
       console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
     }
@@ -892,7 +963,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     probeFailure = new Error(`server04_completion_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
   } finally {
     try {
-      await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
+      await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3SourceWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
     } catch (error) {
       cleanupFailure = error instanceof Error ? error : new Error(String(error));
     }

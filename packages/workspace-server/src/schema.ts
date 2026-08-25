@@ -7985,6 +7985,59 @@ const migrations: readonly WorkspaceServerMigration[] = [
        END
        $$`
     ]
+  },
+  {
+    // A backfill may create and immediately read its own file-batch ledger
+    // while the Workspace is read-only.  The Run capability already limits
+    // that path to the matching owner, run and phase; include it in USING as
+    // well as WITH CHECK so finalization and child-entry checks do not lose
+    // visibility of the just-created batch.
+    version: 63,
+    name: "workspace_server_completion_migration_file_batch_visibility",
+    statements: [
+      "DROP POLICY workspace_completion_file_batches_access ON workspace_completion_file_batches",
+      `CREATE POLICY workspace_completion_file_batches_access ON workspace_completion_file_batches FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_completion_migration_write_allowed(workspace_id)
+          OR (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR samurai_completion_migration_write_allowed(workspace_id)
+          OR (samurai_workspace_is_writable(workspace_id) AND (
+            (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+            OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+          ))
+        )
+      )`,
+      "DROP POLICY workspace_completion_file_batch_entries_access ON workspace_completion_file_batch_entries",
+      `CREATE POLICY workspace_completion_file_batch_entries_access ON workspace_completion_file_batch_entries FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_completion_migration_write_allowed(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_completion_file_batches batch
+            WHERE batch.workspace_id = workspace_completion_file_batch_entries.workspace_id
+              AND batch.id = workspace_completion_file_batch_entries.batch_id
+              AND ((batch.scope_kind = 'workspace' AND samurai_can_workspace(batch.workspace_id, 'guest'))
+                OR (batch.scope_kind = 'room' AND batch.room_id IS NOT NULL AND samurai_can_room(batch.workspace_id, batch.room_id, 'read')))
+          )
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_file_batches batch
+          WHERE batch.workspace_id = workspace_completion_file_batch_entries.workspace_id
+            AND batch.id = workspace_completion_file_batch_entries.batch_id
+            AND (samurai_is_import_session(batch.workspace_id)
+              OR samurai_completion_migration_write_allowed(batch.workspace_id)
+              OR (samurai_workspace_is_writable(batch.workspace_id) AND (
+                (batch.scope_kind = 'workspace' AND samurai_can_workspace(batch.workspace_id, 'admin'))
+                OR (batch.scope_kind = 'room' AND batch.room_id IS NOT NULL AND samurai_can_room(batch.workspace_id, batch.room_id, 'execute'))
+              )))
+        )
+      )`
+    ]
   }
 ];
 
