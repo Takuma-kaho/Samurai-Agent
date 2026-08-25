@@ -100,6 +100,14 @@ export interface WorkspaceCompletionResourceInput {
   evidenceEpisodeId?: string;
 }
 
+/** A model-proposed Resource is never valid without Room-local evidence.
+ * Keep this distinct from human and import inputs so callers cannot defer an
+ * otherwise deterministic contract failure until a live PostgreSQL probe. */
+export interface WorkspaceCompletionAiResourceInput extends WorkspaceCompletionResourceInput {
+  evidenceActivityIds: readonly [string, ...string[]];
+  evidenceEpisodeId: string;
+}
+
 export interface WorkspaceCompletionSkillSupportInput {
   path: string;
   content: Uint8Array;
@@ -594,7 +602,7 @@ export class WorkspaceCompletionService {
 
   /** Internal review/Curator path.  It creates a provisional candidate and
    * never points an existing confirmed Resource at model output. */
-  async proposeResourceVersion(context: WorkspaceRequestContext, input: WorkspaceCompletionResourceInput): Promise<WorkspaceCompletionResourceWriteResult> {
+  async proposeResourceVersion(context: WorkspaceRequestContext, input: WorkspaceCompletionAiResourceInput): Promise<WorkspaceCompletionResourceWriteResult> {
     return this.writeResource(context, input, { creationSource: "ai", action: "workspace.completion.resource.propose" });
   }
 

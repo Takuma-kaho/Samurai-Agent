@@ -288,19 +288,12 @@ try {
         ["Hosted and Self-host PostgreSQL Completion Server04 load probes", ["--import", "tsx", "scripts/verify-server-04-completion-load.ts"]],
         ["Hosted and Self-host PostgreSQL Runtime recovery probes", ["--import", "tsx", "scripts/verify-runtime-recovery-rls.ts"]]
       ];
-      let postgresqlPassed = true;
+      // Every probe owns and cleans up its own Workspace fixture. Run every
+      // one even when an earlier probe fails so a single CI run reports all
+      // independently observable PostgreSQL failures. A later result is not
+      // downgraded to a synthetic "prerequisite_failed" success/failure.
       for (const [label, args] of postgresqlChecks) {
-        if (!postgresqlPassed) {
-          checks.push({
-            label,
-            started_at: new Date().toISOString(),
-            completed_at: new Date().toISOString(),
-            status: "failed",
-            error: "postgresql_prerequisite_failed"
-          });
-          continue;
-        }
-        postgresqlPassed = run(label, "node", args, {
+        run(label, "node", args, {
           env: environment,
           ...(label.includes("load probes") ? { timeoutMs: 30 * 60 * 1000 } : {})
         });

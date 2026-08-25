@@ -57,6 +57,19 @@ for (const target of targets) {
 }
 if (probeFailures.length > 0) throw new Error(`server04_completion_targets_failed:${probeFailures.join(";")}`);
 
+/**
+ * A Completion probe contains several independent product paths. Do not let
+ * one failed path hide later paths which can still be checked safely against
+ * the committed database state. A skipped stage is never reported as passed.
+ */
+async function collectProbeStage(failures: string[], stage: string, action: () => Promise<void>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    failures.push(`${stage}:${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function targetFromEnvironment(prefix: "HOSTED" | "SELF_HOST", label: ProbeTarget["label"]): ProbeTarget {
   const databaseUrl = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_URL`];
   const adminDatabaseUrl = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_ADMIN_URL`];
@@ -78,9 +91,10 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const accounts = [owner, otherRoomMember, maintenanceAccount];
   const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
-  let stage = "setup";
+  let stage = "resources_policy";
   let probeFailure: Error | undefined;
   let cleanupFailure: Error | undefined;
+  const stageFailures: string[] = [];
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -273,6 +287,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const startup = await completion.getStartupContext({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, operation: "resource.create" });
     assert(startup.profile?.includes("evidence-backed"), "server04_completion_profile_not_loaded");
 
+    stage = "review_setup";
     const activity = await completion.ingestActivity(ownerContext("activity"), {
       roomId: rootRoom.id,
       sourceApp: "probe",
@@ -285,8 +300,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       explicitRemember: false
     });
     assert(!activity.eligible && !activity.job, "server04_completion_activity_unexpected_review_job");
+    await collectProbeStage(stageFailures, "review_and_attestation", async () => {
     const snapshot = await completion.createReviewSnapshot({ workspaceId, accountId: owner.id }, activity.episode.id);
-    stage = "review_initial_apply";
     const reviewed = await completion.applyReviewResult(ownerContext("review"), {
       snapshot,
       result: {
@@ -496,7 +511,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     assert(firstPage.items.length === 1 && firstPage.nextCursor, "server04_completion_pagination_missing");
     const secondPage = await completion.listResourcesPage({ workspaceId, accountId: owner.id }, { roomId: rootRoom.id, limit: 10, cursor: firstPage.nextCursor });
     assert(secondPage.items.length >= 2, "server04_completion_pagination_cursor_missing");
+    });
 
+    await collectProbeStage(stageFailures, "curator_and_maintenance", async () => {
     const curator = new WorkspaceCompletionCuratorService(completion);
     const maintenance = new WorkspaceCompletionMaintenanceService(completion, jobs, curator);
 
@@ -511,7 +528,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       title: "Curator first candidate",
       content: "First AI candidate for a stale-plan probe.",
       metadata: { statement: "First candidate", subject: "curator probe", evidence: "test fixture" },
-      reason: "Curator stale input probe."
+      reason: "Curator stale input probe.",
+      evidenceEpisodeId: activity.episode.id,
+      evidenceActivityIds: [activity.activity.id]
     });
     const curatorSecond = await completion.proposeResourceVersion(ownerContext("curator-second"), {
       id: `completion_curator_second_${suffix.slice(0, 18)}`,
@@ -521,7 +540,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       title: "Curator second candidate",
       content: "Second AI candidate for a stale-plan probe.",
       metadata: { statement: "Second candidate", subject: "curator probe", evidence: "test fixture" },
-      reason: "Curator stale input probe."
+      reason: "Curator stale input probe.",
+      evidenceEpisodeId: activity.episode.id,
+      evidenceActivityIds: [activity.activity.id]
     });
     const seededCurator = await curator.runLight(ownerContext("curator-seed"), { roomId: rootRoom.id });
     assert(seededCurator.status === "seeded", "server04_completion_curator_seed_missing");
@@ -577,7 +598,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       title: "Duplicate AI candidate",
       content: "Exactly duplicated AI body for rollback protection.",
       metadata: { statement: "Duplicate", subject: "curator probe", evidence: "test fixture" },
-      reason: "Curator rollback probe."
+      reason: "Curator rollback probe.",
+      evidenceEpisodeId: activity.episode.id,
+      evidenceActivityIds: [activity.activity.id]
     });
     const duplicateSecond = await completion.proposeResourceVersion(ownerContext("curator-duplicate-second"), {
       id: `completion_curator_duplicate_second_${suffix.slice(0, 14)}`,
@@ -587,7 +610,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       title: "Duplicate AI candidate",
       content: "Exactly duplicated AI body for rollback protection.",
       metadata: { statement: "Duplicate", subject: "curator probe", evidence: "test fixture" },
-      reason: "Curator rollback probe."
+      reason: "Curator rollback probe.",
+      evidenceEpisodeId: activity.episode.id,
+      evidenceActivityIds: [activity.activity.id]
     });
     await adminDatabase.withAdmin(async (sql) => {
       await sql.query(
@@ -623,7 +648,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       operationId: operationId("maintenance-tick")
     }, { workerId: "completion_maintenance_worker", maxRuns: 10 });
     assert(maintenanceResult.queuedCuratorJobs >= 1, "server04_completion_maintenance_curator_not_queued");
+    });
 
+    await collectProbeStage(stageFailures, "migration_and_bundle_v4", async () => {
     // Starting a dedicated Run flips the Workspace to read-only before any
     // source snapshot. A normal Server write is therefore an explicit deny,
     // while only the matching Run capability may move it to rollback.
@@ -774,12 +801,22 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       return { marker: marker.rows[0]?.exists === true, memberships: memberships.rows[0]?.exists === true };
     });
     assert(!restoredMaintenance.marker && !restoredMaintenance.memberships, "server04_completion_bundle_v4_maintenance_membership_restored");
+    });
 
+    await collectProbeStage(stageFailures, "bundle_v3_compatibility", async () => {
     // Compatibility is not merely "the v3 reader accepts a manifest". A
     // legacy portable Workspace is first restored through its old path, then
     // migrated to the file-backed Completion model, exported as v4, and
     // restored again without losing the old body.
-    stage = "bundle_v3";
+    const v3LegacyResource = await new WorkspaceLearningService(store).putResource(ownerContext("v3-legacy-resource"), {
+      id: `legacy_v3_knowledge_${suffix.slice(0, 20)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
+      kind: "knowledge",
+      title: "V3 legacy knowledge",
+      content: "This V3 row must become a file-backed Completion Resource.",
+      payload: { knowledge_kind: "fact" },
+      reason: "V3 compatibility probe"
+    });
     const v3Directory = path.join(root, "legacy.bundle.v3");
     await new WorkspaceBundleV3Service(store).export(ownerContext("v3-export"), { destination: v3Directory });
     const v3MembershipRows = (await readFile(path.join(v3Directory, "memberships.jsonl"), "utf8"))
@@ -837,9 +874,20 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const v3RestoredLegacy = await new WorkspaceCompletionService(v3RestoreStore).getResourceBody({
       workspaceId: v3Restored.workspaceId,
       accountId: owner.id
-    }, legacyResource.resource.id);
-    assert(v3RestoredLegacy.content === "This old row must become a file-backed Completion Resource.", "server04_completion_v3_to_v4_roundtrip_failed");
-    console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
+    }, v3LegacyResource.resource.id);
+    assert(v3RestoredLegacy.content === "This V3 row must become a file-backed Completion Resource.", "server04_completion_v3_to_v4_roundtrip_failed");
+    });
+    if (stageFailures.length > 0) {
+      console.error(JSON.stringify({
+        verifier: "server04-completion-rls",
+        target: target.label,
+        status: "failed",
+        failed_stages: stageFailures
+      }, null, 2));
+      probeFailure = new Error(`server04_completion_probe_${target.label}_stages_failed:${stageFailures.join(";")}`);
+    } else {
+      console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
+    }
   } catch (error) {
     probeFailure = new Error(`server04_completion_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
   } finally {
