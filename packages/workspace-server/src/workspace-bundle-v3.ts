@@ -45,6 +45,15 @@ export const WORKSPACE_BUNDLE_INCOMING_TTL_MS = 60 * 60 * 1000;
 const transferExportLocks = new Map<string, Promise<void>>();
 const bundleStagingLocks = new Map<string, Promise<void>>();
 
+function safeErrorCode(error: unknown): string {
+  if (error instanceof WorkspaceServerError) return error.code;
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Za-z0-9_.:-]+$/.test(code)) return code;
+  }
+  return "workspace_server_internal_error";
+}
+
 const portableSchema: Readonly<Record<string, { required: readonly string[]; allowed: readonly string[] }>> = {
   [workspaceFile]: {
     required: ["id", "name", "hosting_mode", "database_placement", "storage_namespace", "created_by", "version", "created_at", "updated_at"],
@@ -706,19 +715,26 @@ export class WorkspaceBundleV3Service {
       };
     } catch (error) {
       let abortFailed = false;
+      let abortError: unknown;
       if (importSessionStarted) {
         try {
           await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
-          await sql.query("SELECT samurai_abort_workspace_import($1, $2)", [input.targetWorkspaceId, importId]);
+            await sql.query("SELECT samurai_abort_workspace_import($1, $2)", [input.targetWorkspaceId, importId]);
           });
-        } catch {
+        } catch (cleanupError) {
           abortFailed = true;
+          abortError = cleanupError;
         }
       }
       // Do not remove the files if database cleanup failed: keeping them is
       // the only recoverable evidence for a partially imported Workspace.
       if (!abortFailed && finalRootCreated) await rm(finalRoot, { recursive: true, force: true }).catch(() => undefined);
-      if (abortFailed) throw new WorkspaceServerError("workspace_import_abort_failed", 500);
+      if (abortFailed) {
+        throw new WorkspaceServerError("workspace_import_abort_failed", 500, {
+          primary_error_code: safeErrorCode(error),
+          cleanup_error_code: safeErrorCode(abortError)
+        });
+      }
       throw error;
     } finally {
       await rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);

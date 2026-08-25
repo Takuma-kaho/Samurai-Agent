@@ -59,8 +59,28 @@ if (probeFailures.length > 0) throw new Error(`server04_completion_targets_faile
 
 interface ProbeStageFailure {
   stage: string;
+  step: string;
+  status: "failed" | "blocked";
   message: string;
   code?: string;
+  primary_error_code?: string;
+  cleanup_error_code?: string;
+}
+
+function safeProbeCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]+$/.test(value) ? value : undefined;
+}
+
+function probeErrorDetails(error: unknown): { code?: string; primary?: string; cleanup?: string; step?: string } {
+  if (!error || typeof error !== "object") return {};
+  const value = error as { code?: unknown; details?: unknown; probeStep?: unknown };
+  const details = value.details && typeof value.details === "object" ? value.details as Record<string, unknown> : {};
+  return {
+    code: safeProbeCode(value.code),
+    primary: safeProbeCode(details.primary_error_code),
+    cleanup: safeProbeCode(details.cleanup_error_code),
+    step: typeof value.probeStep === "string" ? value.probeStep : undefined
+  };
 }
 
 /**
@@ -72,11 +92,15 @@ async function collectProbeStage(failures: ProbeStageFailure[], stage: string, a
   try {
     await action();
   } catch (error) {
-    const value = error && typeof error === "object" ? error as { code?: unknown } : undefined;
+    const details = probeErrorDetails(error);
     failures.push({
       stage,
+      step: details.step ?? stage,
+      status: "failed",
       message: error instanceof Error ? error.message : String(error),
-      ...(typeof value?.code === "string" ? { code: value.code } : {})
+      ...(details.code ? { code: details.code } : {}),
+      ...(details.primary ? { primary_error_code: details.primary } : {}),
+      ...(details.cleanup ? { cleanup_error_code: details.cleanup } : {})
     });
   }
 }
@@ -87,9 +111,22 @@ async function runProbeStep<T>(step: string, action: () => Promise<T>): Promise<
   try {
     return await action();
   } catch (error) {
-    const value = error && typeof error === "object" ? error as { code?: unknown } : undefined;
-    const wrapped = new Error(`${step}:${error instanceof Error ? error.message : String(error)}`);
-    if (typeof value?.code === "string") Object.assign(wrapped, { code: value.code });
+    const details = probeErrorDetails(error);
+    const wrapped = new Error(`${step}:${error instanceof Error ? error.message : String(error)}`) as Error & {
+      code?: string;
+      details?: Record<string, unknown>;
+      probeStep?: string;
+    };
+    Object.assign(wrapped, {
+      probeStep: step,
+      ...(details.code ? { code: details.code } : {}),
+      ...((details.primary || details.cleanup) ? {
+        details: {
+          ...(details.primary ? { primary_error_code: details.primary } : {}),
+          ...(details.cleanup ? { cleanup_error_code: details.cleanup } : {})
+        }
+      } : {})
+    });
     throw wrapped;
   }
 }
@@ -974,7 +1011,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         status: "failed",
         failed_stages: stageFailures
       }, null, 2));
-      probeFailure = new Error(`server04_completion_probe_${target.label}_stages_failed:${stageFailures.map((failure) => `${failure.stage}:${failure.message}`).join(";")}`);
+      probeFailure = new Error(`server04_completion_probe_${target.label}_stages_failed:${JSON.stringify(stageFailures)}`);
     } else {
       console.log(`[Server04 completion] ${target.label}: file body, RLS, review, scheduler, migration, v3-to-v4, and Bundle v4 probes passed`);
     }

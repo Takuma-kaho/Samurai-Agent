@@ -67,7 +67,7 @@ const postgresApi = existsSync(path.join(root, "apps/server/src/workspace-server
 const missingLiveEnvironment = requiredLiveEnvironment();
 const issues = [];
 if (forbidden.length > 0) issues.push({ code: "legacy_storage_or_api_references_present", files: forbidden });
-if (missingLiveEnvironment.length > 0 && !staticOnly) issues.push({ code: "postgres_live_rls_evidence_unavailable", missing_environment: missingLiveEnvironment });
+if (missingLiveEnvironment.length > 0 && !staticOnly) issues.push({ code: "postgres_live_environment_unavailable", missing_environment: missingLiveEnvironment });
 
 const hasStaticBlocker = forbidden.length > 0;
 const hasUnverifiedLiveEvidence = missingLiveEnvironment.length > 0 && !staticOnly;
@@ -75,13 +75,14 @@ const hasUnverifiedLiveEvidence = missingLiveEnvironment.length > 0 && !staticOn
 const result = {
   status: hasStaticBlocker ? "blocked" : hasUnverifiedLiveEvidence ? "unverified" : staticOnly && missingLiveEnvironment.length > 0 ? "passed_static_only" : "passed",
   storage_target: "postgresql",
-  deletion_allowed: forbidden.length === 0 && missingLiveEnvironment.length === 0,
+  static_legacy_reference_gate: hasStaticBlocker ? "blocked" : "passed",
+  live_postgres_environment: missingLiveEnvironment.length === 0 ? "available" : "unavailable",
+  missing_environment: missingLiveEnvironment,
   scanned_files: files.length,
   legacy_reference_count: forbidden.length,
   legacy_references: forbidden,
   legacy_api_route_count: 0,
   postgres_api_route_count: postgresApi.length,
-  live_postgres_rls_evidence: missingLiveEnvironment.length === 0 ? "configured" : "unverified",
   verification_scope: staticOnly ? "static_reference_scan_only" : "static_reference_scan_and_live_environment_check",
   issues
 };
