@@ -1309,6 +1309,12 @@ function portableRow(row: Record<string, unknown>): Record<string, unknown> {
 
 function portableRuntimeRow(table: string, row: Record<string, unknown>): Record<string, unknown> {
   const portable = portableRow(row);
+  if (table === "workspace_completion_migration_receipts") {
+    // A migration receipt remains complete in PostgreSQL, but the portable
+    // Bundle must never carry identifiers that were excluded because they
+    // matched secret detection.  Keep a count as portable audit evidence.
+    return { ...portable, counts: portableMigrationReceiptCounts(portable.counts) };
+  }
   if (table === "workspace_runtime_activities") {
     // Runtime runs are intentionally not part of V4's process state. Keep the
     // Activity record, but remove the foreign key to a non-portable run.
@@ -1329,6 +1335,17 @@ function portableRuntimeRow(table: string, row: Record<string, unknown>): Record
     };
   }
   return portable;
+}
+
+function portableMigrationReceiptCounts(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const counts = value as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(counts, "blocked_secret_resources")) return counts;
+  const { blocked_secret_resources: blocked, ...portable } = counts;
+  return {
+    ...portable,
+    filtered_resource_count: Array.isArray(blocked) ? blocked.length : 0
+  };
 }
 
 function portableConnectionDescriptorRow(row: Record<string, unknown>): Record<string, unknown> {

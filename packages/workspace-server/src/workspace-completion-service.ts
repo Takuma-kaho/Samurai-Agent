@@ -2914,7 +2914,10 @@ export class WorkspaceCompletionService {
     }
   }
 
-  private async finalizeBatch(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, batchId: string): Promise<void> {
+  private async finalizeBatch(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "migrationRunId" | "migrationOperation">,
+    batchId: string
+  ): Promise<void> {
     await this.store.database.withContext(context, async (sql) => {
       const header = await sql.query<{ id: string; scope_kind: "workspace" | "room"; room_id: string | null; status: "db_committed" | "renamed" | "rolled_back" }>(
         "SELECT id, scope_kind, room_id, status FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",

@@ -723,6 +723,10 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       operationId: operationId("migration-file-batch")
     };
     await store.database.withContext(pausedFileBatchContext, async (sql) => {
+      await runProbeStep("migration_backfill_start", () => sql.query(
+        "SELECT samurai_transition_completion_migration_run($1, $2, 'backfilling', '{}'::JSONB, $3, NULL, NULL)",
+        [workspaceId, pausedMigrationRunId, "a".repeat(64)]
+      ));
       const capability = await runProbeStep("migration_file_batch_capability", () => sql.query<{ allowed: boolean }>(
         "SELECT samurai_completion_migration_write_allowed($1) AS allowed",
         [workspaceId]
@@ -782,7 +786,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       reason: "Legacy probe"
     });
     const migration = new WorkspaceCompletionMigrationService(completion);
-    const migrated = await migration.migrateLegacy(ownerContext("legacy-migrate"));
+    const migrated = await runProbeStep("completion_legacy_migrate", () => migration.migrateLegacy(ownerContext("legacy-migrate")));
     assert(Boolean(migrated.verificationHash) && migrated.receiptId, "server04_completion_migration_not_verified");
     const migratedBody = await completion.getResourceBody({ workspaceId, accountId: owner.id }, legacyResource.resource.id);
     assert(migratedBody.content === "This old row must become a file-backed Completion Resource.", "server04_completion_migration_body_missing");
@@ -808,7 +812,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       );
     });
     const bundleExportContext = ownerContext("bundle-export");
-    const exported = await bundles.export(bundleExportContext, { destination: bundleDirectory });
+    const exported = await runProbeStep("bundle_v4_export", () => bundles.export(bundleExportContext, { destination: bundleDirectory }));
     assert(exported.manifest.format_version === 4, "server04_completion_bundle_v4_missing");
     await verifyWorkspaceBundleV4(bundleDirectory);
     const retriedExport = await bundles.export(bundleExportContext, { destination: bundleDirectory });
@@ -840,11 +844,13 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         invitationTokenSecret: "x".repeat(32)
       })
       : store;
-    const imported = await new WorkspaceBundleV4Service(restoreStore).importNew({ accountId: owner.id, operationId: operationId("bundle-import") }, {
-      sourceDirectory: bundleDirectory,
-      targetWorkspaceId: restoredWorkspaceId,
-      targetWorkspaceName: "Restored completion probe"
-    });
+    const imported = await runProbeStep("bundle_v4_import", () =>
+      new WorkspaceBundleV4Service(restoreStore).importNew({ accountId: owner.id, operationId: operationId("bundle-import") }, {
+        sourceDirectory: bundleDirectory,
+        targetWorkspaceId: restoredWorkspaceId,
+        targetWorkspaceName: "Restored completion probe"
+      })
+    );
     const restoredCompletion = new WorkspaceCompletionService(restoreStore);
     const restoredBody = await restoredCompletion.getResourceBody({ workspaceId: imported.workspaceId, accountId: owner.id }, knowledge.resource.id);
     assert(restoredBody.content === expectedKnowledgeContent, "server04_completion_bundle_v4_roundtrip_failed");

@@ -69,9 +69,50 @@ describe("Workspace Bundle v4 HTTP transport", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects migration receipts that expose excluded secret-shaped resource identifiers", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-"));
+    try {
+      const source = path.join(root, "source");
+      await writeMinimalV4Bundle(source, {
+        migrationReceipts: [{
+          workspace_id: workspaceId,
+          id: "completion_migration_receipt_test",
+          counts: { blocked_secret_resources: ["sk-live-must-not-be-portable"] }
+        }]
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).rejects.toThrow("workspace_bundle_v4_secret_forbidden");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts portable migration receipts that retain only the filtered count", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-"));
+    try {
+      const source = path.join(root, "source");
+      await writeMinimalV4Bundle(source, {
+        migrationReceipts: [{
+          workspace_id: workspaceId,
+          id: "completion_migration_receipt_test",
+          counts: { filtered_resource_count: 1 }
+        }]
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).resolves.toMatchObject({
+        manifest: { format_version: 4 }
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
-async function writeMinimalV4Bundle(root: string): Promise<void> {
+async function writeMinimalV4Bundle(
+  root: string,
+  input: { migrationReceipts?: readonly Record<string, unknown>[] } = {}
+): Promise<void> {
   const base = path.join(root, "base-v3");
   await mkdir(base, { recursive: true, mode: 0o700 });
   const baseFiles: Record<string, string> = {
@@ -124,9 +165,18 @@ async function writeMinimalV4Bundle(root: string): Promise<void> {
 
   const completionRoot = path.join(root, "completion");
   await mkdir(completionRoot, { recursive: true, mode: 0o700 });
-  for (const file of completionFiles) await writeFile(path.join(completionRoot, file), "", { flag: "wx", mode: 0o600 });
+  const migrationReceipts = input.migrationReceipts ?? [];
+  for (const file of completionFiles) {
+    const content = file === "migration-receipts.jsonl"
+      ? migrationReceipts.map((row) => canonicalJson(row)).join("\n") + (migrationReceipts.length ? "\n" : "")
+      : "";
+    await writeFile(path.join(completionRoot, file), content, { flag: "wx", mode: 0o600 });
+  }
   const files = await hashFiles(root);
-  const recordCounts = Object.fromEntries(recordCountKeys.map((key) => [key, 0]));
+  const recordCounts = Object.fromEntries(recordCountKeys.map((key) => [
+    key,
+    key === "migration_receipts" ? migrationReceipts.length : 0
+  ]));
   await writeFile(path.join(root, "manifest.json"), canonicalJson({
     format_version: 4,
     workspace_id: workspaceId,
