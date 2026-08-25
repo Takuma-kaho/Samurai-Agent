@@ -58,13 +58,7 @@ for (const target of targets) {
     probeFailures.push(`${target.label}:${error instanceof Error ? error.message : String(error)}`);
   }
 }
-if (probeFailures.length > 0) {
-  for (const failure of probeFailures) {
-    const annotation = failure.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
-    console.log(`::error file=scripts/verify-server-04-completion-rls.ts::${annotation}`);
-  }
-  throw new Error(`server04_completion_targets_failed:${probeFailures.join(";")}`);
-}
+if (probeFailures.length > 0) throw new Error(`server04_completion_targets_failed:${probeFailures.join(";")}`);
 
 interface ProbeStageFailure {
   stage: string;

@@ -146,6 +146,17 @@ function escapeMarkdownCodeFence(value) {
   return String(value).replaceAll("```", "` ` `");
 }
 
+function escapeGitHubCommandValue(value) {
+  return String(value).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+function writeGitHubFailureAnnotations() {
+  for (const check of checks.filter((candidate) => candidate.status === "failed")) {
+    const details = [check.error, check.output_tail].filter(Boolean).join("\n");
+    process.stdout.write(`::error file=scripts/verify/ci-full.mjs::${escapeGitHubCommandValue(`${check.id}: ${details}`)}\n`);
+  }
+}
+
 function writeGitHubStepSummary(report, reportPath) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY?.trim();
   if (!summaryPath) return;
@@ -206,6 +217,7 @@ const report = {
 };
 const reportPath = writeReport(report);
 writeGitHubStepSummary(report, reportPath);
+writeGitHubFailureAnnotations();
 process.stdout.write(`${JSON.stringify({
   verifier: report.verifier,
   status: report.status,
