@@ -865,7 +865,18 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       );
       return { rows: rows.rows, embedded: embedded.rows[0]?.exists === true };
     });
-    assert(v4Ledger.rows.length === 1 && v4Ledger.rows[0]?.path === bundleDirectory && v4Ledger.rows[0]?.sha256 === exported.manifest.integrity_hash && !v4Ledger.embedded, "server04_completion_bundle_v4_ledger_mismatch");
+    assert(
+      v4Ledger.rows.length === 1
+        && v4Ledger.rows[0]?.path === bundleDirectory
+        && v4Ledger.rows[0]?.sha256 === exported.manifest.integrity_hash
+        && !v4Ledger.embedded,
+      `server04_completion_bundle_v4_ledger_mismatch:${JSON.stringify({
+        rows: v4Ledger.rows,
+        embedded: v4Ledger.embedded,
+        expected_path: bundleDirectory,
+        expected_sha256: exported.manifest.integrity_hash
+      })}`
+    );
     const repairedLedger = await store.database.withContext({ workspaceId, accountId: owner.id }, async (sql) => sql.query<{ id: string; format_version: number | string }>(
       "SELECT id, format_version FROM workspace_bundles WHERE workspace_id = $1 AND id = $2",
       [workspaceId, legacyBundleId]
