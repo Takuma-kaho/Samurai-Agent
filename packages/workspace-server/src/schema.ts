@@ -8329,6 +8329,18 @@ const migrations: readonly WorkspaceServerMigration[] = [
         AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id))
       )`
     ]
+  },
+  {
+    // V4 restore inserts links while the target Workspace is still inside
+    // its short-lived import session. Keep ordinary link writes unchanged;
+    // only that session receives the same explicit import exception as the
+    // other completion rows.
+    version: 69,
+    name: "workspace_server_completion_import_resource_link_policy",
+    statements: [
+      "DROP POLICY workspace_completion_links_access ON workspace_completion_resource_links",
+      `CREATE POLICY workspace_completion_links_access ON workspace_completion_resource_links FOR ALL USING (workspace_id = samurai_current_workspace_id() AND EXISTS (SELECT 1 FROM workspace_completion_resources source JOIN workspace_completion_resources target ON target.workspace_id = source.workspace_id AND target.id = workspace_completion_resource_links.to_resource_id WHERE source.workspace_id = workspace_completion_resource_links.workspace_id AND source.id = workspace_completion_resource_links.from_resource_id AND ((source.scope_kind = 'workspace' AND samurai_can_workspace(source.workspace_id, 'guest')) OR (source.scope_kind = 'room' AND source.room_id IS NOT NULL AND samurai_can_room(source.workspace_id, source.room_id, 'read'))) AND ((target.scope_kind = 'workspace' AND samurai_can_workspace(target.workspace_id, 'guest')) OR (target.scope_kind = 'room' AND target.room_id IS NOT NULL AND samurai_can_room(target.workspace_id, target.room_id, 'read'))))) WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))`
+    ]
   }
 ];
 
