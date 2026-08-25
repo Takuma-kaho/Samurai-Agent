@@ -1389,11 +1389,32 @@ async function signedJsonRequest(input: {
 
 async function rewriteBundleToFailDuringCompletionFinalize(directory: string, resourceId: string): Promise<void> {
   const baseDirectory = path.join(directory, "base-v3");
-  const blockerRelativePath = `files/knowledge/${resourceId}.md/abort-finalize-blocker.txt`;
+  const originalRelativePath = `files/knowledge/${resourceId}.md`;
+  const blockerRelativePath = `${originalRelativePath}/abort-finalize-blocker.txt`;
   const blockerContent = Buffer.from("This directory must make Completion finalize fail after the database commit.\n", "utf8");
-  const blockerPath = path.join(baseDirectory, ...blockerRelativePath.split("/"));
-  await mkdir(path.dirname(blockerPath), { recursive: true, mode: 0o700 });
-  await writeFile(blockerPath, blockerContent, { flag: "wx", mode: 0o600 });
+  const originalPath = path.join(baseDirectory, ...originalRelativePath.split("/"));
+  await rm(originalPath, { force: true });
+  await mkdir(path.join(baseDirectory, ...originalRelativePath.split("/")), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(baseDirectory, ...blockerRelativePath.split("/")), blockerContent, { flag: "wx", mode: 0o600 });
+
+  const filesJsonlPath = path.join(baseDirectory, "files.jsonl");
+  const filesJsonl = (await readFile(filesJsonlPath, "utf8"))
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const row = JSON.parse(line) as Record<string, unknown>;
+      if (row.path !== originalRelativePath.slice("files/".length)) return row;
+      return {
+        ...row,
+        path: blockerRelativePath.slice("files/".length),
+        sha256: hashBytes(blockerContent),
+        size: blockerContent.byteLength
+      };
+    })
+    .map((row) => canonicalJson(row))
+    .join("\n") + "\n";
+  const filesJsonlContent = Buffer.from(filesJsonl, "utf8");
+  await writeFile(filesJsonlPath, filesJsonlContent);
 
   const baseManifestPath = path.join(baseDirectory, "manifest.json");
   const baseManifest = JSON.parse(await readFile(baseManifestPath, "utf8")) as {
@@ -1402,7 +1423,8 @@ async function rewriteBundleToFailDuringCompletionFinalize(directory: string, re
     integrity_hash: string;
   };
   baseManifest.files = Object.fromEntries([
-    ...Object.entries(baseManifest.files),
+    ...Object.entries(baseManifest.files).filter(([relative]) => relative !== originalRelativePath && relative !== "files.jsonl"),
+    ["files.jsonl", hashBytes(filesJsonlContent)],
     [blockerRelativePath, hashBytes(blockerContent)]
   ].sort(([left], [right]) => left.localeCompare(right)));
   baseManifest.integrity_hash = hashText(canonicalJson({
@@ -1423,8 +1445,13 @@ async function rewriteBundleToFailDuringCompletionFinalize(directory: string, re
   };
   const baseManifestRelativePath = "base-v3/manifest.json";
   manifest.files = Object.fromEntries([
-    ...Object.entries(manifest.files).filter(([relative]) => relative !== baseManifestRelativePath),
+    ...Object.entries(manifest.files).filter(([relative]) => ![
+      baseManifestRelativePath,
+      `base-v3/${originalRelativePath}`,
+      "base-v3/files.jsonl"
+    ].includes(relative)),
     [baseManifestRelativePath, hashBytes(baseManifestContent)],
+    ["base-v3/files.jsonl", hashBytes(filesJsonlContent)],
     [`base-v3/${blockerRelativePath}`, hashBytes(blockerContent)]
   ].sort(([left], [right]) => left.localeCompare(right)));
   manifest.base_v3_integrity_hash = baseManifest.integrity_hash;
