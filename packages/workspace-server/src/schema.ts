@@ -7973,9 +7973,13 @@ const migrations: readonly WorkspaceServerMigration[] = [
        LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
        BEGIN
          IF NEW.creation_source = 'machine_verified'
-           AND CASE WHEN TG_OP = 'INSERT' THEN TRUE ELSE OLD.creation_source IS DISTINCT FROM 'machine_verified' END
+           AND NOT samurai_is_import_session(NEW.workspace_id)
            AND current_setting('samurai.completion_attestation_apply', true) IS DISTINCT FROM 'on' THEN
-           RAISE EXCEPTION 'workspace_completion_machine_verified_attestation_required';
+           IF TG_OP = 'INSERT' THEN
+             RAISE EXCEPTION 'workspace_completion_machine_verified_attestation_required';
+           ELSIF OLD.creation_source IS DISTINCT FROM 'machine_verified' THEN
+             RAISE EXCEPTION 'workspace_completion_machine_verified_attestation_required';
+           END IF;
          END IF;
          RETURN NEW;
        END

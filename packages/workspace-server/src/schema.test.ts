@@ -200,7 +200,10 @@ describe("Workspace Server PostgreSQL schema", () => {
     const completionActivityCorrectionIndexMigration = migrations.find((migration) => migration.version === 61);
     expect(completionActivityCorrectionIndexMigration?.statements.join("\n")).toContain("workspace_completion_activities_correction_index");
     const machineVerifiedTransitionGuardMigration = migrations.find((migration) => migration.version === 62);
-    expect(machineVerifiedTransitionGuardMigration?.statements.join("\n")).toContain("OLD.creation_source IS DISTINCT FROM 'machine_verified'");
+    const machineVerifiedTransitionGuard = machineVerifiedTransitionGuardMigration?.statements.join("\n");
+    expect(machineVerifiedTransitionGuard).toContain("IF TG_OP = 'INSERT' THEN");
+    expect(machineVerifiedTransitionGuard).toContain("ELSIF OLD.creation_source IS DISTINCT FROM 'machine_verified' THEN");
+    expect(machineVerifiedTransitionGuard).toContain("NOT samurai_is_import_session(NEW.workspace_id)");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
     for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);
