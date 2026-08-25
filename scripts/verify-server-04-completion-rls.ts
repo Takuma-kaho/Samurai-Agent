@@ -151,6 +151,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const v3ImportedWorkspaceId = `workspace_completion04_v3_${suffix}`;
   const v3RestoredWorkspaceId = `workspace_completion04_v3_restore_${suffix}`;
   const root = await mkdtemp(path.join(os.tmpdir(), "samurai-completion04-"));
+  const agentWorktreeRoot = path.join(os.tmpdir(), `samurai-completion04-agent-worktrees-${suffix}`);
   const owner = accountIdentity();
   const otherRoomMember = accountIdentity();
   const maintenanceAccount = accountIdentity();
@@ -227,7 +228,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         database,
         store,
         backendRegistry: new AgentBackendRegistry(),
-        agentWorktreeRoot: path.join(root, "automation-agent-worktrees"),
+        agentWorktreeRoot,
         coreWorkspaceRoot: root,
         reindexWiki: async () => ({ active: 0, total: 0 }),
         maxRuns: 1
@@ -1167,6 +1168,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     await database.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
     await adminDatabase.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
     await rm(root, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await rm(agentWorktreeRoot, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
   }
   if (probeFailure && cleanupFailure) throw new Error(`${probeFailure.message};cleanup:${cleanupFailure.message}`);
   if (probeFailure) throw probeFailure;
