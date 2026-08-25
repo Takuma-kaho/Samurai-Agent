@@ -15,6 +15,10 @@ describe("Workspace completion policy", () => {
     expect(containsWorkspaceCompletionSecret('{"oauth_client_secret":"must-not-persist"}')).toBe(true);
   });
 
+  it("allows non-secret authorization state metadata", () => {
+    expect(containsWorkspaceCompletionSecret('{"authorization_state":"ready","authorization_error_code":null}')).toBe(false);
+  });
+
   it("does not treat a caller's verified claim as deterministic learning evidence", () => {
     expect(classifyWorkspaceCompletionActivity({
       outcome: "completed", verificationOutcome: "confirmed", failureState: "none", explicitRemember: false, payload: {}

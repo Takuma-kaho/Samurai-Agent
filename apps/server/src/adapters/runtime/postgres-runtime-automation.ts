@@ -93,23 +93,23 @@ interface AutomationJobRow {
   session_ref: unknown;
   authorization_state: string;
   authorization_error_code: string | null;
-  authorized_at: string | null;
-  blocked_at: string | null;
-  rebound_at: string | null;
+  authorized_at: Date | string | null;
+  blocked_at: Date | string | null;
+  rebound_at: Date | string | null;
   management_state: string;
   management_operation_id: string | null;
   created_operation_id: string | null;
   rebound_operation_id: string | null;
-  next_run_at: string | null;
-  last_run_at: string | null;
-  retry_after_at: string | null;
-  locked_until: string | null;
+  next_run_at: Date | string | null;
+  last_run_at: Date | string | null;
+  retry_after_at: Date | string | null;
+  locked_until: Date | string | null;
   lock_owner_token: string | null;
   failure_count: number | string;
   max_attempts: number | string;
   last_error: string | null;
-  created_at: string;
-  updated_at: string;
+  created_at: Date | string;
+  updated_at: Date | string;
 }
 
 interface AutomationRunRow {
@@ -128,10 +128,10 @@ interface AutomationRunRow {
   app_id: string | null;
   activity_id: string | null;
   error_code: string | null;
-  scheduled_at: string;
-  started_at: string;
-  completed_at: string | null;
-  blocked_at: string | null;
+  scheduled_at: Date | string;
+  started_at: Date | string;
+  completed_at: Date | string | null;
+  blocked_at: Date | string | null;
   error: string | null;
   attempt_no: number | string;
 }
@@ -1020,23 +1020,23 @@ function jobFromRow(row: AutomationJobRow): AutomationJobRecord {
     ...(row.session_ref ? { session_ref: SessionRefSchema.parse(jsonValue(row.session_ref)) } : {}),
     authorization_state: row.authorization_state,
     ...(row.authorization_error_code ? { authorization_error_code: row.authorization_error_code } : {}),
-    ...(row.authorized_at ? { authorized_at: row.authorized_at } : {}),
-    ...(row.blocked_at ? { blocked_at: row.blocked_at } : {}),
-    ...(row.rebound_at ? { rebound_at: row.rebound_at } : {}),
+    ...(row.authorized_at ? { authorized_at: iso(row.authorized_at) } : {}),
+    ...(row.blocked_at ? { blocked_at: iso(row.blocked_at) } : {}),
+    ...(row.rebound_at ? { rebound_at: iso(row.rebound_at) } : {}),
     management_state: row.management_state,
     ...(row.management_operation_id ? { management_operation_id: row.management_operation_id } : {}),
     ...(row.created_operation_id ? { created_operation_id: row.created_operation_id } : {}),
     ...(row.rebound_operation_id ? { rebound_operation_id: row.rebound_operation_id } : {}),
-    ...(row.next_run_at ? { next_run_at: row.next_run_at } : {}),
-    ...(row.last_run_at ? { last_run_at: row.last_run_at } : {}),
-    ...(row.retry_after_at ? { retry_after_at: row.retry_after_at } : {}),
-    ...(row.locked_until ? { locked_until: row.locked_until } : {}),
+    ...(row.next_run_at ? { next_run_at: iso(row.next_run_at) } : {}),
+    ...(row.last_run_at ? { last_run_at: iso(row.last_run_at) } : {}),
+    ...(row.retry_after_at ? { retry_after_at: iso(row.retry_after_at) } : {}),
+    ...(row.locked_until ? { locked_until: iso(row.locked_until) } : {}),
     ...(row.lock_owner_token ? { lock_owner_token: row.lock_owner_token } : {}),
     failure_count: Number(row.failure_count),
     max_attempts: Number(row.max_attempts),
     ...(row.last_error ? { last_error: row.last_error } : {}),
-    created_at: row.created_at,
-    updated_at: row.updated_at
+    created_at: iso(row.created_at),
+    updated_at: iso(row.updated_at)
   });
 }
 
@@ -1058,14 +1058,18 @@ function runFromRow(row: AutomationRunRow): PostgresRuntimeAutomationRun {
       ...(row.app_id ? { app_id: row.app_id } : {}),
       ...(row.activity_id ? { activity_id: row.activity_id } : {}),
       ...(row.error_code ? { error_code: row.error_code } : {}),
-      started_at: row.started_at,
-      ...(row.completed_at ? { completed_at: row.completed_at } : {}),
-      ...(row.blocked_at ? { blocked_at: row.blocked_at } : {}),
+      started_at: iso(row.started_at),
+      ...(row.completed_at ? { completed_at: iso(row.completed_at) } : {}),
+      ...(row.blocked_at ? { blocked_at: iso(row.blocked_at) } : {}),
       ...(row.error ? { error: row.error } : {})
     }),
-    scheduled_at: row.scheduled_at,
+    scheduled_at: iso(row.scheduled_at),
     attempt_no: Number(row.attempt_no)
   };
+}
+
+function iso(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 function automationPrincipal(job: AutomationJobRecord) {
