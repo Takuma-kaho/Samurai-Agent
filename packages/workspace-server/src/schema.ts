@@ -8223,6 +8223,32 @@ const migrations: readonly WorkspaceServerMigration[] = [
       END
       $$`
     ]
+  },
+  {
+    // V4 imports restore the search projection inside the short-lived import
+    // session. Keep that path explicit; normal callers still need the
+    // migration capability or a writable Workspace.
+    version: 67,
+    name: "workspace_server_completion_import_search_projection_policy",
+    statements: [
+      "DROP POLICY workspace_completion_search_access ON workspace_completion_search_projection",
+      `CREATE POLICY workspace_completion_search_access ON workspace_completion_search_projection FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_search_projection.workspace_id
+            AND resource.id = workspace_completion_search_projection.resource_id
+            AND ((resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read')))
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR samurai_completion_migration_write_allowed(workspace_id)
+          OR samurai_workspace_is_writable(workspace_id)
+        )
+      )`
+    ]
   }
 ];
 
@@ -8858,7 +8884,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
   await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE samurai_server_schema_migrations FROM ${role}`);
   await sql.query(`GRANT SELECT ON TABLE ${tables.join(", ")} TO ${role}`);
   await sql.query(`GRANT INSERT, UPDATE, DELETE ON TABLE ${writableTables.join(", ")} TO ${role}`);
-  await sql.query(`REVOKE DELETE ON TABLE workspace_learning_activities, workspace_learning_resource_versions, workspace_learning_evidence, workspace_learning_resource_links, workspace_learning_jobs, workspace_learning_job_attempts, workspace_learning_resource_uses, workspace_completion_activities, workspace_completion_episode_activities, workspace_completion_resource_versions, workspace_completion_skill_files, workspace_completion_evidence, workspace_completion_resource_links, workspace_completion_policy_rules, workspace_completion_policy_change_requests, workspace_completion_uses, workspace_completion_evaluations, workspace_completion_job_attempts, workspace_completion_file_batch_entries, workspace_completion_migration_receipts, workspace_completion_migration_runs, workspace_completion_policy_approvals, workspace_completion_attestations FROM ${role}`);
+  await sql.query(`REVOKE DELETE ON TABLE workspace_learning_activities, workspace_learning_resource_versions, workspace_learning_evidence, workspace_learning_resource_links, workspace_learning_jobs, workspace_learning_job_attempts, workspace_learning_resource_uses, workspace_completion_activities, workspace_completion_episode_activities, workspace_completion_resource_versions, workspace_completion_skill_files, workspace_completion_evidence, workspace_completion_resource_links, workspace_completion_policy_rules, workspace_completion_policy_change_requests, workspace_completion_uses, workspace_completion_evaluations, workspace_completion_job_attempts, workspace_completion_migration_receipts, workspace_completion_migration_runs, workspace_completion_policy_approvals, workspace_completion_attestations FROM ${role}`);
   await sql.query(`REVOKE UPDATE ON TABLE workspace_completion_activities, workspace_completion_episode_activities, workspace_completion_evidence, workspace_completion_resource_links, workspace_completion_policy_rules, workspace_completion_policy_change_requests, workspace_completion_uses, workspace_completion_evaluations, workspace_completion_file_batch_entries, workspace_completion_migration_receipts, workspace_completion_migration_runs, workspace_completion_policy_approvals, workspace_completion_attestations FROM ${role}`);
   await sql.query(`REVOKE INSERT ON TABLE workspace_completion_migration_runs FROM ${role}`);
   await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE ${guardedMutationTables.join(", ")} FROM ${role}`);

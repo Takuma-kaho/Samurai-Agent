@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -163,6 +163,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("samurai_repair_workspace_bundle_v4_legacy_ledger");
     expect(schema).toContain("samurai_guard_completion_machine_attestation");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_import_abort_column_resolution");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_import_search_projection_policy");
     expect(schema).toContain("workspace_key");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_agent_room_permissions_and_connection_descriptors");
     for (const table of ["workspace_agents", "workspace_agent_room_permissions", "workspace_connection_descriptors"]) {
@@ -223,6 +224,8 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(importAbortDependencyOrder).toContain("workspace_completion_migration_runs");
     expect(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_resource_versions")).toBeLessThan(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_file_batches"));
     expect(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_file_batch_entries")).toBeLessThan(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_file_batches"));
+    const importSearchProjectionPolicy = migrations.find((migration) => migration.version === 67)?.statements.join("\n");
+    expect(importSearchProjectionPolicy).toContain("samurai_is_import_session(workspace_id)");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
     for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);
