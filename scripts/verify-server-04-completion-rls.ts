@@ -874,7 +874,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         rows: v4Ledger.rows,
         embedded: v4Ledger.embedded,
         expected_path: bundleDirectory,
-        expected_sha256: exported.manifest.integrity_hash
+        expected_sha256: exported.manifest.integrity_hash,
+        preview_base_v3_hash: previewBase.manifest.integrity_hash,
+        exported_base_v3_hash: exported.manifest.base_v3_integrity_hash
       })}`
     );
     const repairedLedger = await store.database.withContext({ workspaceId, accountId: owner.id }, async (sql) => sql.query<{ id: string; format_version: number | string }>(
