@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { evaluatePhase13Completion } from "./lib/phase13-completion.mjs";
 
 const root = process.cwd();
 const writeReport = process.argv.includes("--write-report");
@@ -95,25 +96,20 @@ function runCheck(definition) {
 
 const startedAt = new Date().toISOString();
 const checks = definitions.map(runCheck);
-const failed = checks.filter((check) => check.status === "failed");
-const unverified = checks.filter((check) => check.status === "unverified");
+const decision = evaluatePhase13Completion(checks);
 const report = {
   schema_version: 1,
   verifier: "phase13-completion",
-  status: failed.length > 0 ? "failed" : unverified.length > 0 ? "passed_with_unverified" : "passed",
-  complete: failed.length === 0,
-  environment_verified: unverified.length === 0,
+  ...decision,
   started_at: startedAt,
   completed_at: new Date().toISOString(),
   repository_root: root,
   checks,
-  unverified,
-  failed,
   note: "環境依存の未検証はPhase 13の静的完了判定と分離し、成功扱いにはしない。",
   ...(writeReport ? {} : { report_directory: reportDirectory })
 };
 
 const reportPath = path.join(reportDirectory, "phase13-latest.json");
 writeFileSync(reportPath, `${JSON.stringify({ ...report, report_file: reportPath }, null, 2)}\n`);
-process.stdout.write(`${JSON.stringify({ verifier: report.verifier, status: report.status, complete: report.complete, environment_verified: report.environment_verified, failed: failed.map((check) => check.id), unverified: unverified.map((check) => check.id), report_file: reportPath })}\n`);
-process.exitCode = failed.length > 0 ? 1 : 0;
+process.stdout.write(`${JSON.stringify({ verifier: report.verifier, status: report.status, complete: report.complete, environment_verified: report.environment_verified, failed: decision.failed.map((check) => check.id), unverified: decision.unverified.map((check) => check.id), report_file: reportPath })}\n`);
+process.exitCode = decision.exit_code;

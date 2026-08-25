@@ -1,10 +1,13 @@
-import { generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { Server as HttpServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { AgentBackendRegistry } from "../packages/agent-backends/src/contract.ts";
+import { PostgresRuntimeAutomation } from "../apps/server/src/adapters/runtime/postgres-runtime-automation.ts";
 import {
   accountIdFromPublicKey,
+  canonicalJson,
   createAccountSignaturePayload,
   createInternalWorkspaceConnectionCaller,
   createInternalWorkspaceMaintenanceCaller,
@@ -143,6 +146,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const suffix = randomUUID().replaceAll("-", "");
   const workspaceId = `workspace_completion04_${target.label}_${suffix}`;
   const restoredWorkspaceId = `workspace_completion04_restore_${suffix}`;
+  const failedRestoredWorkspaceId = `workspace_completion04_failed_${suffix}`;
   const v3SourceWorkspaceId = `workspace_completion04_v3_source_${suffix}`;
   const v3ImportedWorkspaceId = `workspace_completion04_v3_${suffix}`;
   const v3RestoredWorkspaceId = `workspace_completion04_v3_restore_${suffix}`;
@@ -188,6 +192,72 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     })).room;
     await store.setRoomMember(ownerContext("other-room-member"), {
       roomId: privateRoom.id, accountId: otherRoomMember.id, role: "member", state: "active", expectedVersion: 0
+    });
+    await collectProbeStage(stageFailures, "automation_rls_and_worker", async () => {
+      const agentId = `agent_completion04_${suffix.slice(0, 24)}`;
+      await store.registerAgent(ownerContext("automation-agent"), {
+        id: agentId,
+        displayName: "Automation probe agent",
+        description: "Agent identity for the V4 cleanup probe.",
+        backendId: "samurai-native"
+      });
+      await store.setAgentRoomPermission(ownerContext("automation-agent-room"), {
+        roomId: rootRoom.id,
+        agentId,
+        canView: true,
+        canEdit: true,
+        canExecute: true,
+        expectedVersion: 0
+      });
+      await store.upsertConnectionDescriptor(ownerContext("automation-connection"), {
+        id: `connection_completion04_${suffix.slice(0, 20)}`,
+        agentId,
+        principalAccountId: owner.id,
+        connectorId: "completion-probe",
+        appId: "completion-probe",
+        status: "revoked",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        revokedAt: new Date().toISOString(),
+        allowedRoomIds: [rootRoom.id],
+        roomLimit: 1,
+        ingressClasses: ["domain_operation"],
+        expectedVersion: 0
+      });
+      const automation = new PostgresRuntimeAutomation({
+        database,
+        store,
+        backendRegistry: new AgentBackendRegistry(),
+        agentWorktreeRoot: path.join(root, "automation-agent-worktrees"),
+        coreWorkspaceRoot: root,
+        reindexWiki: async () => ({ active: 0, total: 0 }),
+        maxRuns: 1
+      });
+      const job = await automation.createJob(ownerContext("automation-job"), {
+        roomId: privateRoom.id,
+        title: "Automation RLS probe",
+        kind: "wiki_reindex",
+        schedule: "once",
+        targetInstruction: "Run the PostgreSQL Automation worker probe.",
+        nextRunAt: new Date(Date.now() - 1_000).toISOString(),
+        maxAttempts: 1
+      });
+      const viewerDelete = await database.withContext({ workspaceId, accountId: otherRoomMember.id }, async (sql) => {
+        const visible = await sql.query<{ id: string }>(
+          "SELECT id FROM workspace_runtime_automation_jobs WHERE workspace_id = $1 AND id = $2",
+          [workspaceId, job.job.id]
+        );
+        const deleted = await sql.query<{ id: string }>(
+          "DELETE FROM workspace_runtime_automation_jobs WHERE workspace_id = $1 AND id = $2 RETURNING id",
+          [workspaceId, job.job.id]
+        );
+        return { visible: visible.rows.length, deleted: deleted.rows.length };
+      });
+      assert(viewerDelete.visible === 1 && viewerDelete.deleted === 0, `server04_automation_room_reader_delete_allowed:${JSON.stringify(viewerDelete)}`);
+      const workerResult = await automation.runTick(ownerContext("automation-worker"), {
+        workerId: "completion04-automation-worker",
+        signal: new AbortController().signal
+      });
+      assert(workerResult.claimed === 1 && workerResult.completed === 1, `server04_automation_worker_failed:${JSON.stringify(workerResult)}`);
     });
 
     const completion = new WorkspaceCompletionService(store);
@@ -922,6 +992,64 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       return { marker: marker.rows[0]?.exists === true, memberships: memberships.rows[0]?.exists === true };
     });
     assert(!restoredMaintenance.marker && !restoredMaintenance.memberships, "server04_completion_bundle_v4_maintenance_membership_restored");
+    const failureBundleDirectory = path.join(root, "failure.bundle.v4");
+    await cp(bundleDirectory, failureBundleDirectory, { recursive: true });
+    await rewriteBundleToFailDuringCompletionFinalize(failureBundleDirectory, knowledge.resource.id);
+    const failureRestoreStore = target.label === "self_host"
+      ? new WorkspaceServerStore({
+        database,
+        mode: "self_host",
+        selfHostWorkspaceId: failedRestoredWorkspaceId,
+        selfHostInitialAdminId: owner.id,
+        storageRoot: root,
+        invitationTokenSecret: "x".repeat(32)
+      })
+      : store;
+    let failedImportError: unknown;
+    try {
+      await new WorkspaceBundleV4Service(failureRestoreStore).importNew({ accountId: owner.id, operationId: operationId("bundle-import-failure") }, {
+        sourceDirectory: failureBundleDirectory,
+        targetWorkspaceId: failedRestoredWorkspaceId,
+        targetWorkspaceName: "Failed completion probe"
+      });
+    } catch (error) {
+      failedImportError = error;
+    }
+    assert(
+      failedImportError instanceof Error && !failedImportError.message.includes("workspace_import_abort_failed"),
+      `server04_completion_bundle_v4_failure_not_original_error:${failedImportError instanceof Error ? failedImportError.message : String(failedImportError)}`
+    );
+    const failedImportResidue = await adminDatabase.withAdmin(async (sql) => {
+      const tables = [
+        "workspace_runtime_activities", "workspace_runtime_automation_runs", "workspace_runtime_automation_jobs",
+        "workspace_connection_descriptors", "workspace_agent_room_permissions", "workspace_agents",
+        "workspace_completion_configurations", "workspace_completion_activities", "workspace_completion_episodes",
+        "workspace_completion_episode_activities", "workspace_completion_resources", "workspace_completion_resource_versions",
+        "workspace_completion_skill_files", "workspace_completion_policy_approvals", "workspace_completion_attestations",
+        "workspace_completion_evidence", "workspace_completion_resource_links", "workspace_completion_policy_rules",
+        "workspace_completion_policy_change_requests", "workspace_completion_uses", "workspace_completion_evaluations",
+        "workspace_completion_jobs", "workspace_completion_job_attempts", "workspace_completion_curator_state",
+        "workspace_completion_curator_snapshots", "workspace_completion_search_projection", "workspace_completion_workspace_documents",
+        "workspace_completion_redactions", "workspace_completion_file_batches", "workspace_completion_file_batch_entries",
+        "workspace_completion_migration_receipts", "workspace_completion_migration_runs", "workspace_completion_maintenance_identities",
+        "workspace_completion_job_raw_outputs", "workspace_import_sessions", "workspaces"
+      ];
+      const rows: Record<string, number> = {};
+      for (const table of tables) {
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        const result = await sql.query<{ count: number | string }>(
+          `SELECT COUNT(*) AS count FROM ${table} WHERE ${workspaceColumn} = $1`,
+          [failedRestoredWorkspaceId]
+        );
+        rows[table] = Number(result.rows[0]?.count ?? 0);
+      }
+      return rows;
+    });
+    assert(
+      Object.values(failedImportResidue).every((count) => count === 0)
+        && !(await pathExists(path.join(root, "workspaces", failedRestoredWorkspaceId))),
+      `server04_completion_bundle_v4_failure_residue:${JSON.stringify(failedImportResidue)}`
+    );
     });
 
     await collectProbeStage(stageFailures, "bundle_v3_compatibility", async () => {
@@ -1032,7 +1160,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     probeFailure = new Error(`server04_completion_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
   } finally {
     try {
-      await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, v3SourceWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
+      await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId, failedRestoredWorkspaceId, v3SourceWorkspaceId, v3ImportedWorkspaceId, v3RestoredWorkspaceId], accounts.map((account) => account.id));
     } catch (error) {
       cleanupFailure = error instanceof Error ? error : new Error(String(error));
     }
@@ -1259,6 +1387,75 @@ async function signedJsonRequest(input: {
   return { response, signature };
 }
 
+async function rewriteBundleToFailDuringCompletionFinalize(directory: string, resourceId: string): Promise<void> {
+  const baseDirectory = path.join(directory, "base-v3");
+  const blockerRelativePath = `files/knowledge/${resourceId}.md/abort-finalize-blocker.txt`;
+  const blockerContent = Buffer.from("This directory must make Completion finalize fail after the database commit.\n", "utf8");
+  const blockerPath = path.join(baseDirectory, ...blockerRelativePath.split("/"));
+  await mkdir(path.dirname(blockerPath), { recursive: true, mode: 0o700 });
+  await writeFile(blockerPath, blockerContent, { flag: "wx", mode: 0o600 });
+
+  const baseManifestPath = path.join(baseDirectory, "manifest.json");
+  const baseManifest = JSON.parse(await readFile(baseManifestPath, "utf8")) as {
+    files: Record<string, string>;
+    record_counts: Record<string, unknown>;
+    integrity_hash: string;
+  };
+  baseManifest.files = Object.fromEntries([
+    ...Object.entries(baseManifest.files),
+    [blockerRelativePath, hashBytes(blockerContent)]
+  ].sort(([left], [right]) => left.localeCompare(right)));
+  baseManifest.integrity_hash = hashText(canonicalJson({
+    files: baseManifest.files,
+    record_counts: baseManifest.record_counts
+  }));
+  const baseManifestContent = Buffer.from(canonicalJson(baseManifest), "utf8");
+  await writeFile(baseManifestPath, baseManifestContent);
+
+  const manifestPath = path.join(directory, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    files: Record<string, string>;
+    record_counts: Record<string, unknown>;
+    integrity_hash: string;
+    base_v3_integrity_hash: string;
+    transfer_id?: string;
+    excluded_maintenance_account_ids: string[];
+  };
+  const baseManifestRelativePath = "base-v3/manifest.json";
+  manifest.files = Object.fromEntries([
+    ...Object.entries(manifest.files).filter(([relative]) => relative !== baseManifestRelativePath),
+    [baseManifestRelativePath, hashBytes(baseManifestContent)],
+    [`base-v3/${blockerRelativePath}`, hashBytes(blockerContent)]
+  ].sort(([left], [right]) => left.localeCompare(right)));
+  manifest.base_v3_integrity_hash = baseManifest.integrity_hash;
+  manifest.integrity_hash = hashText(canonicalJson({
+    files: manifest.files,
+    record_counts: manifest.record_counts,
+    ...(manifest.transfer_id ? { transfer_id: manifest.transfer_id } : {}),
+    base_v3_integrity_hash: manifest.base_v3_integrity_hash,
+    excluded_maintenance_account_ids: [...manifest.excluded_maintenance_account_ids].sort()
+  }));
+  await writeFile(manifestPath, canonicalJson(manifest));
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function hashBytes(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function pathExists(value: string): Promise<boolean> {
+  try {
+    await stat(value);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function listenLoopback(server: HttpServer): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -1284,6 +1481,8 @@ async function cleanup(adminDatabase: PostgresWorkspaceAdminDatabase, workspaceI
       "workspace_completion_jobs", "workspace_completion_episodes", "workspace_completion_activities", "workspace_completion_configurations",
       "workspace_completion_workspace_documents", "workspace_completion_file_batch_entries", "workspace_completion_file_batches",
       "workspace_completion_migration_receipts", "workspace_completion_migration_runs", "workspace_completion_maintenance_identities",
+      "workspace_runtime_activities", "workspace_runtime_automation_runs", "workspace_runtime_automation_jobs",
+      "workspace_connection_descriptors", "workspace_agent_room_permissions", "workspace_agents",
       "workspace_learning_resource_uses", "workspace_learning_resource_links", "workspace_learning_evidence",
       "workspace_learning_resource_versions", "workspace_learning_resources", "workspace_learning_job_attempts", "workspace_learning_jobs",
       "workspace_learning_activities", "workspace_learning_settings",

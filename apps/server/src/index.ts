@@ -42,6 +42,7 @@ export function installServerSignalHandlers(server: WorkspaceServerHttp): () => 
 
 /** The standard process has one PostgreSQL-backed composition root. */
 export async function startStandardServer(port?: number): Promise<WorkspaceServerHttp> {
+  loadServerEnv();
   const [{ loadWorkspaceServerConfig }, { startWorkspaceServer }] = await Promise.all([
     import("@samurai-agent/workspace-server"),
     import("./workspace-server/http-server")

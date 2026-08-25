@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -239,6 +239,43 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(importEvidencePolicy).toContain("workspace_completion_uses_access");
     expect(importEvidencePolicy).toContain("workspace_completion_evaluations_access");
     expect(importEvidencePolicy).toContain("samurai_is_import_session(workspace_id)");
+    const importV4AbortCleanup = migrations.find((migration) => migration.version === 71)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_import_abort_v4_dependencies");
+    for (const table of [
+      "workspace_runtime_activities", "workspace_runtime_automation_runs", "workspace_runtime_automation_jobs",
+      "workspace_connection_descriptors", "workspace_agent_room_permissions", "workspace_agents"
+    ]) {
+      expect(importV4AbortCleanup).toContain(`DELETE FROM ${table}`);
+    }
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_runtime_automation_runs")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM workspace_runtime_automation_jobs"));
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_connection_descriptors")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agent_room_permissions"));
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agent_room_permissions")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agents"));
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agents")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM rooms"));
+    for (const table of [
+      "workspace_completion_configurations", "workspace_completion_activities", "workspace_completion_episodes",
+      "workspace_completion_episode_activities", "workspace_completion_resources", "workspace_completion_resource_versions",
+      "workspace_completion_skill_files", "workspace_completion_policy_approvals", "workspace_completion_attestations",
+      "workspace_completion_evidence", "workspace_completion_resource_links", "workspace_completion_policy_rules",
+      "workspace_completion_policy_change_requests", "workspace_completion_uses", "workspace_completion_evaluations",
+      "workspace_completion_jobs", "workspace_completion_job_attempts", "workspace_completion_curator_state",
+      "workspace_completion_curator_snapshots", "workspace_completion_search_projection", "workspace_completion_workspace_documents",
+      "workspace_completion_redactions", "workspace_completion_file_batches", "workspace_completion_file_batch_entries",
+      "workspace_completion_migration_receipts", "workspace_completion_migration_runs", "workspace_completion_maintenance_identities",
+      "workspace_runtime_activities", "workspace_runtime_automation_runs", "workspace_runtime_automation_jobs",
+      "workspace_connection_descriptors", "workspace_agent_room_permissions", "workspace_agents"
+    ]) {
+      expect(importV4AbortCleanup!.indexOf(`DELETE FROM ${table}`)).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM rooms"));
+    }
+    const automationCommandPolicies = migrations.find((migration) => migration.version === 72)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_command_specific_rls");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_jobs_select");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_jobs_insert");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_jobs_update");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_select");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_insert");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_update");
+    expect(automationCommandPolicies).not.toContain("FOR ALL");
+    expect(automationCommandPolicies).not.toContain("FOR DELETE");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
     for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);

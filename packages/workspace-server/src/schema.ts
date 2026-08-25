@@ -8354,6 +8354,121 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "ALTER POLICY workspace_completion_uses_access ON workspace_completion_uses WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))",
       "ALTER POLICY workspace_completion_evaluations_access ON workspace_completion_evaluations WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))"
     ]
+  },
+  {
+    // V4 also imports Runtime Automation and Workspace Agent identity rows.
+    // Remove those rows before Rooms/Workspace so a failed import cannot hide
+    // its original error behind a foreign-key cleanup failure.
+    version: 71,
+    name: "workspace_server_bundle_import_abort_v4_dependencies",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_abort_workspace_import(
+        target_workspace_id TEXT,
+        import_session_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_key TEXT := target_workspace_id;
+      DECLARE import_key TEXT := import_session_id;
+      BEGIN
+        IF workspace_key IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(workspace_key) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        DELETE FROM workspace_runtime_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_automation_runs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_automation_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_connection_descriptors WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_agent_room_permissions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_agents WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_search_projection WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_policy_rules WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_policy_change_requests WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_policy_approvals WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_uses WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_evaluations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_evidence WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_attestations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_resource_links WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_redactions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_skill_files WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_workspace_documents WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_job_raw_outputs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_resource_versions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_resources WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_file_batch_entries WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_file_batches WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_episode_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_episodes WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_job_attempts WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_curator_snapshots WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_curator_state WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_configurations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_migration_receipts WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_migration_runs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_maintenance_identities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resource_uses WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resource_links WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_evidence WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resource_versions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resources WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_job_attempts WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_settings WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_audit_entries WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_bundles WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_transfers WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_invitations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_events WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_operations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_file_transactions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_files WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_records WHERE workspace_id = workspace_key;
+        DELETE FROM room_members WHERE workspace_id = workspace_key;
+        DELETE FROM rooms WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_members WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_import_sessions WHERE workspace_id = workspace_key AND id = import_key;
+        DELETE FROM workspaces WHERE id = workspace_key AND state = 'read_only';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_import_target_invalid'; END IF;
+      END
+      $$`
+    ]
+  },
+  {
+    // Automation has no product delete caller. Keep the table grants needed
+    // by the Worker, but expose only the operations each path actually uses;
+    // in particular, ordinary Room readers receive no DELETE policy.
+    version: 72,
+    name: "workspace_server_runtime_automation_command_specific_rls",
+    statements: [
+      "DROP POLICY IF EXISTS workspace_runtime_automation_jobs_access ON workspace_runtime_automation_jobs",
+      "DROP POLICY IF EXISTS workspace_runtime_automation_runs_access ON workspace_runtime_automation_runs",
+      `CREATE POLICY workspace_runtime_automation_jobs_select ON workspace_runtime_automation_jobs FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')
+      )`,
+      `CREATE POLICY workspace_runtime_automation_jobs_insert ON workspace_runtime_automation_jobs FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'edit')
+      )`,
+      `CREATE POLICY workspace_runtime_automation_jobs_update ON workspace_runtime_automation_jobs FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'edit')
+      )`,
+      `CREATE POLICY workspace_runtime_automation_runs_select ON workspace_runtime_automation_runs FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')
+      )`,
+      `CREATE POLICY workspace_runtime_automation_runs_insert ON workspace_runtime_automation_runs FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')
+      )`,
+      `CREATE POLICY workspace_runtime_automation_runs_update ON workspace_runtime_automation_runs FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'read')
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')
+      )`
+    ]
   }
 ];
 
