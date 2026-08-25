@@ -3513,12 +3513,18 @@ export class WorkspaceCompletionService {
 
   private async baseAuthority(sql: WorkspaceSql, workspaceId: string, roomId: string | undefined, authority: "execute" | "edit" | "admin"): Promise<boolean> {
     if (authority === "admin") {
-      const result = await sql.query<{ allowed: boolean }>("SELECT samurai_workspace_is_writable($1) AND samurai_can_workspace($1, 'admin') AS allowed", [workspaceId]);
+      // A legacy backfill freezes ordinary Workspace writes.  The only
+      // exception is the database-proven migration capability, and ordinary
+      // Completion policy rules are still evaluated by assertPolicyAllowed.
+      const result = await sql.query<{ allowed: boolean }>(
+        "SELECT samurai_completion_migration_write_allowed($1) OR (samurai_workspace_is_writable($1) AND samurai_can_workspace($1, 'admin')) AS allowed",
+        [workspaceId]
+      );
       return result.rows[0]?.allowed === true;
     }
     if (!roomId) return false;
     const result = await sql.query<{ allowed: boolean }>(
-      "SELECT samurai_workspace_is_writable($1) AND samurai_can_room($1, $2, $3) AS allowed",
+      "SELECT samurai_completion_migration_write_allowed($1) OR (samurai_workspace_is_writable($1) AND samurai_can_room($1, $2, $3)) AS allowed",
       [workspaceId, roomId, authority]
     );
     return result.rows[0]?.allowed === true;

@@ -81,6 +81,19 @@ async function collectProbeStage(failures: ProbeStageFailure[], stage: string, a
   }
 }
 
+/** Keep a later regression actionable: the deep report names the individual
+ * product operation, while collectProbeStage still lets unrelated stages run. */
+async function runProbeStep<T>(step: string, action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const value = error && typeof error === "object" ? error as { code?: unknown } : undefined;
+    const wrapped = new Error(`${step}:${error instanceof Error ? error.message : String(error)}`);
+    if (typeof value?.code === "string") Object.assign(wrapped, { code: value.code });
+    throw wrapped;
+  }
+}
+
 function targetFromEnvironment(prefix: "HOSTED" | "SELF_HOST", label: ProbeTarget["label"]): ProbeTarget {
   const databaseUrl = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_URL`];
   const adminDatabaseUrl = process.env[`SAMURAI_SERVER_VERIFY_${prefix}_DATABASE_ADMIN_URL`];
@@ -654,11 +667,11 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     assert(protectedAfterRollback.resource.lifecycleState === "archived" && protectedAfterRollback.resource.aiProtection === "fixed", "server04_completion_curator_rollback_overwrote_human_edit");
 
     await maintenance.configureIdentity(ownerContext("maintenance-configure"), { accountId: maintenanceAccount.id });
-    const maintenanceResult = await maintenance.runTick({
+    const maintenanceResult = await runProbeStep("maintenance_tick", () => maintenance.runTick({
       workspaceId,
       accountId: maintenanceAccount.id,
       operationId: operationId("maintenance-tick")
-    }, { workerId: "completion_maintenance_worker", maxRuns: 10 });
+    }, { workerId: "completion_maintenance_worker", maxRuns: 10 }));
     assert(maintenanceResult.queuedCuratorJobs >= 1, "server04_completion_maintenance_curator_not_queued");
     });
 
@@ -710,38 +723,38 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       operationId: operationId("migration-file-batch")
     };
     await store.database.withContext(pausedFileBatchContext, async (sql) => {
-      const capability = await sql.query<{ allowed: boolean }>(
+      const capability = await runProbeStep("migration_file_batch_capability", () => sql.query<{ allowed: boolean }>(
         "SELECT samurai_completion_migration_write_allowed($1) AS allowed",
         [workspaceId]
-      );
+      ));
       assert(capability.rows[0]?.allowed === true, "server04_completion_migration_file_batch_capability_missing");
       const batchId = `completion_migration_capability_batch_${suffix.slice(0, 18)}`;
-      await sql.query(
+      await runProbeStep("migration_file_batch_insert", () => sql.query(
         `INSERT INTO workspace_completion_file_batches(workspace_id, id, scope_kind, room_id, status)
          VALUES ($1, $2, 'room', $3, 'db_committed')`,
         [workspaceId, batchId, rootRoom.id]
-      );
-      await sql.query(
+      ));
+      await runProbeStep("migration_file_batch_entry_insert", () => sql.query(
         `INSERT INTO workspace_completion_file_batch_entries(workspace_id, batch_id, path, sha256, size)
          VALUES ($1, $2, 'migration-capability.txt', $3, 1)`,
         [workspaceId, batchId, "b".repeat(64)]
-      );
-      await sql.query(
+      ));
+      await runProbeStep("migration_file_batch_rename", () => sql.query(
         "UPDATE workspace_completion_file_batches SET status = 'renamed' WHERE workspace_id = $1 AND id = $2",
         [workspaceId, batchId]
-      );
-      await sql.query(
+      ));
+      await runProbeStep("migration_file_batch_reset", () => sql.query(
         "UPDATE workspace_completion_file_batches SET status = 'db_committed' WHERE workspace_id = $1 AND id = $2",
         [workspaceId, batchId]
-      );
-      await sql.query(
+      ));
+      await runProbeStep("migration_file_batch_entry_delete", () => sql.query(
         "DELETE FROM workspace_completion_file_batch_entries WHERE workspace_id = $1 AND batch_id = $2",
         [workspaceId, batchId]
-      );
-      await sql.query(
+      ));
+      await runProbeStep("migration_file_batch_delete", () => sql.query(
         "DELETE FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",
         [workspaceId, batchId]
-      );
+      ));
       await sql.query(
         "SELECT samurai_transition_completion_migration_run($1, $2, 'rolling_back', '{}'::JSONB, $3, NULL, NULL)",
         [workspaceId, pausedMigrationRunId, "a".repeat(64)]
@@ -917,9 +930,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       targetWorkspaceName: "V3 compatibility completion probe"
     });
     const v3Completion = new WorkspaceCompletionService(v3Store);
-    const v3Migrated = await new WorkspaceCompletionMigrationService(v3Completion).migrateLegacy(
+    const v3Migrated = await runProbeStep("v3_completion_migrate", () => new WorkspaceCompletionMigrationService(v3Completion).migrateLegacy(
       humanContext(v3Imported.workspaceId, owner, "v3-completion-migrate")
-    );
+    ));
     assert(Boolean(v3Migrated.verificationHash), "server04_completion_v3_migration_not_verified");
     const v3BundleDirectory = path.join(root, "v3-to-v4.bundle.v4");
     await new WorkspaceBundleV4Service(v3Store).export({

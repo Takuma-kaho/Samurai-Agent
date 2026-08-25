@@ -8038,6 +8038,41 @@ const migrations: readonly WorkspaceServerMigration[] = [
         )
       )`
     ]
+  },
+  {
+    // File batches are the durable ledger used by the file/DB coordinator.
+    // Keep the read-only migration exception separate from normal access so a
+    // parent batch and its child entries can be written and then recovered
+    // only by the matching migration Run, not by an ordinary writable caller.
+    version: 64,
+    name: "workspace_server_completion_migration_file_batch_capability_policy",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_completion_migration_write_allowed(target_workspace_id TEXT)
+      RETURNS BOOLEAN
+      LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
+        SELECT target_workspace_id = samurai_current_workspace_id()
+          AND EXISTS(
+            SELECT 1 FROM workspace_completion_migration_runs run
+            WHERE run.workspace_id = target_workspace_id
+              AND run.id = samurai_context_value('samurai.completion_migration_run_id')
+              AND run.owner_account_id = samurai_current_account_id()
+              AND (
+                (current_setting('samurai.completion_migration_operation', true) = 'completion_backfill'
+                  AND run.state IN ('preparing', 'backfilling', 'verified'))
+                OR (current_setting('samurai.completion_migration_operation', true) = 'completion_rollback'
+                  AND run.state = 'rolling_back')
+              )
+          )
+      $$`,
+      "DROP POLICY IF EXISTS workspace_completion_file_batches_migration_access ON workspace_completion_file_batches",
+      `CREATE POLICY workspace_completion_file_batches_migration_access ON workspace_completion_file_batches FOR ALL
+       USING (samurai_completion_migration_write_allowed(workspace_id))
+       WITH CHECK (samurai_completion_migration_write_allowed(workspace_id))`,
+      "DROP POLICY IF EXISTS workspace_completion_file_batch_entries_migration_access ON workspace_completion_file_batch_entries",
+      `CREATE POLICY workspace_completion_file_batch_entries_migration_access ON workspace_completion_file_batch_entries FOR ALL
+       USING (samurai_completion_migration_write_allowed(workspace_id))
+       WITH CHECK (samurai_completion_migration_write_allowed(workspace_id))`
+    ]
   }
 ];
 
