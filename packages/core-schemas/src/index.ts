@@ -128,7 +128,9 @@ export const learningAssessments = ["helpful", "neutral", "harmful", "insufficie
 /** Evidence and use are independent axes for Core 05 learning resources. */
 export const learningEvidenceStates = ["direct_confirmed", "inferred", "supported", "conflict"] as const;
 export const learningUsageStates = ["normal", "limited", "dormant"] as const;
-export const learningKnowledgeKinds = ["reference", "experience_rule"] as const;
+/** `reference` is retained only for legacy Wiki documents. New
+ * Completion and PostgreSQL Wiki resources use the four product categories. */
+export const learningKnowledgeKinds = ["fact", "decision", "explanation", "experience_rule", "reference"] as const;
 export const learningEvaluationVerdicts = ["supported", "refuted", "indeterminate"] as const;
 export const learningBudgetUnits = ["currency", "tokens"] as const;
 export const learningCandidateSignalKinds = [
@@ -154,7 +156,7 @@ export const automationAuthorizationStates = ["ready", "rebind_required", "block
 export const automationAuthorityKinds = ["direct_principal", "external_connection"] as const;
 export const automationManagementStates = ["allowed", "manager_stopped"] as const;
 export const automationRunStatuses = ["started", "completed", "failed", "blocked"] as const;
-export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed"] as const;
+export const externalSendStatuses = ["draft", "pending_approval", "approved", "dispatched", "denied", "failed", "outcome_unknown"] as const;
 export const externalSendChannels = ["webhook", "email", "slack", "telegram", "line"] as const;
 export const externalSendTransportStatuses = ["ready", "dry_run_only", "not_configured"] as const;
 export const gatewayPairingStatuses = ["pending", "approved", "rejected", "expired", "revoked"] as const;
@@ -327,6 +329,20 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/** Filesystem capability supplied by an application composition root. */
+export interface WorkspaceFilePort {
+  readText(path: string): Promise<string>;
+  readTextIfExists(path: string): Promise<string | undefined>;
+  readBytes(path: string): Promise<Uint8Array>;
+  readBytesIfExists(path: string): Promise<Uint8Array | undefined>;
+  writeText(path: string, content: string): Promise<void>;
+  writeBytes(path: string, content: Uint8Array): Promise<void>;
+  remove(path: string): Promise<void>;
+  ensureParent(path: string): Promise<void>;
+  isFile(path: string): Promise<boolean>;
+  stat(path: string): Promise<{ size: number; modifiedAt: string }>;
+}
 
 export const BackendSessionPolicySchema = z.object({
   acquisition: BackendSessionAcquisitionModeSchema,
@@ -515,7 +531,7 @@ export type AgentRecord = z.infer<typeof AgentRecordSchema>;
 
 /**
  * A reference to an app-owned conversation or work unit.  It is metadata only:
- * it never grants Workspace or Room access and has no SQLite foreign key.
+ * it never grants Workspace or Room access and has no database foreign key.
  */
 export const SessionRefSchema = z.object({
   app_id: z.string().trim().min(1).max(200),
@@ -613,6 +629,7 @@ export type TrustedWorkspaceSource = z.infer<typeof TrustedWorkspaceSourceSchema
 export const TrustedWorkspaceContextSchema = z.object({
   workspace_id: z.string().trim().min(1),
   room_id: z.string().trim().min(1).optional(),
+  connection_id: z.string().trim().min(1).optional(),
   principal: PrincipalSchema,
   source: TrustedWorkspaceSourceSchema,
   correlation_id: z.string().trim().min(1),
@@ -639,6 +656,8 @@ export const WorkspaceExecutionRequestSchema = z.object({
   backend_id: z.string().trim().min(1).optional(),
   agent_id: z.string().trim().min(1).optional(),
   input_summary: z.string().max(20_000).optional(),
+  input_locale: SupportedLocaleSchema.optional(),
+  output_locale: SupportedLocaleSchema.optional(),
   input_message_id: z.string().trim().min(1).optional(),
   metadata: z.record(jsonValueSchema).default({})
 }).strict();
@@ -1012,6 +1031,9 @@ const backendEventProviderShape: z.ZodRawShape = {
 const backendEventPayload = (shape: z.ZodRawShape = {}) => z.object({ ...backendEventProviderShape, ...shape }).strict();
 const backendEventTextPayload = backendEventPayload({
   text: z.string().min(1),
+  // Compatibility marker retained after unknown provider values are converted
+  // to JSON null by the event bridge.
+  non_json: jsonValueSchema.optional(),
   item_type: z.string().min(1).optional(),
   display_kind: z.string().min(1).optional(),
   activity_kind: z.string().min(1).optional(),
@@ -1106,6 +1128,8 @@ const backendProcessFailurePayload = backendEventPayload({
   reason: z.string().min(1).nullable().optional(),
   message: z.string().optional(),
   error_code: z.string().min(1).optional(),
+  status: z.number().int().optional(),
+  model: z.string().min(1).optional(),
   retryable: z.boolean().optional(),
   cause_category: z.string().min(1).optional(),
   exit_code: z.number().int().nullable().optional(),
@@ -1202,6 +1226,7 @@ export const BackendEventPayloadSchemas = {
   backend_stream_unavailable: backendEventPayload({
     reason: z.string().min(1).nullable().optional(),
     message: z.string().optional(),
+    run_status: z.string().min(1).optional(),
     ui_visible: z.boolean().optional()
   }),
   host_post_turn_failed: backendProcessFailurePayload,
@@ -1264,6 +1289,8 @@ export const BackendEventRecordSchema: z.ZodType<BackendEventRecord, z.ZodTypeDe
 
 export const ClientEventRecordSchema = z.object({
   id: z.string().min(1),
+  /** Room-scoped notifications use the same Room boundary as their Run. */
+  room_id: z.string().min(1).optional(),
   target_client_kind: ClientTargetKindSchema,
   target_client_id: z.string().min(1).optional(),
   event_type: ClientEventTypeSchema,
@@ -1474,6 +1501,8 @@ export const ExternalAssistProviderConfigDiagnosticsSchema = z.object({
   timeout_ms: z.number().int().positive().nullable(),
   token_configured: z.boolean(),
   auth_header: z.string().nullable(),
+  /** True only when the host explicitly opted into sending raw conversation context. */
+  raw_context_shared: z.boolean().default(false),
   endpoint_origin: z.string().optional(),
   endpoint_path_configured: z.boolean().optional(),
   file_name: z.string().optional(),
@@ -2760,6 +2789,7 @@ export const ExternalSendDiagnosticsIssueSchema = z.object({
     "external_send_pending_approval",
     "external_send_dry_run_only",
     "external_send_failed",
+    "external_send_outcome_unknown",
     "external_send_stale_draft",
     "external_send_missing_target_url"
   ]),
@@ -3694,6 +3724,7 @@ export type WorkFailureKind = z.infer<typeof WorkFailureKindSchema>;
 export const ObjectiveRecordSchema = z.object({
   id: z.string().min(1),
   session_id: z.string().min(1).optional(),
+  room_id: z.string().min(1).optional(),
   title: z.string().min(1),
   objective: z.string().min(1),
   completion_criteria: z.array(z.string().min(1)).min(1),
@@ -3711,6 +3742,7 @@ export type ObjectiveRecord = z.infer<typeof ObjectiveRecordSchema>;
 export const WorkItemRecordSchema = z.object({
   id: z.string().min(1),
   objective_id: z.string().min(1),
+  room_id: z.string().min(1).optional(),
   parent_work_item_id: z.string().min(1).optional(),
   instruction: z.string().min(1),
   status: WorkItemStatusSchema,
@@ -4128,6 +4160,25 @@ export function stableHash(value: unknown): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Wider deterministic digest for persisted identity and idempotency checks.
+ * stableHash remains the short compatibility fingerprint used by existing
+ * content projections; callers that distinguish different durable commands
+ * must use this 128-bit digest.
+ */
+export function stableDigest(value: unknown): string {
+  const input = stableStringify(value);
+  const states = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    for (let stateIndex = 0; stateIndex < states.length; stateIndex += 1) {
+      const mixed = code + (index * (stateIndex + 1));
+      states[stateIndex] = Math.imul((states[stateIndex] ?? 0) ^ mixed, 0x01000193 + stateIndex * 2);
+    }
+  }
+  return states.map((state) => (state >>> 0).toString(16).padStart(8, "0")).join("");
 }
 
 export type PrivacyRedactionOptions = {

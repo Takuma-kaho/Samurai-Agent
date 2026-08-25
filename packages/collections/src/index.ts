@@ -8,6 +8,44 @@ import {
   type JsonValue
 } from "@samurai-agent/core-schemas";
 
+export type CollectionMarkdownKind = "schema" | "record";
+
+/**
+ * Collection definitions and records are kept as readable Markdown files.
+ * The JSON block is a deterministic canonical projection consumed by the
+ * validator; it is not a second source of truth.
+ */
+export function renderCollectionMarkdown(kind: CollectionMarkdownKind, value: CollectionSchema | CollectionRecord): string {
+  const id = "collection_id" in value ? value.collection_id : value.id;
+  const title = kind === "schema" ? `# Collection: ${id}` : `# Collection record: ${id}`;
+  return [
+    "---",
+    `samurai_collection_kind: ${kind}`,
+    `collection_id: ${id}`,
+    "---",
+    title,
+    "",
+    kind === "schema" ? "This Markdown file is the editable Collection definition." : "This Markdown file is the editable Collection record.",
+    "",
+    "```json",
+    JSON.stringify(value, null, 2),
+    "```",
+    ""
+  ].join("\n");
+}
+
+export function parseCollectionMarkdown(value: string, expectedKind: CollectionMarkdownKind): unknown {
+  const kind = /^samurai_collection_kind:\s*(schema|record)\s*$/m.exec(value)?.[1];
+  if (kind !== expectedKind) throw new Error("collection_markdown_kind_mismatch");
+  const match = /```json\s*([\s\S]*?)\s*```/m.exec(value);
+  if (!match?.[1]) throw new Error("collection_markdown_json_block_missing");
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    throw new Error("collection_markdown_json_invalid");
+  }
+}
+
 export function applyCollectionPatch(record: CollectionRecord, patch: CollectionPatch, schema: CollectionSchema): CollectionRecord {
   const parsedSchema = parseCollectionSchema(schema);
   const parsedRecord = parseCollectionRecord(record, parsedSchema);

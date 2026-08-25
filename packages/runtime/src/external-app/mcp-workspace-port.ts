@@ -24,17 +24,18 @@ export interface RuntimeMcpWorkspacePortOptions {
   /** Operational integration records only. Workspace content never crosses
    * this adapter; it is reached through ExternalAppIngress queries. */
   integrationStore: ExternalIntegrationStore;
-  runtime: AgentRuntime;
+  runtime: Pick<AgentRuntime, "createExternalAppIngress">;
   bindings: RoomBindingService;
   snapshots: ContextSnapshotService;
 }
 
-export function createRuntimeContextSnapshotSource(input: { runtime: AgentRuntime }): (target: ExternalWorkspaceTarget, signal?: AbortSignal) => Promise<ContextSnapshotSource> {
+export function createRuntimeContextSnapshotSource(input: { runtime: Pick<AgentRuntime, "createExternalAppIngress"> }): (target: ExternalWorkspaceTarget, signal?: AbortSignal) => Promise<ContextSnapshotSource> {
   return async (target, signal) => {
     const ingress = input.runtime.createExternalAppIngress(target.workspaceId);
     const ingressTarget = {
       requested_room_id: target.roomId,
-      correlation_id: `context:${target.connectorId}:${target.externalSessionId}`
+      connection_id: target.connectionId,
+      correlation_id: ["context", target.connectionId, target.connectorId, target.externalSessionId].join(":")
     };
     const evidence = { connector_id: target.connectorId, app_id: target.appId };
     const query = (queryId: string, payload: Record<string, unknown>) => ingress.query({
@@ -81,17 +82,14 @@ export function createRuntimeContextSnapshotSource(input: { runtime: AgentRuntim
 }
 
 const externalMutationOperations = [
-  "artifact.create", "artifact.revise", "artifact.restore_revision", "collection.schema.save", "collection.record.create", "collection.patch.apply",
-  "collection.record.delete",
-  // Proposal/candidate creation is intentionally separate from publication
-  // or promotion of human-owned Knowledge and Skills.
+  "artifact.create", "artifact.revise", "artifact.restore_revision", "collection.schema.save", "collection.record.create", "collection.patch.apply", "collection.record.delete",
   "wiki.proposal.create", "wiki.patch", "wiki.archive", "skill.candidate.create", "skill.patch",
   "resource.copy", "resource.move", "resource.promote", "resource.redact",
   "policy.change.request", "profile.change.request", "soul.change.request"
 ] as const;
 
 /** Adapter from the public MCP contract to the existing Core09 formal
- * ExternalAppIngress. No MCP operation calls WorkspaceStore directly. */
+ * ExternalAppIngress. No MCP operation calls a storage implementation directly. */
 export class RuntimeMcpWorkspacePort implements McpWorkspacePort {
   constructor(private readonly options: RuntimeMcpWorkspacePortOptions) {}
 
@@ -704,7 +702,8 @@ function isExternalSessionEndEvent(eventKind: string): boolean {
 function ingressTarget(target: ExternalWorkspaceTarget, idempotencyKey?: string) {
   return {
     requested_room_id: target.roomId,
-    correlation_id: `mcp:${target.connectorId}:${target.externalSessionId}`,
+    connection_id: target.connectionId,
+    correlation_id: ["mcp", target.connectionId, target.connectorId, target.externalSessionId].join(":"),
     ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
     ...(target.sessionRef ? { session_ref: { session_id: target.sessionRef.session_id, ...(target.sessionRef.turn_id ? { turn_id: target.sessionRef.turn_id } : {}), ...(target.sessionRef.message_id ? { message_id: target.sessionRef.message_id } : {}) } } : {})
   };
@@ -729,7 +728,7 @@ function formalQuery(
 
 /** Version lookup is itself a Room-authorized formal Query. This keeps the
  * optimistic concurrency check outside the MCP adapter and avoids hidden
- * WorkspaceStore reads. */
+ * storage reads. */
 async function formalResourceVersion(
   ingress: ReturnType<AgentRuntime["createExternalAppIngress"]>,
   target: ExternalWorkspaceTarget,

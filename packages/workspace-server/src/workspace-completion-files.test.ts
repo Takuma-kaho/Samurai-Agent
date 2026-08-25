@@ -6,6 +6,7 @@ import { WorkspaceServerError } from "./errors";
 import {
   assertSkillSupportRelativePath,
   completionResourcePath,
+  isWorkspaceCompletionOwnedPath,
   parseWorkspaceCompletionDocument,
   renderWorkspaceCompletionDocument,
   WorkspaceCompletionFileService
@@ -33,6 +34,12 @@ describe("Workspace completion files", () => {
 
   it("rejects a path outside the Workspace", () => {
     expect(() => completionResourcePath({ id: "policy_a", kind: "policy", scope: { kind: "room", roomId: "../room" } })).toThrow(WorkspaceServerError);
+  });
+
+  it("keeps generic Workspace files out of Completion-owned roots", () => {
+    expect(isWorkspaceCompletionOwnedPath("knowledge/topic.md")).toBe(true);
+    expect(isWorkspaceCompletionOwnedPath("collections/topic/record.md")).toBe(false);
+    expect(() => isWorkspaceCompletionOwnedPath("../outside.md")).toThrow(WorkspaceServerError);
   });
 
   it("keeps an allowed auxiliary file outside the four conventional Skill folders", () => {

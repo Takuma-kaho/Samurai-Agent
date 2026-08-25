@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ingestAttachment } from "../../packages/runtime/src/attachments/ingestion";
@@ -10,6 +10,7 @@ try {
     image: path.join(root, "image.png"), pdf: path.join(root, "sample.pdf"), text: path.join(root, "sample.txt"),
     docx: path.join(root, "sample.docx"), xlsx: path.join(root, "sample.xlsx"), pptx: path.join(root, "sample.pptx")
   };
+  const readAttachment = (filePath: string) => readFile(filePath);
   const png = Buffer.alloc(24); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png); png.writeUInt32BE(320, 16); png.writeUInt32BE(200, 20);
   await writeFile(files.image, png);
   await writeFile(files.text, "Text attachment source trace");
@@ -25,12 +26,12 @@ try {
     "ppt/slides/slide2.xml": "<p:sld><a:t>PPTX second slide</a:t></p:sld>"
   }));
 
-  const image = await ingestAttachment({ filePath: files.image });
-  const pdf = await ingestAttachment({ filePath: files.pdf });
-  const text = await ingestAttachment({ filePath: files.text });
-  const docx = await ingestAttachment({ filePath: files.docx });
-  const xlsx = await ingestAttachment({ filePath: files.xlsx });
-  const pptx = await ingestAttachment({ filePath: files.pptx });
+  const image = await ingestAttachment({ filePath: files.image, read: readAttachment });
+  const pdf = await ingestAttachment({ filePath: files.pdf, read: readAttachment });
+  const text = await ingestAttachment({ filePath: files.text, read: readAttachment });
+  const docx = await ingestAttachment({ filePath: files.docx, read: readAttachment });
+  const xlsx = await ingestAttachment({ filePath: files.xlsx, read: readAttachment });
+  const pptx = await ingestAttachment({ filePath: files.pptx, read: readAttachment });
   assert.deepEqual(image.metadata, { format: "png", width: 320, height: 200, extraction: "metadata_only" });
   assert.match(pdf.extracted_text, /PDF attachment text/);
   assert.match(text.extracted_text, /source trace/);
@@ -50,13 +51,13 @@ try {
     { filePath: path.join(root, "broken.xlsx"), bytes: Buffer.from("not a zip"), error: /attachment_zip_invalid/ },
     { filePath: path.join(root, "broken.pptx"), bytes: Buffer.from("not a zip"), error: /attachment_zip_invalid/ }
   ];
-  for (const corruption of corruptions) { await writeFile(corruption.filePath, corruption.bytes); await assert.rejects(ingestAttachment({ filePath: corruption.filePath }), corruption.error); }
-  for (const filePath of Object.values(files)) await assert.rejects(ingestAttachment({ filePath, maxSourceBytes: 2 }), /attachment_source_too_large/);
+  for (const corruption of corruptions) { await writeFile(corruption.filePath, corruption.bytes); await assert.rejects(ingestAttachment({ filePath: corruption.filePath, read: readAttachment }), corruption.error); }
+  for (const filePath of Object.values(files)) await assert.rejects(ingestAttachment({ filePath, read: readAttachment, maxSourceBytes: 2 }), /attachment_source_too_large/);
 
-  const truncated = await ingestAttachment({ filePath: files.text, maxExtractedCharacters: 10 });
+  const truncated = await ingestAttachment({ filePath: files.text, read: readAttachment, maxExtractedCharacters: 10 });
   assert.equal(truncated.truncated, true);
   assert.equal(truncated.extracted_text.length, 10);
-  await assert.rejects(ingestAttachment({ filePath: files.text, maxSourceBytes: 2 }), /attachment_source_too_large/);
+  await assert.rejects(ingestAttachment({ filePath: files.text, read: readAttachment, maxSourceBytes: 2 }), /attachment_source_too_large/);
   let reads = 0;
   const retried = await ingestAttachment({
     filePath: files.text,

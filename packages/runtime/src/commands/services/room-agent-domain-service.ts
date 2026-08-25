@@ -13,47 +13,13 @@ import type {
   RoomAgentPermissionRecord,
   RoomMemberRecord,
   RoomResourceShareRecord,
-  WorkspaceMemberRecord,
-  WorkspaceStore
-} from "@samurai-agent/workspace-store";
+  RuntimeRoomAgentPort,
+  WorkspaceMemberRecord
+} from "../../composition/runtime-workspace-ports";
 import { delegatedParticipant, type NewRoomShareableResourceReference, type RoomHumanRole, type RoomShareableResourceReference, type WorkspaceRole } from "@samurai-agent/room-permissions";
 import { RoomAuthorizationService } from "./room-authorization-service.js";
 import { RoomResourceCatalog } from "./room-resource-catalog.js";
-
-export type RoomAgentStorePort = Pick<WorkspaceStore,
-  | "createRoomWithOwner"
-  | "getRoom"
-  | "listRooms"
-  | "patchRoom"
-  | "createAgent"
-  | "getAgent"
-  | "listAgents"
-  | "patchAgent"
-  | "bindAgentBackend"
-  | "getWorkspaceMember"
-  | "listWorkspaceMembers"
-  | "addWorkspaceMember"
-  | "changeWorkspaceMemberRole"
-  | "removeWorkspaceMember"
-  | "transferWorkspaceOwnership"
-  | "getRoomMember"
-  | "listRoomMembers"
-  | "addRoomMember"
-  | "changeRoomMemberRole"
-  | "removeRoomMember"
-  | "transferRoomOwnership"
-  | "recoverOwnerlessRoom"
-  | "listOwnerlessRoomIds"
-  | "listRoomAgents"
-  | "setRoomAgentPermissions"
-  | "removeRoomAgent"
-  | "setAgentWorkspacePermission"
-  | "getResourceAccessBoundary"
-  | "ensureResourceAccessBoundary"
-  | "listRoomResourceShares"
-  | "shareResource"
-  | "revokeRoomResourceShare"
->;
+export type RoomAgentStorePort = RuntimeRoomAgentPort;
 
 export interface RoomParticipantList {
   humans: RoomMemberRecord[];

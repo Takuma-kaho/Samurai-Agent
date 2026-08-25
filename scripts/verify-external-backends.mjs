@@ -48,7 +48,7 @@ process.exitCode = exitCode(summary);
 function parseArgs(args) {
   const options = {
     backend: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_BACKEND || "all",
-    run: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_RUN === "true",
+    run: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_RUN === "true" || process.env.SAMURAI_EXTERNAL_BACKEND_E2E_RESUME === "true",
     live: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_LIVE === "true",
     resume: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_RESUME === "true",
     cancel: process.env.SAMURAI_EXTERNAL_BACKEND_E2E_CANCEL === "true",
@@ -70,6 +70,7 @@ function parseArgs(args) {
       options.run = true;
     } else if (arg === "--resume") {
       options.resume = true;
+      options.run = true;
     } else if (arg === "--cancel") {
       options.cancel = true;
     } else if (arg === "--evidence") {
@@ -172,7 +173,8 @@ async function verifyBackend(backend, options) {
   if (options.resume) {
     const restartedBackend = createBackend(backend.kind === "codex" ? "codex" : "claude");
     if (!restartedBackend.resumeRun) result.resume = { status: "skipped", reason: "resume_unsupported" };
-    else if (!result.run.backend_session_id) result.resume = { status: "skipped", reason: "backend_session_id_missing" };
+    else if (result.run.status !== "passed") result.resume = { status: "failed", reason: "run_not_completed" };
+    else if (!result.run.backend_session_id) result.resume = { status: "failed", reason: "backend_session_id_missing" };
     else {
       const resumeCollection = await collectRunEvents(restartedBackend, backendRunInput(backend.id, "Continue the Samurai Agent external backend E2E probe.", `${backend.id}_e2e_run`, result.run.backend_session_id), options.timeoutMs, (input) => restartedBackend.resumeRun(`${backend.id}_e2e_run`, { backend_session_id: input.backend_session_id, answer: "Continue the Samurai Agent external backend E2E probe.", abort_signal: input.abort_signal }));
       result.resume = { ...summarizeEvents(resumeCollection.events, resumeCollection.process_close_confirmed), backend_recreated: true };
@@ -455,7 +457,7 @@ function exitCode(summary) {
     if (summary.run_requested && result.status?.configured && result.run.status !== "passed") {
       code = 1;
     }
-    if (summary.resume_requested && result.resume.status === "failed") {
+    if (summary.resume_requested && result.status?.configured && result.resume.status !== "passed") {
       code = 1;
     }
     if (summary.live_requested && result.live.status !== "passed") code = 1;

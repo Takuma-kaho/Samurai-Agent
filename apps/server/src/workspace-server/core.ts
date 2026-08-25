@@ -14,6 +14,7 @@ import {
   WorkspaceServerCommandService,
   WorkspaceServerError,
   WorkspaceServerStore,
+  WorkspaceRuntimeActivityService,
   loadWorkspaceServerConfig,
   type WorkspaceCompletionAttestationPort,
   type WorkspaceKnowledgeReviewPort,
@@ -28,6 +29,7 @@ export interface WorkspaceServerCore {
   bundles: WorkspaceBundleV3Service;
   completionBundles: WorkspaceBundleV4Service;
   commands: WorkspaceServerCommandService;
+  runtimeActivities: WorkspaceRuntimeActivityService;
   learning: WorkspaceLearningService;
   completion: WorkspaceCompletionService;
   completionJobs: WorkspaceCompletionJobService;
@@ -106,7 +108,8 @@ export async function createWorkspaceServerCore(
     const curator = new WorkspaceCompletionCuratorService(completion);
     const maintenance = new WorkspaceCompletionMaintenanceService(completion, completionJobs, curator);
     const completionMigrations = new WorkspaceCompletionMigrationService(completion);
-    const commands = new WorkspaceServerCommandService({ store, files, bundles, completion, completionMigrations, maintenance });
+    const runtimeActivities = new WorkspaceRuntimeActivityService(database);
+    const commands = new WorkspaceServerCommandService({ store, files, bundles, completionBundles, completion, completionMigrations, maintenance, runtimeActivities });
     return {
       config,
       database,
@@ -115,6 +118,7 @@ export async function createWorkspaceServerCore(
       bundles,
       completionBundles,
       commands,
+      runtimeActivities,
       learning,
       completion,
       completionJobs,

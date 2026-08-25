@@ -181,6 +181,19 @@ export class ResourceTransferDomainService {
   }
 
   async promote(context: TrustedDomainContext, input: ResourcePromoteInput): Promise<ResourceTransferValue> {
+    const access = requiredRoomAccess(context);
+    // Promotion crosses the Room boundary and creates a new Workspace-owned
+    // projection. Room edit permission alone must never grant that broader
+    // write; the delegated human/agent is checked against current Workspace
+    // administration permission immediately before the source is copied.
+    try {
+      await this.dependencies.roomAuthorization.assertWorkspace(access.participant, "manage_settings");
+    } catch (error) {
+      if (error instanceof RoomAuthorizationError) {
+        throw new DomainOperationError("source_not_allowed", `resource_transfer_workspace_authorization_denied:${error.reason}`);
+      }
+      throw error;
+    }
     const source = await this.loadSource(context, input.resource_kind, input.resource_id);
     // Promotion intentionally creates a new Workspace-scoped projection. The
     // Room source and its evidence remain intact; there is no implicit Room

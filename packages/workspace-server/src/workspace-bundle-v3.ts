@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { assertAccountIdMatchesPublicKey, canonicalJson } from "./auth";
@@ -27,16 +27,32 @@ const learningJsonlFiles = [
 ] as const;
 const jsonlFiles = [...coreJsonlFiles, ...learningJsonlFiles] as const;
 const credentialFilePath = /(?:^|\/)(?:\.env(?:\..*)?|[^/]*(?:credential|secret|token|private[_-]?key|id_rsa)[^/]*|[^/]+\.(?:pem|key|p12|pfx))$/i;
-const credentialText = /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|(?:^|[\n{,])\s*["']?(?:password|passphrase|secret|private[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|credential|api[_-]?key)["']?\s*[:=]|(?:^|[^A-Za-z0-9])(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?:$|[^A-Za-z0-9])/i;
+const credentialText = /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|(?:^|[\n{,])\s*["']?(?:password|passphrase|secret|client[_-]?secret|oauth[_-]?client[_-]?secret|private[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|credential|api[_-]?key)["']?\s*[:=]|(?:^|[^A-Za-z0-9])(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?:$|[^A-Za-z0-9])/i;
 const credentialFieldNames = new Set([
-  "password", "passphrase", "secret", "privatekey", "accesstoken", "refreshtoken",
-  "authorization", "cookie", "credential", "apikey", "token"
+  "password", "passphrase", "secret", "clientsecret", "oauthclientsecret", "privatekey", "secretkey",
+  "accesstoken", "refreshtoken", "oauthaccesstoken", "oauthrefreshtoken", "authorization", "cookie",
+  "credential", "apikey", "apitoken", "bearertoken", "token"
 ]);
 const transportFormat = "samurai-workspace-bundle-v3";
+export const WORKSPACE_BUNDLE_MAX_BYTES = 24 * 1024 * 1024;
+export const WORKSPACE_BUNDLE_MAX_ENTRY_BYTES = 8 * 1024 * 1024;
+export const WORKSPACE_BUNDLE_MAX_ENTRIES = 100_000;
+export const WORKSPACE_BUNDLE_MAX_RECORDS_PER_FILE = 100_000;
+export const WORKSPACE_BUNDLE_INCOMING_TTL_MS = 60 * 60 * 1000;
 // One Server process owns one transfer export at a time. The database still
 // validates the final transition, while this avoids two local file writers
 // racing over the same private bundle directory.
 const transferExportLocks = new Map<string, Promise<void>>();
+const bundleStagingLocks = new Map<string, Promise<void>>();
+
+function safeErrorCode(error: unknown): string {
+  if (error instanceof WorkspaceServerError) return error.code;
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Za-z0-9_.:-]+$/.test(code)) return code;
+  }
+  return "workspace_server_internal_error";
+}
 
 const portableSchema: Readonly<Record<string, { required: readonly string[]; allowed: readonly string[] }>> = {
   [workspaceFile]: {
@@ -144,6 +160,7 @@ export interface WritePortableWorkspaceBundleSnapshotInput {
   destination: string;
   includeLegacyLearning?: boolean;
   excludeMembershipAccountIds?: readonly string[];
+  transferId?: string;
 }
 
 export interface ImportWorkspaceBundleInput {
@@ -240,7 +257,7 @@ export class WorkspaceBundleV3Service {
     await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
     await mkdir(destination, { recursive: false, mode: 0o700 });
     try {
-      const written = await this.writeStableBundleDirectory(context, destination, undefined, {
+      const written = await this.writeStableBundleDirectory(context, destination, input.transferId, {
         includeLegacyLearning: input.includeLegacyLearning !== false,
         excludeMembershipAccountIds: input.excludeMembershipAccountIds ?? []
       });
@@ -274,8 +291,8 @@ export class WorkspaceBundleV3Service {
     // A second request with the same operation ID must resume the same
     // transfer. Do not run another state-changing operation ledger entry.
     if (begun.transferId !== transferId) throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
-    return runExclusiveTransferExport(canonicalJson([context.workspaceId, transferId]), async () => {
-      const transfer = await readTransfer(this.store, context, transferId);
+    return runExclusiveWorkspaceTransferExport(canonicalJson([context.workspaceId, transferId]), async () => {
+      const transfer = await readWorkspaceTransfer(this.store, context, transferId);
       if (transfer.state === "exported" && transfer.bundlePath) {
         const verified = await verifyWorkspaceBundleV3(transfer.bundlePath);
         return { id: `bundle_${transferId}`, directory: transfer.bundlePath, manifest: verified.manifest, transferId };
@@ -292,7 +309,7 @@ export class WorkspaceBundleV3Service {
         // If another process completed the durable DB transition while this
         // process was racing for the destination directory, prefer that
         // verified result instead of incorrectly failing the transfer.
-        const resumed = await readTransfer(this.store, context, transferId).catch(() => undefined);
+        const resumed = await readWorkspaceTransfer(this.store, context, transferId).catch(() => undefined);
         if (resumed?.state === "exported" && resumed.bundlePath) {
           const verified = await verifyWorkspaceBundleV3(resumed.bundlePath);
           return { id: `bundle_${transferId}`, directory: resumed.bundlePath, manifest: verified.manifest, transferId };
@@ -426,7 +443,7 @@ export class WorkspaceBundleV3Service {
   ): Promise<{ directory: string; manifest: WorkspaceBundleV3Manifest }> {
     assertOpaqueId(transferId, "workspace_transfer_id_invalid");
     await assertWorkspaceOwner(this.store, context);
-    const transfer = await readTransfer(this.store, context, transferId);
+    const transfer = await readWorkspaceTransfer(this.store, context, transferId);
     if (transfer.state !== "exported" || !transfer.bundlePath) throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
     const verified = await verifyWorkspaceBundleV3(transfer.bundlePath);
     if (verified.manifest.transfer_id !== transferId) throw new WorkspaceServerError("workspace_transfer_bundle_mismatch", 409);
@@ -456,6 +473,9 @@ export class WorkspaceBundleV3Service {
     assertOpaqueId(context.operationId, "workspace_operation_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
     assertBundleManifestCandidate(input.manifest);
+    const createdAt = new Date();
+    const manifestText = canonicalJson(input.manifest);
+    assertBundleManifestSize(manifestText, "workspace_bundle_v3_transport_too_large");
     const root = this.incomingRoot(context.accountId, context.operationId);
     const metadata: IncomingBundleMetadata = {
       format_version: 1,
@@ -463,7 +483,11 @@ export class WorkspaceBundleV3Service {
       operation_id: context.operationId,
       target_workspace_id: input.targetWorkspaceId,
       ...(input.targetWorkspaceName?.trim() ? { target_workspace_name: input.targetWorkspaceName.trim().slice(0, 500) } : {}),
-      manifest: input.manifest
+      manifest: input.manifest,
+      created_at: createdAt.toISOString(),
+      expires_at: new Date(createdAt.getTime() + WORKSPACE_BUNDLE_INCOMING_TTL_MS).toISOString(),
+      received_bytes: Buffer.byteLength(manifestText),
+      received_entries: 0
     };
     const metadataPath = this.incomingMetadataPath(context.accountId, context.operationId);
     if (await pathExists(metadataPath)) {
@@ -479,7 +503,7 @@ export class WorkspaceBundleV3Service {
       await mkdir(path.dirname(root), { recursive: true, mode: 0o700 });
       await mkdir(root, { recursive: false, mode: 0o700 });
       createdRoot = true;
-      await writeFile(path.join(root, manifestFile), canonicalJson(input.manifest), { flag: "wx", mode: 0o600 });
+      await writeFile(path.join(root, manifestFile), manifestText, { flag: "wx", mode: 0o600 });
       await this.writeIncomingMetadata(context, metadata, { overwrite: false });
       wroteMetadata = true;
     } catch (error) {
@@ -496,23 +520,42 @@ export class WorkspaceBundleV3Service {
   }
 
   async putIncomingBundleEntry(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">, entryPath: string, content: Uint8Array): Promise<void> {
-    const metadata = await this.readIncomingMetadata(context);
-    if (metadata.completed) throw new WorkspaceServerError("workspace_import_staging_completed", 409);
-    assertSafeRelativePath(entryPath);
-    const expectedHash = metadata.manifest.files[entryPath];
-    if (!expectedHash) throw new WorkspaceServerError("workspace_bundle_v3_entry_not_found", 404);
-    if (content.byteLength > 8 * 1024 * 1024) throw new WorkspaceServerError("workspace_bundle_v3_entry_too_large", 413);
-    if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v3_hash_mismatch", 400);
-    const root = this.incomingRoot(context.accountId, context.operationId);
-    const destination = resolveBundlePath(root, entryPath);
-    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-    try {
-      await writeFile(destination, content, { flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const existing = await readFile(destination);
-      if (hashBytes(existing) !== expectedHash) throw new WorkspaceServerError("workspace_import_staging_conflict", 409);
-    }
+    return runExclusiveWorkspaceBundleStaging(canonicalJson([context.accountId, context.operationId]), async () => {
+      const metadata = await this.readIncomingMetadata(context);
+      if (metadata.completed) throw new WorkspaceServerError("workspace_import_staging_completed", 409);
+      assertSafeRelativePath(entryPath);
+      const expectedHash = metadata.manifest.files[entryPath];
+      if (!expectedHash) throw new WorkspaceServerError("workspace_bundle_v3_entry_not_found", 404);
+      if (content.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v3_entry_too_large", 413);
+      if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v3_hash_mismatch", 400);
+      const root = this.incomingRoot(context.accountId, context.operationId);
+      const destination = resolveBundlePath(root, entryPath);
+      if (await pathExists(destination)) {
+        const existing = await readFile(destination);
+        if (hashBytes(existing) !== expectedHash) throw new WorkspaceServerError("workspace_import_staging_conflict", 409);
+        return;
+      }
+      const usage = await measureBundleUsage(root);
+      if (usage.entries >= WORKSPACE_BUNDLE_MAX_ENTRIES || usage.bytes + content.byteLength > WORKSPACE_BUNDLE_MAX_BYTES) {
+        throw new WorkspaceServerError("workspace_bundle_v3_transport_too_large", 413);
+      }
+      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      let wrote = false;
+      try {
+        await writeFile(destination, content, { flag: "wx", mode: 0o600 });
+        wrote = true;
+        const nextUsage = await measureBundleUsage(root);
+        assertBundleUsage(nextUsage, "workspace_bundle_v3_transport_too_large");
+        await this.writeIncomingMetadata(context, {
+          ...metadata,
+          received_bytes: nextUsage.bytes,
+          received_entries: nextUsage.entries
+        }, { overwrite: true });
+      } catch (error) {
+        if (wrote) await rm(destination, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
   }
 
   async completeIncomingBundle(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">): Promise<{
@@ -579,17 +622,45 @@ export class WorkspaceBundleV3Service {
       throw error;
     });
     if (existingWorkspace) {
-      try {
-        await assertImportedBundleMatches(this.store, targetContext, source.manifest);
+      await assertImportedBundleMatches(this.store, targetContext, source.manifest);
+      const recovery = await this.store.database.withContext(targetContext, async (sql) => {
+        const workspace = await sql.query<{ state: string }>(
+          "SELECT state FROM workspaces WHERE id = $1",
+          [input.targetWorkspaceId]
+        );
+        const session = await sql.query<{ id: string }>(
+          `SELECT id FROM workspace_import_sessions
+           WHERE workspace_id = $1 AND account_id = $2 AND state = 'writing'
+           ORDER BY created_at DESC, id DESC LIMIT 1`,
+          [input.targetWorkspaceId, context.accountId]
+        );
+        return { state: workspace.rows[0]?.state, importId: session.rows[0]?.id };
+      });
+      if (recovery.state === "active") {
         await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
         return {
           workspaceId: input.targetWorkspaceId,
           manifest: source.manifest,
           ...(source.manifest.transfer_id ? { receipt: transferReceipt(source.manifest, input.targetWorkspaceId) } : {})
         };
-      } catch {
-        throw new WorkspaceServerError("workspace_import_target_exists", 409);
       }
+      if (recovery.state !== "read_only" || !recovery.importId) {
+        throw new WorkspaceServerError("workspace_import_recovery_required", 409);
+      }
+      const recoveryContext = { ...targetContext, importId: recovery.importId };
+      await this.store.database.withContext(recoveryContext, async (sql) => {
+        await sql.query("SELECT samurai_reopen_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
+      });
+      await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
+      if (input.beforeActivate) await input.beforeActivate(recoveryContext);
+      await this.store.database.withContext(recoveryContext, async (sql) => {
+        await sql.query("SELECT samurai_complete_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
+      });
+      return {
+        workspaceId: input.targetWorkspaceId,
+        manifest: source.manifest,
+        ...(source.manifest.transfer_id ? { receipt: transferReceipt(source.manifest, input.targetWorkspaceId) } : {})
+      };
     }
     if (await pathExists(finalRoot)) throw new WorkspaceServerError("workspace_import_target_exists", 409);
     let importSessionStarted = false;
@@ -644,19 +715,26 @@ export class WorkspaceBundleV3Service {
       };
     } catch (error) {
       let abortFailed = false;
+      let abortError: unknown;
       if (importSessionStarted) {
         try {
           await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
-          await sql.query("SELECT samurai_abort_workspace_import($1, $2)", [input.targetWorkspaceId, importId]);
+            await sql.query("SELECT samurai_abort_workspace_import($1, $2)", [input.targetWorkspaceId, importId]);
           });
-        } catch {
+        } catch (cleanupError) {
           abortFailed = true;
+          abortError = cleanupError;
         }
       }
       // Do not remove the files if database cleanup failed: keeping them is
       // the only recoverable evidence for a partially imported Workspace.
       if (!abortFailed && finalRootCreated) await rm(finalRoot, { recursive: true, force: true }).catch(() => undefined);
-      if (abortFailed) throw new WorkspaceServerError("workspace_import_abort_failed", 500);
+      if (abortFailed) {
+        throw new WorkspaceServerError("workspace_import_abort_failed", 500, {
+          primary_error_code: safeErrorCode(error),
+          cleanup_error_code: safeErrorCode(abortError)
+        });
+      }
       throw error;
     } finally {
       await rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -785,8 +863,34 @@ export class WorkspaceBundleV3Service {
     }
     assertOpaqueId(metadata.target_workspace_id, "workspace_id_invalid");
     assertBundleManifestCandidate(metadata.manifest);
+    if (metadata.created_at !== undefined && !isValidTimestamp(metadata.created_at)) {
+      throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    }
+    if (metadata.expires_at !== undefined && !isValidTimestamp(metadata.expires_at)) {
+      throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    }
+    if (metadata.received_bytes !== undefined
+      && (!Number.isSafeInteger(metadata.received_bytes) || metadata.received_bytes < 0 || metadata.received_bytes > WORKSPACE_BUNDLE_MAX_BYTES)) {
+      throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    }
+    if (metadata.received_entries !== undefined
+      && (!Number.isSafeInteger(metadata.received_entries) || metadata.received_entries < 0 || metadata.received_entries > WORKSPACE_BUNDLE_MAX_ENTRIES)) {
+      throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
+    }
     if (metadata.completed !== undefined) assertIncomingCompletion(metadata.completed, metadata.target_workspace_id, metadata.manifest);
-    return metadata as IncomingBundleMetadata;
+    const normalized = metadata as IncomingBundleMetadata;
+    if (!normalized.completed && await incomingBundleExpired(this.incomingMetadataPath(context.accountId, context.operationId), normalized)) {
+      await this.clearIncomingBundle(context);
+      throw new WorkspaceServerError("workspace_import_staging_expired", 410);
+    }
+    return normalized;
+  }
+
+  private async clearIncomingBundle(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">): Promise<void> {
+    await Promise.all([
+      rm(this.incomingRoot(context.accountId, context.operationId), { recursive: true, force: true }),
+      rm(this.incomingMetadataPath(context.accountId, context.operationId), { force: true })
+    ]);
   }
 
   private async writeIncomingMetadata(
@@ -813,6 +917,10 @@ interface IncomingBundleMetadata {
   target_workspace_id: string;
   target_workspace_name?: string;
   manifest: WorkspaceBundleV3Manifest;
+  created_at?: string;
+  expires_at?: string;
+  received_bytes?: number;
+  received_entries?: number;
   completed?: IncomingBundleCompletion;
 }
 
@@ -876,7 +984,7 @@ async function assertImportedBundleMatches(
   if (!result.rows[0]) throw new WorkspaceServerError("workspace_import_target_exists", 409);
 }
 
-async function runExclusiveTransferExport<T>(key: string, action: () => Promise<T>): Promise<T> {
+export async function runExclusiveWorkspaceTransferExport<T>(key: string, action: () => Promise<T>): Promise<T> {
   const previous = transferExportLocks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const completion = new Promise<void>((resolve) => { release = resolve; });
@@ -888,6 +996,21 @@ async function runExclusiveTransferExport<T>(key: string, action: () => Promise<
   } finally {
     release();
     if (transferExportLocks.get(key) === queued) transferExportLocks.delete(key);
+  }
+}
+
+export async function runExclusiveWorkspaceBundleStaging<T>(key: string, action: () => Promise<T>): Promise<T> {
+  const previous = bundleStagingLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const completion = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous.catch(() => undefined).then(() => completion);
+  bundleStagingLocks.set(key, queued);
+  await previous.catch(() => undefined);
+  try {
+    return await action();
+  } finally {
+    release();
+    if (bundleStagingLocks.get(key) === queued) bundleStagingLocks.delete(key);
   }
 }
 
@@ -904,12 +1027,33 @@ function isTransientBundleSnapshotError(error: unknown): boolean {
 }
 
 function snapshotFingerprint(snapshot: WorkspaceSnapshot): string {
-  // JSON serialization normalizes PostgreSQL Date values before canonical
-  // sorting, so a timestamp change cannot be hidden as an empty object.
-  return hashText(canonicalJson(JSON.parse(JSON.stringify(snapshot))));
+  return hashText(canonicalBundleJson(snapshot));
 }
 
-async function readTransfer(
+/** PostgreSQL returns TIMESTAMPTZ columns as Date instances. Bundle JSON must
+ * preserve them as ISO strings; canonicalJson alone would see a Date as an
+ * object with no enumerable fields and serialize it as {}. */
+function canonicalBundleJson(value: unknown): string {
+  return canonicalJson(normalizeBundleJson(value));
+}
+
+function normalizeBundleJson(value: unknown): unknown {
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) throw new WorkspaceServerError("workspace_bundle_v3_snapshot_value_invalid", 500);
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) return value.map(normalizeBundleJson);
+  if (value && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      normalized[key] = normalizeBundleJson(nested);
+    }
+    return normalized;
+  }
+  return value;
+}
+
+export async function readWorkspaceTransfer(
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
   transferId: string
@@ -982,7 +1126,7 @@ async function writeBundleDirectory(input: {
     ["learning-resource-uses.jsonl", input.snapshot.learningResourceUses]
   ];
   for (const [file, payload] of dataFiles) {
-    const contents = Array.isArray(payload) ? payload.map((row) => canonicalJson(row)).join("\n") + (payload.length > 0 ? "\n" : "") : canonicalJson(payload);
+    const contents = Array.isArray(payload) ? payload.map((row) => canonicalBundleJson(row)).join("\n") + (payload.length > 0 ? "\n" : "") : canonicalBundleJson(payload);
     await writeFile(path.join(input.directory, file), contents, { flag: "wx", mode: 0o600 });
   }
   for (const row of input.snapshot.files) {
@@ -1049,6 +1193,8 @@ export async function verifyWorkspaceBundleV3(directory: string): Promise<{ dire
     throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
   }
   if (manifest.transfer_id !== undefined) assertOpaqueId(manifest.transfer_id, "workspace_transfer_id_invalid");
+  if (Object.keys(manifest.files).length > WORKSPACE_BUNDLE_MAX_ENTRIES) throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 413);
+  assertBundleUsage(await measureBundleUsage(root), "workspace_bundle_v3_transport_too_large");
   const actual = await hashBundleFiles(root, false);
   if (canonicalJson(actual) !== canonicalJson(manifest.files)) throw new WorkspaceServerError("workspace_bundle_v3_hash_mismatch", 400);
   if (manifest.integrity_hash !== hashText(canonicalJson({ files: manifest.files, record_counts: manifest.record_counts }))) {
@@ -1083,8 +1229,9 @@ export async function readWorkspaceBundleV3Transport(directory: string): Promise
   let total = 0;
   for (const relativePath of Object.keys(verified.manifest.files).sort()) {
     const content = await readFile(resolveBundlePath(verified.directory, relativePath));
+    if (content.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v3_entry_too_large", 413);
     total += content.byteLength;
-    if (total > 24 * 1024 * 1024) throw new WorkspaceServerError("workspace_bundle_v3_transport_too_large", 413);
+    if (total > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v3_transport_too_large", 413);
     entries.push({ path: relativePath, content_base64: content.toString("base64") });
   }
   return { format: transportFormat, manifest: verified.manifest, entries };
@@ -1104,7 +1251,7 @@ export async function writeWorkspaceBundleV3Transport(input: { transport: unknow
       if (!expected.delete(entry.path)) throw new WorkspaceServerError("workspace_bundle_v3_transport_entry_invalid", 400);
       const content = decodeTransportContent(entry.content_base64);
       total += content.byteLength;
-      if (total > 24 * 1024 * 1024) throw new WorkspaceServerError("workspace_bundle_v3_transport_too_large", 413);
+      if (total > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v3_transport_too_large", 413);
       if (hashBytes(content) !== transport.manifest.files[entry.path]) throw new WorkspaceServerError("workspace_bundle_v3_hash_mismatch", 400);
       const target = resolveBundlePath(destination, entry.path);
       await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -1463,7 +1610,10 @@ async function assertPortableJsonFile(file: string, relativeFile: string): Promi
   const schema = portableSchema[relativeFile];
   if (!schema) throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
   const text = await readFile(file, "utf8");
-  const rows = relativeFile.endsWith(".jsonl") ? text.split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [JSON.parse(text)];
+  if (Buffer.byteLength(text, "utf8") > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v3_entry_too_large", 413);
+  const lines = relativeFile.endsWith(".jsonl") ? text.split("\n").filter(Boolean) : [text];
+  if (lines.length > WORKSPACE_BUNDLE_MAX_RECORDS_PER_FILE) throw new WorkspaceServerError("workspace_bundle_v3_record_count_too_large", 413);
+  const rows = lines.map((line) => JSON.parse(line));
   for (const row of rows) {
     if (!row || typeof row !== "object" || Array.isArray(row)) throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
     const record = row as Record<string, unknown>;
@@ -1516,7 +1666,7 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     accountIds.add(accountId);
     accountStates.set(accountId, account.status === "disabled" ? "disabled" : "active");
   }
-  // A legacy SQLite migration can safely preserve only its configured local
+  // A legacy local-store migration can safely preserve only its configured local
   // owner because old rows have no portable public-key identity. Every other
   // principal must be proven by accounts.jsonl.
   const knownAccountIds = new Set([...accountIds, sourceOwnerAccountId]);
@@ -1938,6 +2088,9 @@ function parseTransport(value: unknown): WorkspaceBundleV3Transport {
     || Array.isArray((candidate.manifest as WorkspaceBundleV3Manifest).files)) {
     throw new WorkspaceServerError("workspace_bundle_v3_transport_invalid", 400);
   }
+  if (candidate.entries.length > WORKSPACE_BUNDLE_MAX_ENTRIES) {
+    throw new WorkspaceServerError("workspace_bundle_v3_transport_too_large", 413);
+  }
   const paths = new Set<string>();
   const entries = candidate.entries.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new WorkspaceServerError("workspace_bundle_v3_transport_entry_invalid", 400);
@@ -1972,11 +2125,92 @@ function assertBundleManifestCandidate(manifest: WorkspaceBundleV3Manifest): voi
   }
 }
 
-function decodeTransportContent(value: string): Buffer {
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new WorkspaceServerError("workspace_bundle_v3_transport_entry_invalid", 400);
+function assertBundleManifestSize(manifestText: string, errorCode: string): void {
+  if (Buffer.byteLength(manifestText, "utf8") > WORKSPACE_BUNDLE_MAX_BYTES) {
+    throw new WorkspaceServerError(errorCode, 413);
   }
-  return Buffer.from(value, "base64");
+}
+
+interface BundleUsage {
+  bytes: number;
+  entries: number;
+}
+
+async function measureBundleUsage(root: string): Promise<BundleUsage> {
+  let bytes = 0;
+  let entries = 0;
+  const visit = async (directory: string): Promise<void> => {
+    const children = await readdir(directory, { withFileTypes: true });
+    for (const child of children) {
+      const target = path.join(directory, child.name);
+      const relative = path.relative(root, target).split(path.sep).join("/");
+      if (child.isDirectory()) {
+        await visit(target);
+        continue;
+      }
+      const details = await lstat(target);
+      if (details.isSymbolicLink() || !details.isFile()) {
+        throw new WorkspaceServerError("workspace_bundle_v3_entry_invalid", 400);
+      }
+      // The manifest is transport metadata, not one of the uploaded
+      // Workspace entries. Counting it would make a manifest with exactly
+      // MAX_ENTRIES legitimate files impossible to stage.
+      if (relative === manifestFile) continue;
+      entries += 1;
+      bytes += details.size;
+      if (entries > WORKSPACE_BUNDLE_MAX_ENTRIES || bytes > WORKSPACE_BUNDLE_MAX_BYTES) return;
+    }
+  };
+  await visit(root);
+  return { bytes, entries };
+}
+
+function assertBundleUsage(usage: BundleUsage, errorCode: string): void {
+  if (usage.entries > WORKSPACE_BUNDLE_MAX_ENTRIES || usage.bytes > WORKSPACE_BUNDLE_MAX_BYTES) {
+    throw new WorkspaceServerError(errorCode, 413);
+  }
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+async function incomingBundleExpired(metadataPath: string, metadata: IncomingBundleMetadata): Promise<boolean> {
+  const expiresAt = metadata.expires_at
+    ? Date.parse(metadata.expires_at)
+    : metadata.created_at
+      ? Date.parse(metadata.created_at) + WORKSPACE_BUNDLE_INCOMING_TTL_MS
+      : Number.NaN;
+  if (Number.isFinite(expiresAt)) return expiresAt <= Date.now();
+  try {
+    const details = await stat(metadataPath);
+    return details.mtimeMs + WORKSPACE_BUNDLE_INCOMING_TTL_MS <= Date.now();
+  } catch {
+    return true;
+  }
+}
+
+function decodeTransportContent(value: string): Buffer {
+  const maxEncodedLength = Math.ceil(WORKSPACE_BUNDLE_MAX_ENTRY_BYTES / 3) * 4;
+  if (value.length > maxEncodedLength) throw new WorkspaceServerError("workspace_bundle_v3_entry_too_large", 413);
+  if (!isBase64Syntax(value)) throw new WorkspaceServerError("workspace_bundle_v3_transport_entry_invalid", 400);
+  const content = Buffer.from(value, "base64");
+  if (content.toString("base64") !== value) throw new WorkspaceServerError("workspace_bundle_v3_transport_entry_invalid", 400);
+  if (content.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) throw new WorkspaceServerError("workspace_bundle_v3_entry_too_large", 413);
+  return content;
+}
+
+function isBase64Syntax(value: string): boolean {
+  if (value.length % 4 !== 0) return false;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const dataLength = value.length - padding;
+  for (let index = 0; index < dataLength; index += 1) {
+    const code = value.charCodeAt(index);
+    if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39) || code === 0x2b || code === 0x2f)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function transferReceipt(manifest: WorkspaceBundleV3Manifest, targetWorkspaceId: string): WorkspaceTransferReceipt {

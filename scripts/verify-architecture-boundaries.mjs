@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
@@ -49,14 +49,13 @@ for (const file of sourceFiles("packages/learning/src")) {
 for (const file of [...sourceFiles("apps/web/src"), ...sourceFiles("packages/ui-protocol/src")]) {
   const source = readFileSync(path.join(root, file), "utf8");
   const ast = parse(file, source);
-  if (importsOf(ast).some((specifier) => specifier === "@samurai-agent/workspace-store" || specifier === "better-sqlite3")
-    || stringLiterals(ast).includes("workspace.sqlite")) issues.push({ code: "renderer_depends_on_store", file });
+  if (importsOf(ast).some((specifier) => specifier === "pg" || specifier === "@samurai-agent/workspace-server")) issues.push({ code: "renderer_depends_on_database", file });
 }
 for (const directory of ["packages/ui-protocol/src", "packages/agent-backends/src", "packages/gateway/src"]) {
   for (const file of sourceFiles(directory)) {
     const source = readFileSync(path.join(root, file), "utf8");
     const ast = parse(file, source);
-    if (importsOf(ast).includes("@samurai-agent/workspace-store") || identifiers(ast).includes("WorkspaceStore")) issues.push({ code: "adapter_depends_on_store", file });
+    if (importsOf(ast).includes("pg") || identifiers(ast).includes("PostgresWorkspaceDatabase")) issues.push({ code: "adapter_depends_on_database", file });
     inspectMutationCallsWithAliases(ast, file, "store", storeMutationVerbs, "adapter_direct_store_mutation");
   }
 }
@@ -76,28 +75,27 @@ const evidenceSources = [...serverFiles, ...sourceFiles("packages/learning/src")
 const sourceHash = createHash("sha256").update(evidenceSources.map((file) => `${file}\0${readFileSync(path.join(root, file), "utf8")}`).join("\0")).digest("hex");
 const worktreeClean = evidenceSources.every((file) => {
   try {
-    return execFileSync("git", ["show", `HEAD:${file}`], { cwd: root }).equals(readFileSync(path.join(root, file)));
+    return execFileSync("git", ["show", `HEAD:${file}`], {
+      cwd: root,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).equals(readFileSync(path.join(root, file)));
   } catch {
     return false;
   }
 });
-const now = new Date().toISOString();
-const evidenceDir = path.join(root, "reports/core-completion/evidence");
-mkdirSync(evidenceDir, { recursive: true });
-writeFileSync(path.join(evidenceDir, "A07.json"), `${JSON.stringify({
-  schema_version: 1, test_id: "A07", command: "pnpm core:test:boundaries", status: "passed",
-  commit_sha: commitSha, worktree_clean: worktreeClean, source_sha256: sourceHash, source_files: evidenceSources, started_at: now, completed_at: now,
-  assertions: [
-    { name: "Server route direct Store mutations", actual: 0, expected: 0 },
-    { name: "Workspace Server HTTP direct persistence mutations", actual: 0, expected: 0 },
-    { name: "Server Runtime mutations bypassing Domain Command Bus", actual: 0, expected: 0 },
-    { name: "Surface and Provider Adapter direct Store mutations", actual: 0, expected: 0 },
-    { name: "Surface and Provider Adapter Store dependencies", actual: 0, expected: 0 },
-    { name: "Learning to UI dependencies", actual: 0, expected: 0 },
-    { name: "Renderer to Store dependencies", actual: 0, expected: 0 }
-  ], result
-}, null, 2)}\n`);
-process.stdout.write(`${JSON.stringify(result)}\n`);
+// Boundary verification is intentionally read-only. A verifier must not
+// rewrite tracked Evidence because that would make a stale or locally dirty
+// report look like proof for the current source tree. CI may persist this
+// stdout as an artifact when it needs a durable record.
+process.stdout.write(`${JSON.stringify({
+  ...result,
+  test_id: "A07",
+  command: "pnpm core:test:boundaries",
+  commit_sha: commitSha,
+  worktree_clean: worktreeClean,
+  source_sha256: sourceHash,
+  source_files: evidenceSources
+})}\n`);
 
 function parse(file, source) {
   return ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);

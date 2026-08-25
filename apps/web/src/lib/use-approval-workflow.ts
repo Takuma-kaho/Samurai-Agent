@@ -10,7 +10,7 @@ import type {
   SessionRecord
 } from "@samurai-agent/core-schemas";
 import type { LocaleKey } from "@samurai-agent/localization";
-import { api, ApiError, type ApprovalLifecyclePayload, type ArchiveMemoryPayload, type MemoryDetail } from "./api";
+import { api, ApiError, type ApprovalLifecyclePayload, type ArchiveMemoryPayload, type MemoryDetail, type WorkspaceKnowledgeMemoryArchivePayload } from "./api";
 
 export type PendingApprovalChoice = "allow" | "allow_prefix" | "deny";
 
@@ -94,7 +94,12 @@ export function useApprovalWorkflow(input: {
     input.activity.value = payload.activity;
   }
 
-  function applyArchiveMemory(payload: ArchiveMemoryPayload) {
+  function applyArchiveMemory(payload: ArchiveMemoryPayload | WorkspaceKnowledgeMemoryArchivePayload) {
+    if (!("operation" in payload)) {
+      input.memory.value = input.memory.value.filter((item) => item.id !== payload.memory.id);
+      if (input.activeMemory.value?.memory.id === payload.memory.id) input.activeMemory.value = null;
+      return;
+    }
     input.operations.value = replaceFirst(input.operations.value, payload.operation);
     input.auditRecords.value = replaceFirst(input.auditRecords.value, payload.auditRecord);
     if (payload.rollbackPoint) input.rollbackPoints.value = replaceFirst(input.rollbackPoints.value, payload.rollbackPoint);

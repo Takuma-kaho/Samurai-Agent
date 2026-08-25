@@ -50,6 +50,7 @@ External Assist is optional and stays outside accepted Memory:
 SAMURAI_EXTERNAL_ASSIST_URL=https://assist.example.test/hints
 SAMURAI_EXTERNAL_ASSIST_TOKEN=...
 SAMURAI_EXTERNAL_ASSIST_AUTH_HEADER=Authorization
+SAMURAI_EXTERNAL_ASSIST_SHARE_RAW_CONTEXT=0
 SAMURAI_EXTERNAL_ASSIST_TIMEOUT_MS=5000
 SAMURAI_EXTERNAL_ASSIST_FILE=/absolute/path/to/external-assist.json
 SAMURAI_EXTERNAL_ASSIST_FILES=/absolute/path/to/a.json:/absolute/path/to/b.json
@@ -63,7 +64,10 @@ Set `SAMURAI_EXTERNAL_ASSIST_URL` for an HTTP provider, or
 `SAMURAI_EXTERNAL_ASSIST_FILES` for multiple local JSON/JSONL providers, separated
 by the platform path delimiter or commas. If `SAMURAI_EXTERNAL_ASSIST_URL` is set,
 the HTTP provider wins. The HTTP provider receives POST JSON for `prefetch` and
-`sync` and returns either `{ "hints": [...] }` or a direct hint array. Hints use
+`sync` and returns either `{ "hints": [...] }` or a direct hint array. Raw
+conversation/search text is withheld by default; set
+`SAMURAI_EXTERNAL_ASSIST_SHARE_RAW_CONTEXT=1` only after explicitly approving
+that sharing with the configured provider. Hints use
 `summary` or `content`, plus optional `id`, `title`, `source_label`,
 `source_uri`, and `confidence`. Local file records may also include `keywords`
 for query matching.
@@ -166,7 +170,7 @@ pnpm run backend:channels:verify
 pnpm run sandbox:verify
 ```
 
-`pnpm doctor` checks the workspace layout, SQLite database, provider env,
+`pnpm doctor` checks the PostgreSQL workspace state, provider env,
 external backend env, sandbox executor environment, dependency state, runner
 startup probes, API health, recent backend runs, and Gateway state.
 
@@ -226,4 +230,6 @@ Key directories:
 - `skills/`: Skill markdown and support files
 - `rollback/`: rollback point snapshots
 
-SQLite stores indexes and operational history in `workspace.sqlite`.
+PostgreSQL stores Workspace metadata, records, file-transaction state, and
+operational history. Durable content files are kept below the configured
+storage root and are indexed by PostgreSQL.

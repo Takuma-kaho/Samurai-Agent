@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -55,6 +55,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const accounts = [owner, otherRoomMember, roomExecutor];
   const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
+  let stage = "setup";
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -237,9 +238,21 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     if (!resumed) throw new Error("server04_configuration_block_resume_missing");
     assert(resumed.id === blockedActivity.job?.id && resumed.status === "completed", "server04_configuration_block_not_resumed");
 
+    stage = "bundle_v3";
     const bundles = new WorkspaceBundleV3Service(store);
     const bundleDirectory = path.join(root, "source.bundle");
     await bundles.export(ownerContext(operationId("bundle-export")), { destination: bundleDirectory });
+    const membershipRows = (await readFile(path.join(bundleDirectory, "memberships.jsonl"), "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { created_at?: unknown; updated_at?: unknown });
+    assert(
+      membershipRows.length > 0 && membershipRows.every((row) => typeof row.created_at === "string"
+        && Number.isFinite(new Date(row.created_at).getTime())
+        && typeof row.updated_at === "string"
+        && Number.isFinite(new Date(row.updated_at).getTime())),
+      "server04_bundle_membership_timestamp_not_serialized"
+    );
     const restoreStore = target.label === "self_host"
       ? new WorkspaceServerStore({
         database,
@@ -256,6 +269,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const restored = await new WorkspaceLearningService(restoreStore).listResources({ workspaceId: imported.workspaceId, accountId: owner.id }, { scope: { kind: "room", roomId: rootRoom.id }, includeArchived: true });
     assert(restored.some((resource) => resource.title === "Verified deployment"), "server04_bundle_learning_roundtrip_failed");
     console.log(`[Server04] ${target.label}: learning, RLS, fixed state, feedback, and restore probe passed`);
+  } catch (error) {
+    throw new Error(`server04_probe_${target.label}_${stage}:${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await cleanup(adminDatabase, [workspaceId, restoredWorkspaceId], accounts.map((account) => account.id));
     await database.close();
@@ -315,11 +330,14 @@ async function cleanup(adminDatabase: PostgresWorkspaceAdminDatabase, workspaceI
       "workspace_audit_entries", "workspace_bundles", "workspace_transfers", "workspace_invitations", "workspace_jobs", "workspace_events", "workspace_operations", "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms", "workspace_members", "workspace_import_sessions", "workspaces"
     ];
     for (const workspaceId of workspaceIds) {
-      for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]).catch(() => undefined);
+      for (const table of tables) {
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
+      }
     }
-    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
-    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
-  }).catch(() => undefined);
+    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
+    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
+  });
 }
 
 function accountIdentity(): ProbeAccount {

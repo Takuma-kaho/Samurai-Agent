@@ -1,9 +1,9 @@
 # Core-02 completion report
 
-- 判定: 実装完了・環境検証待ち
-- Commit SHA: 6e11095f3399a2189bb6300077e74a871aa3da9a
+- 判定: 実装完了・CI待ち
+- Commit SHA: d828d7023a30ac68d467dd3a9740085011d05b78
 - CI: not_run（GitHubへのpushとCI実行はユーザー許可の対象）
-- 検証中断: あり（SIGINT）
+- 検証中断: なし
 
 ## 最終production経路
 
@@ -13,17 +13,17 @@ Chat、Gateway、AutomationのChat実行は、Server composition rootで一度�
 
 | Command | 結果 | exit code | 所要時間 |
 | --- | --- | ---: | ---: |
-| core:host-runtime:check | pass | 0 | 36030ms |
-| core-02 independent blocker audit | pass | 0 | 2568ms |
-| core-schemas typecheck | pass | 0 | 2374ms |
-| agent-backends typecheck | pass | 0 | 1493ms |
-| workspace-store typecheck | pass | 0 | 14504ms |
-| runtime typecheck | pass | 0 | 173993ms |
-| server typecheck | pass | 0 | 6097ms |
-| focused runtime tests | pass | 0 | 2715ms |
-| focused SQLite tests | pass | 0 | 1463ms |
-| production composition test | pass | 0 | 2091ms |
-| git diff check | unverified | - | 69684ms |
+| core:host-runtime:check | pass | 0 | 780ms |
+| core-02 independent blocker audit | pass | 0 | 591ms |
+| core-schemas typecheck | pass | 0 | 3680ms |
+| agent-backends typecheck | pass | 0 | 3945ms |
+| workspace-store typecheck | pass | 0 | 5999ms |
+| runtime typecheck | pass | 0 | 7873ms |
+| server typecheck | pass | 0 | 12036ms |
+| focused runtime tests | pass | 0 | 2010ms |
+| focused SQLite tests | pass | 0 | 3306ms |
+| production composition test | pass | 0 | 3946ms |
+| git diff check | pass | 0 | 56ms |
 
 ## Phase判定
 
@@ -36,7 +36,7 @@ Chat、Gateway、AutomationのChat実行は、Server composition rootで一度�
 | Phase 4 | verified | runtime typecheck:pass, focused runtime tests:pass, core-02 independent blocker audit:pass |
 | Phase 5 | verified | server typecheck:pass, production composition test:pass, core-02 independent blocker audit:pass |
 | Phase 6 | verified | core:host-runtime:check:pass, core-02 independent blocker audit:pass, runtime typecheck:pass |
-| Phase 7 | unverified | core:host-runtime:check:pass, core-02 independent blocker audit:pass, core-schemas typecheck:pass, agent-backends typecheck:pass, workspace-store typecheck:pass, runtime typecheck:pass, server typecheck:pass, focused runtime tests:pass, focused SQLite tests:pass, production composition test:pass, git diff check:unverified |
+| Phase 7 | verified | core:host-runtime:check:pass, core-02 independent blocker audit:pass, core-schemas typecheck:pass, agent-backends typecheck:pass, workspace-store typecheck:pass, runtime typecheck:pass, server typecheck:pass, focused runtime tests:pass, focused SQLite tests:pass, production composition test:pass, git diff check:pass |
 
 ## 責務分離
 

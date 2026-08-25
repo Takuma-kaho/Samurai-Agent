@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,6 +27,9 @@ import {
   type SupportedLocale,
   stableHash
 } from "@samurai-agent/core-schemas";
+import { assertSafeGatewayHttpEndpoint, GatewayHttpEndpointError } from "./http-url-safety.js";
+
+export { assertSafeGatewayHttpEndpoint, GatewayHttpEndpointError } from "./http-url-safety.js";
 
 export {
   GatewayFormalWorkspaceIngress,
@@ -35,6 +39,38 @@ export {
 
 const mcpProcessCloseGraceMs = 1_000;
 const mcpProcessCloseKillWaitMs = 1_000;
+
+const inheritedChildEnvironmentKeys = [
+  "PATH",
+  "PATHEXT",
+  "SystemRoot",
+  "WINDIR",
+  "ComSpec",
+  "HOME",
+  "USERPROFILE",
+  "TMP",
+  "TEMP",
+  "TMPDIR",
+  "SHELL",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_LANG",
+  "XDG_RUNTIME_DIR",
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "SSH_AUTH_SOCK",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT"
+] as const;
+
+/** External tools must never inherit application credentials from the Server. */
+export function safeChildEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    inheritedChildEnvironmentKeys.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]]])
+  );
+}
 
 export interface RouteSessionInput {
   source: MessageEnvelope["source"];
@@ -126,6 +162,8 @@ export interface McpToolAdapterInput {
 }
 
 export interface McpToolAdapter {
+  /** Backend that actually enforces the boundary for this adapter. */
+  sandboxBackend?: SandboxExecutorBackend;
   invoke(input: McpToolAdapterInput): Promise<{ output?: JsonValue; resource_refs?: Array<{ kind: string; id?: string; uri: string; label?: string }> }>;
 }
 
@@ -139,7 +177,7 @@ export interface McpToolExecutionResult {
   resolved_secret_ref_ids: string[];
   secret_resolution: SecretResolutionSummary;
   sandbox: SandboxExecutionPlan;
-  reason?: McpToolInvocationPlan["reason"] | "secret_resolution_failed" | "adapter_failed";
+  reason?: McpToolInvocationPlan["reason"] | "secret_resolution_failed" | "adapter_failed" | "sandbox_isolation_unavailable";
   error?: string;
 }
 
@@ -202,7 +240,7 @@ export interface SandboxCommandExecutionResult {
   resolved_secret_ref_ids: string[];
   secret_resolution: SecretResolutionSummary;
   sandbox: SandboxExecutionPlan;
-  reason?: "secret_resolution_failed" | "adapter_failed" | "command_failed" | "sandbox_disabled" | "invalid_command";
+  reason?: "secret_resolution_failed" | "adapter_failed" | "command_failed" | "sandbox_disabled" | "invalid_command" | "path_not_allowed" | "sandbox_isolation_unavailable";
   error?: string;
 }
 
@@ -216,6 +254,11 @@ export interface SandboxExecutorCapabilityStatus {
   detail?: string;
 }
 
+/**
+ * A filesystem bridge for an explicitly selected Agent project worktree.
+ * Composition code must never pass the Workspace Core root here; Core
+ * mutations use FormalWorkspaceIngress and Domain Operation instead.
+ */
 export interface SandboxWorkspaceSyncInput {
   direction: GatewaySandboxWorkspaceSyncDirection;
   workspace_root: string;
@@ -233,7 +276,7 @@ export interface SandboxWorkspaceSyncAdapterOutput {
   file_count?: number;
   byte_count?: number;
   resource_refs?: Array<{ kind: string; id?: string; uri: string; label?: string }>;
-  reason?: "workspace_access_none" | "docker_bind_mount" | "docker_container_required" | "remote_target_required" | "mirror_two_pass_update" | "mirror_newer_wins" | "adapter_failed";
+  reason?: "workspace_access_none" | "docker_bind_mount" | "docker_container_required" | "remote_target_required" | "mirror_two_pass_update" | "mirror_newer_wins" | "adapter_failed" | "path_not_allowed";
   error?: string;
 }
 
@@ -261,7 +304,7 @@ export interface SandboxLifecycleAdapterInput {
 
 export interface SandboxLifecycleAdapterOutput {
   status: "completed" | "failed" | "skipped";
-  reason?: "host_noop" | "docker_container_required" | "remote_target_required" | "remote_command_required" | "adapter_failed";
+  reason?: "host_noop" | "docker_container_required" | "remote_target_required" | "remote_command_required" | "adapter_failed" | "path_not_allowed";
   command?: string;
   args?: string[];
   stdout?: string;
@@ -394,6 +437,10 @@ export interface SandboxCommandAdapterOptions {
 
 export interface SandboxWorkspaceSyncAdapterOptions {
   spawnProcess?: typeof spawn;
+  /** Raw filesystem sync is only valid for a separately provisioned Agent worktree. */
+  workspaceRootRole?: "agent_worktree";
+  /** Runtime-owned Core root used to reject a mislabelled worktree. */
+  coreWorkspaceRoot?: string;
 }
 
 export interface SandboxLifecycleAdapterOptions {
@@ -536,7 +583,7 @@ export function createStdioMcpToolAdapter(options: StdioMcpToolAdapterOptions): 
       let client: StdioJsonRpcClient | undefined;
       try {
         const env = buildStdioMcpEnv({
-          baseEnv: options.env ?? process.env,
+          baseEnv: safeChildEnvironment(options.env ?? process.env),
           config,
           materials: input.secrets,
           secretFiles
@@ -615,11 +662,12 @@ export function createHttpMcpToolAdapter(options: HttpMcpToolAdapterOptions): Mc
       if (!config) {
         throw new Error(`mcp_config_not_found:${input.server_name}`);
       }
+      const endpoint = await assertSafeGatewayHttpEndpoint(config.endpoint_url);
       const fetcher = options.fetch ?? fetch;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), config.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000);
       try {
-        const response = await fetcher(config.endpoint_url, {
+        const response = await fetcher(endpoint.toString(), {
           method: "POST",
           headers: buildHttpMcpHeaders(config, input.secrets),
           body: JSON.stringify({
@@ -631,8 +679,12 @@ export function createHttpMcpToolAdapter(options: HttpMcpToolAdapterOptions): Mc
               arguments: input.input
             }
           }),
-          signal: controller.signal
+          signal: controller.signal,
+          redirect: "manual"
         });
+        if (response.status >= 300 && response.status < 400) {
+          throw new GatewayHttpEndpointError("redirect_blocked");
+        }
         const body = await response.text();
         if (!response.ok) {
           throw new Error(`mcp_http_status:${response.status}:${body.slice(0, 200)}`);
@@ -655,7 +707,7 @@ export function createHttpMcpToolAdapter(options: HttpMcpToolAdapterOptions): Mc
 export function createSandboxCommandAdapter(options: SandboxCommandAdapterOptions = {}): SandboxCommandAdapter {
   return {
     async execute(input) {
-      const invocation = createSandboxProcessInvocation(input, options.env ?? process.env);
+      const invocation = createSandboxProcessInvocation(input, safeChildEnvironment(options.env ?? process.env));
       return runSandboxProcess(invocation, {
         stdin: invocation.stdin ?? input.stdin,
         timeoutMs: input.timeout_ms ?? input.sandbox.timeout_ms ?? 30_000,
@@ -677,7 +729,7 @@ export function inspectSandboxExecutorCapabilities(options: {
       backend: "none",
       available: true,
       reason: "host_process",
-      detail: "Host process execution is available inside the Runtime boundary."
+      detail: "Host process execution is available only for trusted local_cli/cron boundaries; it is not an isolation boundary."
     },
     probeSandboxExecutor("docker", "docker", ["--version"], spawnProbe, timeoutMs),
     probeSandboxExecutor("ssh", "ssh", ["-V"], spawnProbe, timeoutMs),
@@ -733,6 +785,41 @@ export async function executeSandboxCommand(
       error: "sandbox_disabled"
     };
   }
+  if (sandbox.workspace_access !== "none") {
+    const pathError = sandboxPathPolicyError(sandbox, input.cwd?.trim() || "workspace", sandbox.workspace_access)
+      ?? sandboxHostPartialPathError(sandbox);
+    const dockerMountError = sandbox.backend === "docker" ? sandboxDockerMountPolicyError(sandbox) : undefined;
+    if (pathError || dockerMountError) {
+      return {
+        status: "blocked",
+        command,
+        resource_refs: [],
+        secret_ref_ids: secretRefIds,
+        resolved_secret_ref_ids: [],
+        secret_resolution: emptySecretSummary,
+        sandbox,
+        reason: "path_not_allowed",
+        error: pathError ?? dockerMountError
+      };
+    }
+  }
+
+  const isolationError = sandbox.backend === "none"
+    ? sandboxIsolationCapabilityError(sandbox, "none", policy.source_channel)
+    : undefined;
+  if (isolationError) {
+    return {
+      status: "blocked",
+      command,
+      resource_refs: [],
+      secret_ref_ids: secretRefIds,
+      resolved_secret_ref_ids: [],
+      secret_resolution: emptySecretSummary,
+      sandbox,
+      reason: "sandbox_isolation_unavailable",
+      error: isolationError
+    };
+  }
 
   const secretBundle = await createSecretResolutionBundle(policy.secret_refs, {
     env: options.env,
@@ -764,8 +851,8 @@ export async function executeSandboxCommand(
       secrets: secretBundle.materials,
       secret_files_materialized: secretFiles
     });
-    const stdout = redactSecretText(output.stdout, secretBundle.materials);
-    const stderr = redactSecretText(output.stderr, secretBundle.materials);
+    const stdout = redactSandboxOutput(output.stdout, secretBundle.materials);
+    const stderr = redactSandboxOutput(output.stderr, secretBundle.materials);
     const failed = output.exit_code !== 0 || Boolean(output.signal);
     return {
       status: failed ? "failed" : "completed",
@@ -792,26 +879,46 @@ export async function executeSandboxCommand(
       secret_resolution: secretBundle.summary,
       sandbox,
       reason: "adapter_failed",
-      error: message
+      error: secretBundle.materials.length > 0
+        ? "sandbox_adapter_failed_with_secret_material"
+        : message
     };
   } finally {
     await secretFiles?.cleanup();
   }
 }
 
+/**
+ * Executes worktree transfer after Runtime has rejected the Core root.
+ * The adapter intentionally has no Workspace Store or Domain Operation
+ * capability; it only handles the Agent's separately granted worktree.
+ */
 export function createSandboxWorkspaceSyncAdapter(options: SandboxWorkspaceSyncAdapterOptions = {}): SandboxWorkspaceSyncAdapter {
   return {
     async sync(input) {
       if (input.sandbox.workspace_access === "none") {
         return { status: "skipped", reason: "workspace_access_none" };
       }
-      if (input.sandbox.backend === "docker") {
-        return syncDockerWorkspace(input, options.spawnProcess ?? spawn);
+      if (options.workspaceRootRole !== "agent_worktree") {
+        return { status: "failed", reason: "path_not_allowed", error: "sandbox_agent_worktree_required" };
       }
-      if (input.sandbox.backend === "ssh" || input.sandbox.backend === "remote") {
-        return syncRemoteWorkspace(input, options.spawnProcess ?? spawn);
+      if (!options.coreWorkspaceRoot?.trim()) {
+        return { status: "failed", reason: "path_not_allowed", error: "sandbox_core_workspace_root_required" };
       }
-      return syncLocalWorkspace(input);
+      const sandbox = withWorkspaceSyncMetadata(input.sandbox, input.metadata);
+      const scopedInput = { ...input, sandbox };
+      assertSandboxWorkspaceSyncPathAllowed(scopedInput);
+      const coreRootError = await sandboxCoreWorkspaceRootError(input.workspace_root, sandbox, options.coreWorkspaceRoot);
+      if (coreRootError) {
+        return { status: "failed", reason: "path_not_allowed", error: coreRootError };
+      }
+      if (sandbox.backend === "docker") {
+        return syncDockerWorkspace(scopedInput, options.spawnProcess ?? spawn);
+      }
+      if (sandbox.backend === "ssh" || sandbox.backend === "remote") {
+        return syncRemoteWorkspace(scopedInput, options.spawnProcess ?? spawn);
+      }
+      return syncLocalWorkspace(scopedInput);
     }
   };
 }
@@ -822,12 +929,68 @@ export async function executeSandboxWorkspaceSync(
   adapter: SandboxWorkspaceSyncAdapter
 ): Promise<SandboxWorkspaceSyncExecutionResult> {
   const plan = createSandboxExecutionPlan(sandbox);
+  const scopedPlan = withWorkspaceSyncMetadata(plan, input.metadata);
   const workspaceRoot = path.resolve(input.workspace_root);
   try {
+    const pathError = sandboxWorkspaceSyncPathError(scopedPlan, input);
+    if (pathError) {
+      return {
+        status: "failed",
+        direction: input.direction,
+        workspace_root: workspaceRoot,
+        remote_workspace_root: input.remote_workspace_root,
+        sandbox: plan,
+        reason: "path_not_allowed",
+        error: pathError
+      };
+    }
+    const coreRootError = await sandboxCoreWorkspaceRootError(workspaceRoot, scopedPlan);
+    if (coreRootError) {
+      return {
+        status: "failed",
+        direction: input.direction,
+        workspace_root: workspaceRoot,
+        remote_workspace_root: input.remote_workspace_root,
+        sandbox: plan,
+        reason: "path_not_allowed",
+        error: coreRootError
+      };
+    }
+    if (plan.backend === "none" || plan.metadata.workspace_sync_transport === "local") {
+      const localSandboxRoot = input.remote_workspace_root ? path.resolve(input.remote_workspace_root) : undefined;
+      const localSandboxCoreRootError = localSandboxRoot
+        ? await sandboxCoreWorkspaceRootError(localSandboxRoot, scopedPlan)
+        : undefined;
+      if (localSandboxCoreRootError) {
+        return {
+          status: "failed",
+          direction: input.direction,
+          workspace_root: workspaceRoot,
+          remote_workspace_root: input.remote_workspace_root,
+          sandbox: plan,
+          reason: "path_not_allowed",
+          error: localSandboxCoreRootError
+        };
+      }
+    }
+    if (plan.backend === "docker") {
+      const dockerRootError = sandboxDockerWorkspaceRootError(input.remote_workspace_root ?? "/workspace");
+      if (dockerRootError) {
+        return {
+          status: "failed",
+          direction: input.direction,
+          workspace_root: workspaceRoot,
+          remote_workspace_root: input.remote_workspace_root,
+          sandbox: plan,
+          reason: "path_not_allowed",
+          error: dockerRootError
+        };
+      }
+    }
     const output = await adapter.sync({
       ...input,
       workspace_root: workspaceRoot,
-      sandbox: plan
+      sandbox: scopedPlan
     });
     return {
       ...output,
@@ -874,6 +1037,19 @@ export async function executeSandboxLifecycleAction(
 ): Promise<SandboxLifecycleAdapterOutput> {
   const plan = createSandboxExecutionPlan(sandbox);
   try {
+    if (input.action === "delete") {
+      const pathError = !sandboxPathAccessAllows(plan.workspace_access, "read_write")
+        ? "sandbox_workspace_access_not_allowed"
+        : sandboxPathPolicyError(plan, "workspace", "read_write");
+      if (pathError) {
+        return {
+          status: "failed",
+          reason: "path_not_allowed",
+          error: pathError,
+          resource_refs: [sandboxLifecycleRef(input.action, input.instance_key)]
+        };
+      }
+    }
     return await adapter.run({
       ...input,
       sandbox: plan
@@ -992,7 +1168,7 @@ export function planMcpToolInvocation(
 }
 
 export async function executeMcpToolInvocation(
-  boundary: Pick<GatewayBoundaryPolicy, "mcp_config_refs" | "sandbox">,
+  boundary: Pick<GatewayBoundaryPolicy, "mcp_config_refs" | "sandbox" | "source_channel">,
   input: McpToolExecutionInput,
   adapter: McpToolAdapter,
   options: {
@@ -1014,6 +1190,26 @@ export async function executeMcpToolInvocation(
       secret_resolution: emptySecretSummary,
       sandbox,
       reason: plan.reason
+    };
+  }
+
+  const isolationError = sandboxIsolationCapabilityError(
+    sandbox,
+    adapter.sandboxBackend ?? "none",
+    boundary.source_channel
+  );
+  if (isolationError) {
+    return {
+      status: "blocked",
+      server_name: input.server_name,
+      tool_name: input.tool_name,
+      resource_refs: [],
+      secret_ref_ids: plan.secret_ref_ids,
+      resolved_secret_ref_ids: [],
+      secret_resolution: emptySecretSummary,
+      sandbox,
+      reason: "sandbox_isolation_unavailable",
+      error: isolationError
     };
   }
 
@@ -1047,7 +1243,7 @@ export async function executeMcpToolInvocation(
       status: "completed",
       server_name: input.server_name,
       tool_name: input.tool_name,
-      output: redactSecretMaterials(result.output, secretBundle.materials),
+      output: redactMcpOutput(result.output, secretBundle.materials),
       resource_refs: result.resource_refs ?? [],
       secret_ref_ids: plan.secret_ref_ids,
       resolved_secret_ref_ids: secretBundle.summary.resolved_secret_ref_ids,
@@ -1066,7 +1262,9 @@ export async function executeMcpToolInvocation(
       secret_resolution: secretBundle.summary,
       sandbox,
       reason: "adapter_failed",
-      error: redactSecretText(errorMessage, secretBundle.materials)
+      error: secretBundle.materials.length > 0
+        ? "mcp_adapter_failed_with_secret_material"
+        : redactSecretText(errorMessage, secretBundle.materials)
     };
   }
 }
@@ -1078,6 +1276,34 @@ function secretResolutionSummaryFromIds(secretRefIds: string[]): SecretResolutio
     unresolved_secret_ref_ids: [],
     unresolved_reasons: {}
   };
+}
+
+function sandboxIsolationCapabilityError(
+  sandbox: SandboxExecutionPlan,
+  adapterBackend: SandboxExecutorBackend,
+  sourceChannel?: GatewayBoundaryPolicy["source_channel"]
+): string | undefined {
+  if (adapterBackend !== sandbox.backend) {
+    return "sandbox_adapter_backend_mismatch";
+  }
+  if (sandbox.backend !== "none") {
+    return undefined;
+  }
+  if (sourceChannel !== "local_cli" && sourceChannel !== "cron") {
+    return "sandbox_unisolated_backend_not_allowed";
+  }
+  if (sandbox.network_access !== "external") {
+    return "sandbox_network_isolation_unavailable";
+  }
+  if (sandbox.workspace_access !== "read_write") {
+    return "sandbox_workspace_isolation_unavailable";
+  }
+  if (sandbox.denied_paths.length > 0 || !sandbox.allowed_paths.some((rule) =>
+    (rule.root === "workspace" || rule.root === ".") && rule.access === "read_write"
+  )) {
+    return "sandbox_workspace_isolation_unavailable";
+  }
+  return undefined;
 }
 
 export function createSandboxExecutionPlan(policy: GatewayBoundaryPolicy["sandbox"]): SandboxExecutionPlan {
@@ -1092,6 +1318,121 @@ export function createSandboxExecutionPlan(policy: GatewayBoundaryPolicy["sandbo
     timeout_ms: policy.timeout_ms,
     metadata: policy.metadata
   };
+}
+
+type SandboxPathAccess = "read" | "write" | "read_write";
+
+function sandboxPathPolicyError(
+  sandbox: Pick<SandboxExecutionPlan, "allowed_paths" | "denied_paths">,
+  requestedPath: string,
+  requiredAccess: SandboxPathAccess
+): string | undefined {
+  const normalizedPath = requestedPath === "workspace"
+    ? "workspace"
+    : normalizeGatewayWorkspacePath(requestedPath);
+  if (sandbox.denied_paths.some((root) => sandboxPolicyPathMatches(normalizedPath, root))) {
+    return "sandbox_path_denied";
+  }
+  const matchingRules = sandbox.allowed_paths.filter((rule) => sandboxPolicyPathMatches(normalizedPath, rule.root));
+  if (matchingRules.some((rule) => sandboxPathAccessAllows(rule.access, requiredAccess))) {
+    return undefined;
+  }
+  return matchingRules.length > 0 ? "sandbox_path_access_not_allowed" : "sandbox_path_not_allowed";
+}
+
+function sandboxPolicyPathMatches(requestedPath: string, policyRoot: string): boolean {
+  if (policyRoot === "workspace" || policyRoot === ".") {
+    return true;
+  }
+  return requestedPath === policyRoot || requestedPath.startsWith(`${policyRoot}/`);
+}
+
+function sandboxPathAccessAllows(grantedAccess: string, requiredAccess: SandboxPathAccess): boolean {
+  if (requiredAccess === "read_write") {
+    return grantedAccess === "read_write";
+  }
+  return grantedAccess === requiredAccess || grantedAccess === "read_write";
+}
+
+function sandboxWorkspaceSyncRequiredAccess(
+  direction: GatewaySandboxWorkspaceSyncDirection,
+  metadata: Record<string, JsonValue>
+): SandboxPathAccess {
+  if (direction === "mirror" || metadata.workspace_sync_delete === true) {
+    return "read_write";
+  }
+  return direction === "seed_to_sandbox" ? "read" : "write";
+}
+
+function sandboxWorkspaceSyncPathError(
+  sandbox: SandboxExecutionPlan,
+  input: SandboxWorkspaceSyncInput
+): string | undefined {
+  const metadata = {
+    ...sandbox.metadata,
+    ...(input.metadata ?? {})
+  };
+  const requiredAccess = sandboxWorkspaceSyncRequiredAccess(input.direction, metadata);
+  if (!sandboxPathAccessAllows(sandbox.workspace_access, requiredAccess)) {
+    return "sandbox_workspace_access_not_allowed";
+  }
+  const syncRoots = sandboxWorkspaceSyncRoots(sandbox);
+  if (syncRoots.length === 0) {
+    return "sandbox_path_not_allowed";
+  }
+  for (const root of syncRoots) {
+    const pathError = sandboxPathPolicyError(sandbox, root || "workspace", requiredAccess);
+    if (pathError && pathError !== "sandbox_path_denied") {
+      return pathError;
+    }
+  }
+  return undefined;
+}
+
+function sandboxDockerMountPolicyError(sandbox: SandboxExecutionPlan): string | undefined {
+  for (const rule of sandbox.allowed_paths) {
+    if (sandbox.denied_paths.some((deniedPath) => sandboxPolicyPathMatches(deniedPath, rule.root))) {
+      return "sandbox_path_denied";
+    }
+  }
+  return undefined;
+}
+
+function sandboxHostPartialPathError(sandbox: SandboxExecutionPlan): string | undefined {
+  if (sandbox.backend !== "none" || sandbox.allowed_paths.some((rule) => rule.root === "workspace" || rule.root === ".")) {
+    return undefined;
+  }
+  return "sandbox_host_partial_path_not_supported";
+}
+
+function assertSandboxWorkspaceSyncPathAllowed(input: SandboxWorkspaceSyncAdapterInput): void {
+  const pathError = sandboxWorkspaceSyncPathError(input.sandbox, input);
+  if (pathError) {
+    throw new Error(pathError);
+  }
+}
+
+function withWorkspaceSyncMetadata(
+  sandbox: SandboxExecutionPlan,
+  metadata: Record<string, JsonValue> | undefined
+): SandboxExecutionPlan {
+  return metadata ? { ...sandbox, metadata: { ...sandbox.metadata, ...metadata } } : sandbox;
+}
+
+async function sandboxCoreWorkspaceRootError(workspaceRoot: string, sandbox?: SandboxExecutionPlan, coreWorkspaceRoot?: string): Promise<string | undefined> {
+  if (coreWorkspaceRoot) {
+    const resolvedWorkspaceRoot = path.resolve(workspaceRoot);
+    const resolvedCoreRoot = path.resolve(coreWorkspaceRoot);
+    if (resolvedWorkspaceRoot === resolvedCoreRoot
+      || resolvedWorkspaceRoot.startsWith(`${resolvedCoreRoot}${path.sep}`)
+      || resolvedCoreRoot.startsWith(`${resolvedWorkspaceRoot}${path.sep}`)) {
+      return "sandbox_core_workspace_root_not_allowed";
+    }
+  }
+  // PostgreSQL is the only standard Core persistence. A configured Core root
+  // is rejected above; there is no local database file to discover or copy.
+  if (sandbox && !sandboxWorkspaceSyncRoots(sandbox).includes("")) return undefined;
+  return undefined;
 }
 
 export const webGatewayContext: GatewayContext = {
@@ -1463,7 +1804,7 @@ export function createDefaultGatewayBoundaryPolicy(input: {
       backend: "none",
       workspace_access: "none",
       network_access: "none",
-      allowed_paths: [],
+      allowed_paths: [{ root: "workspace", access: "read_write" }],
       denied_paths: [],
       metadata: {}
     },
@@ -1722,7 +2063,13 @@ function createDockerSandboxInvocation(input: SandboxCommandAdapterInput, baseEn
   args.push("--network", input.sandbox.network_access === "none" ? "none" : "bridge");
   if (input.sandbox.workspace_access !== "none") {
     const mode = input.sandbox.workspace_access === "read" ? "ro" : "rw";
-    args.push("-v", `${path.resolve(input.workspace_root)}:/workspace:${mode}`);
+    for (const rule of dockerWorkspaceMountRules(input.sandbox)) {
+      const hostPath = rule.root === "workspace"
+        ? path.resolve(input.workspace_root)
+        : path.resolve(input.workspace_root, rule.root);
+      const containerPath = rule.root === "workspace" ? "/workspace" : `/workspace/${rule.root}`;
+      args.push("-v", `${hostPath}:${containerPath}:${mode}`);
+    }
     args.push("-w", dockerWorkspaceCwd(input.cwd));
   }
   if (input.secret_files_materialized?.root_dir) {
@@ -1745,6 +2092,14 @@ function createDockerSandboxInvocation(input: SandboxCommandAdapterInput, baseEn
     args,
     env: baseEnv
   };
+}
+
+function dockerWorkspaceMountRules(sandbox: SandboxExecutionPlan): Array<{ root: string }> {
+  const roots = sandbox.allowed_paths
+    .map((rule) => rule.root === "." ? "workspace" : rule.root)
+    .filter((root, index, all) => all.indexOf(root) === index)
+    .sort((left, right) => left.length - right.length);
+  return roots.filter((root, index) => !roots.slice(0, index).some((parent) => sandboxPolicyPathMatches(root, parent))).map((root) => ({ root }));
 }
 
 function createSshSandboxInvocation(input: SandboxCommandAdapterInput, baseEnv: NodeJS.ProcessEnv): SandboxProcessInvocation {
@@ -1847,24 +2202,50 @@ async function syncDockerWorkspace(input: SandboxWorkspaceSyncAdapterInput, spaw
     };
   }
   const remoteRoot = input.remote_workspace_root ?? "/workspace";
+  assertDockerWorkspaceRoot(remoteRoot);
+  const roots = sandboxWorkspaceSyncRoots(input.sandbox);
+  const forward = roots.map((root) => ({
+    command: "docker",
+    args: input.direction === "seed_to_sandbox"
+      ? ["cp", dockerLocalSource(input.workspace_root, root), `${container}:${dockerRemoteTarget(remoteRoot, root)}`]
+      : ["cp", `${container}:${dockerRemoteSource(remoteRoot, root)}`, dockerLocalTarget(input.workspace_root, root)],
+    env: safeChildEnvironment()
+  }));
   const output = input.direction === "mirror"
     ? await runTwoStepWorkspaceSync([
-      { command: "docker", args: ["cp", `${path.resolve(input.workspace_root)}/.`, `${container}:${remoteRoot}`], env: process.env },
-      { command: "docker", args: ["cp", `${container}:${remoteRoot}/.`, path.resolve(input.workspace_root)], env: process.env }
+      ...roots.map((root) => ({
+        command: "docker",
+        args: ["cp", dockerLocalSource(input.workspace_root, root), `${container}:${dockerRemoteTarget(remoteRoot, root)}`],
+        env: safeChildEnvironment()
+      })),
+      ...roots.map((root) => ({
+        command: "docker",
+        args: ["cp", `${container}:${dockerRemoteSource(remoteRoot, root)}`, dockerLocalTarget(input.workspace_root, root)],
+        env: safeChildEnvironment()
+      }))
     ], input, spawnProcess, "mirror_two_pass_update")
-    : await runWorkspaceSyncProcess({
-      command: "docker",
-      args: input.direction === "seed_to_sandbox"
-        ? ["cp", `${path.resolve(input.workspace_root)}/.`, `${container}:${remoteRoot}`]
-        : ["cp", `${container}:${remoteRoot}/.`, path.resolve(input.workspace_root)],
-      env: process.env
-    }, input, spawnProcess);
+    : await runWorkspaceSyncSequence(forward, input, spawnProcess);
   const stats = await countWorkspaceFiles(input.workspace_root);
   return {
     ...output,
     file_count: stats.fileCount,
     byte_count: stats.byteCount
   };
+}
+
+function assertDockerWorkspaceRoot(remoteRoot: string): void {
+  const error = sandboxDockerWorkspaceRootError(remoteRoot);
+  if (error) {
+    throw new Error(error);
+  }
+}
+
+function sandboxDockerWorkspaceRootError(remoteRoot: string): string | undefined {
+  const normalized = remoteRoot.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+  if (normalized !== "/workspace" && !normalized.startsWith("/workspace/")) {
+    return "sandbox_remote_root_not_allowed";
+  }
+  return undefined;
 }
 
 async function syncRemoteWorkspace(input: SandboxWorkspaceSyncAdapterInput, spawnProcess: typeof spawn): Promise<SandboxWorkspaceSyncAdapterOutput> {
@@ -1888,15 +2269,21 @@ async function syncRemoteWorkspace(input: SandboxWorkspaceSyncAdapterInput, spaw
   if (booleanMetadata(input.sandbox.metadata, "workspace_sync_delete")) {
     args.push("--delete");
   }
-  if (input.direction === "mirror") {
-    args.push("--update");
-  }
-  const localRoot = `${path.resolve(input.workspace_root)}/`;
-  const remote = `${target}:${remoteRoot.replace(/\/+$/, "")}/`;
+  const roots = sandboxWorkspaceSyncRoots(input.sandbox);
+  const invocations = roots.map((root) => {
+    const localRoot = `${remoteLocalRoot(input.workspace_root, root)}/`;
+    const remote = `${target}:${remoteRemoteRoot(remoteRoot, root)}/`;
+    const rootArgs = [...args];
+    if (input.direction === "mirror") rootArgs.push("--update");
+    return {
+      forward: { command: "rsync", args: [...rootArgs, localRoot, remote], env: safeChildEnvironment() },
+      reverse: { command: "rsync", args: [...rootArgs, remote, localRoot], env: safeChildEnvironment() }
+    };
+  });
   if (input.direction === "mirror") {
     const output = await runTwoStepWorkspaceSync([
-      { command: "rsync", args: [...args, localRoot, remote], env: process.env },
-      { command: "rsync", args: [...args, remote, localRoot], env: process.env }
+      ...invocations.map((invocation) => invocation.forward),
+      ...invocations.map((invocation) => invocation.reverse)
     ], input, spawnProcess, "mirror_two_pass_update");
     const stats = await countWorkspaceFiles(input.workspace_root);
     return {
@@ -1906,17 +2293,9 @@ async function syncRemoteWorkspace(input: SandboxWorkspaceSyncAdapterInput, spaw
     };
   }
   if (input.direction === "seed_to_sandbox") {
-    args.push(localRoot, remote);
-  } else {
-    args.push(remote, localRoot);
+    return withWorkspaceSyncStats(await runWorkspaceSyncSequence(invocations.map((invocation) => invocation.forward), input, spawnProcess), input);
   }
-  const output = await runWorkspaceSyncProcess({ command: "rsync", args, env: process.env }, input, spawnProcess);
-  const stats = await countWorkspaceFiles(input.workspace_root);
-  return {
-    ...output,
-    file_count: stats.fileCount,
-    byte_count: stats.byteCount
-  };
+  return withWorkspaceSyncStats(await runWorkspaceSyncSequence(invocations.map((invocation) => invocation.reverse), input, spawnProcess), input);
 }
 
 async function syncLocalWorkspace(input: SandboxWorkspaceSyncAdapterInput): Promise<SandboxWorkspaceSyncAdapterOutput> {
@@ -1931,13 +2310,17 @@ async function syncLocalWorkspace(input: SandboxWorkspaceSyncAdapterInput): Prom
       resource_refs: [sandboxWorkspaceSyncRef("local-workspace", workspaceRoot)]
     };
   }
+  const localSandboxCoreRootError = await sandboxCoreWorkspaceRootError(remoteRoot, input.sandbox);
+  if (localSandboxCoreRootError) {
+    throw new Error(localSandboxCoreRootError);
+  }
   assertSafeLocalWorkspaceCopy(workspaceRoot, remoteRoot);
   if (input.direction === "seed_to_sandbox") {
-    await copyWorkspaceContents(workspaceRoot, remoteRoot);
+    await copyWorkspaceContentsByPolicy(workspaceRoot, remoteRoot, input.sandbox);
   } else if (input.direction === "pull_from_sandbox") {
-    await copyWorkspaceContents(remoteRoot, workspaceRoot);
+    await copyWorkspaceContentsByPolicy(remoteRoot, workspaceRoot, input.sandbox);
   } else {
-    await copyWorkspaceMirror(workspaceRoot, remoteRoot);
+    await copyWorkspaceMirrorByPolicy(workspaceRoot, remoteRoot, input.sandbox);
   }
   const stats = await countWorkspaceFiles(input.direction === "pull_from_sandbox" ? remoteRoot : workspaceRoot);
   return {
@@ -1964,7 +2347,7 @@ async function runDockerSandboxLifecycle(input: SandboxLifecycleAdapterInput, sp
     };
   }
   const args = input.action === "recreate" ? ["restart", container] : ["rm", "-f", container];
-  return runSandboxLifecycleProcess({ command: "docker", args, env: process.env }, input, spawnProcess);
+  return runSandboxLifecycleProcess({ command: "docker", args, env: safeChildEnvironment() }, input, spawnProcess);
 }
 
 async function runRemoteSandboxLifecycle(input: SandboxLifecycleAdapterInput, spawnProcess: typeof spawn): Promise<SandboxLifecycleAdapterOutput> {
@@ -1991,7 +2374,7 @@ async function runRemoteSandboxLifecycle(input: SandboxLifecycleAdapterInput, sp
   return runSandboxLifecycleProcess({
     command: "ssh",
     args: [target, configuredCommand],
-    env: process.env
+    env: safeChildEnvironment()
   }, input, spawnProcess);
 }
 
@@ -2054,41 +2437,135 @@ async function runTwoStepWorkspaceSync(
   };
 }
 
-async function copyWorkspaceContents(sourceRoot: string, targetRoot: string): Promise<void> {
-  await mkdir(targetRoot, { recursive: true });
-  const entries = await readdir(sourceRoot, { withFileTypes: true });
-  for (const entry of entries) {
-    await cp(path.join(sourceRoot, entry.name), path.join(targetRoot, entry.name), {
-      recursive: true,
-      force: true
-    });
+async function runWorkspaceSyncSequence(
+  invocations: SandboxProcessInvocation[],
+  input: SandboxWorkspaceSyncAdapterInput,
+  spawnProcess: typeof spawn
+): Promise<SandboxWorkspaceSyncAdapterOutput> {
+  const resourceRefs: Array<{ kind: string; id?: string; uri: string; label?: string }> = [];
+  for (const invocation of invocations) {
+    const output = await runWorkspaceSyncProcess(invocation, input, spawnProcess);
+    resourceRefs.push(...(output.resource_refs ?? []));
+    if (output.status !== "completed") return output;
+  }
+  return { status: "completed", resource_refs: resourceRefs };
+}
+
+function sandboxWorkspaceSyncRoots(sandbox: SandboxExecutionPlan): string[] {
+  const allowedRoots = sandbox.allowed_paths
+    .map((rule) => rule.root === "." || rule.root === "workspace" ? "" : rule.root)
+    .filter((root, index, all) => all.indexOf(root) === index)
+    .filter((root) => !sandboxPathIsDenied(root, sandbox))
+    .sort((left, right) => left.length - right.length);
+  const requestedRoots = sandbox.metadata.workspace_sync_roots;
+  const roots = Array.isArray(requestedRoots)
+    ? requestedRoots
+      .filter((root): root is string => typeof root === "string")
+      .map((root) => root === "." || root === "workspace" ? "" : normalizeGatewayWorkspacePath(root))
+      .filter((root, index, all) => all.indexOf(root) === index)
+      .filter((root) => allowedRoots.some((allowed) => allowed === "" || sandboxPolicyPathMatches(root, allowed)))
+      .filter((root) => !sandboxPathIsDenied(root, sandbox))
+      .sort((left, right) => left.length - right.length)
+    : allowedRoots.includes("") ? [""] : [];
+  return roots.filter((root, index) => !roots.slice(0, index).some((parent) => parent === "" || sandboxPolicyPathMatches(root, parent)));
+}
+
+function sandboxPathIsDenied(relativePath: string, sandbox: SandboxExecutionPlan): boolean {
+  return sandbox.denied_paths.some((denied) => {
+    if (denied === "" || denied === "." || denied === "workspace") return true;
+    return relativePath === denied || relativePath.startsWith(`${denied}/`);
+  });
+}
+
+function dockerLocalSource(root: string, relative: string): string {
+  const resolved = path.resolve(root, relative);
+  return relative ? `${resolved}/.` : `${resolved}/.`;
+}
+
+function dockerLocalTarget(root: string, relative: string): string {
+  return path.resolve(root, relative || ".");
+}
+
+function dockerRemoteTarget(root: string, relative: string): string {
+  return relative ? `${root.replace(/\/+$/, "")}/${relative}` : root;
+}
+
+function dockerRemoteSource(root: string, relative: string): string {
+  return relative ? `${root.replace(/\/+$/, "")}/${relative}/.` : `${root.replace(/\/+$/, "")}/.`;
+}
+
+function remoteLocalRoot(root: string, relative: string): string {
+  return path.resolve(root, relative || ".");
+}
+
+function remoteRemoteRoot(root: string, relative: string): string {
+  return relative ? `${root.replace(/\/+$/, "")}/${relative}` : root.replace(/\/+$/, "");
+}
+
+async function copyWorkspaceContentsByPolicy(sourceRoot: string, targetRoot: string, sandbox: SandboxExecutionPlan): Promise<void> {
+  for (const relative of sandboxWorkspaceSyncRoots(sandbox)) {
+    await copyWorkspaceTree(path.join(sourceRoot, relative), path.join(targetRoot, relative), relative, sandbox);
   }
 }
 
-async function copyWorkspaceMirror(sourceRoot: string, targetRoot: string): Promise<void> {
-  await mkdir(targetRoot, { recursive: true });
-  await copyNewerWorkspaceContents(sourceRoot, targetRoot);
-  await copyNewerWorkspaceContents(targetRoot, sourceRoot);
+async function copyWorkspaceMirrorByPolicy(sourceRoot: string, targetRoot: string, sandbox: SandboxExecutionPlan): Promise<void> {
+  for (const relative of sandboxWorkspaceSyncRoots(sandbox)) {
+    const source = path.join(sourceRoot, relative);
+    const target = path.join(targetRoot, relative);
+    await copyNewerWorkspaceTree(source, target, relative, sandbox);
+    await copyNewerWorkspaceTree(target, source, relative, sandbox);
+  }
 }
 
-async function copyNewerWorkspaceContents(sourceRoot: string, targetRoot: string): Promise<void> {
+async function copyWorkspaceTree(sourceRoot: string, targetRoot: string, relativeRoot: string, sandbox: SandboxExecutionPlan): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(sourceRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+    throw error;
+  }
   await mkdir(targetRoot, { recursive: true });
-  const entries = await readdir(sourceRoot, { withFileTypes: true });
   for (const entry of entries) {
-    const sourcePath = path.join(sourceRoot, entry.name);
-    const targetPath = path.join(targetRoot, entry.name);
+    const relative = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
+    if (sandboxPathIsDenied(relative, sandbox)) continue;
+    const source = path.join(sourceRoot, entry.name);
+    const target = path.join(targetRoot, entry.name);
     if (entry.isDirectory()) {
-      await copyNewerWorkspaceContents(sourcePath, targetPath);
-      continue;
-    }
-    if (!entry.isFile()) {
-      continue;
-    }
-    if (await shouldCopyNewerFile(sourcePath, targetPath)) {
-      await mkdir(path.dirname(targetPath), { recursive: true });
-      await cp(sourcePath, targetPath, { force: true });
+      await copyWorkspaceTree(source, target, relative, sandbox);
+    } else if (entry.isFile()) {
+      await mkdir(path.dirname(target), { recursive: true });
+      await cp(source, target, { force: true });
     }
   }
+}
+
+async function copyNewerWorkspaceTree(sourceRoot: string, targetRoot: string, relativeRoot: string, sandbox: SandboxExecutionPlan): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(sourceRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+    throw error;
+  }
+  await mkdir(targetRoot, { recursive: true });
+  for (const entry of entries) {
+    const relative = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
+    if (sandboxPathIsDenied(relative, sandbox)) continue;
+    const source = path.join(sourceRoot, entry.name);
+    const target = path.join(targetRoot, entry.name);
+    if (entry.isDirectory()) {
+      await copyNewerWorkspaceTree(source, target, relative, sandbox);
+    } else if (entry.isFile() && await shouldCopyNewerFile(source, target)) {
+      await mkdir(path.dirname(target), { recursive: true });
+      await cp(source, target, { force: true });
+    }
+  }
+}
+
+async function withWorkspaceSyncStats(output: SandboxWorkspaceSyncAdapterOutput, input: SandboxWorkspaceSyncAdapterInput): Promise<SandboxWorkspaceSyncAdapterOutput> {
+  const stats = await countWorkspaceFiles(input.workspace_root);
+  return { ...output, file_count: stats.fileCount, byte_count: stats.byteCount };
 }
 
 async function shouldCopyNewerFile(sourcePath: string, targetPath: string): Promise<boolean> {
@@ -2420,7 +2897,7 @@ class StdioMcpProcessPool {
       }
       const results = await Promise.allSettled([
         ...entries.map((entry) => this.closeEntry(entry)),
-        ...starting.map((handle) => settleMcpStartup(handle.promise))
+        ...starting.map((handle) => settleMcpStartup(handle))
       ]);
       const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (errors.length > 0) {
@@ -2467,7 +2944,7 @@ class StdioMcpProcessPool {
       handle.secretFiles = secretFiles;
       if (handle.controller.signal.aborted) throw new Error("mcp_process_startup_aborted");
       const env = buildStdioMcpEnv({
-        baseEnv: this.options.env ?? process.env,
+        baseEnv: safeChildEnvironment(this.options.env ?? process.env),
         config,
         materials: input.secrets,
         secretFiles
@@ -2567,7 +3044,7 @@ class StdioMcpProcessPool {
   }
 }
 
-async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
+async function settleMcpStartup(handle: StdioMcpStartupHandle): Promise<void> {
   const timeoutMs = mcpProcessCloseGraceMs + mcpProcessCloseKillWaitMs + 500;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -2576,7 +3053,7 @@ async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
       settled = true;
       reject(new Error("mcp_process_startup_shutdown_timeout"));
     }, timeoutMs);
-    task.then(() => {
+    handle.promise.then(() => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -2585,9 +3062,20 @@ async function settleMcpStartup(task: Promise<unknown>): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (handle.controller.signal.aborted && isExpectedMcpStartupAbort(error)) {
+        resolve();
+        return;
+      }
       reject(error);
     });
   });
+}
+
+function isExpectedMcpStartupAbort(error: unknown): boolean {
+  if (!(error instanceof Error) || error instanceof AggregateError) return false;
+  return error.message === "mcp_process_closed"
+    || error.message === "mcp_process_startup_aborted"
+    || error.message.startsWith("mcp_process_exited:");
 }
 
 function pooledStdioProcessKey(config: StdioMcpServerConfig, secrets: SecretResolutionMaterial[]): string {
@@ -2834,7 +3322,10 @@ class StdioJsonRpcClient {
 }
 
 function createPairingCode(): string {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
+  // Pairing codes are an authentication factor for an external contact. Do
+  // not derive them from Math.random(), which is predictable and not
+  // suitable for security-sensitive admission codes.
+  return randomBytes(6).toString("hex").toUpperCase();
 }
 
 function redactSecretMaterials(value: JsonValue | undefined, secrets: SecretResolutionMaterial[]): JsonValue | undefined {
@@ -2860,4 +3351,16 @@ function redactSecretMaterials(value: JsonValue | undefined, secrets: SecretReso
 
 function redactSecretText(value: string, secrets: SecretResolutionMaterial[]): string {
   return secrets.reduce<string>((current, secret) => current.replaceAll(secret.value, `[redacted:${secret.id}]`), redactSecretLikeString(value));
+}
+
+const secretOutputWithheldMessage = "output_withheld_secret_material_injected";
+
+function redactSandboxOutput(value: string, secrets: SecretResolutionMaterial[]): string {
+  return secrets.length > 0 ? secretOutputWithheldMessage : redactSecretText(value, secrets);
+}
+
+function redactMcpOutput(value: JsonValue | undefined, secrets: SecretResolutionMaterial[]): JsonValue | undefined {
+  return secrets.length > 0
+    ? { redacted: true, reason: secretOutputWithheldMessage }
+    : redactSecretMaterials(value, secrets);
 }

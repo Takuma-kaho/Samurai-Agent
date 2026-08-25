@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { createId, nowIso, stableHash, type ActivityInboxItem, type JsonValue, type MemoryFrontmatter, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
+import { ActorIdentitySchema, createId, nowIso, stableHash, type ActivityInboxItem, type JsonValue, type MemoryFrontmatter, type OperationRecord, type ResourceRef, type RollbackPoint, type SessionRecord } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { memoryArchiveValueSchema } from "../../value-objects/memory.js";
 
@@ -71,28 +71,40 @@ const memoryArchive = defineCommand<MemoryArchivePorts>()({
         if (!memory) throw ports.memoryArchiveError("not_found", `Memory not found: ${input.memory_id}`);
         const sessionMemory = await ports.listMemoryForSession(session.id);
         if (!sessionMemory.some((item) => item.id === input.memory_id)) throw ports.memoryArchiveError("conflict", "memory_not_in_session");
+        const actorIdentity = ActorIdentitySchema.safeParse(context.actorId);
+        if (!actorIdentity.success) throw ports.memoryArchiveError("conflict", "trusted_context_actor_identity_invalid");
         const now = nowIso();
         const initialRef = ports.memoryResourceRef(memory);
         const operation: OperationRecord = {
           id: createId("operation"), session_id: session.id, capability_id: ports.memoryArchiveCapabilityId(), operation: "memory.archive",
-          actor_identity: "owner", instruction_source: "owner_instruction", instruction_authority: "owner", channel: "web",
+          actor_identity: actorIdentity.data, instruction_source: "owner_instruction", instruction_authority: "owner", channel: "web",
           input_hash: stableHash({ memory_id: memory.id, session_id: session.id, operationName: "memory.archive" }), input_ref: initialRef,
           target_resource_refs: [initialRef], proposed_effects: ["Archive a session-linked memory so it no longer appears in normal memory views."],
           status: "created", created_at: now, updated_at: now
         };
         await ports.saveMemoryArchiveOperation(operation);
-        await ports.emitMemoryArchiveOperation(operation);
-        const archive = await ports.archiveMemoryRecord(input.memory_id);
-        if (!archive) throw ports.memoryArchiveError("not_found", `Memory not found: ${input.memory_id}`);
-        const archivedMemory = { ...archive.after.frontmatter, file_path: archive.after.file_path };
-        const ref = ports.memoryResourceRef(archivedMemory);
-        const rollbackPoint = archive.changed
-          ? await ports.createMemoryArchiveRollback(operation, [ref], { memory: domainJsonValueSchema.parse(archive.before) }, { memory: domainJsonValueSchema.parse(archive.after) })
-          : undefined;
-        operation.status = "completed"; operation.result_ref = ref; operation.updated_at = nowIso();
-        await ports.updateMemoryArchiveOperation(operation);
-        const value = Output.parse({ memory: archivedMemory, content: archive.content, operation, rollbackPoint, activity: await ports.rebuildMemoryActivity(), changed: archive.changed, warning: archive.warning });
-        return { ok: true, value };
+        try {
+          await ports.emitMemoryArchiveOperation(operation);
+          const archive = await ports.archiveMemoryRecord(input.memory_id);
+          if (!archive) throw ports.memoryArchiveError("not_found", `Memory not found: ${input.memory_id}`);
+          const archivedMemory = { ...archive.after.frontmatter, file_path: archive.after.file_path };
+          const ref = ports.memoryResourceRef(archivedMemory);
+          const rollbackPoint = archive.changed
+            ? await ports.createMemoryArchiveRollback(operation, [ref], { memory: domainJsonValueSchema.parse(archive.before) }, { memory: domainJsonValueSchema.parse(archive.after) })
+            : undefined;
+          const activity = await ports.rebuildMemoryActivity();
+          operation.status = "completed"; operation.result_ref = ref; operation.updated_at = nowIso();
+          const value = Output.parse({ memory: archivedMemory, content: archive.content, operation, rollbackPoint, activity, changed: archive.changed, warning: archive.warning });
+          await ports.updateMemoryArchiveOperation(operation);
+          return { ok: true, value };
+        } catch (error) {
+          operation.status = "failed";
+          delete operation.result_ref;
+          operation.error = error instanceof Error ? error.message : String(error);
+          operation.updated_at = nowIso();
+          await ports.updateMemoryArchiveOperation(operation).catch(() => undefined);
+          throw error;
+        }
       }
     };
   }

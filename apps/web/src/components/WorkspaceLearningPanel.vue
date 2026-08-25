@@ -5,11 +5,10 @@ import Check from "lucide-vue-next/dist/esm/icons/check.js";
 import Lock from "lucide-vue-next/dist/esm/icons/lock.js";
 import Search from "lucide-vue-next/dist/esm/icons/search.js";
 import type {
-  DesktopWorkspaceLearningEvidence,
-  DesktopWorkspaceLearningResource,
-  DesktopWorkspaceLearningResourceVersion,
-  DesktopWorkspaceLearningSettings
+  DesktopWorkspaceLearningSettings,
+  WorkspaceCompletionResourceView
 } from "../lib/api";
+import { getWorkspaceClientBridge } from "../lib/api";
 
 const props = defineProps<{
   available: boolean;
@@ -17,14 +16,30 @@ const props = defineProps<{
 }>();
 
 type ScopeKind = "workspace" | "room";
-type ResourceKind = DesktopWorkspaceLearningResource["kind"];
+type KnowledgeKind = "fact" | "decision" | "explanation" | "experience_rule";
+
+interface KnowledgePanelResource {
+  resource: WorkspaceCompletionResourceView;
+  state: "active" | "provisional" | "archived" | "conflict";
+  aiUpdateLocked: boolean;
+  title: string;
+  content: string;
+  version: number;
+  updatedAt: string;
+  knowledgeKind?: KnowledgeKind;
+}
+
+interface KnowledgeHistory {
+  versions: Array<Record<string, unknown>>;
+  evidence: Array<Record<string, unknown>>;
+}
 
 const ResourceGroup = defineComponent({
   name: "ResourceGroup",
   props: {
     title: { type: String, required: true },
-    resources: { type: Array as () => DesktopWorkspaceLearningResource[], required: true },
-    scopeLabel: { type: Function as () => (resource: DesktopWorkspaceLearningResource) => string, required: true }
+    resources: { type: Array as () => KnowledgePanelResource[], required: true },
+    scopeLabel: { type: Function as () => (resource: KnowledgePanelResource) => string, required: true }
   },
   emits: ["select", "fixed", "archive"],
   setup(groupProps, { emit }) {
@@ -32,7 +47,7 @@ const ResourceGroup = defineComponent({
       h("strong", groupProps.title),
       groupProps.resources.length === 0
         ? h("span", { class: "workspace-learning-empty" }, "まだありません")
-        : h("div", { class: "workspace-learning-list" }, groupProps.resources.map((resource) => h("article", { key: resource.id, class: ["workspace-learning-item", { "is-provisional": resource.state === "provisional", "is-archived": resource.state === "archived", "is-conflict": resource.state === "conflict" }] }, [
+        : h("div", { class: "workspace-learning-list" }, groupProps.resources.map((resource) => h("article", { key: resource.resource.id, class: ["workspace-learning-item", { "is-provisional": resource.state === "provisional", "is-archived": resource.state === "archived", "is-conflict": resource.state === "conflict" }] }, [
           h("button", { type: "button", onClick: () => emit("select", resource) }, [
             h("small", groupProps.scopeLabel(resource)), h("strong", resource.title),
             ...(resource.state === "provisional" ? [h("em", { class: "workspace-learning-provisional" }, provisionalLabel(resource))] : []),
@@ -51,18 +66,18 @@ const loading = ref(false);
 const saving = ref(false);
 const searching = ref(false);
 const error = ref<string | null>(null);
-const roomResources = ref<DesktopWorkspaceLearningResource[]>([]);
-const workspaceResources = ref<DesktopWorkspaceLearningResource[]>([]);
+const roomResources = ref<KnowledgePanelResource[]>([]);
+const workspaceResources = ref<KnowledgePanelResource[]>([]);
 const searchQuery = ref("");
-const searchResults = ref<DesktopWorkspaceLearningResource[]>([]);
+const searchResults = ref<KnowledgePanelResource[]>([]);
 const settings = ref<DesktopWorkspaceLearningSettings | null>(null);
 const workspaceSettings = ref<DesktopWorkspaceLearningSettings | null>(null);
 const roomSettings = ref<DesktopWorkspaceLearningSettings | null>(null);
 const settingsScope = ref<ScopeKind>("workspace");
-const editing = ref<DesktopWorkspaceLearningResource | null>(null);
-const resourceHistory = ref<{ versions: DesktopWorkspaceLearningResourceVersion[]; evidence: DesktopWorkspaceLearningEvidence[] } | null>(null);
+const editing = ref<KnowledgePanelResource | null>(null);
+const resourceHistory = ref<KnowledgeHistory | null>(null);
 const resourceScope = ref<ScopeKind>("room");
-const resourceKind = ref<ResourceKind>("knowledge");
+const knowledgeKind = ref<KnowledgeKind>("fact");
 const resourceTitle = ref("");
 const resourceContent = ref("");
 const actionReason = ref("人が確認して保存");
@@ -78,9 +93,9 @@ let searchGeneration = 0;
 let realtimeReloadTimer: ReturnType<typeof setTimeout> | undefined;
 let unsubscribeRealtime: (() => void) | undefined;
 
-const canUse = computed(() => props.available && Boolean(props.selectedRoomId) && Boolean(window.samuraiDesktop?.listWorkspaceLearningResources));
-const workspaceRules = computed(() => workspaceResources.value.filter((resource) => resource.isAbsoluteRule));
-const workspaceKnowledge = computed(() => workspaceResources.value.filter((resource) => !resource.isAbsoluteRule));
+const canUse = computed(() => props.available && Boolean(props.selectedRoomId)
+  && Boolean(getWorkspaceClientBridge()?.listWorkspaceCompletionResources)
+  && Boolean(getWorkspaceClientBridge()?.getWorkspaceCompletionResourceBody));
 
 watch(() => props.selectedRoomId, () => {
   // A selected Room is an authorization/context boundary. Never leave an
@@ -94,15 +109,11 @@ watch(() => props.selectedRoomId, () => {
   void load();
 }, { immediate: true });
 
-watch(resourceKind, (kind) => {
-  if (kind === "workspace_rule") resourceScope.value = "workspace";
-});
-
 watch(settingsScope, () => applySettingsForm());
 
 onMounted(() => {
-  unsubscribeRealtime = window.samuraiDesktop?.onWorkspaceServerEvent?.((event) => {
-    if (event?.type !== "event" || !event.kind?.startsWith("learning.")) return;
+  unsubscribeRealtime = getWorkspaceClientBridge()?.onWorkspaceServerEvent?.((event) => {
+    if (event?.type !== "event" || !(event.kind?.startsWith("completion.resource.") || event.kind?.startsWith("learning.settings."))) return;
     if (event.roomId && event.roomId !== props.selectedRoomId) return;
     if (realtimeReloadTimer) clearTimeout(realtimeReloadTimer);
     realtimeReloadTimer = setTimeout(() => { void load(); }, 100);
@@ -121,19 +132,23 @@ async function load(): Promise<void> {
     return;
   }
   const roomId = props.selectedRoomId;
-  const desktop = window.samuraiDesktop;
-  if (!desktop?.listWorkspaceLearningResources || !desktop.getWorkspaceLearningSettings) return;
+  const desktop = getWorkspaceClientBridge();
+  if (!desktop?.listWorkspaceCompletionResources || !desktop.getWorkspaceCompletionResourceBody || !desktop.getWorkspaceLearningSettings) return;
   loading.value = true;
   error.value = null;
   try {
     const [room, workspace, configured] = await Promise.all([
-      desktop.listWorkspaceLearningResources({ scopeKind: "room", roomId, includeArchived: true }),
-      desktop.listWorkspaceLearningResources({ scopeKind: "workspace", includeArchived: true }),
+      desktop.listWorkspaceCompletionResources({ scopeKind: "room", roomId, kind: "knowledge", includeArchived: true }),
+      desktop.listWorkspaceCompletionResources({ scopeKind: "workspace", kind: "knowledge", includeArchived: true }),
       desktop.getWorkspaceLearningSettings(roomId)
     ]);
     if (generation !== loadGeneration || props.selectedRoomId !== roomId) return;
-    roomResources.value = room.resources;
-    workspaceResources.value = workspace.resources;
+    const roomViews = room.resources.filter((resource) => resource.scope.kind === "room" && resource.scope.roomId === roomId);
+    const workspaceViews = workspace.resources.filter((resource) => resource.scope.kind === "workspace");
+    [roomResources.value, workspaceResources.value] = await Promise.all([
+      hydrateResources(roomViews, desktop),
+      hydrateResources(workspaceViews, desktop)
+    ]);
     applySettings(configured);
   } catch (cause) {
     if (generation === loadGeneration && props.selectedRoomId === roomId) error.value = message(cause);
@@ -146,7 +161,7 @@ function beginCreate(): void {
   editing.value = null;
   resourceHistory.value = null;
   resourceScope.value = "room";
-  resourceKind.value = "knowledge";
+  knowledgeKind.value = "fact";
   resourceTitle.value = "";
   resourceContent.value = "";
 }
@@ -161,35 +176,39 @@ function clearLearningDisplay(): void {
   error.value = null;
 }
 
-async function beginEdit(resource: DesktopWorkspaceLearningResource): Promise<void> {
+async function beginEdit(resource: KnowledgePanelResource): Promise<void> {
   editing.value = resource;
-  resourceScope.value = resource.scope.kind;
-  resourceKind.value = resource.kind;
+  resourceScope.value = resource.resource.scope.kind;
+  knowledgeKind.value = resource.knowledgeKind ?? "fact";
   resourceTitle.value = resource.title;
   resourceContent.value = resource.content;
   resourceHistory.value = null;
-  const desktop = window.samuraiDesktop;
-  if (!desktop?.getWorkspaceLearningResource) return;
+  const desktop = getWorkspaceClientBridge();
+  if (!desktop?.getWorkspaceCompletionResource || !desktop.getWorkspaceCompletionResourceBody) return;
   try {
-    const detail = await desktop.getWorkspaceLearningResource({ resourceId: resource.id });
-    if (editing.value?.id !== resource.id) return;
+    const [detail, body] = await Promise.all([
+      desktop.getWorkspaceCompletionResource({ resourceId: resource.resource.id }),
+      desktop.getWorkspaceCompletionResourceBody({ resourceId: resource.resource.id })
+    ]);
+    if (editing.value?.resource.id !== resource.resource.id) return;
+    resourceContent.value = body.content;
     resourceHistory.value = { versions: detail.versions, evidence: detail.evidence };
   } catch (cause) {
-    if (editing.value?.id === resource.id) error.value = message(cause);
+    if (editing.value?.resource.id === resource.resource.id) error.value = message(cause);
   }
 }
 
 async function saveResource(): Promise<void> {
-  const desktop = window.samuraiDesktop;
+  const desktop = getWorkspaceClientBridge();
   if (!desktop || !props.selectedRoomId || !resourceTitle.value.trim() || !resourceContent.value.trim() || !actionReason.value.trim()) return;
-  if (!desktop.createWorkspaceLearningResource || !desktop.updateWorkspaceLearningResource) return;
+  if (!desktop.createWorkspaceCompletionResource || !desktop.updateWorkspaceCompletionResource) return;
   saving.value = true;
   error.value = null;
   const scopeInput = resourceScope.value === "room" ? { scopeKind: "room" as const, roomId: props.selectedRoomId } : { scopeKind: "workspace" as const };
   const input = {
     ...scopeInput,
-    kind: resourceKind.value,
-    ...(resourceKind.value === "workspace_rule" ? { isAbsoluteRule: true } : {}),
+    kind: "knowledge" as const,
+    knowledgeKind: knowledgeKind.value,
     title: resourceTitle.value,
     content: resourceContent.value,
     reason: actionReason.value,
@@ -197,9 +216,9 @@ async function saveResource(): Promise<void> {
   };
   try {
     if (editing.value) {
-      await desktop.updateWorkspaceLearningResource({ ...input, resourceId: editing.value.id, expectedVersion: editing.value.version });
+      await desktop.updateWorkspaceCompletionResource({ ...input, resourceId: editing.value.resource.id, expectedVersion: editing.value.version });
     } else {
-      await desktop.createWorkspaceLearningResource(input);
+      await desktop.createWorkspaceCompletionResource(input);
     }
     beginCreate();
     await load();
@@ -210,13 +229,13 @@ async function saveResource(): Promise<void> {
   }
 }
 
-async function toggleFixed(resource: DesktopWorkspaceLearningResource): Promise<void> {
-  const desktop = window.samuraiDesktop;
-  if (!desktop?.setWorkspaceLearningResourceFixed || !actionReason.value.trim()) return;
+async function toggleFixed(resource: KnowledgePanelResource): Promise<void> {
+  const desktop = getWorkspaceClientBridge();
+  if (!desktop?.setWorkspaceCompletionResourceFixed || !actionReason.value.trim()) return;
   saving.value = true;
   try {
-    await desktop.setWorkspaceLearningResourceFixed({
-      resourceId: resource.id, fixed: !resource.aiUpdateLocked, expectedVersion: resource.version,
+    await desktop.setWorkspaceCompletionResourceFixed({
+      resourceId: resource.resource.id, fixed: !resource.aiUpdateLocked, expectedVersion: resource.version,
       reason: actionReason.value, operationId: operationId()
     });
     await load();
@@ -227,13 +246,13 @@ async function toggleFixed(resource: DesktopWorkspaceLearningResource): Promise<
   }
 }
 
-async function toggleArchive(resource: DesktopWorkspaceLearningResource): Promise<void> {
-  const desktop = window.samuraiDesktop;
-  if (!desktop?.archiveWorkspaceLearningResource || !actionReason.value.trim()) return;
+async function toggleArchive(resource: KnowledgePanelResource): Promise<void> {
+  const desktop = getWorkspaceClientBridge();
+  if (!desktop?.archiveWorkspaceCompletionResource || !actionReason.value.trim()) return;
   saving.value = true;
   try {
-    await desktop.archiveWorkspaceLearningResource({
-      resourceId: resource.id, archived: resource.state !== "archived", expectedVersion: resource.version,
+    await desktop.archiveWorkspaceCompletionResource({
+      resourceId: resource.resource.id, archived: resource.state !== "archived", expectedVersion: resource.version,
       reason: actionReason.value, operationId: operationId()
     });
     await load();
@@ -245,15 +264,15 @@ async function toggleArchive(resource: DesktopWorkspaceLearningResource): Promis
 }
 
 async function runSearch(): Promise<void> {
-  const desktop = window.samuraiDesktop;
-  if (!desktop?.searchWorkspaceKnowledge || !props.selectedRoomId || !searchQuery.value.trim()) return;
+  const desktop = getWorkspaceClientBridge();
+  if (!desktop?.searchWorkspaceCompletionKnowledge || !props.selectedRoomId || !searchQuery.value.trim()) return;
   const roomId = props.selectedRoomId;
   const generation = ++searchGeneration;
   searching.value = true;
   error.value = null;
   try {
-    const result = await desktop.searchWorkspaceKnowledge({ roomId, query: searchQuery.value, limit: 20 });
-    if (generation === searchGeneration && props.selectedRoomId === roomId) searchResults.value = result.resources;
+    const result = await desktop.searchWorkspaceCompletionKnowledge({ roomId, query: searchQuery.value, limit: 20 });
+    if (generation === searchGeneration && props.selectedRoomId === roomId) searchResults.value = await hydrateResources(result.resources, desktop);
   } catch (cause) {
     if (generation === searchGeneration && props.selectedRoomId === roomId) error.value = message(cause);
   } finally {
@@ -262,7 +281,7 @@ async function runSearch(): Promise<void> {
 }
 
 async function saveSettings(): Promise<void> {
-  const desktop = window.samuraiDesktop;
+  const desktop = getWorkspaceClientBridge();
   const effective = settings.value;
   if (!desktop?.updateWorkspaceLearningSettings || !effective || !actionReason.value.trim()) return;
   saving.value = true;
@@ -293,7 +312,7 @@ async function saveSettings(): Promise<void> {
 }
 
 async function removeRoomOverride(): Promise<void> {
-  const desktop = window.samuraiDesktop;
+  const desktop = getWorkspaceClientBridge();
   if (!desktop?.updateWorkspaceLearningSettings || !props.selectedRoomId || !roomSettings.value) return;
   saving.value = true;
   error.value = null;
@@ -335,21 +354,49 @@ function applySettingsForm(): void {
   settingsTokenLimit.value = value?.tokenLimit === undefined ? "" : String(value.tokenLimit);
 }
 
-function resourceScopeLabel(resource: DesktopWorkspaceLearningResource): string {
-  if (resource.isAbsoluteRule) return "Workspaceの絶対ルール";
-  return resource.scope.kind === "room" ? "このRoom" : "Workspace共通";
+function resourceScopeLabel(resource: KnowledgePanelResource): string {
+  return resource.resource.scope.kind === "room" ? "このRoom" : "Workspace共通";
 }
 
-function provisionalLabel(resource: DesktopWorkspaceLearningResource): string {
-  return `AIの暫定Knowledge${resource.confidence === undefined ? "" : `（確信度 ${Math.round(resource.confidence * 100)}%）`}`;
+function provisionalLabel(resource: KnowledgePanelResource): string {
+  return "AIの暫定Knowledge";
 }
 
 function operationId(): string {
-  return `learning_ui_${crypto.randomUUID()}`;
+  return `knowledge_ui_${crypto.randomUUID()}`;
 }
 
 function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : "Knowledgeを更新できませんでした";
+}
+
+async function hydrateResources(
+  resources: WorkspaceCompletionResourceView[],
+  desktop: NonNullable<typeof window.samuraiDesktop>
+): Promise<KnowledgePanelResource[]> {
+  if (!desktop.getWorkspaceCompletionResourceBody) throw new Error("Knowledge本文を取得できません");
+  return Promise.all(resources.map(async (resource) => {
+    const body = await desktop.getWorkspaceCompletionResourceBody!({ resourceId: resource.id });
+    return toPanelResource(resource, body.content);
+  }));
+}
+
+function toPanelResource(resource: WorkspaceCompletionResourceView, content: string): KnowledgePanelResource {
+  const state = resource.lifecycleState === "archived"
+    ? "archived"
+    : resource.evidenceState === "contradicted" || resource.evidenceState === "review_required"
+      ? "conflict"
+      : resource.evidenceState === "provisional" ? "provisional" : "active";
+  return {
+    resource,
+    state,
+    aiUpdateLocked: resource.aiProtection === "fixed",
+    title: resource.title,
+    content,
+    version: resource.version,
+    updatedAt: resource.updatedAt,
+    ...(resource.knowledgeKind ? { knowledgeKind: resource.knowledgeKind as KnowledgeKind } : {})
+  };
 }
 </script>
 
@@ -375,21 +422,20 @@ function message(cause: unknown): string {
         <button type="submit" :disabled="saving || searching || !searchQuery.trim()">検索</button>
       </form>
       <div v-if="searchResults.length" class="workspace-learning-list">
-        <button v-for="resource in searchResults" :key="`search-${resource.id}`" type="button" class="workspace-learning-item" @click="beginEdit(resource)">
+        <button v-for="resource in searchResults" :key="`search-${resource.resource.id}`" type="button" class="workspace-learning-item" @click="beginEdit(resource)">
           <small>{{ resourceScopeLabel(resource) }}</small><strong>{{ resource.title }}</strong><span>{{ resource.content }}</span>
         </button>
       </div>
 
       <div class="workspace-learning-groups">
-        <ResourceGroup title="最優先のWorkspaceルール" :resources="workspaceRules" :scope-label="resourceScopeLabel" @select="beginEdit" @fixed="toggleFixed" @archive="toggleArchive" />
         <ResourceGroup title="このRoomのKnowledge" :resources="roomResources" :scope-label="resourceScopeLabel" @select="beginEdit" @fixed="toggleFixed" @archive="toggleArchive" />
-        <ResourceGroup title="Workspace共通Knowledge" :resources="workspaceKnowledge" :scope-label="resourceScopeLabel" @select="beginEdit" @fixed="toggleFixed" @archive="toggleArchive" />
+        <ResourceGroup title="Workspace共通Knowledge" :resources="workspaceResources" :scope-label="resourceScopeLabel" @select="beginEdit" @fixed="toggleFixed" @archive="toggleArchive" />
       </div>
 
       <form class="workspace-learning-form" @submit.prevent="saveResource">
         <div class="workspace-learning-form-head"><strong>{{ editing ? "Knowledgeを編集" : "Knowledgeを追加" }}</strong><button type="button" @click="beginCreate">新規</button></div>
-        <label><span>保存先</span><select v-model="resourceScope" :disabled="Boolean(editing) || resourceKind === 'workspace_rule'"><option value="room">このRoom</option><option value="workspace">Workspace共通</option></select></label>
-        <label><span>種類</span><select v-model="resourceKind" :disabled="Boolean(editing)"><option value="knowledge">Knowledge</option><option value="memory">Memory</option><option value="skill">Skill</option><option value="workspace_rule">絶対ルール</option></select></label>
+        <label><span>保存先</span><select v-model="resourceScope" :disabled="Boolean(editing)"><option value="room">このRoom</option><option value="workspace">Workspace共通</option></select></label>
+        <label><span>Knowledgeの種類</span><select v-model="knowledgeKind" :disabled="Boolean(editing)"><option value="fact">事実</option><option value="decision">決定</option><option value="explanation">説明</option><option value="experience_rule">経験則</option></select></label>
         <label><span>タイトル</span><input v-model="resourceTitle" required maxlength="20000" /></label>
         <label><span>内容</span><textarea v-model="resourceContent" required maxlength="200000" rows="4" /></label>
         <label><span>変更理由</span><input v-model="actionReason" required maxlength="4000" /></label>
@@ -400,14 +446,14 @@ function message(cause: unknown): string {
         <strong>変更履歴と根拠</strong>
         <div v-if="resourceHistory.versions.length" class="workspace-learning-history-list">
           <article v-for="version in resourceHistory.versions" :key="`version-${version.version}`">
-            <strong>v{{ version.version }} · {{ version.changeKind }}</strong>
-            <span>{{ version.reason }}</span>
+            <strong>v{{ version.version }} · {{ version.change_kind ?? version.changeKind ?? "更新" }}</strong>
+            <span>{{ version.reason ?? "" }}</span>
           </article>
         </div>
         <div v-if="resourceHistory.evidence.length" class="workspace-learning-history-list">
           <article v-for="evidence in resourceHistory.evidence" :key="(evidence.activityId ?? 'human') + evidence.resourceVersion + evidence.kind">
-            <strong>根拠 · v{{ evidence.resourceVersion }} · {{ evidence.kind }}</strong>
-            <span>{{ evidence.summary }}</span>
+            <strong>根拠 · v{{ evidence.resource_version ?? evidence.resourceVersion }} · {{ evidence.kind ?? "" }}</strong>
+            <span>{{ evidence.summary ?? "" }}</span>
           </article>
         </div>
         <span v-if="resourceHistory.versions.length === 0 && resourceHistory.evidence.length === 0" class="workspace-learning-empty">履歴はまだありません</span>

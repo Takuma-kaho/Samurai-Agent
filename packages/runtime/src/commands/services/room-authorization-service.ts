@@ -15,9 +15,9 @@ import type {
   AgentWorkspacePermissionRecord,
   RoomAgentPermissionRecord,
   RoomMemberRecord,
-  WorkspaceMemberRecord,
-  WorkspaceStore
-} from "@samurai-agent/workspace-store";
+  RuntimeRoomAuthorizationPort,
+  WorkspaceMemberRecord
+} from "../../composition/runtime-workspace-ports";
 
 export class RoomAuthorizationError extends Error {
   constructor(
@@ -30,17 +30,7 @@ export class RoomAuthorizationError extends Error {
   }
 }
 
-type RoomAuthorizationStore = Pick<WorkspaceStore,
-  | "getWorkspaceMember"
-  | "getRoomMember"
-  | "getRoomAgent"
-  | "getAgentWorkspacePermission"
-  | "getAgent"
-  | "listRoomIdsForHuman"
-  | "listRoomIdsForAgent"
-  | "listResourceIdsAvailableInRoom"
-  | "getResourceAccessMode"
->;
+type RoomAuthorizationStore = RuntimeRoomAuthorizationPort;
 
 export interface RoomResourceCandidateAccess {
   /** Resource IDs whose source Room or active share permits this Room. */

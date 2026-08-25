@@ -9,7 +9,7 @@ const Input = z.object({
 const Output = learningSnapshotValueSchema;
 
 export interface CuratorRestorePorts {
-  restoreCuratorSnapshot(id: string): Promise<z.infer<typeof Output> | undefined>;
+  restoreCuratorSnapshot(id: string, roomId?: string): Promise<z.infer<typeof Output> | undefined>;
   curatorSnapshotNotFoundError(): Error;
 }
 
@@ -55,7 +55,9 @@ const curatorRestore = defineCommand<CuratorRestorePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleCuratorRestore(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const restored = await ports.restoreCuratorSnapshot(input.snapshot_id);
+        const restored = context.roomId
+          ? await ports.restoreCuratorSnapshot(input.snapshot_id, context.roomId)
+          : await ports.restoreCuratorSnapshot(input.snapshot_id);
         if (!restored) throw ports.curatorSnapshotNotFoundError();
         return { ok: true, value: restored };
       }

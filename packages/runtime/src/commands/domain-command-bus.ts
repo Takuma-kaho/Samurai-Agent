@@ -1,7 +1,7 @@
 import {
   createId,
   nowIso,
-  stableHash,
+  stableDigest,
   type DomainCommandExecutionRecord,
   type JsonValue
 } from "@samurai-agent/core-schemas";
@@ -76,7 +76,7 @@ export class DurableDomainCommandBus {
   ): Promise<TResult> {
     if (!input.idempotencyKey) throw new DomainCommandIdempotencyKeyRequiredError();
 
-    const payloadHash = stableHash({
+    const payloadHash = stableDigest({
       command_id: input.commandId,
       contract_version: input.contractVersion ?? "unknown",
       workspace_id: input.workspaceId ?? null,
@@ -236,7 +236,7 @@ export class DurableDomainCommandBus {
 }
 
 function candidateCorrelationId(input: DurableDomainCommandInput): string {
-  return stableHash({ command_id: input.commandId, idempotency_key: input.idempotencyKey!, input_source: input.inputSource });
+  return stableDigest({ command_id: input.commandId, idempotency_key: input.idempotencyKey!, input_source: input.inputSource });
 }
 
 function domainExecutionError(error: unknown): { code: string; message: string; retryable: boolean; details?: JsonValue } {

@@ -516,7 +516,7 @@ export interface ExternalIntegrationRecordMap {
     payload_hash: string;
     dedupe_key: string;
     created_at: string;
-    /** Optional durable scope for integrations that share one SQLite database
+    /** Optional durable scope for integrations that share the host database
      * across Workspaces. Legacy Activity records may omit these fields. */
     workspace_id?: string;
     connection_id?: string;

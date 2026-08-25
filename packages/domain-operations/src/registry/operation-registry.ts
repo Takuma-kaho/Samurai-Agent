@@ -110,7 +110,10 @@ export class DomainOperationRegistry {
  * Keep cancellation and deadlines live while a handler is inside a port call.
  * Ports still receive the same TrustedDomainContext (including signal and
  * deadline), while the Registry prevents a slow/non-cooperative port from
- * holding the command ingress past its caller's cancellation boundary.
+ * holding the command ingress past its caller's cancellation boundary. Once
+ * the handler has started, an interruption is outcome_unknown because the
+ * handler may have performed an external side effect before it stopped (or
+ * before it eventually settles). The bounded race must not wait forever.
  */
 async function executeWithContextCancellation(
   context: TrustedDomainContext,
@@ -122,7 +125,7 @@ async function executeWithContextCancellation(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let removeAbortListener: (() => void) | undefined;
   const cancellation = new Promise<never>((_, reject) => {
-    const rejectCancelled = () => reject(new DomainOperationError("unavailable", `domain_operation_cancelled:${operationId}`));
+    const rejectCancelled = () => reject(new DomainOperationError("outcome_unknown", `domain_operation_outcome_unknown:${operationId}:cancelled`));
     if (context.signal) {
       if (context.signal.aborted) {
         rejectCancelled();
@@ -134,10 +137,10 @@ async function executeWithContextCancellation(
     if (context.deadlineAt !== undefined) {
       const remaining = context.deadlineAt - Date.now();
       if (remaining <= 0) {
-        reject(new DomainOperationError("unavailable", `domain_operation_deadline_exceeded:${operationId}`));
+        reject(new DomainOperationError("outcome_unknown", `domain_operation_outcome_unknown:${operationId}:deadline_exceeded`));
         return;
       }
-      timer = setTimeout(() => reject(new DomainOperationError("unavailable", `domain_operation_deadline_exceeded:${operationId}`)), remaining);
+      timer = setTimeout(() => reject(new DomainOperationError("outcome_unknown", `domain_operation_outcome_unknown:${operationId}:deadline_exceeded`)), remaining);
     }
   });
   try {

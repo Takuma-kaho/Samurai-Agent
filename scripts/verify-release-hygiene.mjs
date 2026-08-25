@@ -55,11 +55,40 @@ const duplicateSources = duplicateCandidates.filter((file) => {
   return duplicateContent !== undefined && originalContent !== undefined && duplicateContent === originalContent;
 });
 
-const secretPattern = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{32,}\b|\bAKIA[A-Z0-9]{16}\b/;
+// Keep this gate focused on recognizable credential formats.  Fixtures are
+// excluded below, while real source/config files are scanned for the common
+// provider token families and PEM private keys.
+const secretPatterns = [
+  /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/,
+  /\bsk-(?:live|test-)?[A-Za-z0-9_-]{20,}\b/,
+  /\bsk-ant-[A-Za-z0-9_-]{20,}\b/,
+  /\bAKIA[A-Z0-9]{16}\b/,
+  /\bAIza[A-Za-z0-9_-]{35}\b/,
+  /\bya29\.[A-Za-z0-9_-]{30,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/,
+  /\b(?:lin_api|lin_oauth)_[A-Za-z0-9_-]{20,}\b/,
+  /\bnpm_[A-Za-z0-9]{36}\b/,
+  /\bpypi-[A-Za-z0-9_-]{20,}\b/,
+  /\bsq0atp-[A-Za-z0-9_-]{20,}\b/
+];
+const credentialAssignmentPattern = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passphrase|private[_-]?key|authorization|cookie|secret)\s*[:=]\s*["']([^\s"']{16,})["']/i;
 const secretLeaks = [];
+const secretAdvisories = [];
 for (const [file, content] of contents) {
-  if (/^scripts\/fixtures\//.test(file)) continue;
-  if (secretPattern.test(content)) secretLeaks.push(file);
+  const providerPatternMatch = secretPatterns.some((pattern) => pattern.test(content));
+  const assignmentMatch = credentialAssignmentPattern.exec(content);
+  if (!providerPatternMatch && !assignmentMatch) continue;
+  // Tests and fixtures intentionally contain synthetic values. They are
+  // scanned as advisories so the gate does not confuse test data with a real
+  // release credential, while production/configuration files remain blocking.
+  if (/\.(?:test|spec)\.|^scripts\/fixtures\//.test(file)) {
+    secretAdvisories.push(file);
+  } else {
+    secretLeaks.push(file);
+  }
 }
 
 const untrackedGenerated = untracked.filter((file) => !file.startsWith("reports/core-completion/") && /(?:^|\/)(?:dist|build|coverage|\.cache|tmp|temp|latest\.(?:json|md))(?:\/|$)/i.test(file));
@@ -72,6 +101,7 @@ const result = {
   whitespace_issues: whitespaceIssues,
   source_read_errors: sourceReadErrors,
   secret_leaks: secretLeaks,
+  secret_advisories: secretAdvisories,
   duplicate_sources: duplicateSources,
   duplicate_candidates: duplicateCandidates,
   untracked_generated: untrackedGenerated,
@@ -79,7 +109,13 @@ const result = {
   dirty_entries: untracked.length
 };
 const completedAt = new Date().toISOString();
-const sources = ["scripts/verify-release-hygiene.mjs", "scripts/lib/core-evidence.mjs", "plans/core-completion-scorecard.json", "package.json"];
+const sources = [
+  "scripts/verify-release-hygiene.mjs",
+  "scripts/verify-phase13-completion.mjs",
+  "scripts/lib/core-evidence.mjs",
+  "plans/core-completion-scorecard.json",
+  "package.json"
+];
 const commitSha = run("git", ["rev-parse", "HEAD"]);
 const sourceSha256 = createHash("sha256").update([...sources].sort().map((file) => `${file}\0${readFileSync(path.join(root, file), "utf8")}`).join("\0")).digest("hex");
 const evidenceDirectory = path.join(root, "reports/core-completion/evidence");

@@ -3,10 +3,10 @@
   "test_id": "F02",
   "command": "pnpm core:test:automation-race",
   "status": "passed",
-  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
-  "worktree_clean": true,
-  "source_sha256": "b39c78e16038e62ec9c620bec83426c7b52c297161bfb54c162fe0ffc074d9e4",
-  "source_graph_sha256": "61e3219f2af16ab3662c34a30a3c22704785c2134295bcd38ce047afb37b7cbe",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
+  "worktree_clean": false,
+  "source_sha256": "3d6d372bcfdc51b3d25691c84c3f92efecbc910ffd35e0091d1062edc3c003d9",
+  "source_graph_sha256": "7bb9edf771ad07e6a02064f9d6e6b27dba4c007f0fe3f2775cdfec22f71f1622",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/workspace-store/src/backup/backup-id.ts",
@@ -31,11 +31,12 @@
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/automation-worker-race.ts",
     "scripts/lib/core-evidence.mjs",
+    "scripts/lib/verifier-assertions.mjs",
     "scripts/verify-automation-worker-race.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-02T15:40:05.469Z",
-  "completed_at": "2026-08-02T15:40:05.602Z",
+  "started_at": "2026-08-23T06:38:39.266Z",
+  "completed_at": "2026-08-23T06:38:39.459Z",
   "assertions": [
     {
       "name": "10 workers racing 100 claims produce one winner and side effect",
@@ -49,7 +50,7 @@
       }
     },
     {
-      "name": "Heartbeat extends lease and blocks early reclaim",
+      "name": "Lock owner token rejects another worker and blocks early reclaim",
       "actual": true,
       "expected": true
     },
@@ -70,7 +71,7 @@
     "claim_attempts": 100,
     "successful_claims": 1,
     "side_effects": 1,
-    "heartbeat_extended": true,
+    "token_bound": true,
     "early_reclaim_rejected": true,
     "restart_reclaim": true,
     "retry_before_due_rejected": true,

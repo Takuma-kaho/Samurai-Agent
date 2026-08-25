@@ -150,69 +150,77 @@ export class WorkspaceCompletionJobService {
     if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
     const leaseMs = input.leaseMs ?? 60_000;
     if (!Number.isSafeInteger(leaseMs) || leaseMs < minLeaseMs || leaseMs > maxLeaseMs) throw new WorkspaceServerError("workspace_completion_lease_invalid", 400);
-    // We obtain the chosen job first, then snapshot it before claiming. The
-    // stored hash below rejects any input that changes before apply.
-    const candidate = await this.completion.store.database.withContext(context, async (sql) => {
-      await sql.query(
-        `UPDATE workspace_completion_jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = NOW()
-         WHERE workspace_id = $1 AND status = 'running' AND lease_expires_at < NOW()`,
-        [context.workspaceId]
-      );
-      const selected = await sql.query<JobRow>(
-        `SELECT * FROM workspace_completion_jobs
-         WHERE workspace_id = $1 AND kind = 'review' AND status = 'queued' AND ($2::TEXT IS NULL OR room_id = $2)
-         ORDER BY updated_at ASC, id ASC LIMIT 1`,
-        [context.workspaceId, input.roomId ?? null]
-      );
-      return selected.rows[0] ? jobFromRow(selected.rows[0]) : undefined;
-    });
-    if (!candidate) return undefined;
-    if (!candidate.groupKey || !candidate.highWatermark) {
-      throw new WorkspaceServerError("workspace_completion_review_snapshot_identity_missing", 500);
-    }
-    let snapshot: WorkspaceCompletionReviewSnapshot;
-    try {
-      snapshot = await this.completion.createReviewSnapshot(context, candidate.groupKey, {
-        highWatermarkActivityId: candidate.highWatermark
+    // Snapshot creation intentionally happens outside the claim transaction.
+    // If another worker wins the row while the snapshot is being prepared,
+    // select the next queued job instead of returning an empty claim.
+    while (true) {
+      const candidate = await this.completion.store.database.withContext(context, async (sql) => {
+        await sql.query(
+          `UPDATE workspace_completion_jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = NOW()
+           WHERE workspace_id = $1 AND status = 'running' AND lease_expires_at < NOW()`,
+          [context.workspaceId]
+        );
+        const selected = await sql.query<JobRow>(
+          `SELECT * FROM workspace_completion_jobs
+           WHERE workspace_id = $1 AND kind = 'review' AND status = 'queued' AND ($2::TEXT IS NULL OR room_id = $2)
+           ORDER BY updated_at ASC, id ASC LIMIT 1`,
+          [context.workspaceId, input.roomId ?? null]
+        );
+        return selected.rows[0] ? jobFromRow(selected.rows[0]) : undefined;
       });
-    } catch (error) {
-      if (error instanceof WorkspaceServerError && error.code === "workspace_completion_review_snapshot_limit_exceeded") {
-        await this.blockReviewSnapshotLimit(context, candidate, error);
-        return { blocked: true, jobId: candidate.id };
+      if (!candidate) return undefined;
+      if (!candidate.groupKey || !candidate.highWatermark) {
+        throw new WorkspaceServerError("workspace_completion_review_snapshot_identity_missing", 500);
       }
-      throw error;
+      let snapshot: WorkspaceCompletionReviewSnapshot;
+      try {
+        snapshot = await this.completion.createReviewSnapshot(context, candidate.groupKey, {
+          highWatermarkActivityId: candidate.highWatermark
+        });
+      } catch (error) {
+        if (error instanceof WorkspaceServerError && (
+          error.code === "workspace_completion_review_snapshot_limit_exceeded"
+          || error.code === "workspace_completion_review_stale_input"
+        )) {
+          if (await this.blockReviewSnapshot(context, candidate, error)) return { blocked: true, jobId: candidate.id };
+          continue;
+        }
+        throw error;
+      }
+      const snapshotHash = hashSnapshot(snapshot);
+      const claimed = await this.completion.store.database.withContext(context, async (sql) => {
+        const selected = await sql.query<JobRow>(
+          `SELECT * FROM workspace_completion_jobs
+           WHERE workspace_id = $1 AND id = $2 AND status = 'queued' FOR UPDATE SKIP LOCKED`,
+          [context.workspaceId, candidate.id]
+        );
+        const current = selected.rows[0];
+        if (!current) return undefined;
+        const job = jobFromRow(current);
+        await this.completion.assertOperationAllowed(sql, context, job.roomId, "activity.ingest", "execute", { maintenance_job: "review" });
+        const updated = await sql.query<JobRow>(
+          `UPDATE workspace_completion_jobs
+           SET status = 'running', attempt_count = attempt_count + 1, lease_owner = $3,
+               lease_expires_at = NOW() + ($4::BIGINT * INTERVAL '1 millisecond'), heartbeat_at = NOW(),
+               input_hash = $5, updated_by = $6, updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2 AND status = 'queued' RETURNING *`,
+          [context.workspaceId, job.id, input.workerId, leaseMs, snapshotHash, context.accountId]
+        );
+        const claimedRow = updated.rows[0];
+        if (!claimedRow) return undefined;
+        const claimedJob = jobFromRow(claimedRow);
+        const attemptId = completionId("completion_attempt", context.workspaceId, `${claimedJob.id}:${claimedJob.attemptCount}`);
+        const attempt = await sql.query<AttemptRow>(
+          `INSERT INTO workspace_completion_job_attempts(workspace_id, id, job_id, attempt_no, worker_id, status, input_hash, configuration_version)
+           VALUES ($1, $2, $3, $4, $5, 'running', $6, $7) RETURNING *`,
+          [context.workspaceId, attemptId, claimedJob.id, claimedJob.attemptCount, input.workerId, snapshotHash, claimedJob.configurationVersion]
+        );
+        const repair = parseRepairIssues(job.blockedReason);
+        return { job: claimedJob, attempt: attemptFromRow(attempt.rows[0]!), ...(repair.length ? { repair: { issues: repair } } : {}) };
+      });
+      if (!claimed) continue;
+      return { ...claimed, snapshot, snapshotHash };
     }
-    const snapshotHash = hashSnapshot(snapshot);
-    return this.completion.store.database.withContext(context, async (sql) => {
-      const selected = await sql.query<JobRow>(
-        `SELECT * FROM workspace_completion_jobs
-         WHERE workspace_id = $1 AND id = $2 AND status = 'queued' FOR UPDATE SKIP LOCKED`,
-        [context.workspaceId, candidate.id]
-      );
-      const current = selected.rows[0];
-      if (!current) return undefined;
-      const job = jobFromRow(current);
-      await this.completion.assertOperationAllowed(sql, context, job.roomId, "activity.ingest", "execute", { maintenance_job: "review" });
-      const updated = await sql.query<JobRow>(
-        `UPDATE workspace_completion_jobs
-         SET status = 'running', attempt_count = attempt_count + 1, lease_owner = $3,
-             lease_expires_at = NOW() + ($4::BIGINT * INTERVAL '1 millisecond'), heartbeat_at = NOW(),
-             input_hash = $5, updated_by = $6, updated_at = NOW()
-         WHERE workspace_id = $1 AND id = $2 AND status = 'queued' RETURNING *`,
-        [context.workspaceId, job.id, input.workerId, leaseMs, snapshotHash, context.accountId]
-      );
-      const claimedRow = updated.rows[0];
-      if (!claimedRow) return undefined;
-      const claimed = jobFromRow(claimedRow);
-      const attemptId = completionId("completion_attempt", context.workspaceId, `${claimed.id}:${claimed.attemptCount}`);
-      const attempt = await sql.query<AttemptRow>(
-        `INSERT INTO workspace_completion_job_attempts(workspace_id, id, job_id, attempt_no, worker_id, status, input_hash, configuration_version)
-         VALUES ($1, $2, $3, $4, $5, 'running', $6, $7) RETURNING *`,
-        [context.workspaceId, attemptId, claimed.id, claimed.attemptCount, input.workerId, snapshotHash, claimed.configurationVersion]
-      );
-      const repair = parseRepairIssues(job.blockedReason);
-      return { job: claimed, attempt: attemptFromRow(attempt.rows[0]!), snapshot, snapshotHash, ...(repair.length ? { repair: { issues: repair } } : {}) };
-    });
   }
 
   async claimEvaluation(
@@ -223,53 +231,56 @@ export class WorkspaceCompletionJobService {
     if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
     const leaseMs = input.leaseMs ?? 60_000;
     if (!Number.isSafeInteger(leaseMs) || leaseMs < minLeaseMs || leaseMs > maxLeaseMs) throw new WorkspaceServerError("workspace_completion_lease_invalid", 400);
-    const candidate = await this.completion.store.database.withContext(context, async (sql) => {
-      await sql.query(
-        `UPDATE workspace_completion_jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = NOW()
-         WHERE workspace_id = $1 AND status = 'running' AND lease_expires_at < NOW()`,
-        [context.workspaceId]
-      );
-      const selected = await sql.query<JobRow>(
-        `SELECT * FROM workspace_completion_jobs
-         WHERE workspace_id = $1 AND kind = 'evaluation' AND status = 'queued' AND ($2::TEXT IS NULL OR room_id = $2)
-         ORDER BY updated_at ASC, id ASC LIMIT 1`,
-        [context.workspaceId, input.roomId ?? null]
-      );
-      return selected.rows[0] ? jobFromRow(selected.rows[0]) : undefined;
-    });
-    if (!candidate) return undefined;
-    if (!candidate.groupKey || !candidate.highWatermark) throw new WorkspaceServerError("workspace_completion_evaluation_input_missing", 500);
-    const inputHash = await this.completion.evaluationJobInputHash(context, { episodeId: candidate.groupKey, activityId: candidate.highWatermark });
-    return this.completion.store.database.withContext(context, async (sql) => {
-      const selected = await sql.query<JobRow>(
-        `SELECT * FROM workspace_completion_jobs
-         WHERE workspace_id = $1 AND id = $2 AND status = 'queued' FOR UPDATE SKIP LOCKED`,
-        [context.workspaceId, candidate.id]
-      );
-      const current = selected.rows[0];
-      if (!current) return undefined;
-      const job = jobFromRow(current);
-      if (job.kind !== "evaluation") return undefined;
-      await this.completion.assertOperationAllowed(sql, context, job.roomId, "activity.ingest", "execute", { maintenance_job: "evaluation" });
-      const updated = await sql.query<JobRow>(
-        `UPDATE workspace_completion_jobs
-         SET status = 'running', attempt_count = attempt_count + 1, lease_owner = $3,
-             lease_expires_at = NOW() + ($4::BIGINT * INTERVAL '1 millisecond'), heartbeat_at = NOW(),
-             input_hash = $5, updated_by = $6, updated_at = NOW()
-         WHERE workspace_id = $1 AND id = $2 AND status = 'queued' RETURNING *`,
-        [context.workspaceId, job.id, input.workerId, leaseMs, inputHash, context.accountId]
-      );
-      const claimedRow = updated.rows[0];
-      if (!claimedRow) return undefined;
-      const claimed = jobFromRow(claimedRow);
-      const attemptId = completionId("completion_attempt", context.workspaceId, `${claimed.id}:${claimed.attemptCount}`);
-      const attempt = await sql.query<AttemptRow>(
-        `INSERT INTO workspace_completion_job_attempts(workspace_id, id, job_id, attempt_no, worker_id, status, input_hash, configuration_version)
-         VALUES ($1, $2, $3, $4, $5, 'running', $6, $7) RETURNING *`,
-        [context.workspaceId, attemptId, claimed.id, claimed.attemptCount, input.workerId, inputHash, claimed.configurationVersion]
-      );
-      return { job: claimed, attempt: attemptFromRow(attempt.rows[0]!), inputHash };
-    });
+    while (true) {
+      const candidate = await this.completion.store.database.withContext(context, async (sql) => {
+        await sql.query(
+          `UPDATE workspace_completion_jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = NOW()
+           WHERE workspace_id = $1 AND status = 'running' AND lease_expires_at < NOW()`,
+          [context.workspaceId]
+        );
+        const selected = await sql.query<JobRow>(
+          `SELECT * FROM workspace_completion_jobs
+           WHERE workspace_id = $1 AND kind = 'evaluation' AND status = 'queued' AND ($2::TEXT IS NULL OR room_id = $2)
+           ORDER BY updated_at ASC, id ASC LIMIT 1`,
+          [context.workspaceId, input.roomId ?? null]
+        );
+        return selected.rows[0] ? jobFromRow(selected.rows[0]) : undefined;
+      });
+      if (!candidate) return undefined;
+      if (!candidate.groupKey || !candidate.highWatermark) throw new WorkspaceServerError("workspace_completion_evaluation_input_missing", 500);
+      const inputHash = await this.completion.evaluationJobInputHash(context, { episodeId: candidate.groupKey, activityId: candidate.highWatermark });
+      const claimed = await this.completion.store.database.withContext(context, async (sql) => {
+        const selected = await sql.query<JobRow>(
+          `SELECT * FROM workspace_completion_jobs
+           WHERE workspace_id = $1 AND id = $2 AND status = 'queued' FOR UPDATE SKIP LOCKED`,
+          [context.workspaceId, candidate.id]
+        );
+        const current = selected.rows[0];
+        if (!current) return undefined;
+        const job = jobFromRow(current);
+        if (job.kind !== "evaluation") return undefined;
+        await this.completion.assertOperationAllowed(sql, context, job.roomId, "activity.ingest", "execute", { maintenance_job: "evaluation" });
+        const updated = await sql.query<JobRow>(
+          `UPDATE workspace_completion_jobs
+           SET status = 'running', attempt_count = attempt_count + 1, lease_owner = $3,
+               lease_expires_at = NOW() + ($4::BIGINT * INTERVAL '1 millisecond'), heartbeat_at = NOW(),
+               input_hash = $5, updated_by = $6, updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2 AND status = 'queued' RETURNING *`,
+          [context.workspaceId, job.id, input.workerId, leaseMs, inputHash, context.accountId]
+        );
+        const claimedRow = updated.rows[0];
+        if (!claimedRow) return undefined;
+        const claimedJob = jobFromRow(claimedRow);
+        const attemptId = completionId("completion_attempt", context.workspaceId, `${claimedJob.id}:${claimedJob.attemptCount}`);
+        const attempt = await sql.query<AttemptRow>(
+          `INSERT INTO workspace_completion_job_attempts(workspace_id, id, job_id, attempt_no, worker_id, status, input_hash, configuration_version)
+           VALUES ($1, $2, $3, $4, $5, 'running', $6, $7) RETURNING *`,
+          [context.workspaceId, attemptId, claimedJob.id, claimedJob.attemptCount, input.workerId, inputHash, claimedJob.configurationVersion]
+        );
+        return { job: claimedJob, attempt: attemptFromRow(attempt.rows[0]!), inputHash };
+      });
+      if (claimed) return claimed;
+    }
   }
 
   async claimCurator(
@@ -280,7 +291,7 @@ export class WorkspaceCompletionJobService {
     if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
     const leaseMs = input.leaseMs ?? 60_000;
     if (!Number.isSafeInteger(leaseMs) || leaseMs < minLeaseMs || leaseMs > maxLeaseMs) throw new WorkspaceServerError("workspace_completion_lease_invalid", 400);
-    const candidate = await this.completion.store.database.withContext(context, async (sql) => {
+    return this.completion.store.database.withContext(context, async (sql) => {
       await sql.query(
         `UPDATE workspace_completion_jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL, updated_at = NOW()
          WHERE workspace_id = $1 AND status = 'running' AND lease_expires_at < NOW()`,
@@ -289,26 +300,17 @@ export class WorkspaceCompletionJobService {
       const selected = await sql.query<JobRow>(
         `SELECT * FROM workspace_completion_jobs
          WHERE workspace_id = $1 AND kind = 'curator' AND status = 'queued' AND ($2::TEXT IS NULL OR room_id = $2)
-         ORDER BY updated_at ASC, id ASC LIMIT 1`,
+         ORDER BY updated_at ASC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`,
         [context.workspaceId, input.roomId ?? null]
-      );
-      return selected.rows[0] ? jobFromRow(selected.rows[0]) : undefined;
-    });
-    if (!candidate) return undefined;
-    const mode = candidate.groupKey === "semantic" ? "semantic" : candidate.groupKey === "light" ? "light" : undefined;
-    if (!mode) throw new WorkspaceServerError("workspace_completion_curator_mode_invalid", 500);
-    return this.completion.store.database.withContext(context, async (sql) => {
-      const selected = await sql.query<JobRow>(
-        `SELECT * FROM workspace_completion_jobs
-         WHERE workspace_id = $1 AND id = $2 AND kind = 'curator' AND status = 'queued' FOR UPDATE SKIP LOCKED`,
-        [context.workspaceId, candidate.id]
       );
       const current = selected.rows[0];
       if (!current) return undefined;
       const job = jobFromRow(current);
+      const mode = job.groupKey === "semantic" ? "semantic" : job.groupKey === "light" ? "light" : undefined;
+      if (!mode) throw new WorkspaceServerError("workspace_completion_curator_mode_invalid", 500);
       await this.completion.assertOperationAllowed(sql, context, job.roomId, "curator.apply", "execute", { maintenance_job: "curator", mode });
       const updated = await sql.query<JobRow>(
-        `UPDATE workspace_completion_jobs
+         `UPDATE workspace_completion_jobs
          SET status = 'running', attempt_count = attempt_count + 1, lease_owner = $3,
              lease_expires_at = NOW() + ($4::BIGINT * INTERVAL '1 millisecond'), heartbeat_at = NOW(), updated_by = $5, updated_at = NOW()
          WHERE workspace_id = $1 AND id = $2 AND status = 'queued' RETURNING *`,
@@ -447,21 +449,49 @@ export class WorkspaceCompletionJobService {
     });
   }
 
-  /** An oversized snapshot is not a retryable worker failure: handing an
-   * incomplete episode to the Review cassette would make its decision
-   * unsound. Keep the reason as structured data so a human can deliberately
-   * raise the configured bound or split the Episode. */
-  private async blockReviewSnapshotLimit(
+  /** A Review Job cannot be processed without the host-owned review cassette.
+   * Keep the missing capability explicit instead of leaving the Job queued
+   * forever in a normal Server process that was started without that cassette. */
+  async blockQueuedReviewsWithoutPort(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { limit?: number } = {}
+  ): Promise<number> {
+    const limit = boundedLimit(input.limit ?? 100);
+    return this.completion.store.database.withContext(context, async (sql) => {
+      const blocked = await sql.query<{ id: string }>(
+        `WITH candidates AS (
+           SELECT id FROM workspace_completion_jobs
+           WHERE workspace_id = $1 AND kind = 'review' AND status = 'queued'
+           ORDER BY updated_at ASC, id ASC
+           LIMIT $2
+           FOR UPDATE SKIP LOCKED
+         )
+         UPDATE workspace_completion_jobs AS job
+         SET status = 'blocked', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+             blocked_reason = $3, updated_by = $4, updated_at = NOW()
+         FROM candidates
+         WHERE job.workspace_id = $1 AND job.id = candidates.id
+         RETURNING job.id`,
+        [context.workspaceId, limit, JSON.stringify({ code: "workspace_completion_review_port_unavailable", retryable: false }), context.accountId]
+      );
+      return blocked.rows.length;
+    });
+  }
+
+  /** A Review with an oversized or stale snapshot must not reach the cassette.
+   * Keep the reason on the queued Job so it is visible for repair instead of
+   * escaping from claimReview and crashing the worker loop. */
+  private async blockReviewSnapshot(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
     job: WorkspaceCompletionJob,
     error: WorkspaceServerError
-  ): Promise<void> {
-    await this.completion.store.database.withContext(context, async (sql) => {
-      await sql.query(
+  ): Promise<boolean> {
+    return this.completion.store.database.withContext(context, async (sql) => {
+      const blocked = await sql.query<{ id: string }>(
         `UPDATE workspace_completion_jobs
          SET status = 'blocked', lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
              blocked_reason = $3, updated_by = $4, updated_at = NOW()
-         WHERE workspace_id = $1 AND id = $2 AND status = 'queued'`,
+         WHERE workspace_id = $1 AND id = $2 AND status = 'queued' RETURNING id`,
         [
           context.workspaceId,
           job.id,
@@ -469,6 +499,7 @@ export class WorkspaceCompletionJobService {
           context.accountId
         ]
       );
+      return Boolean(blocked.rows[0]);
     });
   }
 

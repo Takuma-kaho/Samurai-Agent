@@ -92,6 +92,7 @@ export function createFollowUpWorkItem(input: {
   const workItem: WorkItemRecord = {
     id: createId("work"),
     objective_id: input.objective.id,
+    room_id: input.objective.room_id ?? input.current.room_id,
     parent_work_item_id: input.current.id,
     instruction,
     status: "queued",

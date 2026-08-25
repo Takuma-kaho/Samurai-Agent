@@ -37,6 +37,8 @@ interface TimedSample {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reportDirectory = path.join(root, "reports", "server04-completion");
+const p95BudgetMilliseconds = numberEnvironment("SAMURAI_SERVER_VERIFY_COMPLETION_LOAD_P95_MS", 2_000);
+const rssBudgetBytes = numberEnvironment("SAMURAI_SERVER_VERIFY_COMPLETION_LOAD_MAX_RSS_BYTES", 512 * 1024 * 1024);
 const targets: ProbeTarget[] = [
   targetFromEnvironment("HOSTED", "hosted"),
   targetFromEnvironment("SELF_HOST", "self_host")
@@ -72,7 +74,10 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const database = new PostgresWorkspaceDatabase({ databaseUrl: target.databaseUrl, runtimeRole: target.runtimeRole });
   const adminDatabase = new PostgresWorkspaceAdminDatabase({ databaseAdminUrl: target.adminDatabaseUrl, runtimeRole: target.runtimeRole });
   let report: Record<string, unknown> | undefined;
+  let probeFailure: Error | undefined;
+  let cleanupFailure: Error | undefined;
   try {
+    console.log(`[Server04 completion load] ${target.label}: migrate and prepare`);
     await adminDatabase.migrate();
     await database.assertReady();
     const store = new WorkspaceServerStore({
@@ -101,7 +106,9 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       roomIds.push(room.room.id);
     }
 
+    console.log(`[Server04 completion load] ${target.label}: write bulk fixture`);
     await bulkFixture(adminDatabase, { workspaceId, ownerId: owner.id, roomIds });
+    console.log(`[Server04 completion load] ${target.label}: measure runtime paths`);
     const completion = new WorkspaceCompletionService(store);
     const jobs = new WorkspaceCompletionJobService(completion);
     const samples: TimedSample[] = [];
@@ -163,6 +170,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const fullWorkspaceScan = planText.includes("Seq Scan") && !hasWorkspacePredicate;
     const indexObserved = indexUsage.some((row) => row.index_scans > 0);
     const boundedRuntimeReads = pageBounded && !fullWorkspaceScan;
+    const performanceBudgetRespected = p95 <= p95BudgetMilliseconds && maxRssGrowth <= rssBudgetBytes;
     report = {
       schema_version: 1,
       generated_at: new Date().toISOString(),
@@ -191,30 +199,43 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         no_unintended_full_workspace_scan: !fullWorkspaceScan,
         bounded_runtime_reads: boundedRuntimeReads,
         index_observed: indexObserved,
+        performance_budget_respected: performanceBudgetRespected,
+        p95_budget_milliseconds: p95BudgetMilliseconds,
+        max_rss_budget_bytes: rssBudgetBytes,
         unlimited_memory_expansion_observed: false
       },
-      status: boundedRuntimeReads && claimedJobs === 8 ? "passed" : "failed"
+      status: boundedRuntimeReads && indexObserved && performanceBudgetRespected && claimedJobs === 8 ? "passed" : "failed"
     };
     await writeLoadReport(target.label, report);
     if (report.status !== "passed") throw new Error("server04_completion_load_guard_failed");
     console.log(`[Server04 completion load] ${target.label}: p50=${p50.toFixed(2)}ms p95=${p95.toFixed(2)}ms`);
   } catch (error) {
+    probeFailure = error instanceof Error ? error : new Error(String(error));
     const failed = {
       ...(report ?? {}),
       schema_version: 1,
       generated_at: new Date().toISOString(),
       target: target.label,
       status: "failed",
-      error: error instanceof Error ? error.message : String(error)
+      error: probeFailure.message
     };
     await writeLoadReport(target.label, failed);
-    throw error;
   } finally {
-    await cleanup(adminDatabase, workspaceId, owner.id);
-    await database.close();
-    await adminDatabase.close();
-    await rm(filesystemRoot, { recursive: true, force: true }).catch(() => undefined);
+    console.log(`[Server04 completion load] ${target.label}: cleanup`);
+    try {
+      await cleanup(adminDatabase, workspaceId, owner.id);
+      console.log(`[Server04 completion load] ${target.label}: cleanup complete`);
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error : new Error(String(error));
+      console.error(`[Server04 completion load] ${target.label}: cleanup failed: ${cleanupFailure.message}`);
+    }
+    await database.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await adminDatabase.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await rm(filesystemRoot, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
   }
+  if (probeFailure && cleanupFailure) throw new Error(`${probeFailure.message};cleanup:${cleanupFailure.message}`);
+  if (probeFailure) throw probeFailure;
+  if (cleanupFailure) throw new Error(`cleanup:${cleanupFailure.message}`);
 }
 
 async function bulkFixture(
@@ -229,7 +250,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 100000) AS item
           )
          INSERT INTO workspace_completion_activities(
@@ -246,7 +267,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 10000) AS item
           )
          INSERT INTO workspace_completion_resources(
@@ -289,7 +310,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 1000) AS item
           )
          INSERT INTO workspace_completion_resources(
@@ -332,7 +353,7 @@ async function bulkFixture(
       await sql.query(
         `WITH input AS (SELECT $1::TEXT AS workspace_id, $2::TEXT AS owner_id, $3::TEXT[] AS room_ids),
           generated AS (
-            SELECT item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
+            SELECT input.workspace_id, input.owner_id, item AS n, room_ids[1 + ((item - 1) % cardinality(room_ids))] AS room_id
             FROM input CROSS JOIN generate_series(1, 16) AS item
           )
          INSERT INTO workspace_completion_jobs(
@@ -385,7 +406,7 @@ async function readIndexUsage(database: PostgresWorkspaceAdminDatabase): Promise
     const result = await sql.query<{ table_name: string; index_name: string; idx_scan: number | string }>(
       `SELECT relname AS table_name, indexrelname AS index_name, idx_scan
        FROM pg_stat_user_indexes
-       WHERE schemaname = 'public' AND table_name IN (
+       WHERE schemaname = 'public' AND relname IN (
          'workspace_completion_resources', 'workspace_completion_activities',
          'workspace_completion_search_projection', 'workspace_completion_jobs'
        ) ORDER BY table_name, index_name`
@@ -442,10 +463,36 @@ async function cleanup(database: PostgresWorkspaceAdminDatabase, workspaceId: st
       "workspace_file_transactions", "workspace_files", "workspace_records", "room_members", "rooms", "workspace_members",
       "workspace_import_sessions", "workspaces"
     ];
-    for (const table of tables) await sql.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [workspaceId]).catch(() => undefined);
-    await sql.query("DELETE FROM account_operations WHERE account_id = $1", [accountId]).catch(() => undefined);
-    await sql.query("DELETE FROM accounts WHERE id = $1", [accountId]).catch(() => undefined);
-  }).catch(() => undefined);
+    await sql.query("BEGIN");
+    try {
+      await sql.query(
+        `UPDATE workspace_completion_resources
+         SET current_confirmed_version = NULL,
+             current_provisional_version = NULL,
+             candidate_version = NULL
+         WHERE workspace_id = $1`,
+        [workspaceId]
+      );
+      for (const table of tables) {
+        const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+        await sql.query(`DELETE FROM ${table} WHERE ${workspaceColumn} = $1`, [workspaceId]);
+      }
+      await sql.query("DELETE FROM account_operations WHERE account_id = $1", [accountId]);
+      await sql.query("DELETE FROM accounts WHERE id = $1", [accountId]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
+  });
+}
+
+function numberEnvironment(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${name}_invalid`);
+  return value;
 }
 
 function accountIdentity(): ProbeAccount {

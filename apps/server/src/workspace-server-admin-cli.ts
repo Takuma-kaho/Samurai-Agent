@@ -9,9 +9,12 @@ import {
  * long-lived public process never receives an owner/admin database URL.
  */
 export async function runWorkspaceServerAdminCli(argv = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
-  const [command] = argv;
-  if (command !== "migrate") {
-    throw new WorkspaceServerError("workspace_server_admin_cli_command_invalid", 400, { commands: ["migrate"] });
+  // pnpm forwards a standalone separator to the script in some invocations.
+  // It is transport syntax, not an administrative command.
+  const commands = argv.filter((argument) => argument !== "--");
+  const [command, ...unexpectedArguments] = commands;
+  if ((command !== "migrate" && command !== "health") || unexpectedArguments.length > 0) {
+    throw new WorkspaceServerError("workspace_server_admin_cli_command_invalid", 400, { commands: ["migrate", "health"] });
   }
   const config = loadWorkspaceServerAdminConfig(env);
   const database = new PostgresWorkspaceAdminDatabase({
@@ -19,8 +22,11 @@ export async function runWorkspaceServerAdminCli(argv = process.argv.slice(2), e
     runtimeRole: config.databaseRuntimeRole
   });
   try {
-    await database.migrate();
-    return { ok: true, action: "migrate" };
+    if (command === "migrate") {
+      await database.migrate();
+      return { ok: true, action: "migrate" };
+    }
+    return { ...(await database.operatorHealth()), action: "health" };
   } finally {
     await database.close();
   }

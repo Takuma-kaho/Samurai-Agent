@@ -1,22 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import path from "node:path";
-import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createId, nowIso, type OperationRecord } from "@samurai-agent/core-schemas";
-import { WorkspaceStore } from "@samurai-agent/workspace-store";
-import { createArtifactDraft } from "./index";
-
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
+import { createArtifactDraft, type ArtifactDraftStorePort } from "./index";
 
 describe("artifact pipeline", () => {
   it("creates typed structured artifacts with filesystem content and metadata", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "samurai-artifact-"));
-    roots.push(root);
-    const store = await WorkspaceStore.create({ rootDir: root });
+    const store = new MemoryArtifactStore();
     const operation = testOperation();
 
     const artifact = await createArtifactDraft({
@@ -32,8 +20,7 @@ describe("artifact pipeline", () => {
       sourceLocales: ["ja"],
       createdBy: "owner"
     });
-    const content = await store.readArtifactContent(artifact.id);
-    await store.close();
+    const content = store.readText(artifact.id);
 
     expect(artifact.kind).toBe("table");
     expect(artifact.metadata).toMatchObject({
@@ -48,9 +35,7 @@ describe("artifact pipeline", () => {
   });
 
   it("creates binary pdf artifacts with filesystem content and metadata", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "samurai-artifact-"));
-    roots.push(root);
-    const store = await WorkspaceStore.create({ rootDir: root });
+    const store = new MemoryArtifactStore();
     const operation = testOperation();
 
     const artifact = await createArtifactDraft({
@@ -67,9 +52,8 @@ describe("artifact pipeline", () => {
       sourceLocales: ["ja"],
       createdBy: "owner"
     });
-    const textContent = await store.readArtifactContent(artifact.id);
-    const binaryContent = await store.readArtifactBinaryContent(artifact.id);
-    await store.close();
+    const textContent = store.readText(artifact.id);
+    const binaryContent = store.readBinary(artifact.id);
 
     expect(artifact.kind).toBe("pdf");
     expect(artifact.file_ref.uri.endsWith(".pdf")).toBe(true);
@@ -85,6 +69,31 @@ describe("artifact pipeline", () => {
     expect(Array.from(binaryContent ?? [])).toEqual([0x25, 0x50, 0x44, 0x46]);
   });
 });
+
+class MemoryArtifactStore implements ArtifactDraftStorePort {
+  private readonly content = new Map<string, string | Uint8Array>();
+  private readonly metadata = new Map<string, Parameters<ArtifactDraftStorePort["saveArtifactMetadata"]>[0]>();
+
+  async writeArtifactContent(id: string, content: string | Uint8Array, options?: { extension?: string }): Promise<string> {
+    this.content.set(id, typeof content === "string" ? content : new Uint8Array(content));
+    return `artifacts/${id}.${options?.extension ?? "md"}`;
+  }
+
+  async saveArtifactMetadata(record: Parameters<ArtifactDraftStorePort["saveArtifactMetadata"]>[0]) {
+    this.metadata.set(record.id, record);
+    return record;
+  }
+
+  readText(id: string): string | undefined {
+    const value = this.content.get(id);
+    return typeof value === "string" ? value : undefined;
+  }
+
+  readBinary(id: string): Uint8Array | undefined {
+    const value = this.content.get(id);
+    return value instanceof Uint8Array ? value : undefined;
+  }
+}
 
 function testOperation(): OperationRecord {
   const now = nowIso();

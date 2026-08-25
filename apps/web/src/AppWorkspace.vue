@@ -44,6 +44,7 @@ import type {
   MessagePresentationRecord,
   OperationRecord,
   PolicyDecisionRecord,
+  ResourceRef,
   RollbackPoint,
   SessionRecord,
   SettingsRecord,
@@ -51,14 +52,15 @@ import type {
   WikiFrontmatter,
   WorkspaceChangeRecord
 } from "@samurai-agent/core-schemas";
-import { supportedLocales } from "@samurai-agent/core-schemas";
+import { defaultSettings, supportedLocales } from "@samurai-agent/core-schemas";
 import { type LocaleKey, t } from "@samurai-agent/localization";
 import type { SurfaceRenderKind, SurfaceRendererCapabilities, SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   api,
   ApiError,
   createIdempotencyKey,
-  getApiBaseUrl,
+  getWorkspaceClientBridge,
+  setActiveWorkspaceRoomId,
   type AgentBackendStatus,
   type ApprovalLifecyclePayload,
   type ArchiveMemoryPayload,
@@ -78,6 +80,7 @@ import {
   type SessionDetail,
   type SurfaceContractPayload
 } from "./lib/api";
+import { configureBrowserWorkspaceConnection, type BrowserWorkspaceConnectionInput } from "./lib/workspace-browser-auth";
 import CollectionWorkspaceView from "./components/CollectionWorkspaceView.vue";
 import GeneratedSurfaceCard from "./components/GeneratedSurfaceCard.vue";
 import SkillOptimizationCard from "./components/SkillOptimizationCard.vue";
@@ -122,7 +125,6 @@ import { persistSettings, readStoredSettings } from "./lib/settings-storage";
 import { useMessageActions } from "./lib/use-message-actions";
 import { collectionDefaultViewId, collectionListErrorMessage, collectionSchemaRenderer, collectionSchemaTitle } from "./lib/collection-list-state";
 import { useDisclosureState } from "./lib/use-disclosure-state";
-import { connectAppSocket } from "./lib/connect-app-socket";
 import { appendById, mergeById } from "./lib/array-state";
 import {
   appCollectionData,
@@ -145,15 +147,7 @@ type ChatDisplayMessage = {
   activityItems?: WorkActivityItem[];
   streamItems?: PendingAgentStreamItem[];
 };
-const settings = ref<SettingsRecord>({
-  ui_locale: "ja",
-  output_locale: "ja",
-  memory_capture_mode: "auto",
-  knowledge_wiki_capture_mode: "auto",
-  skill_capture_mode: "auto",
-  external_provider_role: "assistive",
-  updated_at: new Date().toISOString()
-});
+const settings = ref<SettingsRecord>(defaultSettings());
 const workspaceConnectionState = ref<DesktopWorkspaceConnectionState>({ connections: [] });
 const workspaceConnectionLoading = ref(false);
 const workspaceConnectionError = ref<string | null>(null);
@@ -162,23 +156,26 @@ const workspaceRooms = ref<DesktopWorkspaceRoom[]>([]);
 const workspaceRoomLoading = ref(false);
 const workspaceRoomError = ref<string | null>(null);
 const selectedWorkspaceRoomId = ref<string | undefined>();
+let workspaceRoomGeneration = 0;
+let lastObservedWorkspaceRoomId: string | undefined;
 let stopWorkspaceRealtimeEvents: (() => void) | undefined;
 let workspaceRealtimeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-const workspaceConnectionAvailable = computed(() => typeof window !== "undefined" && Boolean(
-  window.samuraiDesktop?.listWorkspaceConnections
-  && window.samuraiDesktop?.upsertWorkspaceConnection
-  && window.samuraiDesktop?.selectWorkspaceConnection
-  && window.samuraiDesktop?.getWorkspaceServerStatus
+const workspaceConnectionAvailable = computed(() => Boolean(
+  getWorkspaceClientBridge()?.listWorkspaceConnections
+  && getWorkspaceClientBridge()?.upsertWorkspaceConnection
+  && getWorkspaceClientBridge()?.selectWorkspaceConnection
+  && getWorkspaceClientBridge()?.getWorkspaceServerStatus
 ));
-const workspaceRoomAvailable = computed(() => typeof window !== "undefined" && Boolean(
-  window.samuraiDesktop?.listWorkspaceRooms
-  && window.samuraiDesktop?.listWorkspaceRoomMembers
-  && window.samuraiDesktop?.createWorkspaceRoom
-  && window.samuraiDesktop?.previewWorkspaceRoomMove
-  && window.samuraiDesktop?.moveWorkspaceRoom
-  && window.samuraiDesktop?.previewWorkspaceRoomMember
-  && window.samuraiDesktop?.setWorkspaceRoomMember
+const workspaceRoomAvailable = computed(() => Boolean(
+  getWorkspaceClientBridge()?.listWorkspaceRooms
+  && getWorkspaceClientBridge()?.listWorkspaceRoomMembers
+  && getWorkspaceClientBridge()?.createWorkspaceRoom
+  && getWorkspaceClientBridge()?.previewWorkspaceRoomMove
+  && getWorkspaceClientBridge()?.moveWorkspaceRoom
+  && getWorkspaceClientBridge()?.previewWorkspaceRoomMember
+  && getWorkspaceClientBridge()?.setWorkspaceRoomMember
 ));
+const browserWorkspaceMode = computed(() => typeof window !== "undefined" && !window.samuraiDesktop);
 const workspaceRoomWorkspaceVersion = computed(() => {
   const body = workspaceServerStatus.value?.workspace?.body;
   if (!body || typeof body !== "object") return undefined;
@@ -531,7 +528,6 @@ onMounted(async () => {
   }
   subscribeWorkspaceRealtimeEvents();
   void loadWorkspaceConnections();
-  connectSocket();
   await Promise.all([loadSettings(), loadAgentBackends(), loadSurfaceContract(), loadSessionsWithRetry()]);
   window.addEventListener("hashchange", desktopDeepLinkHashHandler);
   await applyDesktopDeepLinkHash();
@@ -558,27 +554,44 @@ watch(activeSurfaceSpec, (spec) => {
   if (spec) prepareSurfaceDraft(spec);
 });
 
-async function loadSessions() {
-  sessions.value = await api.listSessions();
+watch(selectedWorkspaceRoomId, (roomId) => {
+  setActiveWorkspaceRoomId(roomId);
+  if (roomId === lastObservedWorkspaceRoomId) return;
+  lastObservedWorkspaceRoomId = roomId;
+  workspaceRoomGeneration += 1;
+  startDraftChat();
+  sessions.value = [];
+  if (roomId !== undefined) {
+    void loadSessionsWithRetry(workspaceRoomGeneration);
+  }
+}, { immediate: true });
+
+async function loadSessions(generation = workspaceRoomGeneration) {
+  const listedSessions = await api.listSessions();
+  if (generation !== workspaceRoomGeneration) return;
+  sessions.value = listedSessions;
   const currentSession = activeSession.value ? sessions.value.find((session) => session.id === activeSession.value?.id) : undefined;
   if (currentSession) {
-    await openSession(currentSession.id);
+    await openSession(currentSession.id, generation);
     return;
   }
-  startDraftChat();
+  if (generation === workspaceRoomGeneration) startDraftChat();
 }
 
-async function loadSessionsWithRetry() {
+async function loadSessionsWithRetry(generation = workspaceRoomGeneration) {
   const retryDelays = [250, 600, 1000];
+  if (generation !== workspaceRoomGeneration) return;
   initializing.value = true;
   sessionLoadError.value = false;
   for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
     try {
-      await loadSessions();
+      await loadSessions(generation);
+      if (generation !== workspaceRoomGeneration) return;
       sessionLoadError.value = false;
       initializing.value = false;
       return;
     } catch {
+      if (generation !== workspaceRoomGeneration) return;
       if (attempt === retryDelays.length) {
         sessionLoadError.value = true;
         initializing.value = false;
@@ -604,6 +617,7 @@ async function loadSettings() {
 
 function startDraftChat() {
   activeSession.value = null;
+  loading.value = false;
   messages.value = [];
   messagePresentations.value = [];
   pendingUserMessage.value = null;
@@ -622,15 +636,22 @@ function startDraftChat() {
   activeArtifact.value = null;
   activeMemory.value = null;
   activeSurfaceSpec.value = null;
+  activeMessagePresentationId.value = null;
+  lastSurfaceRenderSpec.value = null;
+  lastSurfaceRenderSpecs.value = [];
+  memoryContent.value = {};
   prompt.value = "";
   clearAttachments();
+  pendingChatOperation.value = null;
   viewMode.value = "chat";
   schedulePromptFocus();
 }
 
-async function openSession(sessionId: string) {
+async function openSession(sessionId: string, generation = workspaceRoomGeneration) {
   const detail = await api.getSession(sessionId);
-  await applySessionDetail(detail);
+  if (generation !== workspaceRoomGeneration) return;
+  await applySessionDetail(detail, generation);
+  if (generation !== workspaceRoomGeneration) return;
   await refreshAuditContext();
   viewMode.value = "chat";
 }
@@ -687,6 +708,7 @@ async function sendMessage() {
   if (prompt.value.trim().length === 0 || loading.value) {
     return;
   }
+  const roomGeneration = workspaceRoomGeneration;
   const content = prompt.value.trim();
   const operation = pendingChatOperation.value?.content === content
     ? pendingChatOperation.value
@@ -710,10 +732,14 @@ async function sendMessage() {
     const session = activeSession.value ?? await api.createSession({
       title: draftSessionTitle(content),
       ui_locale: settings.value.ui_locale,
-      output_locale: settings.value.output_locale
+      output_locale: settings.value.output_locale,
+      ...(selectedWorkspaceRoomId.value ? { room_id: selectedWorkspaceRoomId.value } : {})
     });
+    if (roomGeneration !== workspaceRoomGeneration) return;
     activeSession.value = session;
     promoteSessionToTop(session);
+    const attachments = await uploadSelectedChatAttachments(roomGeneration, operation.idempotencyKey);
+    if (roomGeneration !== workspaceRoomGeneration) return;
     const envelope = await api.submitChatSurfaceOperation({
       idempotencyKey: operation.idempotencyKey,
       sessionId: session.id,
@@ -725,8 +751,10 @@ async function sendMessage() {
       metadata: {
         frontend_surface_contract_version: surfaceContract.value?.protocol_version ?? "1",
         ...(activeAppContext() ? { active_app_context: activeAppContext() } : {})
-      }
+      },
+      ...(attachments?.length ? { attachments } : {})
     });
+    if (roomGeneration !== workspaceRoomGeneration) return;
     const result = envelope.result;
     const renderSpecs = envelopeRenderSpecs(envelope);
     lastSurfaceRenderSpec.value = envelope.render_spec;
@@ -756,10 +784,12 @@ async function sendMessage() {
     approvalRequests.value = [...result.approvalRequests, ...approvalRequests.value];
     rollbackPoints.value = [...result.rollbackPoints, ...rollbackPoints.value];
     activity.value = result.activity;
-    await reloadActiveSession();
+    await reloadActiveSession(roomGeneration);
+    if (roomGeneration !== workspaceRoomGeneration) return;
     clearAttachments();
     pendingChatOperation.value = null;
   } catch (error) {
+    if (roomGeneration !== workspaceRoomGeneration) return;
     pendingUserMessage.value = null;
     resetPendingAgentResponse();
     prompt.value = content;
@@ -772,8 +802,58 @@ async function sendMessage() {
     }
     throw error;
   } finally {
-    loading.value = false;
+    if (roomGeneration === workspaceRoomGeneration) loading.value = false;
   }
+}
+
+async function uploadSelectedChatAttachments(generation: number, operationId: string): Promise<ResourceRef[] | undefined> {
+  const roomId = selectedWorkspaceRoomId.value;
+  if (!selectedAttachments.value.length) return undefined;
+  if (!roomId) throw new Error("room_id_required_for_attachment");
+  const refs: ResourceRef[] = [];
+  for (const attachment of selectedAttachments.value) {
+    if (generation !== workspaceRoomGeneration) return undefined;
+    if (attachment.size > 8 * 1024 * 1024) throw new Error("attachment_too_large");
+    if (attachment.resourceRef) {
+      refs.push(attachment.resourceRef);
+      continue;
+    }
+    const filePath = chatAttachmentPath(attachment);
+    const contentBase64 = await fileToBase64(attachment.file);
+    const uploaded = await api.uploadWorkspaceAttachment({
+      roomId,
+      path: filePath,
+      contentBase64,
+      expectedVersion: 0,
+      operationId: `${operationId}.attachment.${attachment.id.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 64)}`
+    });
+    const ref: ResourceRef = {
+      kind: "file",
+      id: uploaded.file.sha256,
+      uri: uploaded.file.path,
+      version: String(uploaded.file.version),
+      label: attachment.name
+    };
+    attachment.resourceRef = ref;
+    refs.push(ref);
+  }
+  return refs;
+}
+
+function chatAttachmentPath(attachment: { id: string; name: string }): string {
+  const id = attachment.id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 96) || "attachment";
+  const name = attachment.name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "file";
+  return `attachments/${id}-${name}`;
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function activeAppContext(): Record<string, JsonValue> | undefined {
@@ -1140,7 +1220,8 @@ async function openMessagePresentation(presentation: MessagePresentationRecord) 
     if (presentation.kind === "generated_surface" && presentation.surface_id) {
       const detail = await api.getGeneratedSurface(presentation.surface_id);
       const revisionId = presentation.revision_id ?? detail.surface.current_revision_id;
-      const spec = generatedSurfaceRenderSpec(detail.surface, revisionId);
+      const bundle = await api.getGeneratedSurfaceBundle(detail.surface.id, revisionId);
+      const spec = generatedSurfaceRenderSpec(detail.surface, revisionId, bundle);
       openSurfaceSpec(spec);
       activeMessagePresentationId.value = presentation.id;
       viewMode.value = "chat";
@@ -1164,9 +1245,12 @@ async function openMessagePresentation(presentation: MessagePresentationRecord) 
   }
 }
 
-function generatedSurfaceRenderSpec(surface: NonNullable<Awaited<ReturnType<typeof api.getGeneratedSurface>>>["surface"], revisionId: string): SurfaceRenderSpec {
+function generatedSurfaceRenderSpec(
+  surface: NonNullable<Awaited<ReturnType<typeof api.getGeneratedSurface>>>["surface"],
+  revisionId: string,
+  bundle: Awaited<ReturnType<typeof api.getGeneratedSurfaceBundle>>
+): SurfaceRenderSpec {
   const revision = surface.current_revision_id === revisionId ? surface.current_revision_id : revisionId;
-  const apiBase = getApiBaseUrl() ?? "";
   return {
     id: `generated_surface_${surface.id}_${revision}`,
     kind: "custom_view",
@@ -1176,7 +1260,7 @@ function generatedSurfaceRenderSpec(surface: NonNullable<Awaited<ReturnType<type
       renderer_version: "1",
       surface_id: surface.id,
       revision_id: revision,
-      preview_url: `${apiBase}/api/generated-surfaces/${encodeURIComponent(surface.id)}/revisions/${encodeURIComponent(revision)}/preview`,
+      srcdoc: generatedSurfaceDocument(bundle.bundle, surface.actions, bundle.csp),
       actions: surface.actions,
       input_data_schema: surface.input_data_schema,
       data: {}
@@ -1207,18 +1291,51 @@ async function exportGeneratedSurface(spec: SurfaceRenderSpec, format: "html" | 
   const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
   const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
   if (!surfaceId || !revisionId) return;
-  const base = getApiBaseUrl() ?? "";
-  const url = `${base}/api/generated-surfaces/${encodeURIComponent(surfaceId)}/export?revision_id=${encodeURIComponent(revisionId)}&format=${format}`;
-  window.open(url, "_blank", "noopener,noreferrer");
+  const exported = await api.exportGeneratedSurface(surfaceId, revisionId, format);
+  const bytes = Uint8Array.from(atob(exported.content_base64), (character) => character.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: exported.content_type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = exported.file_name;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
-async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: string; label: string }, payload: Record<string, JsonValue> = {}) {
+function generatedSurfaceDocument(bundle: { html: string; css?: string; script?: string; assets?: Array<{ path: string; content_base64: string; mime_type: string }> }, actions: Array<{ id: string }>, csp: string): string {
+  const bridge = JSON.stringify({ actions: actions.map((action) => action.id) }).replace(/</g, "\\u003c");
+  const html = inlineGeneratedSurfaceAssets(bundle.html, bundle.assets ?? []);
+  const css = (bundle.css ?? "").replace(/<\/style/gi, "<\\/style");
+  const script = (bundle.script ?? "").replace(/<\/script/gi, "<\\/script");
+  const closeScriptTag = "</" + "script>";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${css}</style></head><body>${html}<script>${script}${closeScriptTag}<script>window.samuraiGeneratedSurface=${bridge};window.dispatchSamuraiAction=function(actionId,payload){window.parent.postMessage({type:"samurai.generated_surface.action",action_id:actionId,payload:payload||{}},"*")};${closeScriptTag}</body></html>`;
+}
+
+function inlineGeneratedSurfaceAssets(source: string, assets: Array<{ path: string; content_base64: string; mime_type: string }>): string {
+  const dataByPath = new Map<string, string>();
+  for (const asset of assets) {
+    const path = asset.path.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+    if (!path || path.startsWith("/") || path.includes("..")) continue;
+    const dataUrl = `data:${asset.mime_type};base64,${asset.content_base64}`;
+    dataByPath.set(path, dataUrl);
+    dataByPath.set(`assets/${path}`, dataUrl);
+  }
+  const replaceReference = (reference: string): string => {
+    const normalized = reference.trim().replace(/^\.\//, "");
+    return dataByPath.get(normalized) ?? reference;
+  };
+  return source
+    .replace(/((?:src|href)\s*=\s*["'])([^"']+)(["'])/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`)
+    .replace(/(url\(\s*["']?)([^"')]+)(["']?\s*\))/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`);
+}
+
+async function runGeneratedSurfaceAction(spec: SurfaceRenderSpec, action: { id: string; label: string; requires_confirmation?: boolean }, payload: Record<string, JsonValue> = {}) {
   const surfaceId = typeof spec.props.surface_id === "string" ? spec.props.surface_id : "";
   const revisionId = typeof spec.props.revision_id === "string" ? spec.props.revision_id : "";
   if (!surfaceId || !revisionId) return;
   await api.runGeneratedSurfaceAction(surfaceId, action.id, {
     revision_id: revisionId,
     interaction_id: `surface_interaction_${Date.now()}`,
+    confirmed: action.requires_confirmation === true,
     action_payload: payload
   });
   await reloadActiveSession();
@@ -1260,7 +1377,7 @@ async function loadWorkspaceConnections(): Promise<void> {
 }
 
 function subscribeWorkspaceRealtimeEvents(): void {
-  const listener = typeof window === "undefined" ? undefined : window.samuraiDesktop?.onWorkspaceServerEvent;
+  const listener = getWorkspaceClientBridge()?.onWorkspaceServerEvent;
   if (!listener) return;
   stopWorkspaceRealtimeEvents = listener((event: DesktopWorkspaceRealtimeEvent | undefined) => {
     if (!event) return;
@@ -1310,6 +1427,24 @@ async function saveWorkspaceConnection(input: { label: string; serverUrl: string
   }
 }
 
+async function saveBrowserWorkspaceConnection(input: BrowserWorkspaceConnectionInput): Promise<void> {
+  if (!browserWorkspaceMode.value) throw new Error("workspace_browser_mode_required");
+  workspaceConnectionLoading.value = true;
+  workspaceConnectionError.value = null;
+  try {
+    await configureBrowserWorkspaceConnection(input);
+    workspaceConnectionState.value = await getWorkspaceClientBridge()!.listWorkspaceConnections!();
+    await refreshWorkspaceServerStatus();
+  } catch (error) {
+    workspaceConnectionError.value = settings.value.ui_locale === "ja"
+      ? `ブラウザ接続を保存できませんでした。${error instanceof Error ? ` (${error.message})` : ""}`
+      : `Could not save the browser connection.${error instanceof Error ? ` (${error.message})` : ""}`;
+    throw new Error("workspace_browser_connection_save_failed");
+  } finally {
+    workspaceConnectionLoading.value = false;
+  }
+}
+
 async function importActiveWorkspaceIdentity(): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge?.importActiveWorkspaceIdentityFromClipboard) return;
@@ -1352,6 +1487,12 @@ async function refreshWorkspaceServerStatus(): Promise<void> {
 async function loadWorkspaceRooms(): Promise<void> {
   const bridge = workspaceConnectionBridge();
   if (!bridge?.listWorkspaceRooms) return;
+  if (!workspaceConnectionState.value.activeConnectionId) {
+    workspaceRooms.value = [];
+    selectedWorkspaceRoomId.value = undefined;
+    workspaceRoomError.value = null;
+    return;
+  }
   workspaceRoomLoading.value = true;
   workspaceRoomError.value = null;
   try {
@@ -1466,7 +1607,9 @@ const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" |
   };
   if (!status.identityAvailable) return {
     tone: "warning",
-    message: settings.value.ui_locale === "ja" ? "この端末の本人情報が未登録です。秘密鍵をコピーしてから、Desktopの安全な読み込みを使ってください。" : "This device has no registered identity. Copy the private key, then import it through Desktop protected storage."
+    message: settings.value.ui_locale === "ja"
+      ? (browserWorkspaceMode.value ? "ブラウザの本人情報が未登録です。公開鍵と秘密鍵を入力して接続してください。" : "この端末の本人情報が未登録です。秘密鍵をコピーしてから、Desktopの安全な読み込みを使ってください。")
+      : (browserWorkspaceMode.value ? "This browser has no identity. Enter the public and private keys to connect." : "This device has no registered identity. Copy the private key, then import it through Desktop protected storage.")
   };
   if (status.workspace?.status === 200) {
     const rooms = status.rooms?.body;
@@ -1487,7 +1630,7 @@ const workspaceServerStatusDisplay = computed<{ message: string; tone: "ready" |
 });
 
 function workspaceConnectionBridge(): NonNullable<Window["samuraiDesktop"]> | undefined {
-  const bridge = typeof window === "undefined" ? undefined : window.samuraiDesktop;
+  const bridge = getWorkspaceClientBridge();
   if (!bridge?.listWorkspaceConnections || !bridge.upsertWorkspaceConnection || !bridge.selectWorkspaceConnection) return undefined;
   return bridge as NonNullable<Window["samuraiDesktop"]>;
 }
@@ -1522,7 +1665,8 @@ async function reviewWorkSummary(block: WorkSummaryBlock) {
   }
 }
 
-async function applySessionDetail(detail: SessionDetail) {
+async function applySessionDetail(detail: SessionDetail, generation = workspaceRoomGeneration) {
+  if (generation !== workspaceRoomGeneration) return;
   activeSession.value = detail.session;
   updateSessionInPlace(detail.session);
   messages.value = detail.messages;
@@ -1542,22 +1686,27 @@ async function applySessionDetail(detail: SessionDetail) {
   if (activeMemory.value && !detail.memory.some((item) => item.id === activeMemory.value?.memory.id)) {
     activeMemory.value = null;
   }
-  await hydrateMemoryContent(detail.memory);
+  await hydrateMemoryContent(detail.memory, generation);
 }
 
-async function reloadActiveSession() {
+async function reloadActiveSession(generation = workspaceRoomGeneration) {
   if (!activeSession.value) {
     return;
   }
-  await applySessionDetail(await api.getSession(activeSession.value.id));
+  const sessionId = activeSession.value.id;
+  const detail = await api.getSession(sessionId);
+  if (generation !== workspaceRoomGeneration || activeSession.value?.id !== sessionId) return;
+  await applySessionDetail(detail, generation);
 }
 
-async function hydrateMemoryContent(items: Array<MemoryFrontmatter & { file_path: string }>) {
+async function hydrateMemoryContent(items: Array<MemoryFrontmatter & { file_path: string }>, generation = workspaceRoomGeneration) {
+  if (generation !== workspaceRoomGeneration) return;
   const missing = items.filter((item) => memoryContent.value[item.id] === undefined);
   if (missing.length === 0) {
     return;
   }
   const details = await Promise.all(missing.map((item) => api.getMemory(item.id).catch(() => undefined)));
+  if (generation !== workspaceRoomGeneration) return;
   memoryContent.value = {
     ...memoryContent.value,
     ...Object.fromEntries(details.filter((item): item is MemoryDetail => Boolean(item)).map((item) => [item.memory.id, item.content]))
@@ -1613,15 +1762,6 @@ function promoteSessionToTop(session: SessionRecord) {
   sessions.value = [session, ...sessions.value.filter((item) => item.id !== session.id)];
 }
 
-function connectSocket() {
-  connectAppSocket({
-    activeSession, activity, approvalRequests, operations, policyDecisions, backendRuns, backendEvents,
-    workspaceChanges, settings, promoteSession: promoteSessionToTop, applyStreamingRun, applyStreamingEvent,
-    persistSettings, reloadActiveSession,
-    acceptSession: (session) => !isInternalSessionTitle(session.title)
-      && (!isInitialTitle(session.title) || activeSession.value?.id === session.id)
-  });
-}
 function hasPersistedPendingUserMessage(): boolean {
   if (!pendingUserMessage.value) {
     return false;
@@ -2222,8 +2362,10 @@ function applyProviderErrorState(payload: ProviderErrorPayload) {
         :set-workspace-room-member="setWorkspaceRoomMember"
         :active-workspace-connection-id="workspaceConnectionState.activeConnectionId"
         :workspace-connections="workspaceConnectionState.connections"
+        :browser-workspace-mode="browserWorkspaceMode"
         :select-workspace-connection="selectWorkspaceConnection"
         :save-workspace-connection="saveWorkspaceConnection"
+        :save-browser-workspace-connection="saveBrowserWorkspaceConnection"
         :import-workspace-identity="importActiveWorkspaceIdentity"
         :register-workspace-server-account="registerWorkspaceServerAccount"
         :locale-display-name="localeDisplayName"

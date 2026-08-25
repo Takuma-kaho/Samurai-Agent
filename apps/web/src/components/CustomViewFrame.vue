@@ -71,9 +71,12 @@ const sandboxAttribute = computed(() => {
   if (sandbox.allow_forms === true) {
     tokens.push("allow-forms");
   }
-  if (sandbox.allow_same_origin === true) {
-    tokens.push("allow-same-origin");
-  }
+  // Custom View data can arrive from a signed HTTP response, but it is still
+  // untrusted document content at this boundary. Never let a response opt
+  // the iframe into the parent origin: that would expose browser credentials
+  // and the Desktop bridge to HTML supplied by a remote or compromised
+  // Workspace Server. The protocol field remains readable for compatibility,
+  // but this renderer is deliberately fail-closed.
   return tokens.join(" ");
 });
 
@@ -106,7 +109,10 @@ function customViewBootstrapScript(): string {
 }
 
 function customViewCspMeta(): string {
-  const networkAccess = customViewSandbox.value.network_access === "read" ? "read" : "none";
+  const networkAccess = customViewSandbox.value.network_access === "read"
+    && customViewCapability.value.network_access === "read"
+    ? "read"
+    : "none";
   const networkSources = networkAccess === "read" ? "https: http:" : "'none'";
   const mediaSources = networkAccess === "read" ? "data: blob: https: http:" : "data: blob:";
   return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; img-src ${mediaSources}; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src ${networkSources}; frame-src 'none'">`;

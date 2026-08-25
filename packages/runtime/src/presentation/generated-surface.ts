@@ -93,6 +93,10 @@ export function buildGeneratedSurfaceRevision(input: {
   request: SurfaceGenerationRequest;
   bundle: GeneratedSurfaceBundleInput;
   existing?: GeneratedSurfaceDefinition;
+  /** A server-owned id used by durable adapters to replay one operation. */
+  surfaceId?: string;
+  /** A server-owned id used by durable adapters to replay one revision. */
+  revisionId?: string;
   producerRunId?: string;
   promptFingerprint?: string;
   now?: string;
@@ -100,9 +104,9 @@ export function buildGeneratedSurfaceRevision(input: {
   const validation = validateGeneratedSurfaceBundle(input.request, input.bundle);
   if (!validation.valid) throw new Error(`generated_surface_invalid:${validation.issues.map((issue) => issue.code).join(",")}`);
   const now = input.now ?? nowIso();
-  const surfaceId = input.existing?.id ?? createId("surface");
+  const surfaceId = input.existing?.id ?? input.surfaceId ?? createId("surface");
   const revisionNumber = (input.existing?.current_revision ?? 0) + 1;
-  const revisionId = createId("surface_revision");
+  const revisionId = input.revisionId ?? createId("surface_revision");
   const root = `surfaces/${surfaceId}/revisions/${revisionNumber}`;
   const htmlRef: ResourceRef = { kind: "generated_surface_html", id: revisionId, uri: `${root}.html`, label: input.bundle.title };
   const cssRef: ResourceRef | undefined = input.bundle.css !== undefined ? { kind: "generated_surface_css", id: revisionId, uri: `${root}.css`, label: input.bundle.title } : undefined;

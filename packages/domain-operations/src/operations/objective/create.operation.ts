@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import { createId, nowIso, type ObjectiveRecord } from "@samurai-agent/core-schemas";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { objectiveValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
@@ -62,9 +62,11 @@ const objectiveCreate = defineCommand<ObjectiveCreatePorts>()({
     return {
       execute: async function handleObjectiveCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const now = nowIso();
+        const roomId = requireRoomContext(context, "objective.create");
         const objective: ObjectiveRecord = {
           id: input.objective_id ?? createId("objective"),
           session_id: context.sessionId,
+          room_id: roomId,
           title: input.title ?? summarize(input.objective, 80),
           objective: input.objective,
           completion_criteria: input.completion_criteria,

@@ -1,7 +1,7 @@
 import type { AgentBackendRegistry } from "@samurai-agent/agent-backends";
-import type { WorkspaceStore } from "@samurai-agent/workspace-store";
 import { AgentHost } from "../host/agent-host";
 import { TurnCompletionCoordinator } from "../host/turn-completion-coordinator";
+import { assertRuntimeWorkspacePort, type RuntimeWorkspacePort } from "./runtime-workspace-ports";
 import type {
   AdmissionObserverPort,
   AdmissionGuardPort,
@@ -17,7 +17,7 @@ import type {
 } from "../host/host-types";
 
 export interface AgentHostCompositionOptions {
-  store: WorkspaceStore;
+  store: RuntimeWorkspacePort;
   backendRegistry: AgentBackendRegistry;
   context: HostContextPort;
   completion?: HostCompletionPort;
@@ -39,6 +39,7 @@ export interface AgentHostCompositionOptions {
 
 /** Composition root for the production Host. Concrete adapters are injected here. */
 export function createAgentHost(options: AgentHostCompositionOptions): AgentHost {
+  assertRuntimeWorkspacePort(options.store);
   const completion: HostCompletionPort = options.completion ?? new TurnCompletionCoordinator(options.store, options.postTurn ?? {}, options.diagnostics);
   const ports: HostPorts = {
     store: options.store,

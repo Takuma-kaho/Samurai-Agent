@@ -70,6 +70,8 @@ describe("provider profiles", () => {
     const anthropic = providerProfiles.anthropic.buildRequest("claude-test", { apiKey: "anthropic-key" }, providerInput);
 
     expect(gemini.url).toContain("/models/gemini-test:generateContent");
+    expect(gemini.url).not.toContain("key=");
+    expect(gemini.headers["x-goog-api-key"]).toBe("gemini-key");
     expect(gemini.body).toHaveProperty("systemInstruction");
     expect(JSON.stringify(gemini.body)).not.toContain("additionalProperties");
     expect(openai.body).toHaveProperty("input");

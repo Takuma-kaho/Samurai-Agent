@@ -62,7 +62,7 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
     "collection_schema"
   ],
   "proposedEffects": [
-    "Create a Collection schema file, renderer view definitions, and SQLite index row."
+    "Create a Collection schema file, renderer view definitions, and PostgreSQL projection row."
   ],
   "outputResourceKind": "collection_schema",
   "uiDisplayCategory": "collection",

@@ -33,6 +33,8 @@ export interface RequestedWorkspaceTarget {
   requested_room_id: string;
   correlation_id: string;
   idempotency_key?: string;
+  /** The authenticated Connection selected by OAuth/MCP. */
+  connection_id?: string;
   /** App-controlled reference fields only. The server supplies the app_id. */
   session_ref?: RequestedExternalSessionRef;
 }
@@ -50,6 +52,7 @@ export interface ResolvedExternalAppContext {
     participant: ParticipantPrincipal;
     roomId: string;
     correlationId: string;
+    connectionId: string;
     idempotencyKey?: string;
     externalAllowedRoomIds: readonly string[];
     sessionRef?: SessionRef;
@@ -60,6 +63,10 @@ export interface ResolvedExternalAppContext {
 
 export interface ExternalAppConnectionLookup {
   getExternalAppConnectionByConnector(input: { workspaceId: string; connectorId: string }): Promise<ExternalAppConnectionRecord | undefined>;
+  /** Exact Connection lookup is mandatory when the authenticated target names
+   * a Connection. Falling back to connector lookup would let a newer or
+   * unrelated Connection inherit the request's Room authority. */
+  getExternalAppConnection(input: { workspaceId: string; connectionId: string }): Promise<ExternalAppConnectionRecord | undefined>;
 }
 
 /**
@@ -82,11 +89,24 @@ export class ExternalAppContextResolver {
   }): Promise<ResolvedExternalAppContext> {
     const evidence = ConnectorEvidenceSchema.parse(input.evidence);
     const target = parseRequestedTarget(input.target);
-    const connection = await this.dependencies.connections.getExternalAppConnectionByConnector({
-      workspaceId: this.dependencies.workspaceId,
-      connectorId: evidence.connector_id
-    });
+    let connection: ExternalAppConnectionRecord | undefined;
+    if (target.connection_id) {
+      if (typeof this.dependencies.connections.getExternalAppConnection !== "function") {
+        throw new ExternalAppContextError("external_app_connection_not_found");
+      }
+      connection = await this.dependencies.connections.getExternalAppConnection({
+        workspaceId: this.dependencies.workspaceId,
+        connectionId: target.connection_id
+      });
+    } else {
+      connection = await this.dependencies.connections.getExternalAppConnectionByConnector({
+        workspaceId: this.dependencies.workspaceId,
+        connectorId: evidence.connector_id
+      });
+    }
     if (!connection) throw new ExternalAppContextError("external_app_connection_not_found");
+    if (connection.workspace_id !== this.dependencies.workspaceId) throw new ExternalAppContextError("external_app_connection_not_found");
+    if (target.connection_id && connection.id !== target.connection_id) throw new ExternalAppContextError("external_app_connection_not_found");
     if (connection.status !== "active") throw new ExternalAppContextError("external_app_connection_revoked");
     if (connection.connector_id !== evidence.connector_id) throw new ExternalAppContextError("external_app_connector_mismatch");
     if (connection.app_id !== evidence.app_id) throw new ExternalAppContextError("external_app_app_mismatch");
@@ -120,6 +140,7 @@ export class ExternalAppContextResolver {
     const workspaceContext = TrustedWorkspaceContextSchema.parse({
       workspace_id: connection.workspace_id,
       room_id: target.requested_room_id,
+      connection_id: connection.id,
       principal: {
         kind: "external_app",
         app_id: connection.app_id,
@@ -137,6 +158,7 @@ export class ExternalAppContextResolver {
         participant,
         roomId: target.requested_room_id,
         correlationId: target.correlation_id,
+        connectionId: connection.id,
         externalAllowedRoomIds: [...connection.allowed_room_ids],
         ...(target.idempotency_key ? { idempotencyKey: target.idempotency_key } : {}),
         ...(sessionRef ? { sessionRef } : {}),
@@ -150,7 +172,7 @@ export class ExternalAppContextResolver {
 function parseRequestedTarget(input: RequestedWorkspaceTarget): RequestedWorkspaceTarget {
   if (!input || typeof input !== "object") throw new ExternalAppContextError("external_app_requested_room_invalid");
   const candidate = input as unknown as Record<string, unknown>;
-  const allowed = new Set(["requested_room_id", "correlation_id", "idempotency_key", "session_ref"]);
+  const allowed = new Set(["requested_room_id", "correlation_id", "idempotency_key", "connection_id", "session_ref"]);
   if (Object.keys(candidate).some((key) => !allowed.has(key))) throw new ExternalAppContextError("external_app_requested_room_invalid");
   if (typeof candidate.requested_room_id !== "string" || !candidate.requested_room_id.trim()) {
     throw new ExternalAppContextError("external_app_requested_room_invalid");
@@ -161,10 +183,14 @@ function parseRequestedTarget(input: RequestedWorkspaceTarget): RequestedWorkspa
   if (candidate.idempotency_key !== undefined && (typeof candidate.idempotency_key !== "string" || !candidate.idempotency_key.trim())) {
     throw new ExternalAppContextError("external_app_requested_room_invalid");
   }
+  if (candidate.connection_id !== undefined && (typeof candidate.connection_id !== "string" || !candidate.connection_id.trim())) {
+    throw new ExternalAppContextError("external_app_requested_room_invalid");
+  }
   return {
     requested_room_id: candidate.requested_room_id.trim(),
     correlation_id: candidate.correlation_id.trim(),
     ...(typeof candidate.idempotency_key === "string" ? { idempotency_key: candidate.idempotency_key.trim() } : {}),
+    ...(typeof candidate.connection_id === "string" ? { connection_id: candidate.connection_id.trim() } : {}),
     ...(candidate.session_ref === undefined ? {} : { session_ref: parseRequestedSessionRef(candidate.session_ref) })
   };
 }

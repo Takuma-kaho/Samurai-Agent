@@ -40,10 +40,15 @@ import {
   ToolRunDiagnosticsReportSchema,
   createId,
   nowIso,
+  stableDigest,
   stableHash
 } from "./index";
 
 describe("core schemas", () => {
+  it("provides a wider digest for durable identity checks", () => {
+    expect(stableDigest({ value: 1 })).toMatch(/^[a-f0-9]{32}$/);
+    expect(stableDigest({ value: 1 })).not.toBe(stableDigest({ value: 2 }));
+  });
   it("parses locale-aware message envelopes", () => {
     const envelope = MessageEnvelopeSchema.parse({
       id: createId("envelope"),
@@ -1136,6 +1141,7 @@ describe("core schemas", () => {
       auth_header: "Authorization",
       endpoint_origin: "https://assist.example.test",
       endpoint_path_configured: true,
+      raw_context_shared: false,
       errors: ["invalid_external_assist_url"],
       warnings: []
     });
@@ -1166,6 +1172,7 @@ describe("core schemas", () => {
       timeout_ms: null,
       token_configured: false,
       auth_header: null,
+      raw_context_shared: false,
       file_name: "release.json, gateway.json",
       errors: [],
       warnings: []

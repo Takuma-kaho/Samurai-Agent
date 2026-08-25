@@ -4,7 +4,10 @@ import { defineCommand, type DomainResult, type TrustedDomainContext } from "../
 import { wikiWriteValueSchema } from "../../value-objects/wiki.js";
 import { executeWikiStateTransition, type WikiStateTransitionPorts } from "./state-transition.js";
 
-const Input = z.object({ "wiki_id": z.string().trim().min(1) }).strict();
+const Input = z.object({
+  "wiki_id": z.string().trim().min(1),
+  "expected_resource_version": z.number().int().positive().optional()
+}).strict();
 const Output = wikiWriteValueSchema;
 
 export interface WikiRejectPorts extends WikiStateTransitionPorts {}
@@ -22,7 +25,7 @@ const wikiReject = defineCommand<WikiRejectPorts>()({
   ],
   "effect": "workspace_mutation",
   "idempotency": "required",
-  "concurrency": "none",
+  "concurrency": "state_transition",
   "render": [
     "knowledge_wiki"
   ],
@@ -49,7 +52,7 @@ const wikiReject = defineCommand<WikiRejectPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiReject(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await executeWikiStateTransition(ports, { context, id: input.wiki_id, state: "rejected", operationName: "wiki.reject", proposedEffect: "Reject a wiki proposal without deleting its markdown.", summaryPrefix: "Rejected wiki page" }) };
+        return { ok: true, value: await executeWikiStateTransition(ports, { context, id: input.wiki_id, state: "rejected", expectedResourceVersion: input.expected_resource_version, operationName: "wiki.reject", proposedEffect: "Reject a wiki proposal without deleting its markdown.", summaryPrefix: "Rejected wiki page" }) };
       }
     };
   }

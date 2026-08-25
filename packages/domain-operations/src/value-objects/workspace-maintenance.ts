@@ -11,9 +11,9 @@ const wikiReindexSchema = reindexSchema.extend({ active: z.number().int().nonneg
 const collectionReindexSchema = z.object({ schemas: reindexSchema, records: reindexSchema }).strict();
 const layoutCheckSchema = z.object({ path: z.string(), exists: z.boolean(), kind: z.literal("directory"), required: z.boolean() }).strict();
 const boundarySchema = z.object({
-  resource: z.string(), source_of_truth: z.enum(["filesystem", "sqlite", "derived"]),
-  file_roots: z.array(z.string()), sqlite_tables: z.array(z.string()),
-  sqlite_role: z.enum(["none", "index", "history", "queue", "audit", "metadata"]), note: z.string()
+  resource: z.string(), source_of_truth: z.enum(["postgresql", "filesystem", "derived"]),
+  file_roots: z.array(z.string()), postgres_tables: z.array(z.string()),
+  postgres_role: z.enum(["none", "primary", "index", "history", "queue", "audit", "metadata"]), note: z.string()
 }).strict();
 const driftIssueSchema = z.object({
   code: z.string(), severity: z.enum(["warning", "error"]), message: z.string(),
@@ -25,7 +25,7 @@ const invalidFileSchema = z.object({ file_path: z.string(), message: z.string() 
 const duplicateSchema = z.object({ id: z.string(), file_paths: z.array(z.string()) }).strict();
 
 export const workspaceHealthSchema = z.object({
-  ok: z.boolean(), checked_at: z.string().datetime(), root_dir: z.string(), db_path: z.string(),
+  ok: z.boolean(), checked_at: z.string().datetime(), root_dir: z.string(), database_ref: z.string(),
   layout: z.object({ ok: z.boolean(), checks: z.array(layoutCheckSchema), missing: z.array(z.string()) }).strict(),
   resource_boundaries: z.array(boundarySchema),
   indexes: z.object({
@@ -45,13 +45,13 @@ export const workspaceHealthSchema = z.object({
 
 const backupManifestV1Schema = z.object({
   format_version: z.literal(1).optional(),
-  id: z.string().min(1), created_at: z.string().datetime(), source_root: z.string(), db_file: z.string(),
+  id: z.string().min(1), created_at: z.string().datetime(), source_root: z.string(), database_ref: z.string(),
   file_roots: z.array(z.string()), resource_boundaries: z.array(boundarySchema), health_ok: z.boolean(),
   integrity_ok: z.boolean(), file_hashes: z.record(z.string())
 }).strict();
 const backupManifestV2Schema = z.object({
   format_version: z.literal(2), schema_version: z.number().int().nonnegative(),
-  id: z.string().min(1), created_at: z.string().datetime(), source_root: z.literal("."), db_file: z.literal("workspace.sqlite"),
+  id: z.string().min(1), created_at: z.string().datetime(), source_root: z.literal("."), database_ref: z.literal("postgresql"),
   file_roots: z.array(z.string()), resource_boundaries: z.array(boundarySchema), health_ok: z.boolean(),
   integrity_ok: z.boolean(), file_hashes: z.record(z.string())
 }).strict();
@@ -61,7 +61,7 @@ export const workspaceBackupValueSchema = z.object({ id: z.string().min(1), path
 export const workspaceRestoreValueSchema = z.object({
   backup_id: z.string().min(1), pre_restore_backup_id: z.string().min(1), restored_at: z.string().datetime(), restored_paths: z.array(z.string()), db_restored: z.boolean(),
   manifest: backupManifestSchema, pre_restore_health: workspaceHealthSchema,
-  integrity: z.object({ ok: z.boolean(), checked_at: z.string().datetime(), db: z.object({ ok: z.boolean(), result: z.string(), path: z.string() }).strict(), workspace: workspaceHealthSchema }).strict(),
+  integrity: z.object({ ok: z.boolean(), checked_at: z.string().datetime(), database: z.object({ ok: z.boolean(), result: z.string(), target: z.string() }).strict(), workspace: workspaceHealthSchema }).strict(),
   health: workspaceHealthSchema
 }).strict();
 export const workspaceRepairValueSchema = z.object({

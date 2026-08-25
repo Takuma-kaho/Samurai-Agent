@@ -9,7 +9,6 @@ export interface AgentRuntimeCompositionOptions {
   backendRegistry?: AgentRuntimeConstructor[3];
   pluginRegistry?: AgentRuntimeConstructor[4];
   externalAssistProviders?: AgentRuntimeConstructor[5];
-  evaluationJudgeProvider?: AgentRuntimeConstructor[6];
   workspaceOptions?: AgentRuntimeWorkspaceOptions;
 }
 
@@ -34,7 +33,6 @@ export function composeAgentRuntime(options: AgentRuntimeCompositionOptions): Ag
     options.backendRegistry,
     options.pluginRegistry,
     options.externalAssistProviders,
-    options.evaluationJudgeProvider,
     {
       ...(options.workspaceOptions ?? {}),
       deferHost: true

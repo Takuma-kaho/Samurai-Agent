@@ -7,7 +7,7 @@ import { collectionRecordWriteValueSchema } from "../../../value-objects/collect
 
 const Input = z.object({
   "collection_id": z.string().trim().min(1).max(256),
-  "expected_version": z.number().int().positive().optional(),
+  "expected_version": z.number().int().positive(),
   "record_id": z.string().trim().min(1).max(256),
   "view_id": z.string().trim().min(1).max(256).optional()
 }).strict();
@@ -17,7 +17,7 @@ export interface CollectionRecordDeletePorts {
   getCollectionSchemaForMutation(id: string): Promise<z.infer<typeof storedCollectionSchema> | undefined>;
   collectionDeleteAllowed(schema: CollectionSchema, viewId?: string): boolean;
   getCollectionRecord(collectionId: string, recordId: string): Promise<z.infer<typeof storedCollectionRecordSchema> | undefined>;
-  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion?: number): Promise<z.infer<typeof Output>["resource"]>;
+  deleteCollectionRecord(collectionId: string, recordId: string, expectedVersion: number): Promise<z.infer<typeof Output>["resource"]>;
   mapCollectionPatchError(error: unknown): Error;
   collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
   collectionMutationError(code: "forbidden" | "not_found", message: string): Error;
@@ -80,7 +80,7 @@ const collectionRecordDelete = defineCommand<CollectionRecordDeletePorts>()({
         if (!record) throw ports.collectionMutationError("not_found", `Collection record not found: ${input.collection_id}/${input.record_id}`);
         const result = await ports.runCollectionMutation({
           trustedContext: context, inputSummary: `Delete collection record: ${input.collection_id}/${input.record_id}`, operationName: "collection.record.delete",
-          proposedEffects: ["Delete a collection record file and SQLite index row."],
+          proposedEffects: ["Delete a collection record file and PostgreSQL projection row."],
           execute: async (operation) => {
             let deleted;
             try {

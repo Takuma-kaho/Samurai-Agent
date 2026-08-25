@@ -3,10 +3,10 @@
   "test_id": "E09",
   "command": "pnpm core:test:curator-graph",
   "status": "passed",
-  "commit_sha": "f86c50edd514876142347d6e198f924c7667eb1c",
-  "worktree_clean": true,
-  "source_sha256": "faa234e94e2d26a742ffe3779ed8b45a09901aedd204853fd8713db4c88b791f",
-  "source_graph_sha256": "97991f54e4531c37ad025ce2d83f675bfaf5965b54aadf046516739e06d2cfb8",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
+  "worktree_clean": false,
+  "source_sha256": "d23f881d0d75ebb90c421a9138725a7752e042e9caaa18caa28e3bb98b4063a3",
+  "source_graph_sha256": "4979b5477dc4bdfe2c5a318bfaa9dc6d21bc8f31114e21404fcc4e5b459ed639",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
@@ -26,6 +26,7 @@
     "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
     "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
+    "packages/workspace-store/src/repositories/learning-repository.ts",
     "packages/workspace-store/src/search/scoring.ts",
     "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
@@ -36,8 +37,8 @@
     "scripts/verify-curator-resource-graph.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-02T15:40:05.459Z",
-  "completed_at": "2026-08-02T15:40:05.627Z",
+  "started_at": "2026-08-23T06:28:59.818Z",
+  "completed_at": "2026-08-23T06:29:00.457Z",
   "assertions": [
     {
       "name": "Duplicate, overlap, conflict, supersede and derivation edges persist",

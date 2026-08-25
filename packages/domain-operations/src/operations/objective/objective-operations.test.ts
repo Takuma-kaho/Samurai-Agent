@@ -7,6 +7,7 @@ const context: TrustedDomainContext = {
   inputSource: "runtime_api",
   workspaceId: "workspace_test",
   actorId: "actor_test",
+  roomId: "room_test",
   correlationId: "correlation_test"
 };
 
@@ -41,6 +42,7 @@ describe("Objective operation handlers", () => {
     const transitionObjective = vi.fn(async () => ({
       objective: {
         id: "objective-1",
+        room_id: "room_test",
         title: "Finish",
         objective: "Finish",
         completion_criteria: ["done"],
@@ -55,6 +57,6 @@ describe("Objective operation handlers", () => {
 
     await handler.execute(context, { objective_id: "objective-1", action: "pause" });
 
-    expect(transitionObjective).toHaveBeenCalledWith("objective-1", "pause");
+    expect(transitionObjective).toHaveBeenCalledWith("objective-1", "pause", "room_test");
   });
 });

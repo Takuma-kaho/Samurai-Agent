@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -23,6 +23,25 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("samurai_workspace_is_writable");
     expect(schema).toContain("samurai_record_workspace_transfer_receipt");
     expect(schema).toContain("samurai_append_workspace_audit");
+    expect(schema).toContain("samurai_list_completion_maintenance_identities");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_gateway_runtime_state");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_skill_optimization_state");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_gateway_policy_metadata_columns");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_import_resume_capability");
+    for (const table of [
+      "workspace_gateway_pairings", "workspace_gateway_pairing_policies", "workspace_gateway_routing_policies",
+      "workspace_gateway_inbound_messages", "workspace_gateway_deliveries", "workspace_gateway_boundary_policies",
+      "workspace_gateway_mcp_configs", "workspace_gateway_concurrency_locks", "workspace_gateway_sandbox_instances",
+      "workspace_gateway_sandbox_syncs", "workspace_skill_optimization_runs", "workspace_skill_optimization_datasets",
+      "workspace_skill_optimization_objectives", "workspace_skill_optimization_work_items", "workspace_skill_optimization_candidates",
+      "workspace_skill_optimization_evaluations", "workspace_skill_optimization_promotions", "workspace_skill_optimization_snapshots",
+      "workspace_skill_optimization_locks"
+    ]) {
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+      expect(schema).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_gateway_deliveries_due");
+    expect(schema).toContain("workspace_skill_optimization_work_items_due");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_import_account_identity_is_non_destructive");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_operation_and_file_recovery_guards");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_operation_completion_and_transfer_receipt_guards");
@@ -104,6 +123,13 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_migration_run_start_audit");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_final_ledger");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_legacy_staging_ledger_repair");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_settings_respect_workspace_freeze");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_agent_connection_import_guards");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_client_event_room_authorization");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_client_event_room_command_rls");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_invitation_output_column_ambiguity_fix");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_v4_transfer_ledger");
+    expect(schema).toContain("ALTER POLICY workspace_runtime_settings_access ON workspace_runtime_settings");
     for (const table of [
       "workspace_completion_configurations", "workspace_completion_activities", "workspace_completion_episodes",
       "workspace_completion_episode_activities", "workspace_completion_resources", "workspace_completion_resource_versions", "workspace_completion_skill_files",
@@ -133,7 +159,148 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("samurai_begin_completion_migration_run");
     expect(schema).toContain("workspace_completion_migration_run_capability_invalid");
     expect(schema).toContain("samurai_record_workspace_bundle_v4");
+    expect(schema).toContain("samurai_record_workspace_bundle_v4_transfer");
     expect(schema).toContain("samurai_repair_workspace_bundle_v4_legacy_ledger");
     expect(schema).toContain("samurai_guard_completion_machine_attestation");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_import_abort_column_resolution");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_import_search_projection_policy");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_completion_file_batch_delete_policy");
+    expect(schema).toContain("workspace_key");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_agent_room_permissions_and_connection_descriptors");
+    for (const table of ["workspace_agents", "workspace_agent_room_permissions", "workspace_connection_descriptors"]) {
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_agents_write_denied");
+    expect(schema).toContain("workspace_agent_room_permissions_write_denied");
+    expect(schema).toContain("workspace_connection_descriptors_write_denied");
+    expect(schema).toContain("samurai_register_workspace_agent");
+    expect(schema).toContain("samurai_can_agent_room");
+    expect(schema).toContain("SELECT COALESCE(CASE action_name");
+    expect(schema).toContain("samurai_set_workspace_agent_room_permission");
+    expect(schema).toContain("samurai_upsert_workspace_connection_descriptor");
+    expect(schema).toContain("workspace_agents_backend_id_nonempty");
+    expect(schema).toContain("samurai_set_workspace_agent_backend");
+    expect(schema).toContain("samurai_import_workspace_agent");
+    expect(schema).toContain("samurai_import_workspace_agent_room_permission");
+    expect(schema).toContain("samurai_import_workspace_connection_descriptor");
+    expect(schema).toContain("workspace_completion_episodes_external_key_unique");
+    for (const table of ["workspace_runtime_sessions", "workspace_runtime_messages", "workspace_runtime_runs", "workspace_runtime_events", "workspace_runtime_activities", "workspace_runtime_resources"]) {
+      expect(schema).toContain(`CREATE TABLE ${table}`);
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_runtime_runs_idempotency_index");
+    expect(schema).toContain("workspace_runtime_reservations");
+    expect(schema).toContain("workspace_runtime_client_events_room_fkey");
+    const clientEventRlsMigration = migrations.find((migration) => migration.version === 57);
+    expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')");
+    expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest')");
+    const invitationAmbiguityFixMigration = migrations.find((migration) => migration.version === 58);
+    expect(invitationAmbiguityFixMigration?.statements.join("\n")).toContain("ancestor_member.room_id = ancestors.room_id");
+    const invitationConflictTargetFixMigration = migrations.find((migration) => migration.version === 59);
+    expect(invitationConflictTargetFixMigration?.statements.join("\n")).toContain("ON CONFLICT ON CONSTRAINT room_members_pkey");
+    const learningResourceUseUniquenessRepairMigration = migrations.find((migration) => migration.version === 60);
+    expect(learningResourceUseUniquenessRepairMigration?.statements.join("\n")).toContain("constraint_row.conkey = ARRAY[");
+    expect(learningResourceUseUniquenessRepairMigration?.statements.join("\n")).toContain("workspace_learning_resource_use_initial_unique");
+    const completionActivityCorrectionIndexMigration = migrations.find((migration) => migration.version === 61);
+    expect(completionActivityCorrectionIndexMigration?.statements.join("\n")).toContain("workspace_completion_activities_correction_index");
+    const machineVerifiedTransitionGuardMigration = migrations.find((migration) => migration.version === 62);
+    const machineVerifiedTransitionGuard = machineVerifiedTransitionGuardMigration?.statements.join("\n");
+    expect(machineVerifiedTransitionGuard).toContain("IF TG_OP = 'INSERT' THEN");
+    expect(machineVerifiedTransitionGuard).toContain("ELSIF OLD.creation_source IS DISTINCT FROM 'machine_verified' THEN");
+    expect(machineVerifiedTransitionGuard).toContain("NOT samurai_is_import_session(NEW.workspace_id)");
+    const migrationFileBatchVisibility = migrations.find((migration) => migration.version === 63)?.statements.join("\n");
+    expect(migrationFileBatchVisibility).toContain("workspace_completion_file_batches_access");
+    expect(migrationFileBatchVisibility).toContain("workspace_completion_file_batch_entries_access");
+    expect(migrationFileBatchVisibility).toContain("samurai_completion_migration_write_allowed(workspace_id)");
+    const migrationFileBatchCapability = migrations.find((migration) => migration.version === 64)?.statements.join("\n");
+    expect(migrationFileBatchCapability).toContain("target_workspace_id = samurai_current_workspace_id()");
+    expect(migrationFileBatchCapability).toContain("workspace_completion_file_batches_migration_access");
+    expect(migrationFileBatchCapability).toContain("workspace_completion_file_batch_entries_migration_access");
+    const importAbortDependencyOrder = migrations.find((migration) => migration.version === 65)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_import_abort_dependency_order");
+    expect(importAbortDependencyOrder).toContain("workspace_completion_skill_files");
+    expect(importAbortDependencyOrder).toContain("workspace_completion_workspace_documents");
+    expect(importAbortDependencyOrder).toContain("workspace_completion_policy_approvals");
+    expect(importAbortDependencyOrder).toContain("workspace_completion_attestations");
+    expect(importAbortDependencyOrder).toContain("workspace_completion_migration_runs");
+    expect(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_resource_versions")).toBeLessThan(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_file_batches"));
+    expect(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_file_batch_entries")).toBeLessThan(importAbortDependencyOrder!.indexOf("DELETE FROM workspace_completion_file_batches"));
+    const importSearchProjectionPolicy = migrations.find((migration) => migration.version === 67)?.statements.join("\n");
+    expect(importSearchProjectionPolicy).toContain("samurai_is_import_session(workspace_id)");
+    const fileBatchDeletePolicy = migrations.find((migration) => migration.version === 68)?.statements.join("\n");
+    expect(fileBatchDeletePolicy).toContain("workspace_completion_file_batches_delete");
+    expect(fileBatchDeletePolicy).toContain("workspace_completion_file_batch_entries_delete");
+    expect(fileBatchDeletePolicy).toContain("samurai_completion_migration_write_allowed(workspace_id)");
+    const importResourceLinkPolicy = migrations.find((migration) => migration.version === 69)?.statements.join("\n");
+    expect(importResourceLinkPolicy).toContain("workspace_completion_links_access");
+    expect(importResourceLinkPolicy).toContain("samurai_is_import_session(workspace_id)");
+    const importEvidencePolicy = migrations.find((migration) => migration.version === 70)?.statements.join("\n");
+    expect(importEvidencePolicy).toContain("workspace_completion_policy_rules_access");
+    expect(importEvidencePolicy).toContain("workspace_completion_uses_access");
+    expect(importEvidencePolicy).toContain("workspace_completion_evaluations_access");
+    expect(importEvidencePolicy).toContain("samurai_is_import_session(workspace_id)");
+    const importV4AbortCleanup = migrations.find((migration) => migration.version === 71)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_import_abort_v4_dependencies");
+    for (const table of [
+      "workspace_runtime_activities", "workspace_runtime_automation_runs", "workspace_runtime_automation_jobs",
+      "workspace_connection_descriptors", "workspace_agent_room_permissions", "workspace_agents"
+    ]) {
+      expect(importV4AbortCleanup).toContain(`DELETE FROM ${table}`);
+    }
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_runtime_automation_runs")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM workspace_runtime_automation_jobs"));
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_connection_descriptors")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agent_room_permissions"));
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agent_room_permissions")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agents"));
+    expect(importV4AbortCleanup!.indexOf("DELETE FROM workspace_agents")).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM rooms"));
+    for (const table of [
+      "workspace_completion_configurations", "workspace_completion_activities", "workspace_completion_episodes",
+      "workspace_completion_episode_activities", "workspace_completion_resources", "workspace_completion_resource_versions",
+      "workspace_completion_skill_files", "workspace_completion_policy_approvals", "workspace_completion_attestations",
+      "workspace_completion_evidence", "workspace_completion_resource_links", "workspace_completion_policy_rules",
+      "workspace_completion_policy_change_requests", "workspace_completion_uses", "workspace_completion_evaluations",
+      "workspace_completion_jobs", "workspace_completion_job_attempts", "workspace_completion_curator_state",
+      "workspace_completion_curator_snapshots", "workspace_completion_search_projection", "workspace_completion_workspace_documents",
+      "workspace_completion_redactions", "workspace_completion_file_batches", "workspace_completion_file_batch_entries",
+      "workspace_completion_migration_receipts", "workspace_completion_migration_runs", "workspace_completion_maintenance_identities",
+      "workspace_runtime_activities", "workspace_runtime_automation_runs", "workspace_runtime_automation_jobs",
+      "workspace_connection_descriptors", "workspace_agent_room_permissions", "workspace_agents"
+    ]) {
+      expect(importV4AbortCleanup!.indexOf(`DELETE FROM ${table}`)).toBeLessThan(importV4AbortCleanup!.indexOf("DELETE FROM rooms"));
+    }
+    const automationCommandPolicies = migrations.find((migration) => migration.version === 72)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_command_specific_rls");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_jobs_select");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_jobs_insert");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_jobs_update");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_select");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_insert");
+    expect(automationCommandPolicies).toContain("workspace_runtime_automation_runs_update");
+    expect(automationCommandPolicies).not.toContain("FOR ALL");
+    expect(automationCommandPolicies).not.toContain("FOR DELETE");
+    const automationUpdateSourcePolicies = migrations.find((migration) => migration.version === 73)?.statements.join("\n");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_update_source_room_rls");
+    expect(automationUpdateSourcePolicies).toContain("DROP POLICY IF EXISTS workspace_runtime_automation_jobs_update");
+    expect(automationUpdateSourcePolicies).toContain("DROP POLICY IF EXISTS workspace_runtime_automation_runs_update");
+    expect(automationUpdateSourcePolicies).toContain("samurai_can_room(workspace_id, room_id, 'edit')");
+    expect(automationUpdateSourcePolicies).toContain("samurai_can_room(workspace_id, room_id, 'execute')");
+    expect(automationUpdateSourcePolicies).not.toContain("samurai_can_room(workspace_id, room_id, 'read')");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_runtime_automation_jobs_and_runs");
+    for (const table of ["workspace_runtime_automation_jobs", "workspace_runtime_automation_runs"]) {
+      expect(schema).toContain(`CREATE TABLE ${table}`);
+      expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+    }
+    expect(schema).toContain("workspace_runtime_automation_jobs_due_index");
+    expect(schema).toContain("workspace_runtime_automation_runs_job_index");
+    expect(schema).toContain("CREATE TABLE workspace_external_integration_records (");
+    expect(schema).toContain("CREATE UNIQUE INDEX workspace_external_integration_records_workspace_unique_index");
+    expect(schema).toContain("CREATE UNIQUE INDEX workspace_external_integration_records_global_unique_index");
+    const externalMigration = migrations.find((migration) => migration.version === 45);
+    expect(externalMigration?.statements.join("\n")).not.toContain("PRIMARY KEY (workspace_id, record_type, id)");
+    const runtimeMigration = migrations.find((migration) => migration.version === 43);
+    expect(runtimeMigration?.statements.join("\n")).not.toContain("workspace_runtime_automation_jobs");
+    const automationMigration = migrations.find((migration) => migration.version === 44);
+    expect(automationMigration?.statements.join("\n")).toContain("workspace_runtime_automation_jobs");
+    expect(schema).not.toContain("api_key TEXT");
+    expect(schema).not.toContain("access_token TEXT");
+    expect(schema).not.toContain("secret TEXT");
   });
 });

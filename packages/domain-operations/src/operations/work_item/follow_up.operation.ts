@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { workItemFollowUpValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
@@ -10,7 +10,7 @@ const Input = z.object({
 const Output = workItemFollowUpValueSchema;
 
 export interface WorkItemFollowUpPorts {
-  createFollowUpWorkItem(input: { workItemId: string; instruction?: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
+  createFollowUpWorkItem(input: { workItemId: string; instruction?: string; roomId: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const workItemFollowUp = defineCommand<WorkItemFollowUpPorts>()({
@@ -54,9 +54,10 @@ const workItemFollowUp = defineCommand<WorkItemFollowUpPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleWorkItemFollowUp(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleWorkItemFollowUp(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const value = await ports.createFollowUpWorkItem({
           workItemId: input.work_item_id,
+          roomId: requireRoomContext(context, "work_item.follow_up"),
           ...(input.instruction === undefined ? {} : { instruction: input.instruction })
         });
         return { ok: true, value: Output.parse(value) };

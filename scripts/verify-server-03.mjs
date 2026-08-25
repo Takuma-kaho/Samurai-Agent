@@ -72,7 +72,7 @@ function createDisposableProbeEnvironment() {
     "run", "--detach", "--rm", "--name", containerName,
     "--publish", "127.0.0.1::5432",
     "--env", "POSTGRES_PASSWORD=" + password,
-    "postgres:16-alpine"
+    "postgres:17-alpine"
   ]);
   if (started.status !== 0) {
     const reason = String(started.stderr || started.error?.message || "docker_postgres_start_failed").trim();
@@ -158,7 +158,6 @@ function runStaticAndFocusedChecks() {
   run("Native App build", "pnpm", ["--filter", "@samurai-agent/web", "run", "build"]);
   run("Room hierarchy focused tests", "pnpm", ["exec", "vitest", "run",
     "packages/workspace-server/src/schema.test.ts",
-    "packages/workspace-server/src/sqlite-migration.test.ts",
     "packages/workspace-server/src/workspace-bundle-v3.test.ts",
     "apps/server/src/workspace-server/realtime.test.ts",
     "apps/desktop/src/workspace-connections.test.ts",

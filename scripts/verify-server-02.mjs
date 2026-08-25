@@ -32,7 +32,6 @@ function verifyStaticContract() {
   const server = read("apps/server/src/workspace-server/http-server.ts");
   const bundle = read("packages/workspace-server/src/workspace-bundle-v3.ts");
   const config = read("packages/workspace-server/src/config.ts");
-  const sqliteMigration = read("packages/workspace-server/src/sqlite-migration.ts");
   const compose = read("docker/self-host/compose.yaml");
   const packageJson = JSON.parse(read("package.json"));
   const lockfile = read("pnpm-lock.yaml");
@@ -65,9 +64,6 @@ function verifyStaticContract() {
   assert(schema.includes("target_status NOT IN ('active', 'disabled')"), "server02_bundle_account_status_guard_missing");
   assert(config.includes("samurai_database_admin_url_forbidden_at_runtime"), "server02_runtime_admin_url_boundary_missing");
   assert(config.includes("samurai_public_base_url_required"), "server02_invitation_public_origin_missing");
-  assert(sqliteMigration.includes("query_only = ON"), "server02_sqlite_readonly_migration_missing");
-  assert(sqliteMigration.includes("copyLegacySqliteReadSource"), "server02_sqlite_source_copy_missing");
-  assert(sqliteMigration.includes("omitted_unverified_workspace_memberships"), "server02_sqlite_identity_boundary_missing");
   assert(compose.includes("SAMURAI_SERVER_MODE: self_host"), "server02_self_host_compose_missing");
   assert(compose.includes("SAMURAI_DATABASE_RUNTIME_ROLE"), "server02_runtime_role_missing");
   for (const relative of ["docker/self-host/scripts/backup.sh", "docker/self-host/scripts/restore.sh", "docker/self-host/scripts/update.sh"]) {
@@ -107,7 +103,7 @@ try {
     env: { SAMURAI_EVIDENCE_MODE: "deferred" }
   });
   if (process.env.CI === "true" || process.env.SAMURAI_SERVER_VERIFY_ONLINE_AUDIT === "yes") {
-    run("high severity dependency audit", "pnpm", ["audit", "--audit-level=high"]);
+    run("moderate-or-higher dependency audit", "pnpm", ["audit", "--audit-level=moderate"]);
   } else {
     console.log("[Server02] オンライン依存監査はCIまたは明示指定時に実行します。");
   }
@@ -119,7 +115,6 @@ try {
     "packages/workspace-server/src/auth.test.ts",
     "packages/workspace-server/src/config.test.ts",
     "packages/workspace-server/src/schema.test.ts",
-    "packages/workspace-server/src/sqlite-migration.test.ts",
     "packages/workspace-server/src/workspace-bundle-v3.test.ts",
     "packages/workspace-server/src/self-host-owner.test.ts",
     "apps/server/src/workspace-server/realtime.test.ts",

@@ -1,6 +1,49 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
+const inheritedChildEnvironmentKeys = [
+  "PATH",
+  "PATHEXT",
+  "SystemRoot",
+  "WINDIR",
+  "ComSpec",
+  "TMP",
+  "TEMP",
+  "SHELL",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_LANG",
+  "TMPDIR"
+] as const;
+
+const blockedChildEnvironmentKeys = new Set([
+  "HOME",
+  "USERPROFILE",
+  "SSH_AUTH_SOCK",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "XDG_RUNTIME_DIR",
+  "DISPLAY",
+  "WAYLAND_DISPLAY"
+]);
+
+/**
+ * External providers are untrusted child processes. Keep only process
+ * plumbing inherited from the host; credentials and application-specific
+ * values must be passed explicitly through ProcessRunnerInput.env.
+ */
+export function safeChildEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    inheritedChildEnvironmentKeys.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]]])
+  );
+}
+
+function explicitChildEnvironment(source: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(source ?? {}).filter(([key]) => !blockedChildEnvironmentKeys.has(key)));
+}
+
 export interface ProcessRunnerInput {
   command: string;
   args: string[];
@@ -36,7 +79,7 @@ export async function* runProcess(input: ProcessRunnerInput): AsyncIterable<Proc
   const child = spawn(input.command, input.args, {
     cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, ...input.env }
+    env: { ...safeChildEnvironment(), ...explicitChildEnvironment(input.env) }
   });
   input.registerChild?.(child);
 

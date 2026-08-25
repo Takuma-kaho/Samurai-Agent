@@ -22,6 +22,7 @@ import {
   type BackendOutputEvent,
   type BackendRunInput
 } from "./index";
+import { safeChildEnvironment } from "./process-runner";
 
 const roots: string[] = [];
 
@@ -30,6 +31,32 @@ afterEach(async () => {
 });
 
 describe("agent backend registry", () => {
+  it("does not inherit application secrets into external child environments", () => {
+    const environment = safeChildEnvironment({
+      PATH: "/usr/bin",
+      SAMURAI_PHASE13_CANARY: "must-not-leak",
+      OPENAI_API_KEY: "must-not-leak",
+      HOME: "/tmp/samurai-home"
+    });
+
+    expect(environment).toMatchObject({ PATH: "/usr/bin" });
+    expect(environment).not.toHaveProperty("HOME");
+    expect(environment).not.toHaveProperty("SAMURAI_PHASE13_CANARY");
+    expect(environment).not.toHaveProperty("OPENAI_API_KEY");
+  });
+
+  it("does not pass host authentication capabilities even when explicitly requested", async () => {
+    const environment = safeChildEnvironment({
+      PATH: "/usr/bin",
+      HOME: "/tmp/samurai-home",
+      SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    });
+    expect(environment).not.toHaveProperty("HOME");
+    expect(environment).not.toHaveProperty("SSH_AUTH_SOCK");
+    expect(environment).not.toHaveProperty("DOCKER_HOST");
+  });
+
   it("reports lifecycle support and connection state for registered backends", () => {
     const registry = new AgentBackendRegistry([
       new MockBackend(),
@@ -549,7 +576,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-safe-diagnostic-"));
     roots.push(root);
     const executable = path.join(root, "safe-diagnostic");
-    await writeFile(executable, "#!/bin/sh\nprintf 'Bearer secret-token api_key=supersecret /workspace/file /mnt/data /usr/bin/tool /Library/App https://example.test/api\\n' >&2\nexit 7\n", "utf8");
+    await writeFile(executable, "#!/bin/sh\nprintf 'Bearer secret-token api_key=supersecret token=plain-secret /workspace/file /mnt/data /usr/bin/tool /Library/App https://example.test/api\\n' >&2\nexit 7\n", "utf8");
     await chmod(executable, 0o755);
     const events = await collectEvents(new ExternalCliBackend({ id: "safe-diagnostic-cli", kind: "external", label: "Safe Diagnostic CLI", command: executable }).runTurn(backendInput("run-safe-diagnostic")));
     const summary = String(events.at(-1)?.payload.stderr_summary ?? "");
@@ -558,6 +585,7 @@ describe("agent backend registry", () => {
     expect(summary).toContain("[path]");
     expect(summary).not.toContain("secret-token");
     expect(summary).not.toContain("supersecret");
+    expect(summary).not.toContain("plain-secret");
     expect(summary).not.toContain("/workspace");
     expect(summary).not.toContain("/mnt/data");
     expect(summary).not.toContain("/usr/bin");
@@ -569,7 +597,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-evidence-"));
     roots.push(root);
     const executable = path.join(root, "long-running");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.on('SIGTERM', () => process.kill(process.pid, 'SIGKILL'));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.on('SIGTERM', () => process.kill(process.pid, 'SIGKILL'));\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-cli", kind: "external", label: "Cancel CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel"))[Symbol.asyncIterator]();
@@ -737,9 +765,9 @@ describe("agent backend registry", () => {
       "#!/usr/bin/env node",
       "const fs = require('node:fs');",
       "const marker = process.argv[2];",
+      "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
       "process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');",
       "process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');",
-      "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
       "setInterval(() => {}, 1000);"
     ].join("\n"), "utf8");
     await chmod(executable, 0o755);
@@ -754,7 +782,9 @@ describe("agent backend registry", () => {
     expect(backend.getStatus().active_run_count).toBe(1);
     await iterator.return?.();
     await waitFor(() => fileExists(marker));
-    await waitFor(() => backend.getStatus().active_run_count === 0);
+    // The runner may need its SIGTERM grace window before the child close
+    // event releases the active-run record on a contended CI worker.
+    await waitFor(() => backend.getStatus().active_run_count === 0, 3_500);
     expect(backend.getStatus().active_run_count).toBe(0);
   });
 
@@ -827,7 +857,7 @@ describe("agent backend registry", () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-cancel-race-"));
     roots.push(root);
     const executable = path.join(root, "completed-then-close");
-    await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }) + '\\n');\nprocess.stdout.write(JSON.stringify({ event_type: 'run_failed', payload: { error_code: 'late_error', message: 'late provider failure', reason: 'late_provider_failure', retryable: false } }) + '\\n');\nprocess.on('SIGTERM', () => process.exit(143));\nsetInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(executable, "#!/usr/bin/env node\nprocess.on('SIGTERM', () => process.exit(143));\nprocess.stdout.write([JSON.stringify({ event_type: 'run_started', payload: {} }), JSON.stringify({ event_type: 'run_completed', payload: { output_summary: 'done' } }), JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }), JSON.stringify({ event_type: 'run_failed', payload: { error_code: 'late_error', message: 'late provider failure', reason: 'late_provider_failure', retryable: false } })].join('\\n') + '\\n');\nsetInterval(() => {}, 1000);\n", "utf8");
     await chmod(executable, 0o755);
     const backend = new ExternalCliBackend({ id: "cancel-race-cli", kind: "external", label: "Cancel Race CLI", command: executable });
     const iterator = backend.runTurn(backendInput("run-cancel-race"))[Symbol.asyncIterator]();
@@ -1412,6 +1442,27 @@ describe("agent backend registry", () => {
     expect(prompt).toContain("Do not write collections/*/schema.json directly.");
     expect(prompt).toContain("Do not write collections/*/records/*.json directly.");
     expect(prompt).toContain("Do not create or edit collections/* files directly.");
+  });
+
+  it("includes light-chat workspace attachments and their temporary working copies", () => {
+    const base = backendInput("run_attachment_prompt");
+    const input: BackendRunInput = {
+      ...base,
+      envelope: {
+        ...base.envelope,
+        attachments: [{ kind: "file", id: "sha256-file", uri: "attachments/report.txt", label: "report.txt" }]
+      },
+      temporary_context: [{
+        id: "workspace_attachment_1", kind: "workspace_file", label: "report.txt", source_name: "attachments/report.txt",
+        mime_type: "application/octet-stream", file_path: "attachments/workspace-report.txt",
+        created_at: "2026-08-22T00:00:00.000Z", expires_at: "2026-08-22T00:10:00.000Z"
+      }],
+      context_intent: "light_chat"
+    };
+    const prompt = buildExternalBackendPrompt(input);
+    expect(prompt).toContain("Workspace attachments for this turn:");
+    expect(prompt).toContain("attachments/report.txt");
+    expect(prompt).toContain("attachments/workspace-report.txt");
   });
 
   it("injects run-scoped Samurai Artifact MCP config into Codex and Claude Code CLI args", async () => {

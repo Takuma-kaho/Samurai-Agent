@@ -6,7 +6,7 @@ type Ports = Pick<DomainOperationPorts, "work_item.create" | "work_item.follow_u
 export function createExecutionDomainServicePorts(services: Pick<RuntimeDomainServices, "executionDomainService">): Ports {
   return {
     "work_item.create": {
-      getWorkItemObjective: (id) => services.executionDomainService.getObjective(id),
+      getWorkItemObjective: (id, roomId) => services.executionDomainService.getObjective(id, roomId),
       saveWorkItem: (record) => services.executionDomainService.saveWorkItemRecord(record),
       workItemObjectiveNotFoundError: () => services.executionDomainService.objectiveNotFoundError()
     },

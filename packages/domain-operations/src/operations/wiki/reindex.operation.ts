@@ -20,7 +20,7 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
   "version": "3.0",
   "availability": "active",
   "title": "Reindex Knowledge Wiki",
-  "description": "Refresh the Knowledge Wiki SQLite index from markdown pages.",
+  "description": "Refresh the Knowledge Wiki PostgreSQL projection from markdown pages.",
   "sources": [
     "runtime_api",
     "scheduled_context"
@@ -36,7 +36,7 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
     "wiki_index"
   ],
   "proposedEffects": [
-    "Refresh the Knowledge Wiki SQLite index from markdown pages."
+    "Refresh the Knowledge Wiki PostgreSQL projection from markdown pages."
   ],
   "outputResourceKind": "wiki_index",
   "uiDisplayCategory": "knowledge_wiki",
@@ -55,7 +55,7 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWikiReindex(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        const value = await ports.runWikiMutation({ trustedContext: context, operationName: "wiki.reindex", inputSummary: "Reindex wiki pages", proposedEffects: ["Refresh the SQLite wiki index from markdown files."], execute: async () => {
+        const value = await ports.runWikiMutation({ trustedContext: context, operationName: "wiki.reindex", inputSummary: "Reindex wiki pages", proposedEffects: ["Refresh the PostgreSQL Wiki projection from markdown files."], execute: async () => {
           const resource = await ports.reindexWikiPages();
           const ref: ResourceRef = { kind: "wiki_index", id: "active", uri: "wiki/pages", label: "Wiki index" };
           return { resource, ref, summary: `Reindexed ${resource.active} active wiki pages.` };

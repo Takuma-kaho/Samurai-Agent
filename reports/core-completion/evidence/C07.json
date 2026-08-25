@@ -3,61 +3,55 @@
   "test_id": "C07",
   "command": "pnpm core:test:doctor",
   "status": "passed",
-  "commit_sha": "e6f8fb92f35e3337b887dda8087e0e606a3a11a5",
-  "worktree_clean": true,
-  "source_sha256": "f5e52a5172ac199c1b33e97285b5b03322d6d1c645eacf731ea697805e8753b2",
-  "source_graph_sha256": "d0c354086371ca6ca4d790d91f4168cd487ca711c6708307f67b3e4dc32bb8c1",
+  "commit_sha": "a1c07f646a9486c0c1bed5672371531ab75bfac1",
+  "worktree_clean": false,
+  "source_sha256": "81bb33886c99066eb15299ca065b7b555e1430e742643240ba32a8905c2eef25",
+  "source_graph_sha256": "1671035625e2ca03db4d3c480325a03b9ad7c073fa31b0b71aba7a0feb370673",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
-    "packages/workspace-store/src/backup/backup-id.ts",
-    "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
-    "packages/workspace-store/src/repositories/backend-events.ts",
-    "packages/workspace-store/src/search/scoring.ts",
-    "packages/workspace-store/src/transactions/recovery-policy.ts",
-    "packages/workspace-store/src/workspace-store.ts",
+    "packages/workspace-server/src/operator-health.ts",
+    "scripts/doctor.mjs",
     "scripts/fixtures/workspace-doctor.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-workspace-doctor.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-28T15:19:05.321Z",
-  "completed_at": "2026-07-28T15:19:05.570Z",
+  "started_at": "2026-08-24T01:10:29.868Z",
+  "completed_at": "2026-08-24T01:10:30.003Z",
   "assertions": [
     {
-      "name": "Doctor detects all corruption fixtures",
-      "actual": 5,
-      "expected": 5
+      "name": "PostgreSQL operator health detects all corruption fixtures",
+      "actual": 4,
+      "expected": 4
     },
     {
-      "name": "Automatic repair leaves healthy Workspace",
+      "name": "Healthy PostgreSQL report passes",
       "actual": true,
       "expected": true
     },
     {
-      "name": "Automatic repair leaves zero issues",
-      "actual": 0,
-      "expected": 0
+      "name": "Unhealthy PostgreSQL report fails closed",
+      "actual": false,
+      "expected": false
+    },
+    {
+      "name": "Doctor has no legacy database reader",
+      "actual": true,
+      "expected": true
     }
   ],
   "result": {
     "status": "passed",
+    "storage": "postgresql",
+    "migration_count": 57,
+    "required_detected": 4,
     "detected_codes": [
-      "collection_record_broken_ref",
-      "memory_file_unindexed",
-      "session_search_index_stale",
-      "skill_file_unindexed",
-      "workspace_layout_missing"
+      "file_transaction_pending",
+      "runtime_operation_unresolved",
+      "schema_migration_mismatch",
+      "workspace_rls_missing"
     ],
-    "required_detected": 5,
-    "applied": [
-      "ensure_workspace_layout",
-      "collection.remove_broken_refs",
-      "memory.reindex",
-      "skill.reindex",
-      "session_search.reindex"
-    ],
-    "final_health_ok": true,
-    "final_issue_count": 0
+    "healthy_report_ok": true,
+    "unhealthy_report_ok": false
   }
 }

@@ -331,6 +331,7 @@ export function useCollectionWorkspace(input: CollectionWorkspaceInput) {
         kind: "collection.record.delete",
         collection_id: collectionTableId(spec),
         record_id: id,
+        expected_version: requiredCollectionRecordVersion(appCollectionRecords(spec).find((candidate) => String(candidate.id ?? "") === id)),
         view_id: collectionTableViewId(spec),
         renderer_capabilities: input.frontendRendererCapabilities.value
       });

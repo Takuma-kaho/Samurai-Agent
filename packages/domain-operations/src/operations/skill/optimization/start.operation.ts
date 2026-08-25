@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { domainJsonValueSchema, defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillOptimizationStartValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
@@ -18,6 +18,7 @@ export interface SkillOptimizationStartPorts {
   startSkillOptimization(input: {
     skillId: string;
     sessionId?: string;
+    roomId: string;
     objective?: string;
     goldenExamples?: readonly z.infer<typeof domainJsonValueSchema>[];
     syntheticExamples?: readonly z.infer<typeof domainJsonValueSchema>[];
@@ -79,6 +80,7 @@ const skillOptimizationStart = defineCommand<SkillOptimizationStartPorts>()({
         return { ok: true, value: Output.parse(await ports.startSkillOptimization({
           skillId: input.skill_id,
           ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+          roomId: requireRoomContext(context, "skill.optimization.start"),
           ...(input.objective ? { objective: input.objective } : {}),
           ...(input.golden_examples ? { goldenExamples: input.golden_examples } : {}),
           ...(input.synthetic_examples ? { syntheticExamples: input.synthetic_examples } : {})

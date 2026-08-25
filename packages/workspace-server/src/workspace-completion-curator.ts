@@ -475,9 +475,9 @@ async function readCuratorResourceFingerprint(sql: WorkspaceSql, workspaceId: st
   const row = result.rows[0];
   return {
     resourceCount: Number(row?.resource_count ?? 0),
-    resourceUpdatedAt: row?.resource_updated_at ? iso(row.resource_updated_at) : undefined,
-    activityFinalizedAt: row?.activity_finalized_at ? iso(row.activity_finalized_at) : undefined,
-    evaluationCreatedAt: row?.evaluation_created_at ? iso(row.evaluation_created_at) : undefined
+    ...(row?.resource_updated_at ? { resourceUpdatedAt: iso(row.resource_updated_at) } : {}),
+    ...(row?.activity_finalized_at ? { activityFinalizedAt: iso(row.activity_finalized_at) } : {}),
+    ...(row?.evaluation_created_at ? { evaluationCreatedAt: iso(row.evaluation_created_at) } : {})
   };
 }
 

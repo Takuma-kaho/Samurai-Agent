@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -47,6 +47,22 @@ import {
 } from "./index";
 
 describe("gateway", () => {
+  const testCoreWorkspaceRoot = path.join(tmpdir(), "samurai-gateway-test-core-root");
+
+  function unrestrictedHostSandbox() {
+    return {
+      mode: "all" as const,
+      scope: "session" as const,
+      backend: "none" as const,
+      workspace_access: "read_write" as const,
+      network_access: "external" as const,
+      allowed_paths: [{ root: "workspace", access: "read_write" as const }],
+      denied_paths: [],
+      timeout_ms: 2_000,
+      metadata: {}
+    };
+  }
+
   it("creates fixed web, local cli, and cron contexts", () => {
     const web = createWebEnvelope("hello");
     const local = createLocalCliEnvelope("local action", "project/main");
@@ -325,6 +341,289 @@ describe("gateway", () => {
     expect(() => normalizeGatewayWorkspacePath("/etc/passwd")).toThrow("gateway_absolute_path_not_allowed");
   });
 
+  it("blocks command cwd outside the allowed path before the adapter runs", async () => {
+    let adapterCalled = false;
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-path-policy",
+        session_key: "webhook:source-path-policy:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "none" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "safe", access: "read_write" as const }],
+        denied_paths: ["safe/secrets"],
+        metadata: {}
+      }
+    };
+
+    const result = await executeSandboxCommand(boundary, { command: "node", cwd: "other" }, {
+      execute: async () => {
+        adapterCalled = true;
+        return { exit_code: 0, stdout: "", stderr: "" };
+      }
+    }, { workspaceRoot: await mkdtemp(path.join(tmpdir(), "samurai-sandbox-policy-command-")) });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "path_not_allowed",
+      error: "sandbox_path_not_allowed"
+    });
+    expect(adapterCalled).toBe(false);
+  });
+
+  it("blocks denied command cwd before the adapter runs", async () => {
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-denied-path",
+        session_key: "webhook:source-denied-path:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "none" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "workspace", access: "read_write" as const }],
+        denied_paths: ["secrets"],
+        metadata: {}
+      }
+    };
+
+    const result = await executeSandboxCommand(boundary, { command: "node", cwd: "secrets" }, {
+      execute: async () => ({ exit_code: 0, stdout: "", stderr: "" })
+    }, { workspaceRoot: await mkdtemp(path.join(tmpdir(), "samurai-sandbox-policy-denied-")) });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "path_not_allowed",
+      error: "sandbox_path_denied"
+    });
+  });
+
+  it("does not claim host execution can isolate a partial workspace path", async () => {
+    let adapterCalled = false;
+    const result = await executeSandboxCommand({
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-host-partial-path",
+        session_key: "webhook:source-host-partial-path:main"
+      }),
+      sandbox: {
+        mode: "all",
+        scope: "session",
+        backend: "none",
+        workspace_access: "read_write",
+        network_access: "none",
+        allowed_paths: [{ root: "safe", access: "read_write" }],
+        denied_paths: [],
+        metadata: {}
+      }
+    }, { command: "node", cwd: "safe" }, {
+      execute: async () => {
+        adapterCalled = true;
+        return { exit_code: 0, stdout: "", stderr: "" };
+      }
+    }, { workspaceRoot: await mkdtemp(path.join(tmpdir(), "samurai-sandbox-host-partial-")) });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "path_not_allowed",
+      error: "sandbox_host_partial_path_not_supported"
+    });
+    expect(adapterCalled).toBe(false);
+  });
+
+  it("mounts only explicitly allowed Docker paths", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-docker-path-"));
+    await mkdir(path.join(workspaceRoot, "tools"), { recursive: true });
+    let captured: { command: string; args: string[] } | undefined;
+    const fakeSpawn = ((command: string, args: string[]) => {
+      captured = { command, args };
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: PassThrough;
+        stderr: PassThrough;
+        stdin: PassThrough;
+        kill(signal?: NodeJS.Signals): boolean;
+      };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = new PassThrough();
+      child.kill = () => true;
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("close", 0, null);
+      });
+      return child;
+    }) as unknown as typeof import("node:child_process").spawn;
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-docker-path",
+        session_key: "webhook:source-docker-path:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "docker" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "tools", access: "read_write" as const }],
+        denied_paths: [],
+        metadata: { docker_image: "samurai-test-sandbox:latest" }
+      }
+    };
+
+    const result = await executeSandboxCommand(boundary, { command: "node", cwd: "tools" }, createSandboxCommandAdapter({ spawnProcess: fakeSpawn }), { workspaceRoot });
+
+    expect(result.status).toBe("completed");
+    expect(captured?.args).toContain(`-v`);
+    expect(captured?.args).toContain(`${path.resolve(workspaceRoot, "tools")}:/workspace/tools:rw`);
+    expect(captured?.args).not.toContain(`${path.resolve(workspaceRoot)}:/workspace:rw`);
+  });
+
+  it("blocks full-root sync for local, Docker, SSH, and remote transports without an explicit root grant", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-sync-policy-workspace-"));
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-sync-policy-remote-"));
+    await writeFile(path.join(workspaceRoot, "secret.txt"), "must not copy");
+    const cases = [
+      { backend: "none" as const, metadata: { workspace_sync_transport: "local" } },
+      { backend: "docker" as const, metadata: { docker_container_id: "container" } },
+      { backend: "ssh" as const, metadata: { ssh_target: "agent@example.test" } },
+      { backend: "remote" as const, metadata: { remote_target: "agent@example.test" } }
+    ];
+
+    for (const testCase of cases) {
+      const boundary = {
+        ...createDefaultGatewayBoundaryPolicy({
+          source_channel: "webhook",
+          source_identity: `source-sync-${testCase.backend}`,
+          session_key: `webhook:source-sync-${testCase.backend}:main`
+        }),
+        sandbox: {
+          mode: "all" as const,
+          scope: "session" as const,
+          backend: testCase.backend,
+          workspace_access: "read_write" as const,
+          network_access: "none" as const,
+          allowed_paths: [{ root: "safe", access: "read_write" as const }],
+          denied_paths: [],
+          metadata: testCase.metadata
+        }
+      };
+
+      const result = await executeSandboxWorkspaceSync(boundary.sandbox, {
+        direction: "seed_to_sandbox",
+        workspace_root: workspaceRoot,
+        remote_workspace_root: testCase.backend === "docker" ? "/workspace" : remoteRoot
+      }, createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot }));
+
+      expect(result).toMatchObject({
+        status: "failed",
+        reason: "path_not_allowed",
+        error: "sandbox_path_not_allowed"
+      });
+    }
+    await expect(access(path.join(remoteRoot, "secret.txt"))).rejects.toBeTruthy();
+  });
+
+  it("blocks raw sync from a Core workspace root even when the root is allowed", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-root-"));
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-core-root-remote-"));
+    const result = await executeSandboxWorkspaceSync({
+      mode: "all",
+      scope: "session",
+      backend: "none",
+      workspace_access: "read_write",
+      network_access: "none",
+      allowed_paths: [{ root: "workspace", access: "read_write" }],
+      denied_paths: [],
+      metadata: { workspace_sync_transport: "local" }
+    }, {
+      direction: "seed_to_sandbox",
+      workspace_root: workspaceRoot,
+      remote_workspace_root: remoteRoot
+    }, createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: workspaceRoot }));
+
+    expect(result).toMatchObject({
+      status: "failed",
+      reason: "path_not_allowed",
+      error: "sandbox_core_workspace_root_not_allowed"
+    });
+    await expect(readdir(remoteRoot)).resolves.toEqual([]);
+  });
+
+  it("syncs only the granted subtree and skips denied descendants", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-subtree-source-"));
+    const remoteRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-subtree-target-"));
+    await mkdir(path.join(workspaceRoot, "safe", "nested"), { recursive: true });
+    await mkdir(path.join(workspaceRoot, "safe", "secrets"), { recursive: true });
+    await writeFile(path.join(workspaceRoot, "safe", "nested", "allowed.txt"), "allowed");
+    await writeFile(path.join(workspaceRoot, "safe", "secrets", "blocked.txt"), "blocked");
+    await writeFile(path.join(workspaceRoot, "outside.txt"), "outside");
+
+    const result = await executeSandboxWorkspaceSync({
+      mode: "all",
+      scope: "session",
+      backend: "none",
+      workspace_access: "read_write",
+      network_access: "none",
+      allowed_paths: [{ root: "safe", access: "read_write" }],
+      denied_paths: ["safe/secrets"],
+      metadata: { workspace_sync_transport: "local" }
+    }, {
+      direction: "seed_to_sandbox",
+      workspace_root: workspaceRoot,
+      remote_workspace_root: remoteRoot,
+      metadata: { workspace_sync_roots: ["safe"] }
+    }, createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot }));
+
+    expect(result.status).toBe("completed");
+    await expect(access(path.join(remoteRoot, "safe", "nested", "allowed.txt"))).resolves.toBeUndefined();
+    await expect(access(path.join(remoteRoot, "safe", "secrets", "blocked.txt"))).rejects.toBeTruthy();
+    await expect(access(path.join(remoteRoot, "outside.txt"))).rejects.toBeTruthy();
+  });
+
+  it("blocks sandbox deletion when the workspace root is denied", async () => {
+    let adapterCalled = false;
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-delete-path",
+        session_key: "webhook:source-delete-path:main"
+      }),
+      sandbox: {
+        mode: "all" as const,
+        scope: "session" as const,
+        backend: "docker" as const,
+        workspace_access: "read_write" as const,
+        network_access: "none" as const,
+        allowed_paths: [{ root: "workspace", access: "read_write" as const }],
+        denied_paths: ["workspace"],
+        metadata: {}
+      }
+    };
+
+    const result = await executeSandboxLifecycleAction(boundary.sandbox, {
+      action: "delete",
+      instance_key: "docker:session:delete-path"
+    }, {
+      run: async () => {
+        adapterCalled = true;
+        return { status: "completed", resource_refs: [] };
+      }
+    });
+
+    expect(result).toMatchObject({ status: "failed", reason: "path_not_allowed", error: "sandbox_path_denied" });
+    expect(adapterCalled).toBe(false);
+  });
+
   it("reports sandbox executor capability diagnostics without contacting remote targets", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const spawnProbe = ((command: string, args: string[]) => {
@@ -366,7 +665,7 @@ describe("gateway", () => {
     ]));
   });
 
-  it("executes sandbox commands through the host adapter and redacts SecretRef material", async () => {
+  it("blocks host sandbox commands when the requested isolation is unavailable", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "samurai-sandbox-host-"));
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
@@ -384,15 +683,16 @@ describe("gateway", () => {
         mode: "all" as const,
         scope: "session" as const,
         backend: "none" as const,
-        workspace_access: "read" as const,
-        network_access: "none" as const,
-        allowed_paths: [],
+        workspace_access: "read_write" as const,
+        network_access: "external" as const,
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {}
       }
     };
 
+    let adapterCalled = false;
     const result = await executeSandboxCommand(
       boundary,
       {
@@ -400,7 +700,12 @@ describe("gateway", () => {
         args: ["-e", "console.log(process.env.SECRET_VALUE)"],
         secret_env: { SECRET_VALUE: "secret_exec" }
       },
-      createSandboxCommandAdapter(),
+      {
+        async execute() {
+          adapterCalled = true;
+          return { exit_code: 0, stdout: "unexpected", stderr: "" };
+        }
+      },
       {
         workspaceRoot,
         env: { EXEC_TOKEN: "sandbox-secret" }
@@ -408,12 +713,11 @@ describe("gateway", () => {
     );
 
     expect(result).toMatchObject({
-      status: "completed",
-      resolved_secret_ref_ids: ["secret_exec"],
-      stdout: "[redacted:secret_exec]\n"
+      status: "blocked",
+      reason: "sandbox_isolation_unavailable",
+      error: "sandbox_unisolated_backend_not_allowed"
     });
-    expect(JSON.stringify(result)).not.toContain("sandbox-secret");
-    expect(JSON.stringify(result)).not.toContain("EXEC_TOKEN");
+    expect(adapterCalled).toBe(false);
   });
 
   it("builds docker sandbox command invocations with workspace and secret mounts", async () => {
@@ -456,7 +760,7 @@ describe("gateway", () => {
         backend: "docker" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { docker_image: "samurai-test-sandbox:latest" }
@@ -481,7 +785,7 @@ describe("gateway", () => {
     );
 
     expect(result.status).toBe("completed");
-    expect(result.stdout).toBe("used [redacted:secret_docker]");
+    expect(result.stdout).toBe("output_withheld_secret_material_injected");
     expect(captured?.command).toBe("docker");
     expect(captured?.args).toEqual(expect.arrayContaining([
       "run",
@@ -551,7 +855,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {
@@ -579,7 +883,7 @@ describe("gateway", () => {
     );
 
     expect(result.status).toBe("completed");
-    expect(result.stdout).toBe("used [redacted:secret_ssh]");
+    expect(result.stdout).toBe("output_withheld_secret_material_injected");
     expect(captured?.command).toBe("ssh");
     expect(captured?.args).toEqual(["agent@example.test", "sh -s"]);
     expect(JSON.stringify(captured?.args)).not.toContain("ssh-secret");
@@ -608,7 +912,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { workspace_sync_transport: "local" }
@@ -622,7 +926,7 @@ describe("gateway", () => {
         workspace_root: workspaceRoot,
         remote_workspace_root: remoteRoot
       },
-      createSandboxWorkspaceSyncAdapter()
+      createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot })
     );
 
     expect(result).toMatchObject({
@@ -667,7 +971,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: {
@@ -684,7 +988,7 @@ describe("gateway", () => {
         workspace_root: workspaceRoot,
         remote_workspace_root: "/srv/samurai/workspace"
       },
-      createSandboxWorkspaceSyncAdapter({ spawnProcess: fakeSpawn })
+      createSandboxWorkspaceSyncAdapter({ spawnProcess: fakeSpawn, workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot })
     );
 
     expect(result.status).toBe("completed");
@@ -721,7 +1025,7 @@ describe("gateway", () => {
         backend: "ssh" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { workspace_sync_transport: "local" }
@@ -735,7 +1039,7 @@ describe("gateway", () => {
         workspace_root: workspaceRoot,
         remote_workspace_root: remoteRoot
       },
-      createSandboxWorkspaceSyncAdapter()
+      createSandboxWorkspaceSyncAdapter({ workspaceRootRole: "agent_worktree", coreWorkspaceRoot: testCoreWorkspaceRoot })
     );
 
     expect(result).toMatchObject({
@@ -781,7 +1085,7 @@ describe("gateway", () => {
         backend: "docker" as const,
         workspace_access: "read_write" as const,
         network_access: "none" as const,
-        allowed_paths: [],
+        allowed_paths: [{ root: "workspace", access: "read_write" }],
         denied_paths: [],
         timeout_ms: 2000,
         metadata: { docker_container_id: "samurai-sandbox-test" }
@@ -919,9 +1223,9 @@ describe("gateway", () => {
   it("plans MCP tool invocation through boundary and sandbox policy", () => {
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
@@ -1015,13 +1319,48 @@ describe("gateway", () => {
     });
   });
 
+  it("blocks unisolated host MCP execution for external gateways", async () => {
+    const boundary = {
+      ...createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-unisolated-mcp",
+        session_key: "webhook:source-unisolated-mcp:main"
+      }),
+      mcp_config_refs: [{
+        id: "mcp_unisolated",
+        server_name: "calendar",
+        allowed_tools: ["calendar.read"],
+        secret_refs: []
+      }],
+      sandbox: unrestrictedHostSandbox()
+    };
+    let adapterCalled = false;
+    const result = await executeMcpToolInvocation(
+      boundary,
+      { server_name: "calendar", tool_name: "calendar.read", input: {} },
+      {
+        async invoke() {
+          adapterCalled = true;
+          return { output: { ok: true } };
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      reason: "sandbox_isolation_unavailable",
+      error: "sandbox_unisolated_backend_not_allowed"
+    });
+    expect(adapterCalled).toBe(false);
+  });
+
   it("executes MCP tools through an adapter without leaking resolved secrets", async () => {
     let adapterSawSecret = false;
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
@@ -1033,7 +1372,8 @@ describe("gateway", () => {
           provider: "calendar",
           key: "CALENDAR_TOKEN"
         }]
-      }]
+      }],
+      sandbox: unrestrictedHostSandbox()
     };
 
     const result = await executeMcpToolInvocation(
@@ -1063,7 +1403,7 @@ describe("gateway", () => {
         resolved_secret_ref_ids: ["secret_calendar"],
         unresolved_secret_ref_ids: []
       },
-      output: { ok: true, echoed: "used [redacted:secret_calendar] for today" }
+      output: { redacted: true, reason: "output_withheld_secret_material_injected" }
     });
     expect(JSON.stringify(result)).not.toContain("calendar-secret");
     expect(JSON.stringify(result)).not.toContain("CALENDAR_TOKEN");
@@ -1084,7 +1424,7 @@ describe("gateway", () => {
         key: "CALENDAR_HTTP_TOKEN"
       }],
       http: {
-        endpoint_url: "https://calendar.example.test/mcp",
+        endpoint_url: "https://93.184.216.34/mcp",
         headers: { "x-client": "samurai" },
         secret_headers: { authorization: "secret_http_calendar" },
         timeout_ms: 2000
@@ -1095,11 +1435,12 @@ describe("gateway", () => {
     };
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-http",
-        session_key: "webhook:source-http:main"
+        session_key: "local_cli:source-http:main"
       }),
-      mcp_config_refs: [gatewayMcpConfigToBoundaryRef(config)]
+      mcp_config_refs: [gatewayMcpConfigToBoundaryRef(config)],
+      sandbox: unrestrictedHostSandbox()
     };
     const result = await executeMcpToolInvocation(
       boundary,
@@ -1130,9 +1471,7 @@ describe("gateway", () => {
 
     expect(fetchSawSecretHeader).toBe(true);
     expect(result.status).toBe("completed");
-    expect(result.output).toEqual({
-      content: [{ type: "text", text: "used Bearer [redacted]" }]
-    });
+    expect(result.output).toEqual({ redacted: true, reason: "output_withheld_secret_material_injected" });
     expect(JSON.stringify(result)).not.toContain("calendar-http-secret");
     expect(JSON.stringify(result)).not.toContain("CALENDAR_HTTP_TOKEN");
   });
@@ -1184,9 +1523,9 @@ rl.on("line", (line) => {
 
     const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
@@ -1206,7 +1545,8 @@ rl.on("line", (line) => {
             key: "SSH_IDENTITY"
           }
         ]
-      }]
+      }],
+      sandbox: unrestrictedHostSandbox()
     };
 
     const result = await executeMcpToolInvocation(
@@ -1248,7 +1588,7 @@ rl.on("line", (line) => {
         unresolved_secret_ref_ids: []
       }
     });
-    expect(output.content?.[0]?.text).toBe("used [redacted:secret_calendar] and [redacted:secret_ssh]");
+    expect(output).toEqual({ redacted: true, reason: "output_withheld_secret_material_injected" });
     expect(JSON.stringify(result)).not.toContain("calendar-secret");
     expect(JSON.stringify(result)).not.toContain("ssh-secret");
     expect(JSON.stringify(result)).not.toContain("CALENDAR_TOKEN");
@@ -1283,24 +1623,20 @@ rl.on("line", (line) => {
   }
 });
 `);
-    const boundary = {
+      const boundary = {
       ...createDefaultGatewayBoundaryPolicy({
-        source_channel: "webhook",
+        source_channel: "local_cli",
         source_identity: "source-1",
-        session_key: "webhook:source-1:main"
+        session_key: "local_cli:source-1:main"
       }),
       mcp_config_refs: [{
         id: "mcp_calendar",
         server_name: "calendar",
         allowed_tools: ["calendar.read"],
-        secret_refs: [{
-          id: "secret_calendar",
-          source: "env" as const,
-          provider: "calendar",
-          key: "CALENDAR_TOKEN"
-        }]
-      }]
-    };
+        secret_refs: []
+      }],
+      sandbox: unrestrictedHostSandbox()
+      };
     const adapter = createPooledStdioMcpToolAdapter({
       env: { PATH: process.env.PATH },
       maxProcesses: 2,
@@ -1311,7 +1647,7 @@ rl.on("line", (line) => {
               server_name: "calendar",
               command: process.execPath,
               args: [serverPath],
-              secret_env: { CALENDAR_TOKEN: "secret_calendar" },
+              secret_env: {},
               framing: "json_lines",
               timeout_ms: 2000
             }
@@ -1323,17 +1659,17 @@ rl.on("line", (line) => {
       boundary,
       { server_name: "calendar", tool_name: "calendar.read", input: { range: "today" } },
       adapter,
-      { env: { CALENDAR_TOKEN: "calendar-secret" } }
+      {}
     );
     const second = await executeMcpToolInvocation(
       boundary,
       { server_name: "calendar", tool_name: "calendar.read", input: { range: "tomorrow" } },
       adapter,
-      { env: { CALENDAR_TOKEN: "calendar-secret" } }
+      {}
     );
     const [third, fourth] = await Promise.all([
-      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "week" } }, adapter, { env: { CALENDAR_TOKEN: "calendar-secret" } }),
-      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "month" } }, adapter, { env: { CALENDAR_TOKEN: "calendar-secret" } })
+      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "week" } }, adapter, {}),
+      executeMcpToolInvocation(boundary, { server_name: "calendar", tool_name: "calendar.read", input: { range: "month" } }, adapter, {})
     ]);
     const firstOutput = first.output as { pid?: number; calls?: number };
     const secondOutput = second.output as { pid?: number; calls?: number };
@@ -1360,8 +1696,11 @@ rl.on("line", (line) => {
   it("rejects pending MCP requests and refuses invocation after pool shutdown", async () => {
     const tmpRoot = await mkdtemp(path.join(tmpdir(), "samurai-mcp-pool-close-"));
     const serverPath = path.join(tmpRoot, "mcp-server.cjs");
+    const pendingCallMarker = path.join(tmpRoot, "tools-call-started");
     await writeFile(serverPath, `
+const fs = require("node:fs");
 const readline = require("node:readline");
+const pendingCallMarker = process.argv[2];
 const rl = readline.createInterface({ input: process.stdin });
 function send(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
 process.on("SIGTERM", () => {});
@@ -1369,6 +1708,9 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2024-11-05", capabilities: {} } });
+  }
+  if (message.method === "tools/call") {
+    fs.writeFileSync(pendingCallMarker, "started");
   }
 });
 `);
@@ -1378,7 +1720,7 @@ rl.on("line", (line) => {
         return {
           server_name: "calendar",
           command: process.execPath,
-          args: [serverPath],
+          args: [serverPath, pendingCallMarker],
           framing: "json_lines",
           timeout_ms: 60_000
         };
@@ -1395,9 +1737,10 @@ rl.on("line", (line) => {
       }).sandbox),
       secrets: []
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForFile(pendingCallMarker);
+    const pendingRejection = expect(pending).rejects.toThrow("mcp_process_closed");
     const closing = adapter.closeAll();
-    await expect(pending).rejects.toThrow("mcp_process_closed");
+    await pendingRejection;
     await closing;
     await expect(adapter.invoke({
       server_name: "calendar",
@@ -1410,6 +1753,52 @@ rl.on("line", (line) => {
       }).sandbox),
       secrets: []
     })).rejects.toThrow("mcp_process_pool_closed");
+  });
+
+  it("does not report an intentionally aborted MCP startup as a pool-close failure", async () => {
+    const tmpRoot = await mkdtemp(path.join(tmpdir(), "samurai-mcp-pool-startup-close-"));
+    const serverPath = path.join(tmpRoot, "mcp-server.cjs");
+    const initializeMarker = path.join(tmpRoot, "initialize-started");
+    await writeFile(serverPath, `
+const fs = require("node:fs");
+const readline = require("node:readline");
+const initializeMarker = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    fs.writeFileSync(initializeMarker, "started");
+  }
+});
+`);
+    const adapter = createPooledStdioMcpToolAdapter({
+      env: { PATH: process.env.PATH },
+      resolveConfig() {
+        return {
+          server_name: "calendar",
+          command: process.execPath,
+          args: [serverPath, initializeMarker],
+          framing: "json_lines",
+          timeout_ms: 60_000
+        };
+      }
+    });
+    const pending = adapter.invoke({
+      server_name: "calendar",
+      tool_name: "calendar.read",
+      input: {},
+      sandbox: createSandboxExecutionPlan(createDefaultGatewayBoundaryPolicy({
+        source_channel: "webhook",
+        source_identity: "source-1",
+        session_key: "webhook:source-1:main"
+      }).sandbox),
+      secrets: []
+    });
+    await waitForFile(initializeMarker);
+    const pendingRejection = expect(pending).rejects.toThrow("mcp_process_closed");
+    await expect(adapter.closeAll()).resolves.toBeUndefined();
+    await pendingRejection;
+    expect(adapter.stats().process_count).toBe(0);
   });
 
   it("reports SecretRef ids without marking them unresolved when an MCP tool is blocked before resolution", async () => {
@@ -1459,3 +1848,12 @@ rl.on("line", (line) => {
     expect(JSON.stringify(result)).not.toContain("CALENDAR_TOKEN");
   });
 });
+
+async function waitForFile(filePath: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (await access(filePath).then(() => true, () => false)) return;
+    if (Date.now() >= deadline) throw new Error("test_file_wait_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

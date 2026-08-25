@@ -3,10 +3,10 @@
   "test_id": "C03",
   "command": "pnpm core:test:file-transaction",
   "status": "passed",
-  "commit_sha": "bef9e992ab38c739bb676aeb3f757ca064bb5d76",
+  "commit_sha": "a1c07f646a9486c0c1bed5672371531ab75bfac1",
   "worktree_clean": false,
-  "source_sha256": "8f2ad020b4d5f979dcb213968681c2dcabcd4f60d7ad13b092ea1ddc993b9d27",
-  "source_graph_sha256": "921d2053aeb3b260d47fe2c8c52b08037b475e78bbcadcefdc2d0be25a14e30d",
+  "source_sha256": "28bf8635dcbc813ef59e96a7bef8a2a88d1f95c847de140008f7eab490a39547",
+  "source_graph_sha256": "9728a5167efee291842d67facc280ffcfc898ee42051ac03c626fd364266cae1",
   "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
@@ -35,8 +35,8 @@
     "scripts/verify-workspace-file-transaction-recovery.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-29T05:18:27.904Z",
-  "completed_at": "2026-07-29T05:18:28.224Z",
+  "started_at": "2026-08-24T01:10:30.003Z",
+  "completed_at": "2026-08-24T01:10:31.247Z",
   "assertions": [
     {
       "name": "Failure injection points",

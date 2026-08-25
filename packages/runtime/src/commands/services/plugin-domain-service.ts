@@ -1,6 +1,6 @@
 export interface PluginStatusPort {
   setEnabled(pluginId: string, enabled: boolean): boolean;
-  findStatus(pluginId: string): { manifest_id: string; version: string } | undefined;
+  findStatus(pluginId: string): { manifest_id: string; version: string; enabled: boolean } | undefined;
   saveState(input: { manifestId: string; enabled: boolean; version: string }): Promise<{ manifest_id: string; enabled: boolean; version: string; updated_at: string }>;
 }
 
@@ -18,6 +18,10 @@ export class PluginDomainService {
 
   findStatus(id: string) {
     return this.dependencies.plugins.findStatus(id);
+  }
+
+  getEnabled(id: string): boolean | undefined {
+    return this.dependencies.plugins.findStatus(id)?.enabled;
   }
 
   saveState(input: { manifestId: string; enabled: boolean; version: string }) {

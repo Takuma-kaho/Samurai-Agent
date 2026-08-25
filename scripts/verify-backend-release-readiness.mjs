@@ -53,7 +53,12 @@ const summary = {
   planned_only: options.list,
   external_effects_confirmed: false,
   timeout_ms: options.timeoutMs,
-  ok: results.every((result) => result.status === "passed" || result.status === "planned" || result.status === "skipped"),
+  // A skipped gate is an unverified gate, not a successful release check.
+  // `--list` is only a plan and is therefore the sole mode that can finish
+  // without every executable gate passing.
+  ok: options.list
+    ? results.every((result) => result.status === "planned" || result.status === "unverified")
+    : results.every((result) => result.status === "passed"),
   gates: results,
   manual_gates: manualGates,
   profiles: releaseProfiles(manualGates)
@@ -113,19 +118,22 @@ function buildGates(options) {
     pnpmGate("full-tests", "Full Vitest suite", ["test"], { skipped: options.skipTests }),
     pnpmGate("i18n-check", "Locale key consistency", ["run", "i18n:check"]),
     pnpmGate("web-build", "Web production build", ["--filter", "@samurai-agent/web", "run", "build"], { skipped: options.skipWebBuild }),
-    nodeGate("doctor", "Local workspace/backend doctor", ["scripts/doctor.mjs"]),
+    pnpmGate("desktop-verify", "Desktop architecture and IPC boundary", ["run", "desktop:verify"]),
+    pnpmGate("desktop-build", "Desktop TypeScript build", ["run", "desktop:build"]),
+    nodeGate("architecture-static", "Architecture boundary invariants", ["scripts/verify/architecture-invariants.mjs", "--strict"]),
+    nodeGate("doctor", "Strict local workspace/backend doctor", ["scripts/doctor.mjs", "--strict"]),
     nodeGate("doctor-syntax", "Doctor script syntax", ["--check", "scripts/doctor.mjs"]),
     internalGate("public-naming-scan", "PUBLIC_NAMING forbidden source names", runPublicNamingScan),
-    nodeGate("gateway-recovery-probe", "Gateway repair preview/apply on temporary workspace", ["--import", "tsx", "scripts/verify-gateway-recovery.mjs", "--json"])
+    // The former probe exercised the removed SQLite WorkspaceStore.  Keep the
+    // release gate on the active PostgreSQL composition instead of reviving a
+    // legacy storage path just to satisfy a verifier.
+    nodeGate("postgres-entry-contract", "Standard PostgreSQL entry composition", ["scripts/verify-standard-postgres-entry.mjs"]),
+    nodeGate("postgres-runtime-scope", "PostgreSQL runtime dependency scope", ["scripts/verify-postgres-runtime-scope.mjs"])
   ];
-  if (!options.skipExternalProbes) {
-    gates.push(nodeGate("external-channel-probe", "External channel readiness without live sends", ["scripts/verify-external-channels.mjs", "--json"]));
-    gates.push(nodeGate("external-backend-status", "External backend command status without starting runs", ["scripts/verify-external-backends.mjs", "--json"]));
-  }
-  if (!options.skipSandboxProbes) {
-    gates.push(nodeGate("sandbox-capabilities", "Sandbox executor capability probe without external runs", ["--import", "tsx", "scripts/verify-sandbox-executors.mjs", "--json"]));
-    gates.push(nodeGate("sandbox-host-run", "Local host sandbox probe", ["--import", "tsx", "scripts/verify-sandbox-executors.mjs", "--backend", "none", "--run", "--json", "--timeout-ms", "5000"]));
-  }
+  gates.push(nodeGate("external-channel-probe", "External channel readiness without live sends", ["scripts/verify-external-channels.mjs", "--json"], { skipped: options.skipExternalProbes }));
+  gates.push(nodeGate("external-backend-status", "External backend command status without starting runs", ["scripts/verify-external-backends.mjs", "--json"], { skipped: options.skipExternalProbes }));
+  gates.push(nodeGate("sandbox-capabilities", "Sandbox executor capability probe without external runs", ["--import", "tsx", "scripts/verify-sandbox-executors.mjs", "--json"], { skipped: options.skipSandboxProbes }));
+  gates.push(nodeGate("sandbox-host-run", "Local host sandbox probe", ["--import", "tsx", "scripts/verify-sandbox-executors.mjs", "--backend", "none", "--run", "--json", "--timeout-ms", "5000"], { skipped: options.skipSandboxProbes }));
   return gates;
 }
 
@@ -135,12 +143,16 @@ function releaseProfiles(manualGates) {
     "full-tests",
     "i18n-check",
     "web-build",
+    "desktop-verify",
+    "desktop-build",
+    "architecture-static",
     "doctor",
     "doctor-syntax",
     "public-naming-scan",
-    "gateway-recovery-probe",
+    "postgres-entry-contract",
+    "postgres-runtime-scope",
     "external-channel-probe",
-    "external-backend-probe",
+    "external-backend-status",
     "sandbox-capabilities",
     "sandbox-host-run"
   ];
@@ -185,12 +197,13 @@ function pnpmGate(id, label, args, options = {}) {
   };
 }
 
-function nodeGate(id, label, args) {
+function nodeGate(id, label, args, options = {}) {
   return {
     id,
     label,
     command: process.execPath,
-    args
+    args,
+    skipped: options.skipped === true
   };
 }
 
@@ -209,7 +222,8 @@ function plannedGate(gate) {
     id: gate.id,
     label: gate.label,
     command: renderCommand(gate),
-    status: gate.skipped ? "skipped" : "planned",
+    status: gate.skipped ? "unverified" : "planned",
+    ...(gate.skipped ? { reason: "explicitly_skipped" } : {}),
     duration_ms: 0,
     exit_code: null
   };
@@ -221,7 +235,8 @@ async function runGate(gate, options) {
       id: gate.id,
       label: gate.label,
       command: renderCommand(gate),
-      status: "skipped",
+      status: "unverified",
+      reason: "explicitly_skipped",
       duration_ms: 0,
       exit_code: null
     };
@@ -265,8 +280,15 @@ async function runGate(gate, options) {
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    let forceKillTimer;
     const timeout = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
+      // A verifier must terminate even when the child ignores SIGTERM.
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, 2_000);
     }, options.timeoutMs);
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
@@ -284,28 +306,31 @@ async function runGate(gate, options) {
     });
     child.on("close", (code, signal) => {
       clearTimeout(timeout);
-      const timedOut = signal === "SIGTERM";
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         id: gate.id,
         label: gate.label,
         command: renderCommand(gate),
         status: code === 0 && !timedOut ? "passed" : timedOut ? "timeout" : "failed",
         duration_ms: Date.now() - startedAt,
-        exit_code: code,
+        exit_code: timedOut ? 124 : code,
         signal,
+        ...(timedOut ? { reason: `deadline_exceeded:${options.timeoutMs}ms` } : {}),
         stdout_tail: stdout.trim(),
         stderr_tail: stderr.trim()
       });
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         id: gate.id,
         label: gate.label,
         command: renderCommand(gate),
-        status: "failed",
+        status: timedOut ? "timeout" : "failed",
         duration_ms: Date.now() - startedAt,
-        exit_code: null,
+        exit_code: timedOut ? 1 : null,
+        ...(timedOut ? { reason: `deadline_exceeded:${options.timeoutMs}ms` } : {}),
         error: error.message
       });
     });
@@ -345,7 +370,7 @@ function printHelp() {
   console.log(`Usage: node scripts/verify-backend-release-readiness.mjs [options]
 
 Runs the non-destructive backend release-readiness gate:
-  typecheck, full tests, i18n check, web build, doctor, gateway recovery probe,
+  typecheck, full tests, i18n check, web build, doctor, PostgreSQL entry/scope probes,
   public naming scan, external backend dry probe, sandbox dry probe, and local host sandbox probe.
 
 Options:
@@ -355,7 +380,7 @@ Options:
   --skip-web-build       Skip the web production build gate.
   --skip-external-probes Skip external channel readiness and backend dry status/probe.
   --skip-sandbox-probes  Skip sandbox capability and local host probe.
-  --timeout-ms <ms>      Per-gate timeout. Default: 180000.
+  --timeout-ms <ms>      Per-gate timeout. Default: 300000.
 `);
 }
 

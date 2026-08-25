@@ -35,7 +35,7 @@ export function createAutomationDomainServicePorts(services: Pick<RuntimeDomainS
       reauthorizeSessionlessAutomationJob: (input) => services.core09AutomationDomainService.reauthorize(input)
     },
     "automation.memory_review.run": {
-      sessionlessMemoryReviewUnsupported: () => services.core09AutomationDomainService.memoryReviewUnsupported()
+      runSessionlessMemoryReview: () => services.core09AutomationDomainService.runSessionlessMemoryReview()
     }
   };
 }

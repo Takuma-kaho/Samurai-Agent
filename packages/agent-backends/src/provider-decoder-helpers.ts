@@ -72,7 +72,7 @@ export function safeFailureMessage(value: unknown, fallback = "Backend operation
   const raw = typeof value === "string" && value.trim() ? value : fallback;
   const safe = raw
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/(?:api[_-]?key|access[_-]?token|secret|password)["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "credential=[redacted]")
+    .replace(/(?:api[_-]?key|access[_-]?token|token|secret|password|credential|authorization)["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "credential=[redacted]")
     .replace(/\b(?:sk|key)-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
     .replace(/(?<![A-Za-z0-9:/.])\/[^\s"'<>]+/g, "[path]")
     .replace(/[A-Za-z]:\\[^\s"'<>]+/g, "[path]")

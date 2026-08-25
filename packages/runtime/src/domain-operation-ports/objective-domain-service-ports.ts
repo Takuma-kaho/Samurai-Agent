@@ -9,7 +9,7 @@ export function createObjectiveDomainServicePorts(services: Pick<RuntimeDomainSe
       saveObjective: (record) => services.objectiveDomainService.save(record)
     },
     "objective.transition": {
-      transitionObjective: (id, action) => services.objectiveDomainService.transition(id, action)
+      transitionObjective: (id, action, roomId) => services.objectiveDomainService.transition(id, action, roomId)
     }
   };
 }

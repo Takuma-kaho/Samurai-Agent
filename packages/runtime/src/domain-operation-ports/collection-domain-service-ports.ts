@@ -14,14 +14,12 @@ export function createCollectionDomainServicePorts(services: Pick<RuntimeDomainS
       mapCollectionPatchError: (error) => services.collectionDomainService.mapCollectionPatchError(error),
       collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
-      queueCollectionTrigger: (input) => services.collectionDomainService.queueCollectionTrigger(input),
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.record.create": {
-      saveCollectionRecord: (record) => services.collectionDomainService.saveCollectionRecord(record),
+      saveCollectionRecord: (record, trigger) => services.collectionDomainService.saveCollectionRecord(record, trigger),
       collectionRecordRef: (record) => services.collectionDomainService.collectionRecordRef(record),
       createCollectionRollback: (operation, refs, before, after) => services.collectionDomainService.createCollectionRollback(operation, refs, before, after),
-      queueCollectionTrigger: (input) => services.collectionDomainService.queueCollectionTrigger(input),
       runCollectionMutation: (input) => services.collectionDomainService.runCollectionMutation(input)
     },
     "collection.record.delete": {

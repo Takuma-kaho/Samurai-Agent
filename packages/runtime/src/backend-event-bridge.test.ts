@@ -52,7 +52,9 @@ describe("BackendEventBridge", () => {
         requires_host_execution: true,
         arguments: {
           title: "Draft",
-          api_key: "secret-key"
+          api_key: "secret-key",
+          environment: { SECRET_VALUE: "raw-secret" },
+          secret_env: { SECRET_VALUE: "secret_ref_1" }
         }
       }
     });
@@ -93,8 +95,14 @@ describe("BackendEventBridge", () => {
     });
 
     expect(started.record.payload).toMatchObject({
-      arguments: { title: "Draft", api_key: "secret-key" }
+      arguments: {
+        title: "Draft",
+        api_key: "[redacted]",
+        environment: { SECRET_VALUE: "[redacted]" },
+        secret_env: { SECRET_VALUE: "secret_ref_1" }
+      }
     });
+    expect(JSON.stringify(started.record.payload)).not.toContain("secret-key");
     expect(started.uiRecord?.payload).toEqual({
       tool_call_id: "tool_1",
       provider_tool_name: "create_artifact",
@@ -104,7 +112,7 @@ describe("BackendEventBridge", () => {
     });
     expect(output.record.payload).toMatchObject({
       stdout: "x".repeat(4100),
-      token: "secret-token"
+      token: "[redacted]"
     });
     expect(output.uiRecord?.payload).toMatchObject({
       tool_call_id: "tool_1",
@@ -123,6 +131,9 @@ describe("BackendEventBridge", () => {
       },
       summary: `${"x".repeat(4000)}...[truncated]`
     });
+    expect(output.record.payload.token).toBe("[redacted]");
+    expect((output.record.payload.secret_resolution as Record<string, unknown>).raw_value).toBe("[redacted]");
+    expect(JSON.stringify(output.record.payload)).not.toContain("secret-token");
     expect(output.uiRecord?.payload).not.toHaveProperty("token");
     expect(JSON.stringify(output.uiRecord?.payload)).not.toContain("Bearer secret");
     expect(JSON.stringify(output.uiRecord?.payload)).not.toContain("raw_value");

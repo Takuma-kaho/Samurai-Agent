@@ -26,6 +26,7 @@ export interface AccountSignaturePayload {
   path: string;
   workspaceId?: string;
   operationId?: string;
+  idempotencyKey?: string;
   requestId: string;
   timestamp: string;
   body: unknown;
@@ -36,6 +37,7 @@ export function createAccountSignaturePayload(input: AccountSignaturePayload): s
   assertOpaqueId(input.requestId, "request_id_invalid");
   if (input.workspaceId) assertOpaqueId(input.workspaceId, "workspace_id_invalid");
   if (input.operationId) assertOpaqueId(input.operationId, "operation_id_invalid");
+  if (input.idempotencyKey) assertOpaqueId(input.idempotencyKey, "idempotency_key_invalid");
   const timestamp = Number(input.timestamp);
   if (!Number.isFinite(timestamp)) throw new WorkspaceServerError("account_signature_timestamp_invalid", 401);
   const bodyHash = createHash("sha256").update(canonicalJson(input.body)).digest("hex");
@@ -45,6 +47,7 @@ export function createAccountSignaturePayload(input: AccountSignaturePayload): s
     input.path,
     input.workspaceId ?? "",
     input.operationId ?? "",
+    input.idempotencyKey ?? "",
     input.requestId,
     String(Math.trunc(timestamp)),
     bodyHash

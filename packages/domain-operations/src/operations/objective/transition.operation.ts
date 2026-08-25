@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import type { ObjectiveRecord, WorkItemRecord } from "@samurai-agent/core-schemas";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { objectiveTransitionValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
@@ -11,7 +11,7 @@ const Input = z.object({
 const Output = objectiveTransitionValueSchema;
 
 export interface ObjectiveTransitionPorts {
-  transitionObjective(id: string, action: z.infer<typeof Input>["action"]): Promise<{
+  transitionObjective(id: string, action: z.infer<typeof Input>["action"], roomId: string): Promise<{
     objective: ObjectiveRecord;
     workItems: WorkItemRecord[];
     cancelBackendRunIds: string[];
@@ -61,7 +61,7 @@ const objectiveTransition = defineCommand<ObjectiveTransitionPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleObjectiveTransition(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: await ports.transitionObjective(input.objective_id, input.action) };
+        return { ok: true, value: await ports.transitionObjective(input.objective_id, input.action, requireRoomContext(context, "objective.transition")) };
       }
     };
   }

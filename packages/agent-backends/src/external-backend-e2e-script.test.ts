@@ -86,7 +86,6 @@ describe("external backend verification script", () => {
       "scripts/verify-external-backends.mjs",
       "--backend",
       "codex",
-      "--run",
       "--confirm-external-effects",
       "--resume",
       "--json",
@@ -141,6 +140,7 @@ describe("external backend verification script", () => {
       "codex",
       "--run",
       "--confirm-external-effects",
+      "--resume",
       "--json",
       "--timeout-ms",
       "5000"
@@ -155,7 +155,7 @@ describe("external backend verification script", () => {
       maxBuffer: 1024 * 1024
     })).rejects.toMatchObject({
       code: 1,
-      stdout: expect.stringContaining("\"status\": \"failed\"")
+      stdout: expect.stringContaining("run_not_completed")
     });
   });
 

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import type { JsonValue } from "@samurai-agent/core-schemas";
 import type { SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 
-type GeneratedAction = { id: string; label: string; description?: string };
+type GeneratedAction = { id: string; label: string; description?: string; requires_confirmation?: boolean };
 
 const props = defineProps<{
   spec: SurfaceRenderSpec;
@@ -16,12 +16,18 @@ const props = defineProps<{
 
 const frameRef = ref<HTMLIFrameElement | null>(null);
 const previewUrl = computed(() => typeof props.spec.props.preview_url === "string" ? props.spec.props.preview_url : "");
+const srcdoc = computed(() => typeof props.spec.props.srcdoc === "string" ? props.spec.props.srcdoc : "");
 const actions = computed<GeneratedAction[]>(() => {
   const value = props.spec.props.actions;
   return Array.isArray(value)
     ? value.flatMap((item) => {
         if (!isRecord(item) || typeof item.id !== "string" || typeof item.label !== "string") return [];
-        return [{ id: item.id, label: item.label, ...(typeof item.description === "string" ? { description: item.description } : {}) }];
+        return [{
+          id: item.id,
+          label: item.label,
+          ...(typeof item.description === "string" ? { description: item.description } : {}),
+          ...(item.requires_confirmation === true ? { requires_confirmation: true } : {})
+        }];
       })
     : [];
 });
@@ -33,6 +39,9 @@ function handleMessage(event: MessageEvent) {
   if (!actionIds.value.has(event.data.action_id)) return;
   const action = actions.value.find((item) => item.id === event.data.action_id);
   if (!action) return;
+  // An iframe message is never an explicit human confirmation. Dangerous
+  // actions remain available through the visible button below.
+  if (action.requires_confirmation === true) return;
   const payload = isRecord(event.data.payload) ? toJsonRecord(event.data.payload) : {};
   void props.runAction(props.spec, action, payload);
 }
@@ -67,10 +76,11 @@ onUnmounted(() => window.removeEventListener("message", handleMessage));
       <button type="button" :disabled="props.saving" @click="props.exportSurface(props.spec, 'zip')">ZIP</button>
     </div>
     <iframe
-      v-if="previewUrl"
+      v-if="srcdoc || previewUrl"
       ref="frameRef"
       class="generated-surface-iframe"
-      :src="previewUrl"
+      :src="srcdoc ? undefined : previewUrl"
+      :srcdoc="srcdoc || undefined"
       sandbox="allow-scripts"
       title="生成された独自UI"
     ></iframe>

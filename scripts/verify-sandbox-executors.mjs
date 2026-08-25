@@ -207,7 +207,9 @@ function createSandboxPolicy(backend, metadata, timeoutMs) {
       mode: "all",
       backend,
       workspace_access: "read_write",
-      network_access: backend === "none" ? "none" : "external",
+      // Host execution cannot provide network isolation; model that explicit
+      // limitation instead of asking the executor to claim a false boundary.
+      network_access: "external",
       timeout_ms: timeoutMs,
       metadata
     }

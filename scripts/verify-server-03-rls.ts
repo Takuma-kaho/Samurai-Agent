@@ -36,7 +36,15 @@ if (process.env.SAMURAI_SERVER_VERIFY_ALLOW_DESTRUCTIVE_PROBE !== "yes") {
   throw new Error("server03_probe_destructive_confirmation_required");
 }
 
-for (const target of targets) await runProbe(target);
+const probeFailures: string[] = [];
+for (const target of targets) {
+  try {
+    await runProbe(target);
+  } catch (error) {
+    probeFailures.push(`${target.label}:${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+if (probeFailures.length > 0) throw new Error(`server03_targets_failed:${probeFailures.join(";")}`);
 
 function targetFromEnvironment(prefix: "HOSTED" | "SELF_HOST", label: ProbeTarget["label"]): ProbeTarget {
   const databaseUrl = process.env["SAMURAI_SERVER_VERIFY_" + prefix + "_DATABASE_URL"];
@@ -63,6 +71,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
   const disabledInvitationMember = accountIdentity();
   const httpInvitationMember = accountIdentity();
   const accounts = [owner, member, parentOnlyMember, missingParentMember, realtimeMember, invitationMember, disabledInvitationMember, httpInvitationMember];
+  let probeFailure: Error | undefined;
+  let cleanupFailure: Error | undefined;
   try {
     await adminDatabase.migrate();
     await database.assertReady();
@@ -532,7 +542,7 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const files = new WorkspaceFileStore(store);
     const rootFile = await files.write(ownerContext(operationId("file-root")), {
       roomId: rootRoom.id,
-      path: "knowledge/room-boundary.md",
+      path: "collections/room-boundary.md",
       content: Buffer.from("root Room file"),
       expectedVersion: 0
     });
@@ -618,12 +628,21 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       assert(JSON.stringify([...sourceParents].sort()) === JSON.stringify([...restoredParents].sort()), "server03_bundle_hierarchy_roundtrip_failed");
     }
     console.log("[Server03] " + target.label + ": Room hierarchy, RLS, search, retry, and restore probe passed");
+  } catch (error) {
+    probeFailure = error instanceof Error ? error : new Error(String(error));
   } finally {
-    await cleanup(adminDatabase, [workspaceId, ...(target.label === "hosted" ? [restoredWorkspaceId, foreignWorkspaceId] : [])], accounts.map((account) => account.id));
-    await database.close();
-    await adminDatabase.close();
-    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await cleanup(adminDatabase, [workspaceId, ...(target.label === "hosted" ? [restoredWorkspaceId, foreignWorkspaceId] : [])], accounts.map((account) => account.id));
+    } catch (error) {
+      cleanupFailure = error instanceof Error ? error : new Error(String(error));
+    }
+    await database.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await adminDatabase.close().catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
+    await rm(root, { recursive: true, force: true }).catch((error) => { cleanupFailure ??= error instanceof Error ? error : new Error(String(error)); });
   }
+  if (probeFailure && cleanupFailure) throw new Error(`${probeFailure.message};cleanup:${cleanupFailure.message}`);
+  if (probeFailure) throw probeFailure;
+  if (cleanupFailure) throw new Error(`cleanup:${cleanupFailure.message}`);
 }
 
 /**
@@ -756,7 +775,7 @@ async function runRealtimeSubscriptionProbe(input: {
     );
 
     const revokedRoomIds = new Set<string>();
-    const leakedRoomEvents: unknown[] = [];
+    const postRevocationRoomEvents: unknown[] = [];
     const ownerRoomEvents: Array<{ roomId?: string; kind?: string }> = [];
     const parentOnlyRoomEvents: Array<{ roomId?: string; kind?: string }> = [];
     const invitationRoomEvents: Array<{ roomId?: string; kind?: string }> = [];
@@ -768,7 +787,6 @@ async function runRealtimeSubscriptionProbe(input: {
         if (typeof roomId === "string") revokedRoomIds.add(roomId);
       }
     });
-    memberSocket.on("workspace:event", (event: unknown) => leakedRoomEvents.push(event));
     ownerSocket.on("workspace:event", (event: unknown) => ownerRoomEvents.push(roomEventSummary(event)));
     parentOnlySocket.on("workspace:event", (event: unknown) => parentOnlyRoomEvents.push(roomEventSummary(event)));
     parentOnlySocket.on("workspace:room-access-revoked", (event: unknown) => {
@@ -825,6 +843,11 @@ async function runRealtimeSubscriptionProbe(input: {
     await delay(75);
     assert(invitationRoomEvents.length === invitationEventCount, "server03_realtime_child_invitation_retry_duplicated_event");
 
+    // Events before this point are valid: the member still had access when the
+    // child invitation was accepted. Observe only the period after revocation
+    // begins, otherwise a delayed legitimate event becomes a false leak.
+    memberSocket.on("workspace:event", (event: unknown) => postRevocationRoomEvents.push(event));
+
     const body = { role: "member", state: "revoked", expected_version: input.rootMembershipVersion };
     const revokeOperationId = operationId("realtime-revoke");
     const result = await signedJsonRequest({
@@ -851,7 +874,7 @@ async function runRealtimeSubscriptionProbe(input: {
       "server03_realtime_owner_event_missing"
     );
     await delay(75);
-    assert(leakedRoomEvents.length === 0, "server03_realtime_event_leaked_after_revocation");
+    assert(postRevocationRoomEvents.length === 0, "server03_realtime_event_leaked_after_revocation");
     assert(!parentOnlyRoomEvents.some((event) => event.roomId === input.childRoomId), "server03_realtime_hidden_child_event_leaked");
     assert(!parentOnlyRevocations.has(input.childRoomId), "server03_realtime_hidden_child_revocation_leaked");
     assert(
@@ -1117,7 +1140,6 @@ async function cleanup(
 ): Promise<void> {
   await adminDatabase.withAdmin(async (sql) => {
     const tables = [
-      "workspace_audit_entries",
       "workspace_bundles",
       "workspace_transfers",
       "workspace_invitations",
@@ -1130,15 +1152,28 @@ async function cleanup(
       "room_members",
       "rooms",
       "workspace_members",
-      "workspace_import_sessions",
-      "workspaces"
+      "workspace_import_sessions"
     ];
-    for (const workspaceId of workspaceIds) {
-      for (const table of tables) await sql.query("DELETE FROM " + table + " WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);
+    await sql.query("BEGIN");
+    try {
+      for (const workspaceId of workspaceIds) {
+        for (const table of tables) {
+          await sql.query("DELETE FROM " + table + " WHERE workspace_id = $1", [workspaceId]);
+        }
+        // Audit is also a child of Workspace. Remove it after every other
+        // probe-owned child and immediately before Workspace, making the
+        // foreign-key cleanup order explicit.
+        await sql.query("DELETE FROM workspace_audit_entries WHERE workspace_id = $1", [workspaceId]);
+        await sql.query("DELETE FROM workspaces WHERE id = $1", [workspaceId]);
+      }
+      await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
+      await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK").catch(() => undefined);
+      throw error;
     }
-    await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
-    await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]).catch(() => undefined);
-  }).catch(() => undefined);
+  });
 }
 
 function accountIdentity(): ProbeAccount {

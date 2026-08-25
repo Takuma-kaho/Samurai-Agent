@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillOptimizationRejectValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
@@ -13,7 +13,7 @@ export type SkillOptimizationRejectInput = z.infer<typeof Input>;
 export type SkillOptimizationRejectOutput = z.infer<typeof Output>;
 
 export interface SkillOptimizationRejectPorts {
-  rejectSkillOptimization(input: { optimizationRunId: string; candidateId: string }): Promise<SkillOptimizationRejectOutput> | SkillOptimizationRejectOutput;
+  rejectSkillOptimization(input: { optimizationRunId: string; candidateId: string; roomId: string }): Promise<SkillOptimizationRejectOutput> | SkillOptimizationRejectOutput;
 }
 
 const skillOptimizationReject = defineCommand<SkillOptimizationRejectPorts>()({
@@ -64,7 +64,7 @@ const skillOptimizationReject = defineCommand<SkillOptimizationRejectPorts>()({
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationReject(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.rejectSkillOptimization({ optimizationRunId: input.optimization_run_id, candidateId: input.candidate_id })) };
+        return { ok: true, value: Output.parse(await ports.rejectSkillOptimization({ optimizationRunId: input.optimization_run_id, candidateId: input.candidate_id, roomId: requireRoomContext(context, "skill.optimization.reject") })) };
       }
     };
   }

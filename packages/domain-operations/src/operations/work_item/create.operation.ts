@@ -1,7 +1,7 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
 import { WorkItemRecordSchema, createId, nowIso, stableHash, type ObjectiveRecord, type WorkItemRecord } from "@samurai-agent/core-schemas";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { workItemValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
@@ -16,7 +16,7 @@ const Input = z.object({
 const Output = workItemValueSchema;
 
 export interface WorkItemCreatePorts {
-  getWorkItemObjective(id: string): Promise<ObjectiveRecord | undefined>;
+  getWorkItemObjective(id: string, roomId: string): Promise<ObjectiveRecord | undefined>;
   saveWorkItem(record: WorkItemRecord): Promise<WorkItemRecord>;
   workItemObjectiveNotFoundError(): Error;
 }
@@ -64,10 +64,13 @@ const workItemCreate = defineCommand<WorkItemCreatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleWorkItemCreate(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        if (!await ports.getWorkItemObjective(input.objective_id)) throw ports.workItemObjectiveNotFoundError();
+        const roomId = requireRoomContext(context, "work_item.create");
+        const objective = await ports.getWorkItemObjective(input.objective_id, roomId);
+        if (!objective) throw ports.workItemObjectiveNotFoundError();
+        if (objective.room_id !== roomId) throw new Error("objective_room_access_denied");
         const now = nowIso();
         const record = WorkItemRecordSchema.parse({
-          id: input.work_item_id ?? createId("work"), objective_id: input.objective_id,
+          id: input.work_item_id ?? createId("work"), objective_id: input.objective_id, room_id: roomId,
           parent_work_item_id: input.parent_work_item_id, instruction: input.instruction,
           status: "ready", priority: input.priority, attempt: 0, max_attempts: input.max_attempts,
           idempotency_key: input.work_idempotency_key ?? `${input.objective_id}:${stableHash(input)}`,

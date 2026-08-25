@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { canonicalJson } from "./auth";
 import { WorkspaceServerError } from "./errors";
+import { isWorkspaceCompletionOwnedPath } from "./workspace-completion-files";
 import type { WorkspaceSql } from "./postgres";
 import type { WorkspaceEvent, WorkspaceFile, WorkspaceRequestContext } from "./types";
 import { WorkspaceServerStore } from "./workspace-server-store";
@@ -20,6 +21,18 @@ export interface WriteWorkspaceFileResult {
   event: WorkspaceEvent;
   transactionId: string;
   /** True only when the durable operation result is returned to a retry. */
+  replayed: boolean;
+}
+
+export interface RemoveWorkspaceFileInput {
+  roomId: string;
+  path: string;
+  expectedVersion: number;
+}
+
+export interface RemoveWorkspaceFileResult {
+  event: WorkspaceEvent;
+  transactionId: string;
   replayed: boolean;
 }
 
@@ -41,10 +54,14 @@ export class WorkspaceFileStore {
     // authority inside the write transaction, but a rejected caller must not
     // be able to consume shared disk through abandoned staging content.
     await this.workspaceStore.assertRoomWritable(context, input.roomId);
+    if (isWorkspaceCompletionOwnedPath(relativePath)) {
+      throw new WorkspaceServerError("workspace_file_path_owned_by_completion", 409, { path: relativePath });
+    }
     const transactionId = `file_tx_${randomUUID()}`;
     const stagedPath = `.staging/${transactionId}`;
     const root = this.workspaceRoot(context.workspaceId);
     const stagedAbsolutePath = this.resolveWithinWorkspace(root, stagedPath);
+    await assertNoSymlinkPath(root, stagedPath);
     await mkdir(path.dirname(stagedAbsolutePath), { recursive: true, mode: 0o700 });
     let databaseCommitted = false;
     try {
@@ -55,6 +72,7 @@ export class WorkspaceFileStore {
         input: { roomId: input.roomId, path: relativePath, expectedVersion: input.expectedVersion, sha256 }
       }, async (sql) => {
         await assertWorkspaceWritable(sql, context.workspaceId);
+        await sql.query("SELECT pg_advisory_xact_lock(hashtext($1))", [fileLockKey(context.workspaceId, relativePath)]);
         const previous = await sql.query<FileRow>(
           `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
            FROM workspace_files WHERE workspace_id = $1 AND path = $2`,
@@ -135,16 +153,87 @@ export class WorkspaceFileStore {
       if (!row) throw new WorkspaceServerError("workspace_file_not_found", 404);
       return fileFromRow(row);
     });
-    const content = await readFile(this.resolveWithinWorkspace(this.workspaceRoot(context.workspaceId), `files/${safePath}`));
+    const root = this.workspaceRoot(context.workspaceId);
+    await assertNoSymlinkPath(root, `files/${safePath}`);
+    const content = await readFile(this.resolveWithinWorkspace(root, `files/${safePath}`));
     if (hashBytes(content) !== file.sha256) throw new WorkspaceServerError("workspace_file_hash_mismatch", 500);
     return { file, content };
+  }
+
+  /**
+   * Removes a file through the same database transaction ledger as writes.
+   * The physical file is removed only after PostgreSQL commits; if that final
+   * step is interrupted, the recovery ledger retries it after the next boot.
+   */
+  async remove(context: WorkspaceRequestContext, input: RemoveWorkspaceFileInput): Promise<RemoveWorkspaceFileResult> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    const relativePath = assertSafeRelativePath(input.path);
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new WorkspaceServerError("workspace_file_expected_version_invalid", 400);
+    }
+    await this.workspaceStore.assertRoomWritable(context, input.roomId);
+    if (isWorkspaceCompletionOwnedPath(relativePath)) {
+      throw new WorkspaceServerError("workspace_file_path_owned_by_completion", 409, { path: relativePath });
+    }
+    const transactionId = `file_tx_${randomUUID()}`;
+    const stagedPath = `.staging/${transactionId}.delete`;
+    const result = await this.workspaceStore.runIdempotentResult(context, {
+        action: "workspace.file.delete",
+        input: { roomId: input.roomId, path: relativePath, expectedVersion: input.expectedVersion }
+      }, async (sql) => {
+        await assertWorkspaceWritable(sql, context.workspaceId);
+        await sql.query("SELECT pg_advisory_xact_lock(hashtext($1))", [fileLockKey(context.workspaceId, relativePath)]);
+        const previous = await sql.query<FileRow>(
+          `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
+           FROM workspace_files WHERE workspace_id = $1 AND path = $2 FOR UPDATE`,
+          [context.workspaceId, relativePath]
+        );
+        const previousFile = previous.rows[0] ? fileFromRow(previous.rows[0]) : undefined;
+        if (!previousFile || previousFile.roomId !== input.roomId || previousFile.version !== input.expectedVersion) {
+          throw new WorkspaceServerError("workspace_file_version_conflict", 409, {
+            latest_version: previousFile?.version ?? null
+          });
+        }
+        const deleted = await sql.query(
+          `DELETE FROM workspace_files
+           WHERE workspace_id = $1 AND room_id = $2 AND path = $3 AND version = $4`,
+          [context.workspaceId, input.roomId, relativePath, input.expectedVersion]
+        );
+        if (deleted.rowCount !== 1) throw new WorkspaceServerError("workspace_file_version_conflict", 409);
+        await sql.query(
+          `INSERT INTO workspace_file_transactions(workspace_id, id, room_id, target_path, staged_path, previous_file, next_file, status)
+           VALUES ($1, $2, $3, $4, $5, $6::JSONB, $7::JSONB, 'db_committed')`,
+          [
+            context.workspaceId,
+            transactionId,
+            input.roomId,
+            relativePath,
+            stagedPath,
+            canonicalJson(fileToJson(previousFile)),
+            canonicalJson({ deleted: true, path: relativePath, previous_version: previousFile.version })
+          ]
+        );
+        const event = await insertFileEvent(sql, context, input.roomId, relativePath, input.expectedVersion, undefined, "workspace.file.deleted");
+        await this.workspaceStore.insertAudit(sql, context, {
+          action: "workspace.file.delete",
+          roomId: input.roomId,
+          subjectKind: "workspace_file",
+          subjectId: relativePath,
+          beforeVersion: input.expectedVersion,
+          afterVersion: input.expectedVersion + 1,
+          details: { deleted: true }
+        });
+        return { event, transactionId };
+      });
+    await this.finalize(context, result.value.transactionId);
+    return { ...result.value, replayed: result.replayed };
   }
 
   /** Call at boot with an active owner context to complete or surface interrupted file writes. */
   async recover(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<{ recovered: string[]; failed: string[] }> {
     const transactions = await this.workspaceStore.database.withContext(context, async (sql) => {
       const result = await sql.query<FileTransactionRow>(
-        `SELECT workspace_id, id, target_path, staged_path, next_file, status
+        `SELECT workspace_id, id, target_path, staged_path, previous_file, next_file, status
          FROM workspace_file_transactions
          WHERE workspace_id = $1 AND status = 'db_committed'
          ORDER BY created_at`,
@@ -167,38 +256,83 @@ export class WorkspaceFileStore {
 
   private async finalize(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, transactionId: string): Promise<void> {
     assertOpaqueId(transactionId, "workspace_file_transaction_id_invalid");
-    const transaction = await this.workspaceStore.database.withContext(context, async (sql) => {
+    await this.workspaceStore.database.withContext(context, async (sql) => {
       const result = await sql.query<FileTransactionRow>(
-        `SELECT workspace_id, id, target_path, staged_path, next_file, status
-         FROM workspace_file_transactions WHERE workspace_id = $1 AND id = $2`,
+        `SELECT workspace_id, id, target_path, staged_path, previous_file, next_file, status
+         FROM workspace_file_transactions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
         [context.workspaceId, transactionId]
       );
-      const row = result.rows[0];
-      if (!row) throw new WorkspaceServerError("workspace_file_transaction_not_found", 404);
-      return row;
-    });
-    if (transaction.status === "renamed") return;
-    const root = this.workspaceRoot(context.workspaceId);
-    const source = this.resolveWithinWorkspace(root, transaction.staged_path);
-    const destination = this.resolveWithinWorkspace(root, `files/${transaction.target_path}`);
-    try {
-      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-      await rename(source, destination);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const expected = jsonObject(transaction.next_file).sha256;
-      const current = await readFile(destination).catch(() => undefined);
-      if (!current || hashBytes(current) !== expected) throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500);
-    }
-    await this.workspaceStore.database.withContext(context, async (sql) => {
+      const transaction = result.rows[0];
+      if (!transaction) throw new WorkspaceServerError("workspace_file_transaction_not_found", 404);
+      if (transaction.status === "renamed") return;
+      await sql.query("SELECT pg_advisory_xact_lock(hashtext($1))", [fileLockKey(context.workspaceId, transaction.target_path)]);
+
+      const root = this.workspaceRoot(context.workspaceId);
+      const source = this.resolveWithinWorkspace(root, transaction.staged_path);
+      const destination = this.resolveWithinWorkspace(root, `files/${transaction.target_path}`);
+      await assertNoSymlinkPath(root, transaction.staged_path);
+      await assertNoSymlinkPath(root, `files/${transaction.target_path}`);
+      if (transaction.staged_path.endsWith(".delete")) {
+        const currentFile = await sql.query<FileRow>(
+          `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
+           FROM workspace_files WHERE workspace_id = $1 AND path = $2 FOR UPDATE`,
+          [context.workspaceId, transaction.target_path]
+        );
+        if (currentFile.rows[0]) {
+          throw new WorkspaceServerError("workspace_file_delete_recovery_required", 500, { path: transaction.target_path });
+        }
+        const current = await readFile(destination).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        });
+        if (current) {
+          const previous = transaction.previous_file ? jsonObject(transaction.previous_file).sha256 : undefined;
+          if (typeof previous !== "string" || hashBytes(current) !== previous) {
+            throw new WorkspaceServerError("workspace_file_delete_recovery_required", 500, { path: transaction.target_path });
+          }
+          await rm(destination, { force: false });
+        }
+      } else {
+        const expected = jsonObject(transaction.next_file);
+        const currentFile = await sql.query<FileRow>(
+          `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
+           FROM workspace_files WHERE workspace_id = $1 AND path = $2 FOR UPDATE`,
+          [context.workspaceId, transaction.target_path]
+        );
+        if (!currentFile.rows[0] || Number(currentFile.rows[0].version) !== Number(expected.version) || currentFile.rows[0].sha256 !== expected.sha256) {
+          throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: transaction.target_path });
+        }
+        const current = await readFile(destination).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        });
+        if (current) {
+          if (hashBytes(current) !== expected.sha256) {
+            throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: transaction.target_path });
+          }
+          await rm(source, { force: true });
+        } else {
+          try {
+            await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+            await rename(source, destination);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            const recovered = await readFile(destination).catch(() => undefined);
+            if (!recovered || hashBytes(recovered) !== expected.sha256) {
+              throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: transaction.target_path });
+            }
+          }
+        }
+      }
+
       // The rename can finish after a transfer has made the Workspace
       // read-only. This narrowly-scoped function changes only the durable
       // recovery marker; it does not reopen the Workspace for writes.
-      const result = await sql.query<{ finalized: boolean }>(
+      const finalized = await sql.query<{ finalized: boolean }>(
         "SELECT samurai_finalize_workspace_file_transaction($1, $2) AS finalized",
         [context.workspaceId, transactionId]
       );
-      if (result.rows[0]?.finalized !== true) throw new WorkspaceServerError("workspace_file_transaction_finalize_failed", 500);
+      if (finalized.rows[0]?.finalized !== true) throw new WorkspaceServerError("workspace_file_transaction_finalize_failed", 500);
     });
   }
 
@@ -233,6 +367,7 @@ interface FileTransactionRow {
   id: string;
   target_path: string;
   staged_path: string;
+  previous_file: Record<string, unknown> | string | null;
   next_file: Record<string, unknown> | string;
   status: "db_committed" | "renamed" | "rolled_back";
 }
@@ -263,17 +398,53 @@ function fileToJson(file: WorkspaceFile): Record<string, unknown> {
   };
 }
 
+function fileLockKey(workspaceId: string, relativePath: string): string {
+  return `${workspaceId}\u001f${relativePath}`;
+}
+
+/** A normalized path is not sufficient protection for a file-backed
+ * Workspace: an already-created directory symlink can redirect read/write
+ * operations after normalization. Reject every existing symlink component
+ * before touching the path. The database transaction remains authoritative;
+ * this is an additional filesystem boundary check. */
+async function assertNoSymlinkPath(root: string, relativePath: string): Promise<void> {
+  let current = path.resolve(root);
+  const rootStat = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (rootStat?.isSymbolicLink()) throw new WorkspaceServerError("workspace_file_symlink_path_rejected", 409);
+  for (const segment of relativePath.split("/").filter(Boolean)) {
+    current = path.join(current, segment);
+    const stat = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!stat) break;
+    if (stat.isSymbolicLink()) throw new WorkspaceServerError("workspace_file_symlink_path_rejected", 409, { path: relativePath });
+  }
+}
+
 async function assertWorkspaceWritable(sql: WorkspaceSql, workspaceId: string): Promise<void> {
   const result = await sql.query<{ state: string }>("SELECT state FROM workspaces WHERE id = $1", [workspaceId]);
   if (result.rows[0]?.state !== "active") throw new WorkspaceServerError("workspace_read_only", 409);
 }
 
-async function insertFileEvent(sql: WorkspaceSql, context: WorkspaceRequestContext, roomId: string, filePath: string, version: number, sha256: string): Promise<WorkspaceEvent> {
+async function insertFileEvent(
+  sql: WorkspaceSql,
+  context: WorkspaceRequestContext,
+  roomId: string,
+  filePath: string,
+  version: number,
+  sha256?: string,
+  kind: "workspace.file.updated" | "workspace.file.deleted" = "workspace.file.updated"
+): Promise<WorkspaceEvent> {
+  const payload = sha256 ? { path: filePath, version, sha256 } : { path: filePath, version, deleted: true };
   const result = await sql.query<EventRow>(
     `INSERT INTO workspace_events(workspace_id, room_id, kind, operation_id, payload)
-     VALUES ($1, $2, 'workspace.file.updated', $3, $4::JSONB)
+     VALUES ($1, $2, $3, $4, $5::JSONB)
      RETURNING id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at`,
-    [context.workspaceId, roomId, context.operationId, canonicalJson({ path: filePath, version, sha256 })]
+    [context.workspaceId, roomId, kind, context.operationId, canonicalJson(payload)]
   );
   const row = result.rows[0];
   if (!row) throw new WorkspaceServerError("workspace_event_creation_failed", 500);

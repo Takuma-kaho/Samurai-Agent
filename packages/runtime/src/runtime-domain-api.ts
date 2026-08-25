@@ -95,6 +95,7 @@ export class RuntimeDomainApi {
     resourceKind: "memory" | "wiki" | "skill";
     resourceId: string;
     targetVersion: string;
+    sessionId?: string;
     reason?: string;
   }): Promise<unknown> {
     const payload = {
@@ -107,7 +108,7 @@ export class RuntimeDomainApi {
       command_id: domainOperationIdFor("learningResourceVersionRestore"),
       idempotency_key: `learning_resource_version_restore:${stableHash(payload)}`,
       payload
-    });
+    }, input.sessionId ? { sessionId: input.sessionId } : undefined);
     return result.result;
   }
 
@@ -115,6 +116,7 @@ export class RuntimeDomainApi {
     resourceKind: "memory" | "wiki" | "skill";
     resourceId: string;
     changeReason: string;
+    sessionId?: string;
     content?: string;
     usageScope?: { kind: "workspace" } | { kind: "room"; room_id: string } | { kind: "agent"; agent_id: string } | { kind: "session"; session_id: string };
     evidenceState?: "direct_confirmed" | "inferred" | "supported" | "conflict";
@@ -135,7 +137,7 @@ export class RuntimeDomainApi {
       command_id: domainOperationIdFor("learningResourceVersionUpdate"),
       idempotency_key: `learning_resource_version_update:${stableHash(payload)}`,
       payload
-    });
+    }, input.sessionId ? { sessionId: input.sessionId } : undefined);
     return result.result;
   }
 
@@ -172,8 +174,8 @@ export class RuntimeDomainApi {
     return result.result;
   }
 
-  async applyReflectionSuggestion(input: { suggestionId: string }): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("reflectionSuggestionApply"), idempotency_key: "reflection_apply_request", payload: { suggestion_id: input.suggestionId } });
+  async applyReflectionSuggestion(input: { suggestionId: string; sessionId?: string }): Promise<unknown> {
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("reflectionSuggestionApply"), idempotency_key: "reflection_apply_request", payload: { suggestion_id: input.suggestionId } }, input.sessionId ? { sessionId: input.sessionId } : undefined);
     return result.result;
   }
 
@@ -231,8 +233,14 @@ export class RuntimeDomainApi {
     return result.result;
   }
 
-  async deleteCollectionRecord(input: { collectionId: string; recordId: string; viewId?: string }): Promise<unknown> {
-    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionRecordDelete"), idempotency_key: "collection_record_delete_request", payload: { collection_id: input.collectionId, record_id: input.recordId, ...(input.viewId === undefined ? {} : { view_id: input.viewId }) } });
+  async deleteCollectionRecord(input: { collectionId: string; recordId: string; expectedVersion: number; viewId?: string }): Promise<unknown> {
+    const payload = {
+      collection_id: input.collectionId,
+      record_id: input.recordId,
+      expected_version: input.expectedVersion,
+      ...(input.viewId === undefined ? {} : { view_id: input.viewId })
+    };
+    const result = await this.dispatcher.command({ command_id: domainOperationIdFor("collectionRecordDelete"), idempotency_key: `collection_record_delete_request:${stableHash(payload)}`, payload });
     return result.result;
   }
 

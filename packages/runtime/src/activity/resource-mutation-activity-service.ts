@@ -36,7 +36,7 @@ interface ResourceMutationActivityStore {
   }): Promise<{ change: WorkspaceChangeRecord }>;
 }
 
-/** A committed Resource whose SQLite evidence could not be recorded. */
+/** A committed Resource whose durable evidence could not be recorded. */
 export class ResourceMutationEvidenceError extends Error {
   readonly code = "resource_mutation_evidence_failed" as const;
   readonly name = "ResourceMutationEvidenceError";

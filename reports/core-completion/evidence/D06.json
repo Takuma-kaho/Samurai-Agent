@@ -3,9 +3,11 @@
   "test_id": "D06",
   "command": "pnpm core:test:attachment",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
   "worktree_clean": false,
-  "source_sha256": "59e5dfc1d2edb86912f52efd67d8140930c25b480ca0d708eda060e6854ffa51",
+  "source_sha256": "ffdadc61644cbd9e66585749686e41661c8da6565617b8790a7269a139fb9ceb",
+  "source_graph_sha256": "29cc90efafcefadae7d224b3433cc9a348141756d0a5c223f4704b59b7a86153",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/core-schemas/src/index.ts",
     "packages/runtime/src/attachments/ingestion.ts",
@@ -13,8 +15,9 @@
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-attachment-ingestion.mjs"
   ],
-  "started_at": "2026-07-11T12:47:32.474Z",
-  "completed_at": "2026-07-11T12:47:32.529Z",
+  "source_read_errors": [],
+  "started_at": "2026-08-23T06:28:59.196Z",
+  "completed_at": "2026-08-23T06:28:59.886Z",
   "assertions": [
     {
       "name": "Six required formats",

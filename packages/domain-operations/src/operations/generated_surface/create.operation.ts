@@ -61,7 +61,7 @@ export interface GeneratedSurfaceCreatePorts {
   createGeneratedSurfaceRequestId(): string;
   generatedSurfaceNow(): string;
   generatedSurfaceFingerprint(value: string): string;
-  buildGeneratedSurfaceRevision(input: { request: SurfaceGenerationRequest; bundle: GeneratedSurfaceBundleInput; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
+  buildGeneratedSurfaceRevision(input: { request: SurfaceGenerationRequest; bundle: GeneratedSurfaceBundleInput; producerRunId?: string; promptFingerprint?: string; existing?: GeneratedSurfaceDefinition; surfaceId?: string; revisionId?: string }): { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord };
   saveGeneratedSurfaceRevision(input: { definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; html: string; css?: string; script?: string; assets?: GeneratedSurfaceBundleInput["assets"] }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }>;
   runGeneratedSurfaceMutation<TExtra extends Record<string, unknown>>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs?: ResourceRef[]; execute(operation: OperationRecord, activity?: ActivityRecord): Promise<{ resource: GeneratedSurfaceDefinition; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & TExtra> }): Promise<{ resource: GeneratedSurfaceDefinition; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] } & TExtra>;
 }

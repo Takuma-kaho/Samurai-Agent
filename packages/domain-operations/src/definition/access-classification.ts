@@ -107,7 +107,7 @@ register({ scope: "room_content", action: "edit", target: { kind: "file", idFiel
 register({ scope: "room_content", action: "read", target: { kind: "file", idField: "path" } }, "file.inspect", "file.read");
 register({ scope: "room_content", action: "execute", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.action.run", "generated_surface.export");
 register({ scope: "room_content", action: "edit", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.revise", "generated_surface.interaction.record");
-register({ scope: "room_content", action: "read", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.state");
+register({ scope: "room_content", action: "edit", target: { kind: "generated_surface", idField: "surface_id" } }, "generated_surface.state");
 register({ scope: "room_content", action: "edit", target: { kind: "memory", idField: "memory_id" } }, "memory.archive");
 register({ scope: "room_content", action: "edit", target: { kindField: "resource_kind", idField: "resource_id", allowedKinds: ["memory", "wiki", "skill"] } }, "learning.resource.usage.record", "learning.resource.version.restore", "learning.resource.version.update");
 register({ scope: "room_content", action: "edit", target: { kindField: "resource_kind", idField: "resource_id", allowedKinds: ["memory", "wiki", "skill"] } }, "resource.copy", "resource.move", "resource.redact");

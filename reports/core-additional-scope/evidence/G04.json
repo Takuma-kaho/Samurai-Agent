@@ -3,31 +3,37 @@
   "test_id": "G04",
   "status": "passed",
   "command": "node scripts/verify-core-additions-tests.mjs",
-  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
-  "source_sha256": "dfe8ab62a58e93f223b70f1b74cf892226533d2b7b0d113fecb48cc8bc4e3438",
+  "source_sha256": "d86fdc8fbf13c1d8bbc147a1fa8e416fd466f460861f6a241a63aa809207d02f",
   "source_files": [
-    "packages/core-schemas/src/index.ts",
-    "packages/agent-backends/src/index.ts",
     "packages/action-catalog/src/index.ts",
-    "packages/capability-registry/src/index.ts",
-    "packages/ui-protocol/src/index.ts",
-    "packages/workspace-store/src/workspace-store.ts",
-    "packages/runtime/src/agent-runtime.ts",
+    "packages/domain-operations/src/domain-operations.coverage.test.ts",
     "scripts/verify-core-additions-tests.mjs"
   ],
   "assertions": [
     {
-      "name": "Affected Core packages typecheck",
-      "actual": 7,
-      "expected": 7
+      "name": "Current action catalog contract tests pass",
+      "actual": true,
+      "expected": true
     },
     {
-      "name": "Targeted integration checks",
-      "actual": 3,
-      "expected": 3
+      "name": "Current domain operation strict gate tests pass",
+      "actual": true,
+      "expected": true
+    },
+    {
+      "name": "No SQLite runtime dependency is introduced",
+      "actual": 0,
+      "expected": 0
     }
   ],
   "result": {
-    "checks": 10
+    "status": "passed",
+    "checks": 3,
+    "test_files": [
+      "packages/action-catalog/src/action-catalog.test.ts",
+      "packages/domain-operations/src/domain-operations.coverage.test.ts"
+    ],
+    "sqlite_legacy_dependencies": 0,
+    "postgres_runtime_path": "not applicable: catalog/contract focused checks"
   }
 }

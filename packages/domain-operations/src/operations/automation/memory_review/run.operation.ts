@@ -7,8 +7,8 @@ const Input = z.object({}).strict();
 const Output = automationMemoryReviewRunValueSchema;
 
 export interface AutomationMemoryReviewRunPorts {
-  /** Core09 deliberately leaves this legacy kind stopped until a Session-free executor exists. */
-  sessionlessMemoryReviewUnsupported(): never;
+  /** The scheduler owns the Room scan; each selected candidate keeps its persisted Session boundary. */
+  runSessionlessMemoryReview(): Promise<z.infer<typeof Output>>;
 }
 
 const automationMemoryReviewRun = defineCommand<AutomationMemoryReviewRunPorts>()({
@@ -18,7 +18,7 @@ const automationMemoryReviewRun = defineCommand<AutomationMemoryReviewRunPorts>(
   "version": "4.0",
   "availability": "active",
   "title": "Run memory review",
-  "description": "Keep the legacy memory review automation safely stopped until it has a Session-free executor.",
+  "description": "Run the explicit Memory Review through the persisted Room and Session boundary.",
   "sources": [
     "runtime_api",
     "automation",
@@ -55,7 +55,7 @@ const automationMemoryReviewRun = defineCommand<AutomationMemoryReviewRunPorts>(
   createHandler(ports) {
     return {
       execute: async function handleAutomationMemoryReviewRun(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return ports.sessionlessMemoryReviewUnsupported();
+        return { ok: true, value: await ports.runSessionlessMemoryReview() };
       }
     };
   }

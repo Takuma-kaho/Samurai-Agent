@@ -41,5 +41,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Audit high severity dependencies
-        run: pnpm audit --audit-level=high
+      - name: Audit moderate-or-higher dependency vulnerabilities
+        run: pnpm audit --audit-level=moderate
+
+      - name: Scan repository for leaked secrets and release hygiene issues
+        run: pnpm run core:test:release-hygiene
+
+      - name: Run source quality gate
+        run: pnpm run verify:source-quality
+
+      - name: Verify PostgreSQL runtime scope
+        run: pnpm run verify:postgres-runtime-scope
+
+      - name: Verify PostgreSQL migration readiness
+        # Live PostgreSQL/RLS probes run in the disposable database deep gate.
+        # This security job verifies the repository has no legacy imports or
+        # API callers without treating an unavailable external database as a
+        # code failure.
+        run: pnpm run verify:postgres-migration:static

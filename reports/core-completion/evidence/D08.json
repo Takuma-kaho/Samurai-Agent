@@ -3,9 +3,11 @@
   "test_id": "D08",
   "command": "pnpm core:test:plugin-isolation",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "a1c07f646a9486c0c1bed5672371531ab75bfac1",
   "worktree_clean": false,
-  "source_sha256": "44d6259029837794ce84a00f3c8c24b0ecb00364052224539d2714d6221bb309",
+  "source_sha256": "b254e37ccf2b6517332fd9407eaf74100199b0c81c26d9b3ad7f3f2cb707dffc",
+  "source_graph_sha256": "b344c53100b5cdb31a41bc983a26dff616173e4774e19061b745e1e3ee59745a",
+  "contract_versions_sha256": "19b8d5e9f2798b7dd2a06b7ecc3a665319ea725d994cf302188907b723e7121c",
   "source_files": [
     "packages/action-catalog/src/index.ts",
     "packages/action-catalog/src/plugin-worker.mjs",
@@ -14,8 +16,9 @@
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-plugin-isolation.mjs"
   ],
-  "started_at": "2026-07-11T09:06:24.163Z",
-  "completed_at": "2026-07-11T09:06:24.576Z",
+  "source_read_errors": [],
+  "started_at": "2026-08-24T04:18:58.200Z",
+  "completed_at": "2026-08-24T04:18:59.326Z",
   "assertions": [
     {
       "name": "Plugin runs outside Host process",
@@ -53,6 +56,10 @@
     "signature_invalid_rejected": true,
     "version_incompatible_rejected": true,
     "unsigned_entrypoint_rejected": true,
-    "core_mutations_before_success": 0
+    "core_mutations_before_success": 0,
+    "tool_surface_same_manifest": true,
+    "version_exposed": true,
+    "disable_blocks": true,
+    "enable_restores": true
   }
 }

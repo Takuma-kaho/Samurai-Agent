@@ -1,7 +1,7 @@
 /**
  * Pure Room-participation vocabulary and decisions.
  *
- * This package deliberately knows nothing about SQLite, HTTP, UI, or a
+ * This package deliberately knows nothing about database, HTTP, UI, or a
  * particular resource repository.  It is the one place that defines who a
  * participant is and what a current membership may do.
  */

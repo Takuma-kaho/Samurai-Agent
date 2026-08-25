@@ -100,6 +100,14 @@ export interface WorkspaceCompletionResourceInput {
   evidenceEpisodeId?: string;
 }
 
+/** A model-proposed Resource is never valid without Room-local evidence.
+ * Keep this distinct from human and import inputs so callers cannot defer an
+ * otherwise deterministic contract failure until a live PostgreSQL probe. */
+export interface WorkspaceCompletionAiResourceInput extends WorkspaceCompletionResourceInput {
+  evidenceActivityIds: readonly [string, ...string[]];
+  evidenceEpisodeId: string;
+}
+
 export interface WorkspaceCompletionSkillSupportInput {
   path: string;
   content: Uint8Array;
@@ -143,6 +151,7 @@ interface TrustedHumanPolicyApproval {
   requestId: string;
   operationId: string;
   timestamp: string;
+  requestTimestamp: string;
   canonicalPayloadHash: string;
   signature: string;
 }
@@ -333,6 +342,28 @@ export class WorkspaceCompletionService {
         [context.workspaceId, activityId, boundedLimit(limit)]
       );
       return rows.rows.map(evidenceFromRow);
+    });
+  }
+
+  async listActivities(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { roomId: string; activityId?: string; sourceApp?: string; sourceId?: string; outcome?: string; limit?: number; offset?: number }
+  ): Promise<WorkspaceCompletionActivity[]> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    const offset = input.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new WorkspaceServerError("workspace_completion_activity_offset_invalid", 400);
+    return this.store.database.withContext(context, async (sql) => {
+      const result = await sql.query<ActivityRow>(
+        `SELECT * FROM workspace_completion_activities
+         WHERE workspace_id = $1 AND room_id = $2
+           AND ($3::TEXT IS NULL OR id = $3)
+           AND ($4::TEXT IS NULL OR source_app = $4)
+           AND ($5::TEXT IS NULL OR source_id = $5)
+           AND ($6::TEXT IS NULL OR outcome = $6)
+         ORDER BY finalized_at DESC, id DESC LIMIT $7 OFFSET $8`,
+        [context.workspaceId, input.roomId, input.activityId ?? null, input.sourceApp ?? null, input.sourceId ?? null, input.outcome ?? null, boundedLimit(input.limit), offset]
+      );
+      return result.rows.map(activityFromRow);
     });
   }
 
@@ -571,8 +602,11 @@ export class WorkspaceCompletionService {
 
   /** Internal review/Curator path.  It creates a provisional candidate and
    * never points an existing confirmed Resource at model output. */
-  async proposeResourceVersion(context: WorkspaceRequestContext, input: WorkspaceCompletionResourceInput): Promise<WorkspaceCompletionResourceWriteResult> {
-    return this.writeResource(context, input, { creationSource: "ai", action: "workspace.completion.resource.propose" });
+  async proposeResourceVersion(context: WorkspaceRequestContext, input: WorkspaceCompletionAiResourceInput): Promise<WorkspaceCompletionResourceWriteResult> {
+    // This is the only public AI-proposal entry point.  Callers must not be
+    // able to create a provisional candidate that Curator later excludes just
+    // because an optional transport field was omitted.
+    return this.writeResource(context, { ...input, aiManaged: true }, { creationSource: "ai", action: "workspace.completion.resource.propose" });
   }
 
   /** Migration is the sole normal-path producer of `import` rows.  It shares
@@ -2293,24 +2327,33 @@ export class WorkspaceCompletionService {
     const configuration = await this.effectiveConfigurationInSql(sql, context.workspaceId, episode.roomId);
     const maxItems = configuration.values.reviewSnapshotMaxItems;
     const pageSize = Math.min(500, maxItems + 1);
+    // PostgreSQL stores TIMESTAMPTZ with microsecond precision, while the
+    // default node-postgres Date parser keeps milliseconds only. Keep the
+    // database text value for SQL cursor boundaries so an immediately rebuilt
+    // snapshot cannot exclude its own high-watermark Activity.
     let watermarkFinalizedAt: string | undefined;
     if (options.highWatermarkActivityId) {
-      const watermark = await sql.query<{ finalized_at: Date | string }>(
-        `SELECT activity.finalized_at
+      const watermark = await sql.query<{ finalized_at: string }>(
+        `SELECT activity.finalized_at::TEXT AS finalized_at
          FROM workspace_completion_episode_activities link
          JOIN workspace_completion_activities activity
            ON activity.workspace_id = link.workspace_id AND activity.id = link.activity_id
          WHERE link.workspace_id = $1 AND link.episode_id = $2 AND activity.id = $3`,
         [context.workspaceId, episode.id, options.highWatermarkActivityId]
       );
-      if (!watermark.rows[0]) throw new WorkspaceServerError("workspace_completion_review_stale_input", 409);
-      watermarkFinalizedAt = iso(watermark.rows[0].finalized_at);
+      if (!watermark.rows[0]) {
+        throw new WorkspaceServerError("workspace_completion_review_stale_input", 409, {
+          episode_id: episode.id,
+          high_watermark_activity_id: options.highWatermarkActivityId
+        });
+      }
+      watermarkFinalizedAt = watermark.rows[0].finalized_at;
     }
     const activities: WorkspaceCompletionActivity[] = [];
     let activityCursor: { finalizedAt: string; id: string } | undefined;
     for (;;) {
-      const rows = await sql.query<ActivityRow>(
-        `SELECT activity.*
+      const rows = await sql.query<ActivityRow & { cursor_finalized_at: string }>(
+        `SELECT activity.*, activity.finalized_at::TEXT AS cursor_finalized_at
          FROM workspace_completion_episode_activities link
          JOIN workspace_completion_activities activity
            ON activity.workspace_id = link.workspace_id AND activity.id = link.activity_id
@@ -2330,12 +2373,15 @@ export class WorkspaceCompletionService {
           pageSize
         ]
       );
-      const page = rows.rows.map(activityFromRow);
-      activities.push(...page);
+      const page = rows.rows.map((row) => ({
+        activity: activityFromRow(row),
+        cursorFinalizedAt: row.cursor_finalized_at
+      }));
+      activities.push(...page.map((item) => item.activity));
       if (activities.length > maxItems) throw new WorkspaceServerError("workspace_completion_review_snapshot_limit_exceeded", 409, { max_items: maxItems, item: "activities" });
       if (page.length < pageSize) break;
       const last = page[page.length - 1]!;
-      activityCursor = { finalizedAt: last.finalizedAt, id: last.id };
+      activityCursor = { finalizedAt: last.cursorFinalizedAt, id: last.activity.id };
     }
     const highWatermarkActivityId = options.highWatermarkActivityId ?? activities[activities.length - 1]?.id;
     if (!highWatermarkActivityId) throw new WorkspaceServerError("workspace_completion_review_snapshot_empty", 409);
@@ -2589,6 +2635,7 @@ export class WorkspaceCompletionService {
     mutate: (sql: WorkspaceSql) => Promise<T>
   ): Promise<{ value: T; replayed: boolean }> {
     const result = await this.store.runIdempotentResult<BatchResult<T>>(context, request, async (sql) => {
+      await this.assertFileBatchWriteAllowed(sql, context, batch);
       await this.recordBatch(sql, batch);
       const value = await mutate(sql);
       return { result: value, batchId: batch.id };
@@ -2596,6 +2643,35 @@ export class WorkspaceCompletionService {
     if (result.replayed) await this.files.rollback(batch).catch(() => undefined);
     await this.finalizeBatch(context, result.value.batchId);
     return { value: result.value.result, replayed: result.replayed };
+  }
+
+  /** Keep a rejected operation from failing first on the batch ledger RLS.
+   * The detailed Completion policy is still checked inside `mutate`; this
+   * guard only mirrors the table's base write capability so read-only and
+   * import/migration transactions return a stable domain error before the
+   * ledger row is attempted. */
+  private async assertFileBatchWriteAllowed(
+    sql: WorkspaceSql,
+    context: WorkspaceRequestContext,
+    batch: StagedWorkspaceCompletionFileBatch
+  ): Promise<void> {
+    const allowed = await sql.query<{ allowed: boolean }>(
+      `SELECT (
+         samurai_is_import_session($1)
+         OR samurai_completion_migration_write_allowed($1)
+         OR (
+           samurai_workspace_is_writable($1)
+           AND (
+             ($2::TEXT = 'workspace' AND samurai_can_workspace($1, 'admin'))
+             OR ($2::TEXT = 'room' AND $3::TEXT IS NOT NULL AND samurai_can_room($1, $3, 'execute'))
+           )
+         )
+       ) AS allowed`,
+      [context.workspaceId, batch.scope.kind, batch.scope.roomId ?? null]
+    );
+    if (allowed.rows[0]?.allowed !== true) {
+      throw new WorkspaceServerError("workspace_completion_policy_denied", 403);
+    }
   }
 
   private async recordBatch(sql: WorkspaceSql, batch: StagedWorkspaceCompletionFileBatch): Promise<void> {
@@ -2868,8 +2944,11 @@ export class WorkspaceCompletionService {
     }
   }
 
-  private async finalizeBatch(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, batchId: string): Promise<void> {
-    const batch = await this.store.database.withContext(context, async (sql) => {
+  private async finalizeBatch(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "migrationRunId" | "migrationOperation">,
+    batchId: string
+  ): Promise<void> {
+    await this.store.database.withContext(context, async (sql) => {
       const header = await sql.query<{ id: string; scope_kind: "workspace" | "room"; room_id: string | null; status: "db_committed" | "renamed" | "rolled_back" }>(
         "SELECT id, scope_kind, room_id, status FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, batchId]
@@ -2884,10 +2963,64 @@ export class WorkspaceCompletionService {
       const scope = row.scope_kind === "workspace"
         ? { kind: "workspace" as const }
         : { kind: "room" as const, roomId: requiredRoomId(row.room_id) };
-      return { workspaceId: context.workspaceId, id: batchId, scope, status: row.status, entries: entries.rows.map((entry) => ({ path: entry.path, sha256: entry.sha256, content: Buffer.alloc(Number(entry.size)) })) };
-    });
-    if (batch.status !== "renamed") await this.files.recover(batch);
-    await this.store.database.withContext(context, async (sql) => {
+      const paths = entries.rows.map((entry) => entry.path);
+      // Hold the resource rows while the physical rename runs. A newer batch
+      // either waits for this recovery or is already visible here and is
+      // rejected, so an older transaction can never overwrite the current
+      // resource file after its metadata has advanced.
+      await sql.query(
+        `SELECT resource_id FROM workspace_completion_resource_versions
+         WHERE workspace_id = $1 AND file_batch_id = $2
+         UNION
+         SELECT resource_id FROM workspace_completion_skill_files
+         WHERE workspace_id = $1 AND file_batch_id = $2`,
+        [context.workspaceId, batchId]
+      );
+      await sql.query(
+        `SELECT * FROM workspace_completion_resources
+         WHERE workspace_id = $1 AND id IN (
+           SELECT resource_id FROM workspace_completion_resource_versions WHERE workspace_id = $1 AND file_batch_id = $2
+           UNION
+           SELECT resource_id FROM workspace_completion_skill_files WHERE workspace_id = $1 AND file_batch_id = $2
+         ) FOR UPDATE`,
+        [context.workspaceId, batchId]
+      );
+      if (paths.length > 0) {
+        const conflictingResource = await sql.query<{ file_path: string }>(
+          `SELECT version.file_path
+           FROM workspace_completion_resource_versions version
+           JOIN workspace_completion_resources resource
+             ON resource.workspace_id = version.workspace_id AND resource.id = version.resource_id
+           WHERE version.workspace_id = $1
+             AND version.file_path = ANY($2::TEXT[])
+             AND version.file_batch_id IS DISTINCT FROM $3
+             AND (resource.current_confirmed_version = version.version
+               OR resource.current_provisional_version = version.version
+               OR resource.candidate_version = version.version)
+           LIMIT 1`,
+          [context.workspaceId, paths, batchId]
+        );
+        if (conflictingResource.rows[0]) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503, { path: conflictingResource.rows[0].file_path });
+        const conflictingDocument = await sql.query<{ file_path: string }>(
+          `SELECT file_path FROM workspace_completion_workspace_documents
+           WHERE workspace_id = $1 AND file_path = ANY($2::TEXT[]) AND file_batch_id IS DISTINCT FROM $3
+           LIMIT 1`,
+          [context.workspaceId, paths, batchId]
+        );
+        if (conflictingDocument.rows[0]) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503, { path: conflictingDocument.rows[0].file_path });
+        // Completion owns these paths. A legacy generic-file ledger entry is
+        // an ownership conflict, not permission to overwrite or silently
+        // migrate the user's file; surface it for an explicit recovery.
+        const conflictingWorkspaceFile = await sql.query<{ path: string }>(
+          `SELECT path FROM workspace_files
+           WHERE workspace_id = $1 AND path = ANY($2::TEXT[])
+           LIMIT 1`,
+          [context.workspaceId, paths]
+        );
+        if (conflictingWorkspaceFile.rows[0]) throw new WorkspaceServerError("workspace_completion_file_ledger_conflict", 409, { path: conflictingWorkspaceFile.rows[0].path });
+      }
+      const batch = { workspaceId: context.workspaceId, id: batchId, scope, status: row.status, entries: entries.rows.map((entry) => ({ path: entry.path, sha256: entry.sha256, content: Buffer.alloc(Number(entry.size)) })) };
+      if (batch.status !== "renamed") await this.files.recover(batch);
       await sql.query(
         `UPDATE workspace_completion_file_batches SET status = 'renamed', updated_at = NOW()
          WHERE workspace_id = $1 AND id = $2 AND status = 'db_committed'`,
@@ -3352,7 +3485,7 @@ export class WorkspaceCompletionService {
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::TIMESTAMPTZ, $9, $10, $11::JSONB, $12)`,
       [
         context.workspaceId, approvalId, resource.id, version, approval.principalAccountId,
-        approval.operationId, approval.requestId, approval.timestamp, approval.canonicalPayloadHash,
+        approval.operationId, approval.requestId, approval.requestTimestamp, approval.canonicalPayloadHash,
         approval.signature, canonicalJson(change), context.operationId
       ]
     );
@@ -3413,12 +3546,18 @@ export class WorkspaceCompletionService {
 
   private async baseAuthority(sql: WorkspaceSql, workspaceId: string, roomId: string | undefined, authority: "execute" | "edit" | "admin"): Promise<boolean> {
     if (authority === "admin") {
-      const result = await sql.query<{ allowed: boolean }>("SELECT samurai_workspace_is_writable($1) AND samurai_can_workspace($1, 'admin') AS allowed", [workspaceId]);
+      // A legacy backfill freezes ordinary Workspace writes.  The only
+      // exception is the database-proven migration capability, and ordinary
+      // Completion policy rules are still evaluated by assertPolicyAllowed.
+      const result = await sql.query<{ allowed: boolean }>(
+        "SELECT samurai_completion_migration_write_allowed($1) OR (samurai_workspace_is_writable($1) AND samurai_can_workspace($1, 'admin')) AS allowed",
+        [workspaceId]
+      );
       return result.rows[0]?.allowed === true;
     }
     if (!roomId) return false;
     const result = await sql.query<{ allowed: boolean }>(
-      "SELECT samurai_workspace_is_writable($1) AND samurai_can_room($1, $2, $3) AS allowed",
+      "SELECT samurai_completion_migration_write_allowed($1) OR (samurai_workspace_is_writable($1) AND samurai_can_room($1, $2, $3)) AS allowed",
       [workspaceId, roomId, authority]
     );
     return result.rows[0]?.allowed === true;
@@ -4290,12 +4429,16 @@ function trustedHumanPolicyApproval(context: WorkspaceRequestContext): TrustedHu
   }
   assertOpaqueId(caller.requestId, "request_id_invalid");
   const timestamp = Number(caller.timestamp);
-  if (!Number.isFinite(timestamp)) throw new WorkspaceServerError("workspace_completion_policy_verified_human_required", 403);
+  const requestTimestamp = new Date(timestamp);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(requestTimestamp.getTime())) {
+    throw new WorkspaceServerError("workspace_completion_policy_verified_human_required", 403);
+  }
   return {
     principalAccountId: caller.principalAccountId,
     requestId: caller.requestId,
     operationId: caller.operationId,
     timestamp: caller.timestamp,
+    requestTimestamp: requestTimestamp.toISOString(),
     canonicalPayloadHash: caller.canonicalPayloadHash,
     signature: caller.signature
   };

@@ -17,6 +17,8 @@ import {
   normalizeExternalIntegrationError,
   normalizeConnectorEvent,
   officialConnectorManifests,
+  redactExternalText,
+  redactExternalValue,
   validateMcpSchema,
   type ConnectorEvent,
   type ContextSnapshotSource,
@@ -35,6 +37,24 @@ function connectionLookup() {
     app_id: "codex-app",
     status: "active" as const,
     delegated_principal: { kind: "human" as const, participant_id: "account-1" },
+    allowed_room_ids: ["room-1"],
+    ingress_classes: ["query", "domain_operation", "activity_ingest"] as Array<"query" | "domain_operation" | "activity_ingest">
+  };
+  return {
+    connection,
+    getExternalAppConnection: async (id: string) => id === connection.id ? connection : undefined,
+    getExternalAppConnectionByConnector: async (input: { workspaceId: string; connectorId: string }) => input.workspaceId === connection.workspace_id && input.connectorId === connection.connector_id ? connection : undefined
+  };
+}
+
+function agentConnectionLookup() {
+  const connection = {
+    id: "connection-agent-1",
+    workspace_id: "workspace-1",
+    connector_id: "codex",
+    app_id: "codex-app",
+    status: "active" as const,
+    delegated_principal: { kind: "agent" as const, agent_id: "agent-1", requested_by_participant_id: "account-1" },
     allowed_room_ids: ["room-1"],
     ingress_classes: ["query", "domain_operation", "activity_ingest"] as Array<"query" | "domain_operation" | "activity_ingest">
   };
@@ -152,6 +172,22 @@ describe("external integration contracts", () => {
     const target = await service.resolveTarget({ auth, workspaceId: "workspace-1", projectRef: "project-a", externalSessionId: "session-a" });
     expect(target).toMatchObject({ roomId: "room-1", bindingVersion: 1, projectRef: "project-a" });
     await expect(service.assertTargetCurrent(target)).resolves.toMatchObject({ room_id: "room-1", binding_version: 1 });
+  });
+
+  it("keeps the requesting participant when an Agent owns a Connection", async () => {
+    const store = new MemoryExternalIntegrationStore();
+    const lookup = agentConnectionLookup();
+    let observedPrincipal: unknown;
+    const service = new RoomBindingService({
+      store,
+      connections: lookup,
+      authorization: { assertRoom: async (principal) => { observedPrincipal = principal; } },
+      now: () => new Date(now),
+      id: () => "binding-agent"
+    });
+    const auth: ExternalIntegrationAuthContext = { workspaceId: "workspace-1", accountId: "account-1", connectionId: lookup.connection.id, connectorId: "codex", appId: "codex-app", scopes: ["room.binding.write"], tokenVersion: 1, expiresAt: now };
+    await service.bind({ auth, workspaceId: "workspace-1", accountId: "account-1", projectRef: "agent-project", roomId: "room-1", changedBy: "account-1" });
+    expect(observedPrincipal).toEqual({ kind: "agent", agentId: "agent-1", requestedByParticipantId: "account-1" });
   });
 
   it("applies the Workspace default Room only for a first Project binding", async () => {
@@ -468,6 +504,13 @@ describe("external integration contracts", () => {
     expect(JSON.stringify(stored)).not.toContain("s3cr3t-value");
     expect(ingested.activity.instruction).toBe("token=[REDACTED]");
     expect(ingested.activity.payload).toMatchObject({ access_token: "[REDACTED]", nested: { cookie: "[REDACTED]" } });
+  });
+
+  it("redacts camelCase secrets in JSON text and nested Activity payloads", () => {
+    const text = redactExternalText('{"accessToken":"s3cr3t-value","privateKey":"s3cr3t-key"}');
+    expect(text).toBe('{"accessToken":[REDACTED],"privateKey":[REDACTED]}');
+    const value = redactExternalValue({ accessToken: "s3cr3t-value", nested: { privateKey: "s3cr3t-key" } });
+    expect(value).toEqual({ accessToken: "[REDACTED]", nested: { privateKey: "[REDACTED]" } });
   });
 
   it("creates one frozen startup snapshot within the token budget", async () => {

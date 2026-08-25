@@ -16,11 +16,15 @@ const Input = z.object({
 const Output = collectionPatchWriteValueSchema;
 
 export interface CollectionPatchApplyPorts {
-  applyCollectionRecordPatch(input: { collectionId: string; recordId: string; patch: CollectionPatch }): Promise<{ before: z.infer<typeof Output>["before"]; after: z.infer<typeof Output>["resource"] }>;
+  applyCollectionRecordPatch(input: {
+    collectionId: string;
+    recordId: string;
+    patch: CollectionPatch;
+    trigger: { event: "record.patched"; operation: OperationRecord; trustedContext: TrustedDomainContext };
+  }): Promise<{ before: z.infer<typeof Output>["before"]; after: z.infer<typeof Output>["resource"] }>;
   mapCollectionPatchError(error: unknown): Error;
   collectionRecordRef(record: z.infer<typeof Output>["resource"]): ResourceRef;
   createCollectionRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, z.infer<typeof domainJsonValueSchema>>, after: Record<string, z.infer<typeof domainJsonValueSchema>>): Promise<RollbackPoint>;
-  queueCollectionTrigger(input: { collectionId: string; recordId: string; event: "record.patched" }): Promise<void>;
   runCollectionMutation<T, Extra extends Record<string, unknown>>(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; execute(operation: OperationRecord): Promise<{ resource: T; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string } & Extra> }): Promise<{ resource: T; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[] } & Extra>;
 }
 
@@ -79,18 +83,24 @@ const collectionPatchApply = defineCommand<CollectionPatchApplyPorts>()({
       execute: async function handleCollectionPatchApply(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const result = await ports.runCollectionMutation<z.infer<typeof Output>["resource"], { before: z.infer<typeof Output>["before"] }>({
           trustedContext: context, inputSummary: `Apply collection patch: ${input.collection_id}/${input.record_id}`, operationName: "collection.patch.apply",
-          proposedEffects: ["Apply a collection patch to an existing local record."],
+          proposedEffects: ["Apply a Collection patch and durably queue matching trigger jobs."],
           execute: async (operation) => {
             const patch: CollectionPatch = { id: input.patch_id ?? createId("collection_patch"), record_id: input.record_id, changes: input.changes, expected_version: input.expected_version, source_operation_id: operation.id, created_at: nowIso() };
             let patched;
-            try { patched = await ports.applyCollectionRecordPatch({ collectionId: input.collection_id, recordId: input.record_id, patch }); }
+            try {
+              patched = await ports.applyCollectionRecordPatch({
+                collectionId: input.collection_id,
+                recordId: input.record_id,
+                patch,
+                trigger: { event: "record.patched", operation, trustedContext: context }
+              });
+            }
             catch (error) { throw ports.mapCollectionPatchError(error); }
             const ref = ports.collectionRecordRef(patched.after);
             const rollbackPoint = await ports.createCollectionRollback(operation, [ref], { record: domainJsonValueSchema.parse(patched.before) }, { record: domainJsonValueSchema.parse(patched.after) });
             return { resource: patched.after, before: patched.before, ref, rollbackPoint, summary: `Applied collection patch ${patch.id}.` };
           }
         });
-        await ports.queueCollectionTrigger({ collectionId: result.resource.collection_id, recordId: result.resource.id, event: "record.patched" });
         return { ok: true, value: Output.parse(result) };
       }
     };

@@ -3,9 +3,11 @@
   "test_id": "F05",
   "command": "pnpm core:test:signed-gateway-sandbox",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
   "worktree_clean": false,
-  "source_sha256": "02c12925471a51797e719abf1993bf8772f64f92bc6cb488d7e7a023a62afa0f",
+  "source_sha256": "fb60da7de7ec47c0b7112e41a66bc57d915574b8c76833dca7af04aa2cf23810",
+  "source_graph_sha256": "b84c9406362f3b3a9f7df128f8b1784f3caae5f6b8fcb16940e4699884440505",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "apps/server/src/api-server.ts",
     "apps/server/src/index.ts",
@@ -18,18 +20,31 @@
     "packages/runtime/src/index.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/signed-gateway-sandbox-flow.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-signed-gateway-sandbox-flow.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-12T03:49:24.725Z",
-  "completed_at": "2026-07-12T03:49:24.871Z",
+  "started_at": "2026-08-21T21:54:01.466Z",
+  "completed_at": "2026-08-21T21:54:02.804Z",
   "assertions": [
     {
       "name": "Signed webhook verifies and invalid signature rejects",
@@ -42,7 +57,7 @@
       "expected": true
     },
     {
-      "name": "Gateway crosses Domain Command, saves Workspace and delivers reply",
+      "name": "Gateway crosses Domain Command, saves Workspace and delivers reply without metadata granting Room access",
       "actual": true,
       "expected": true
     }
@@ -59,7 +74,8 @@
     "real_docker_executed": false,
     "domain_command_executions": 1,
     "workspace_inbound_saved": 1,
-    "session_saved": true,
+    "metadata_does_not_grant_room_access": true,
+    "session_saved": false,
     "reply_delivered": true
   }
 }

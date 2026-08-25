@@ -16,7 +16,8 @@ function run(label, command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     stdio: "inherit",
-    env: { ...process.env, ...(options.env ?? {}) }
+    env: { ...process.env, ...(options.env ?? {}) },
+    timeout: options.timeoutMs ?? 15 * 60 * 1000
   });
   const passed = result.status === 0 && !result.error;
   checks.push({
@@ -87,7 +88,7 @@ function disposableEnvironment() {
   const role = "samurai_server04_runtime";
   const started = captured("docker", [
     "run", "--detach", "--rm", "--name", container, "--publish", "127.0.0.1::5432",
-    "--env", "POSTGRES_PASSWORD=" + password, "postgres:16-alpine"
+    "--env", "POSTGRES_PASSWORD=" + password, "postgres:17-alpine"
   ]);
   if (started.status !== 0) throw new Error("server04_postgresql_unavailable:" + String(started.stderr || started.error?.message || "docker_postgres_start_failed").trim());
   try {
@@ -163,7 +164,8 @@ async function writeReports() {
     "Hosted and Self-host PostgreSQL Server03 probes",
     "Hosted and Self-host PostgreSQL legacy Server04 learning probes",
     "Hosted and Self-host PostgreSQL Completion Server04 probes",
-    "Hosted and Self-host PostgreSQL Completion Server04 load probes"
+    "Hosted and Self-host PostgreSQL Completion Server04 load probes",
+    "Hosted and Self-host PostgreSQL Runtime recovery probes"
   ];
   const statusFor = (label) => checks.find((check) => check.label === label)?.status === "passed";
   const actualPostgresqlPassed = liveLabels.every(statusFor);
@@ -175,7 +177,8 @@ async function writeReports() {
     file_recovery: statusFor("Hosted and Self-host PostgreSQL Completion Server04 probes"),
     migration: statusFor("Hosted and Self-host PostgreSQL Completion Server04 probes"),
     bundle: statusFor("Hosted and Self-host PostgreSQL Completion Server04 probes"),
-    performance: statusFor("Hosted and Self-host PostgreSQL Completion Server04 load probes")
+    performance: statusFor("Hosted and Self-host PostgreSQL Completion Server04 load probes"),
+    runtime_recovery: statusFor("Hosted and Self-host PostgreSQL Runtime recovery probes")
   };
   const unchecked = checks.filter((check) => check.status !== "passed").map((check) => check.label);
   const head = captured("git", ["rev-parse", "HEAD"]);
@@ -194,6 +197,7 @@ async function writeReports() {
       migration: categories.migration ? "passed" : "failed",
       bundle: categories.bundle ? "passed" : "failed",
       performance: categories.performance ? "passed" : "failed",
+      runtime_recovery: categories.runtime_recovery ? "passed" : "failed",
       unverified: unchecked,
       intentional_out_of_scope: ["Native App UI", "OAuth", "MCP", "Plugin", "Vector DB", "Graph DB", "Policy DSL"]
     },
@@ -210,6 +214,7 @@ async function writeReports() {
     `- Migration: ${categories.migration ? "PASS" : "FAIL"}`,
     `- Bundle: ${categories.bundle ? "PASS" : "FAIL"}`,
     `- 性能計測: ${categories.performance ? "PASS" : "FAIL"}`,
+    `- Runtime復旧／結果不明: ${categories.runtime_recovery ? "PASS" : "FAIL"}`,
     "- 確認範囲: schema/RLS、Realtime、ファイル本文/復旧、Review、Policy、Skill package、Evaluation/Curator Job、移行、Bundle v4、負荷、API契約。",
     "- 未解決事項:",
     ...(failures.length ? failures.map((check) => `  - ${check.label}: ${check.error ?? `exit=${check.exit_code ?? "unknown"}`}`) : ["  - なし"]),
@@ -249,6 +254,7 @@ try {
     run("HTTP Server build", "pnpm", ["--filter", "@samurai-agent/server", "run", "build"]),
     run("completion PostgreSQL probe typecheck", "pnpm", ["exec", "tsc", "--noEmit", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "Bundler", "--allowImportingTsExtensions", "--esModuleInterop", "--skipLibCheck", "--strict", "--types", "node", "scripts/verify-server-04-completion-rls.ts"]),
     run("completion PostgreSQL load probe typecheck", "pnpm", ["exec", "tsc", "--noEmit", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "Bundler", "--allowImportingTsExtensions", "--esModuleInterop", "--skipLibCheck", "--strict", "--types", "node", "scripts/verify-server-04-completion-load.ts"]),
+    run("runtime recovery PostgreSQL probe typecheck", "pnpm", ["exec", "tsc", "--noEmit", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "Bundler", "--allowImportingTsExtensions", "--esModuleInterop", "--skipLibCheck", "--strict", "--types", "node", "scripts/verify-runtime-recovery-rls.ts"]),
     run("Native App build", "pnpm", ["--filter", "@samurai-agent/web", "run", "build"]),
     run("Server04 and completion focused tests", "pnpm", ["exec", "vitest", "run",
       "packages/workspace-server/src/schema.test.ts",
@@ -274,11 +280,24 @@ try {
         disposable = disposableEnvironment();
         environment = disposable.env;
       }
-      run("Hosted and Self-host PostgreSQL Server02 probes", "node", ["--import", "tsx", "scripts/verify-server-02-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Server03 probes", "node", ["--import", "tsx", "scripts/verify-server-03-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL legacy Server04 learning probes", "node", ["--import", "tsx", "scripts/verify-server-04-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Completion Server04 probes", "node", ["--import", "tsx", "scripts/verify-server-04-completion-rls.ts"], { env: environment });
-      run("Hosted and Self-host PostgreSQL Completion Server04 load probes", "node", ["--import", "tsx", "scripts/verify-server-04-completion-load.ts"], { env: environment });
+      const postgresqlChecks = [
+        ["Hosted and Self-host PostgreSQL Server02 probes", ["--import", "tsx", "scripts/verify-server-02-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL Server03 probes", ["--import", "tsx", "scripts/verify-server-03-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL legacy Server04 learning probes", ["--import", "tsx", "scripts/verify-server-04-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL Completion Server04 probes", ["--import", "tsx", "scripts/verify-server-04-completion-rls.ts"]],
+        ["Hosted and Self-host PostgreSQL Completion Server04 load probes", ["--import", "tsx", "scripts/verify-server-04-completion-load.ts"]],
+        ["Hosted and Self-host PostgreSQL Runtime recovery probes", ["--import", "tsx", "scripts/verify-runtime-recovery-rls.ts"]]
+      ];
+      // Every probe owns and cleans up its own Workspace fixture. Run every
+      // one even when an earlier probe fails so a single CI run reports all
+      // independently observable PostgreSQL failures. A later result is not
+      // downgraded to a synthetic "prerequisite_failed" success/failure.
+      for (const [label, args] of postgresqlChecks) {
+        run(label, "node", args, {
+          env: environment,
+          ...(label.includes("load probes") ? { timeoutMs: 30 * 60 * 1000 } : {})
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       checks.push({
@@ -293,7 +312,8 @@ try {
         "Hosted and Self-host PostgreSQL Server03 probes",
         "Hosted and Self-host PostgreSQL legacy Server04 learning probes",
         "Hosted and Self-host PostgreSQL Completion Server04 probes",
-        "Hosted and Self-host PostgreSQL Completion Server04 load probes"
+        "Hosted and Self-host PostgreSQL Completion Server04 load probes",
+        "Hosted and Self-host PostgreSQL Runtime recovery probes"
       ]) {
         checks.push({
           label,
@@ -335,6 +355,13 @@ try {
     });
     checks.push({
       label: "Hosted and Self-host PostgreSQL Completion Server04 load probes",
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      status: "failed",
+      error: "static_checks_failed"
+    });
+    checks.push({
+      label: "Hosted and Self-host PostgreSQL Runtime recovery probes",
       started_at: new Date().toISOString(),
       completed_at: new Date().toISOString(),
       status: "failed",

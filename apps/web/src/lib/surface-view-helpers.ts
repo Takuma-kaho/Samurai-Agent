@@ -20,15 +20,16 @@ export function isArtifactPreviewable(artifact: ArtifactRecord): boolean {
   return ["markdown", "document", "note", "generated_report", "pdf", "image"].includes(artifact.kind);
 }
 
-export function artifactContentUrl(artifact: ArtifactRecord): string {
-  return `/api/artifacts/${encodeURIComponent(artifact.id)}/content`;
+export function artifactContentUrl(artifact: ArtifactRecord, content: string): string {
+  if (!isPdfArtifact(artifact) && !isImageArtifact(artifact)) return "";
+  return `data:${artifactContentType(artifact)};base64,${content}`;
 }
 
 export function artifactContentType(artifact: ArtifactRecord): string {
   const contentType = artifact.metadata.content_type;
   if (typeof contentType === "string") return contentType;
   if (artifact.kind === "pdf") return "application/pdf";
-  if (artifact.kind === "image") return "image/*";
+  if (artifact.kind === "image") return "image/png";
   return "text/markdown";
 }
 

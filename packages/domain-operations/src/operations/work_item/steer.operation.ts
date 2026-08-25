@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { workItemValueSchema } from "../../value-objects/work.js";
 
 const Input = z.object({
@@ -10,7 +10,7 @@ const Input = z.object({
 const Output = workItemValueSchema;
 
 export interface WorkItemSteerPorts {
-  steerWorkItem(input: { workItemId: string; instruction?: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
+  steerWorkItem(input: { workItemId: string; instruction?: string; roomId: string }): Promise<z.infer<typeof Output>> | z.infer<typeof Output>;
 }
 
 const workItemSteer = defineCommand<WorkItemSteerPorts>()({
@@ -53,9 +53,10 @@ const workItemSteer = defineCommand<WorkItemSteerPorts>()({
   output: Output,
   createHandler(ports) {
     return {
-      execute: async function handleWorkItemSteer(_context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
+      execute: async function handleWorkItemSteer(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const value = await ports.steerWorkItem({
           workItemId: input.work_item_id,
+          roomId: requireRoomContext(context, "work_item.steer"),
           ...(input.instruction === undefined ? {} : { instruction: input.instruction })
         });
         return { ok: true, value: Output.parse(value) };

@@ -3,9 +3,11 @@
   "test_id": "A03",
   "command": "pnpm core:test:command-parity",
   "status": "passed",
-  "commit_sha": "820f9f520b883464834b2f033651347da08987b1",
+  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
   "worktree_clean": false,
-  "source_sha256": "7e6743586348a6fc6e6c54d85b389c700f211734b18754ec614d658842222864",
+  "source_sha256": "689c6dbca687936318679fefef4df3c9abeebbfa072cd5370b1edb17ae348b50",
+  "source_graph_sha256": "83b044a2598a2c675253a64bf04e9afab094593c5e842c5755dd63050bf4adcf",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
     "packages/action-catalog/src/index.ts",
     "packages/runtime/src/agent-runtime.ts",
@@ -13,18 +15,31 @@
     "packages/runtime/src/index.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/domain-command-parity.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-domain-command-parity.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-14T09:17:56.554Z",
-  "completed_at": "2026-07-14T09:18:22.034Z",
+  "started_at": "2026-08-23T06:27:09.496Z",
+  "completed_at": "2026-08-23T06:27:11.590Z",
   "assertions": [
     {
       "name": "Representative operations",
@@ -42,19 +57,22 @@
       "expected": 50
     },
     {
-      "name": "Validation, change, audit and render parity",
+      "name": "Validation, change, history and render parity",
       "actual": true,
       "expected": true
     }
   ],
   "result": {
     "status": "passed",
+    "gates": [
+      "IN02"
+    ],
     "representative_operations": 10,
     "entrances": 5,
     "executions": 50,
     "validation_equal": true,
     "change_equal": true,
-    "audit_equal": true,
+    "history_equal": true,
     "render_equal": true
   }
 }

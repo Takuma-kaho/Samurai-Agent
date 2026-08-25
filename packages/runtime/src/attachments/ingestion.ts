@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { AttachmentIngestionRecordSchema, createId, nowIso, type AttachmentIngestionRecord, type JsonValue, type ResourceRef } from "@samurai-agent/core-schemas";
+
+const maxAttachmentExpandedBytes = 20 * 1024 * 1024;
+const maxZipEntryExpandedBytes = 8 * 1024 * 1024;
+const maxZipEntries = 2_048;
 
 export interface AttachmentIngestionInput {
   filePath: string;
@@ -26,7 +29,8 @@ export async function ingestAttachment(input: AttachmentIngestionInput): Promise
   while (attempts < maxAttempts) {
     attempts += 1;
     try {
-      bytes = await (input.read ?? (async (filePath) => readFile(filePath)))(input.filePath);
+      if (!input.read) throw new Error("attachment_reader_unavailable");
+      bytes = await input.read(input.filePath);
       break;
     } catch (caught) {
       error = caught;
@@ -104,6 +108,7 @@ function extractAttachment(mediaType: AttachmentIngestionRecord["media_type"], b
 function unzipEntries(bytes: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>();
   let offset = 0;
+  let expandedBytes = 0;
   while (offset + 30 <= bytes.length) {
     const signature = bytes.readUInt32LE(offset);
     if (signature !== 0x04034b50) break;
@@ -111,14 +116,30 @@ function unzipEntries(bytes: Buffer): Map<string, Buffer> {
     const compression = bytes.readUInt16LE(offset + 8);
     if (flags & 0x08) throw new Error("attachment_zip_data_descriptor_unsupported");
     const compressedSize = bytes.readUInt32LE(offset + 18);
+    const declaredUncompressedSize = bytes.readUInt32LE(offset + 22);
     const nameLength = bytes.readUInt16LE(offset + 26);
     const extraLength = bytes.readUInt16LE(offset + 28);
+    if (entries.size >= maxZipEntries) throw new Error("attachment_zip_entry_count_too_large");
     const name = bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
     const dataStart = offset + 30 + nameLength + extraLength;
+    if (dataStart > bytes.length || compressedSize > bytes.length - dataStart) throw new Error("attachment_zip_entry_invalid");
+    if (declaredUncompressedSize !== 0xffffffff && declaredUncompressedSize > maxZipEntryExpandedBytes) {
+      throw new Error("attachment_zip_entry_too_large");
+    }
     const compressed = bytes.subarray(dataStart, dataStart + compressedSize);
-    const data = compression === 0 ? compressed : compression === 8 ? inflateRawSync(compressed) : (() => { throw new Error(`attachment_zip_compression_unsupported:${compression}`); })();
+    const remaining = maxAttachmentExpandedBytes - expandedBytes;
+    if (remaining <= 0) throw new Error("attachment_decompressed_too_large");
+    const data = compression === 0
+      ? compressed
+      : compression === 8
+        ? inflateAttachment(compressed, Math.min(maxZipEntryExpandedBytes, remaining))
+        : (() => { throw new Error(`attachment_zip_compression_unsupported:${compression}`); })();
+    if (data.byteLength > maxZipEntryExpandedBytes || data.byteLength > remaining) throw new Error("attachment_decompressed_too_large");
+    expandedBytes += data.byteLength;
     entries.set(name, Buffer.from(data));
-    offset = dataStart + compressedSize;
+    const nextOffset = dataStart + compressedSize;
+    if (nextOffset <= offset) throw new Error("attachment_zip_entry_invalid");
+    offset = nextOffset;
   }
   if (entries.size === 0) throw new Error("attachment_zip_invalid");
   return entries;
@@ -128,11 +149,16 @@ function extractPdfText(bytes: Buffer): Array<{ name: string; text: string }> {
   if (!bytes.subarray(0, 5).equals(Buffer.from("%PDF-"))) throw new Error("attachment_pdf_invalid");
   const source = bytes.toString("latin1");
   const parts: Array<{ name: string; text: string }> = [];
+  let expandedBytes = 0;
   let index = 0;
   for (const match of source.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
-    let stream = Buffer.from(match[1] ?? "", "latin1");
     const dictionary = source.slice(Math.max(0, (match.index ?? 0) - 300), match.index);
-    if (/\/FlateDecode/.test(dictionary)) stream = inflateRawSync(stream);
+    const rawStream = Buffer.from(match[1] ?? "", "latin1");
+    const stream = /\/FlateDecode/.test(dictionary)
+      ? inflateAttachment(rawStream, maxAttachmentExpandedBytes - expandedBytes)
+      : rawStream;
+    if (stream.byteLength > maxAttachmentExpandedBytes - expandedBytes) throw new Error("attachment_decompressed_too_large");
+    expandedBytes += stream.byteLength;
     const content = stream.toString("latin1");
     const strings = [...content.matchAll(/\((?:\\.|[^\\)])*\)\s*Tj|\[(.*?)\]\s*TJ/gs)].flatMap((item) => {
       if (item[1] !== undefined) return [...item[1].matchAll(/\((?:\\.|[^\\)])*\)/g)].map((token) => decodePdfString(token[0].slice(1, -1)));
@@ -143,6 +169,18 @@ function extractPdfText(bytes: Buffer): Array<{ name: string; text: string }> {
     if (text) parts.push({ name: `stream-${++index}`, text });
   }
   return parts;
+}
+
+function inflateAttachment(bytes: Buffer, maxOutputLength: number): Buffer {
+  if (maxOutputLength <= 0) throw new Error("attachment_decompressed_too_large");
+  try {
+    return inflateRawSync(bytes, { maxOutputLength });
+  } catch (error) {
+    if (error instanceof Error && (error.message.includes("maxOutputLength") || error.message.includes("too large") || (error as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE")) {
+      throw new Error("attachment_decompressed_too_large");
+    }
+    throw new Error("attachment_compressed_data_invalid");
+  }
 }
 
 function xmlText(xml: string, pattern: RegExp): string {

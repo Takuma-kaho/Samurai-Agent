@@ -1,6 +1,6 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
+import { defineCommand, requireRoomContext, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { skillOptimizationPromoteValueSchema } from "../../../value-objects/skill.js";
 
 const Input = z.object({
@@ -13,7 +13,7 @@ export type SkillOptimizationPromoteInput = z.infer<typeof Input>;
 export type SkillOptimizationPromoteOutput = z.infer<typeof Output>;
 
 export interface SkillOptimizationPromotePorts {
-  promoteSkillOptimization(input: { optimizationRunId: string; candidateId: string }): Promise<SkillOptimizationPromoteOutput> | SkillOptimizationPromoteOutput;
+  promoteSkillOptimization(input: { optimizationRunId: string; candidateId: string; roomId: string }): Promise<SkillOptimizationPromoteOutput> | SkillOptimizationPromoteOutput;
 }
 
 const skillOptimizationPromote = defineCommand<SkillOptimizationPromotePorts>()({
@@ -67,7 +67,7 @@ const skillOptimizationPromote = defineCommand<SkillOptimizationPromotePorts>()(
   createHandler(ports) {
     return {
       execute: async function handleSkillOptimizationPromote(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
-        return { ok: true, value: Output.parse(await ports.promoteSkillOptimization({ optimizationRunId: input.optimization_run_id, candidateId: input.candidate_id })) };
+        return { ok: true, value: Output.parse(await ports.promoteSkillOptimization({ optimizationRunId: input.optimization_run_id, candidateId: input.candidate_id, roomId: requireRoomContext(context, "skill.optimization.promote") })) };
       }
     };
   }

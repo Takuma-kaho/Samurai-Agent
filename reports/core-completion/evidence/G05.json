@@ -3,17 +3,18 @@
   "test_id": "G05",
   "command": "pnpm core:test:release-hygiene",
   "status": "passed",
-  "commit_sha": "1d8370ea7192a556d35597bda566b1be3a515f75",
+  "commit_sha": "a1c07f646a9486c0c1bed5672371531ab75bfac1",
   "worktree_clean": false,
-  "source_sha256": "dacde0ba629978cc6690945a90336d45129ff2dcf5f768411780b56d6f6143b8",
+  "source_sha256": "57812b65075bca9115ddff7f828dcdb5f01543e87838ef2cfc69786b4650d684",
   "source_files": [
     "package.json",
     "plans/core-completion-scorecard.json",
     "scripts/lib/core-evidence.mjs",
+    "scripts/verify-phase13-completion.mjs",
     "scripts/verify-release-hygiene.mjs"
   ],
-  "started_at": "2026-07-12T04:37:02.672Z",
-  "completed_at": "2026-07-12T04:38:09.704Z",
+  "started_at": "2026-08-24T04:34:08.307Z",
+  "completed_at": "2026-08-24T04:34:31.157Z",
   "assertions": [
     {
       "name": "inspection_ok",
@@ -61,10 +62,21 @@
     "whitespace_issues": [],
     "source_read_errors": [],
     "secret_leaks": [],
+    "secret_advisories": [
+      "apps/desktop/src/workspace-attachment-requests.test.ts",
+      "apps/desktop/src/workspace-learning-requests.test.ts",
+      "apps/desktop/src/workspace-room-requests.test.ts",
+      "packages/gateway/src/gateway.test.ts",
+      "packages/runtime/src/backend-release-readiness-script.test.ts",
+      "packages/skill-optimization/src/skill-optimization.test.ts",
+      "packages/workspace-server/src/config.test.ts",
+      "packages/workspace-server/src/workspace-bundle-v3.test.ts",
+      "scripts/fixtures/owner-access-security.ts"
+    ],
     "duplicate_sources": [],
     "duplicate_candidates": [],
     "untracked_generated": [],
-    "inspected_source_files": 316,
-    "dirty_entries": 197
+    "inspected_source_files": 955,
+    "dirty_entries": 0
   }
 }

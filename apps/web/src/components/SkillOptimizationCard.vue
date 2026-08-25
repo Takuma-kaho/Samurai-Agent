@@ -48,7 +48,11 @@ async function run(command: "skill.optimization.promote" | "skill.optimization.r
   if (!candidate || !runId) return;
   busy.value = true;
   try {
-    await api.runDomainCommand(command, { optimization_run_id: runId, candidate_id: candidate.id });
+    await api.runSkillOptimizationAction({
+      runId,
+      action: command.endsWith("promote") ? "promote" : "reject",
+      candidateId: candidate.id
+    });
     await load();
     emit("changed");
   } catch (cause) {

@@ -7,7 +7,11 @@ export function createPluginDomainServicePorts(services: Pick<RuntimeDomainServi
   return {
     "plugin.status.set": {
       setPluginEnabled: (id, enabled) => services.pluginDomainService.setEnabled(id, enabled),
-      findPluginStatus: (id) => services.pluginDomainService.findStatus(id),
+      getPluginEnabled: (id) => services.pluginDomainService.getEnabled(id),
+      findPluginStatus: (id) => {
+        const status = services.pluginDomainService.findStatus(id);
+        return status ? { manifest_id: status.manifest_id, version: status.version } : undefined;
+      },
       savePluginState: (input) => services.pluginDomainService.saveState(input),
       pluginNotFoundError: () => services.pluginDomainService.notFoundError()
     }

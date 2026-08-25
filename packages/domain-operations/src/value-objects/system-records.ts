@@ -8,6 +8,8 @@ export const sessionValueSchema = z.object({
 }).strict();
 
 export const settingsValueSchema = z.object({
+  workspace_name: z.string().optional(),
+  workspace_rules: z.array(z.string()).optional(),
   ui_locale: SupportedLocaleSchema, output_locale: SupportedLocaleSchema,
   memory_capture_mode: CaptureModeSchema, knowledge_wiki_capture_mode: CaptureModeSchema,
   skill_capture_mode: CaptureModeSchema, learning_enabled: z.boolean(), learning_budget_ratio: z.number().min(0).max(1), learning_budget_window_days: z.number().int().positive(), external_provider_role: ExternalProviderRoleSchema,

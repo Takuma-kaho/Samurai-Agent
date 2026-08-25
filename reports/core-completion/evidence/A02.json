@@ -3,85 +3,292 @@
   "test_id": "A02",
   "command": "pnpm core:test:command-ingress",
   "status": "passed",
-  "commit_sha": "820f9f520b883464834b2f033651347da08987b1",
+  "commit_sha": "d828d7023a30ac68d467dd3a9740085011d05b78",
   "worktree_clean": false,
-  "source_sha256": "2b38058f58f87dd166392089ce2edfe4d8eb2d1d645ff9f940356c74c1f311a5",
+  "source_sha256": "e8d24b4449c32b06c395efdca2d1c1b6e0b5ce74548d4ced541fbe7c8225606e",
+  "source_graph_sha256": "3a1d0e5fbace130b154659af05cf67e11ff642e6ca7c68fc7d5dff8df91c42d1",
+  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "source_files": [
-    "apps/desktop/src/main.ts",
     "apps/server/src/api-server.ts",
-    "apps/server/src/index.ts",
-    "apps/server/src/middleware/security.ts",
-    "apps/server/src/routes/backend-events.ts",
-    "apps/server/src/streams/backend-events.ts",
-    "apps/server/src/workers/automation-scheduler.ts",
-    "apps/web/src/lib/api.ts",
+    "apps/server/src/domain-ingress.ts",
     "packages/action-catalog/src/index.ts",
     "packages/runtime/src/agent-runtime.ts",
     "packages/runtime/src/commands/domain-command-bus.ts",
     "packages/runtime/src/index.ts",
     "packages/workspace-store/src/backup/backup-id.ts",
     "packages/workspace-store/src/index.ts",
-    "packages/workspace-store/src/migrations/gateway-delivery.ts",
+    "packages/workspace-store/src/kernel/migration-runner.ts",
+    "packages/workspace-store/src/kernel/session-search-index.ts",
+    "packages/workspace-store/src/kernel/workspace-database.ts",
+    "packages/workspace-store/src/kernel/workspace-db-schema.ts",
+    "packages/workspace-store/src/kernel/workspace-paths.ts",
+    "packages/workspace-store/src/migrations/001-core-baseline.ts",
+    "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
+    "packages/workspace-store/src/migrations/003-skill-optimization.ts",
+    "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
+    "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
+    "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
+    "packages/workspace-store/src/migrations/index.ts",
     "packages/workspace-store/src/repositories/backend-events.ts",
     "packages/workspace-store/src/search/scoring.ts",
+    "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
     "packages/workspace-store/src/transactions/recovery-policy.ts",
+    "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
     "packages/workspace-store/src/workspace-store.ts",
     "scripts/fixtures/domain-command-ingress.ts",
     "scripts/lib/core-evidence.mjs",
     "scripts/verify-domain-command-ingress.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-15T05:17:30.839Z",
-  "completed_at": "2026-07-15T05:17:31.072Z",
+  "started_at": "2026-08-22T01:41:46.426Z",
+  "completed_at": "2026-08-22T01:41:47.579Z",
   "assertions": [
     {
-      "name": "Five logical mutation entrances use Domain Command Bus",
+      "name": "Five Artifact entrances reach one Artifact Command binding",
       "actual": 5,
       "expected": 5
     },
     {
-      "name": "Web mutation boundary uses Server API",
+      "name": "All entrances use the canonical contract fingerprint",
+      "actual": "5439a8fbac80be3a6000378028546dd4a16df0b6ff1043d6bd03eae47b33140b",
+      "expected": "non-empty"
+    },
+    {
+      "name": "Artifact and Operation semantic result parity",
       "actual": true,
       "expected": true
     },
     {
-      "name": "Desktop mutation boundary uses Server API",
-      "actual": true,
-      "expected": true
+      "name": "Success and error parity",
+      "actual": {
+        "result": true,
+        "error": true
+      },
+      "expected": {
+        "result": true,
+        "error": true
+      }
     },
     {
-      "name": "Direct Server mutations",
-      "actual": 0,
-      "expected": 0
+      "name": "Invalid artifact.create has the canonical validation code and is rejected before every Handler with no artifact side effect",
+      "actual": {
+        "error": {
+          "code": "validation"
+        },
+        "entrances": [
+          {
+            "entrance": "web_runtime_api",
+            "handlerReached": false,
+            "artifactCommandSideEffects": 0
+          },
+          {
+            "entrance": "surface_operation",
+            "handlerReached": false,
+            "artifactCommandSideEffects": 0
+          },
+          {
+            "entrance": "provider_tool_call",
+            "handlerReached": false,
+            "artifactCommandSideEffects": 0
+          },
+          {
+            "entrance": "automation",
+            "handlerReached": false,
+            "artifactCommandSideEffects": 0
+          },
+          {
+            "entrance": "generated_surface_action",
+            "handlerReached": false,
+            "artifactCommandSideEffects": 0
+          }
+        ]
+      },
+      "expected": "validation and five zero-side-effect rejections"
+    },
+    {
+      "name": "Gateway transport admission cannot create Room content before participant authentication",
+      "actual": {
+        "status": "blocked",
+        "error": "gateway_participant_authentication_required",
+        "trusted": true,
+        "pairing_status": "approved",
+        "session_created": false,
+        "chat_started": false,
+        "boundary_policy_saved": false,
+        "artifact_handler_calls": 0,
+        "artifact_creations": 0,
+        "gateway_command_executions": 1
+      },
+      "expected": "blocked with no Session, Chat, boundary policy, or Artifact"
+    },
+    {
+      "name": "WorkspaceChange links to a BackendRun or direct Activity evidence",
+      "actual": [
+        {
+          "entrance": "web_runtime_api",
+          "count": 1,
+          "runBacked": false,
+          "allLinkedToRealBackendRuns": true,
+          "allLinkedToExpectedCause": true
+        },
+        {
+          "entrance": "surface_operation",
+          "count": 1,
+          "runBacked": false,
+          "allLinkedToRealBackendRuns": true,
+          "allLinkedToExpectedCause": true
+        },
+        {
+          "entrance": "provider_tool_call",
+          "count": 1,
+          "runBacked": true,
+          "allLinkedToRealBackendRuns": true,
+          "allLinkedToExpectedCause": true
+        },
+        {
+          "entrance": "automation",
+          "count": 1,
+          "runBacked": true,
+          "allLinkedToRealBackendRuns": true,
+          "allLinkedToExpectedCause": true
+        },
+        {
+          "entrance": "generated_surface_action",
+          "count": 1,
+          "runBacked": false,
+          "allLinkedToRealBackendRuns": true,
+          "allLinkedToExpectedCause": true
+        }
+      ],
+      "expected": "all linked"
+    },
+    {
+      "name": "Direct Store mutations",
+      "actual": false,
+      "expected": false
     }
   ],
   "result": {
     "status": "passed",
-    "real_ingresses": [
+    "gates": [
+      "IN01",
+      "IN02",
+      "IN03",
+      "IN12"
+    ],
+    "operation": "artifact.create",
+    "entrances": [
       {
-        "input_source": "runtime_api",
-        "command_id": "session.create"
+        "entrance": "web_runtime_api",
+        "source": "runtime_api"
       },
       {
-        "input_source": "surface_operation",
-        "command_id": "artifact.create"
+        "entrance": "surface_operation",
+        "source": "surface_operation"
       },
       {
-        "input_source": "gateway_inbound",
-        "command_id": "gateway.inbound.route"
+        "entrance": "provider_tool_call",
+        "source": "provider_tool_call"
       },
       {
-        "input_source": "automation",
-        "command_id": "automation.job.run"
+        "entrance": "automation",
+        "source": "provider_tool_call"
       },
       {
-        "input_source": "provider_tool_call",
-        "command_id": "artifact.create"
+        "entrance": "generated_surface_action",
+        "source": "generated_surface"
       }
     ],
-    "registered_mappings": 86,
-    "web_api_boundary": true,
-    "desktop_api_boundary": true,
-    "direct_server_mutations": 0
+    "binding": {
+      "operationId": "artifact.create",
+      "version": "6.0",
+      "handlerSymbol": "handleArtifactCreate"
+    },
+    "contract_fingerprint": "5439a8fbac80be3a6000378028546dd4a16df0b6ff1043d6bd03eae47b33140b",
+    "result_parity": true,
+    "error_parity": true,
+    "rejection_parity": {
+      "error": {
+        "code": "validation"
+      },
+      "entrances": [
+        {
+          "entrance": "web_runtime_api",
+          "handlerReached": false,
+          "artifactCommandSideEffects": 0
+        },
+        {
+          "entrance": "surface_operation",
+          "handlerReached": false,
+          "artifactCommandSideEffects": 0
+        },
+        {
+          "entrance": "provider_tool_call",
+          "handlerReached": false,
+          "artifactCommandSideEffects": 0
+        },
+        {
+          "entrance": "automation",
+          "handlerReached": false,
+          "artifactCommandSideEffects": 0
+        },
+        {
+          "entrance": "generated_surface_action",
+          "handlerReached": false,
+          "artifactCommandSideEffects": 0
+        }
+      ]
+    },
+    "gateway_admission": {
+      "status": "blocked",
+      "error": "gateway_participant_authentication_required",
+      "trusted": true,
+      "pairing_status": "approved",
+      "session_created": false,
+      "chat_started": false,
+      "boundary_policy_saved": false,
+      "artifact_handler_calls": 0,
+      "artifact_creations": 0,
+      "gateway_command_executions": 1
+    },
+    "artifact_operation_parity": true,
+    "workspace_change_telemetry": [
+      {
+        "entrance": "web_runtime_api",
+        "count": 1,
+        "runBacked": false,
+        "allLinkedToRealBackendRuns": true,
+        "allLinkedToExpectedCause": true
+      },
+      {
+        "entrance": "surface_operation",
+        "count": 1,
+        "runBacked": false,
+        "allLinkedToRealBackendRuns": true,
+        "allLinkedToExpectedCause": true
+      },
+      {
+        "entrance": "provider_tool_call",
+        "count": 1,
+        "runBacked": true,
+        "allLinkedToRealBackendRuns": true,
+        "allLinkedToExpectedCause": true
+      },
+      {
+        "entrance": "automation",
+        "count": 1,
+        "runBacked": true,
+        "allLinkedToRealBackendRuns": true,
+        "allLinkedToExpectedCause": true
+      },
+      {
+        "entrance": "generated_surface_action",
+        "count": 1,
+        "runBacked": false,
+        "allLinkedToRealBackendRuns": true,
+        "allLinkedToExpectedCause": true
+      }
+    ],
+    "direct_store_mutation": false
   }
 }

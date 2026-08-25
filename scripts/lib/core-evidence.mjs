@@ -8,33 +8,20 @@ const sourceReadScript = "process.stdout.write(require('node:fs').readFileSync(p
 export function committedSourceEvidence(root, sourceFiles) {
   const facadeImplementations = new Map([
     ["packages/runtime/src/index.ts", ["packages/runtime/src/agent-runtime.ts"]],
-    ["packages/workspace-store/src/index.ts", [
-      "packages/workspace-store/src/workspace-store.ts",
-      "packages/workspace-store/src/backup/backup-id.ts",
-      "packages/workspace-store/src/kernel/workspace-paths.ts",
-      "packages/workspace-store/src/kernel/workspace-database.ts",
-      "packages/workspace-store/src/kernel/workspace-db-schema.ts",
-      "packages/workspace-store/src/kernel/migration-runner.ts",
-      "packages/workspace-store/src/kernel/session-search-index.ts",
-      "packages/workspace-store/src/migrations/index.ts",
-      "packages/workspace-store/src/migrations/001-core-baseline.ts",
-      "packages/workspace-store/src/migrations/002-gateway-delivery.ts",
-      "packages/workspace-store/src/migrations/003-skill-optimization.ts",
-      "packages/workspace-store/src/migrations/004-tool-run-error-code.ts",
-      "packages/workspace-store/src/migrations/005-gateway-allowed-tools.ts",
-      "packages/workspace-store/src/migrations/006-pre-core04-schema-normalization.ts",
-      "packages/workspace-store/src/repositories/backend-events.ts",
-      "packages/workspace-store/src/search/scoring.ts",
-      "packages/workspace-store/src/transactions/workspace-file-transaction-coordinator.ts",
-      "packages/workspace-store/src/transactions/collection-record-recovery-handler.ts",
-      "packages/workspace-store/src/transactions/recovery-policy.ts"
+    ["packages/workspace-server/src/index.ts", [
+      "packages/workspace-server/src/workspace-server-store.ts",
+      "packages/workspace-server/src/workspace-files.ts",
+      "packages/workspace-server/src/schema.ts",
+      "packages/workspace-server/src/postgres.ts",
+      "packages/workspace-server/src/workspace-bundle-v3.ts",
+      "packages/workspace-server/src/workspace-completion-service.ts"
     ]],
     ["packages/runtime/src/provider.ts", ["packages/runtime/src/backend/provider.ts"]],
     ["packages/runtime/src/native-backend.ts", ["packages/runtime/src/backend/native-backend.ts"]],
     ["packages/runtime/src/external-assist-provider.ts", ["packages/runtime/src/backend/external-assist-provider.ts"]],
     ["packages/runtime/src/backend-event-bridge.ts", ["packages/runtime/src/backend/event-bridge.ts"]],
     ["packages/runtime/src/backend-feedback.ts", ["packages/runtime/src/backend/feedback.ts"]],
-    ["apps/server/src/index.ts", ["apps/server/src/api-server.ts", "apps/server/src/middleware/security.ts", "apps/server/src/routes/backend-events.ts", "apps/server/src/streams/backend-events.ts", "apps/server/src/workers/automation-scheduler.ts"]]
+    ["apps/server/src/index.ts", ["apps/server/src/workspace-server/http-server.ts", "apps/server/src/workspace-server/core.ts", "apps/server/src/server-config.ts", "apps/server/src/workers/automation-scheduler.ts"]]
   ]);
   const files = [...new Set(sourceFiles.flatMap((file) => [file, ...(facadeImplementations.get(file) ?? [])]))].sort();
   const commitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
@@ -51,7 +38,7 @@ export function committedSourceEvidence(root, sourceFiles) {
     imports: extractImportSpecifiers(sourceContents.get(file)).sort()
   }));
   const sourceGraphSha256 = createHash("sha256").update(JSON.stringify(sourceGraph)).digest("hex");
-  const contractVersions = readContractVersions(sourceContents.get("plans/domain-command-contract-ledger.json"));
+  const contractVersions = readContractVersions(readSourceFile(root, "plans/domain-command-contract-ledger.json"));
   const contractVersionsSha256 = createHash("sha256").update(JSON.stringify(contractVersions)).digest("hex");
   const headBlobs = new Map(execFileSync("git", ["ls-tree", "-r", "HEAD"], { cwd: root, encoding: "utf8" }).trim().split("\n").filter(Boolean).map((line) => { const match = line.match(/^\d+\s+blob\s+([0-9a-f]+)\t(.+)$/); return match ? [match[2], match[1]] : ["", ""]; }));
   const worktreeClean = files.every((file) => {
