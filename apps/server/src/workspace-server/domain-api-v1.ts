@@ -6,11 +6,9 @@ import {
   ActivityRecordSchema,
   AgentRecordSchema,
   ArtifactRecordSchema,
-  BackendRunRecordSchema,
   ResourceRefSchema,
   RoomRecordSchema,
   type ActivityRecord,
-  type BackendRunRecord,
   type JsonValue,
   type ResourceRef
 } from "@samurai-agent/core-schemas";
@@ -54,8 +52,10 @@ import { createPostgresChatSessionThroughDomainOperation } from "../adapters/run
 import { runPostgresChatTurnThroughDomainOperation } from "../adapters/runtime/postgres-chat-domain-operation";
 import { PostgresRuntimeCommandService } from "../adapters/runtime/postgres-runtime-chat";
 import { WorkspaceRealtimeGate } from "./realtime";
+import { RunControlService } from "./run-control-service";
 
 const v1OperationIds = new Set<string>(publicDomainOperationIds);
+const runControlService = new RunControlService();
 
 type V1Dependencies = {
   app: Express;
@@ -191,33 +191,26 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     const input = parseRunControlRequest(req.body, action.data);
     const operation = operationContext(req);
     const runId = pathParam(req, "runId");
-    const runtime = runtimeFor(req);
-    const before = await runtime.getBackendRun(runId);
-    if (!before) throw new WorkspaceServerError("runtime_backend_run_not_found", 404);
-    assertRunContext(input.context.room_id, input.context.session_id, before);
-    // A settled Run is a safe replay for lifecycle actions. `retry` is the
-    // exception: it deliberately creates a new attempt from a settled Run.
-    const replayed = action.data !== "retry" && isSettledRun(before);
-    let result: BackendRunRecord | Awaited<ReturnType<PostgresRuntimeCommandService["retryBackendRun"]>>;
-    if (action.data === "cancel") result = await runtime.cancelBackendRun(runId);
-    else if (action.data === "resume") result = await runtime.resumeBackendRun(runId, input.input);
-    else if (action.data === "sync") result = await runtime.syncBackendRun(runId);
-    else if (action.data === "recover") result = await runtime.recoverBackendRun(runId);
-    else result = await runtime.retryBackendRun(runId, {
+    const execution = await runControlService.execute({
+      runtime: runtimeFor(req),
+      action: action.data,
+      runId,
+      roomId: input.context.room_id,
+      sessionId: input.context.session_id,
+      resumeInput: input.input,
       idempotencyKey: operation.operationId,
-      ...(input.input.confirm_unknown === true ? { confirmUnknown: true } : {})
+      ...(input.input.confirm_unknown === true ? { confirmUnknown: true } : {}),
+      onChanged: async ({ action: changedAction, run }) => {
+        await appendAndEmitPublicEvent(dependencies, operation, {
+          eventType: "workspace.run.changed",
+          roomId: run.room_id,
+          authorizationAction: "execute",
+          resources: [{ kind: "backend_run", id: run.id, uri: `samurai://backend-runs/${run.id}` }],
+          payload: { run_id: run.id, status: run.status, action: changedAction }
+        });
+      }
     });
-    const run = isRunChatResult(result) ? result.backendRun : result;
-    if (!replayed) {
-      await appendAndEmitPublicEvent(dependencies, operation, {
-        eventType: "workspace.run.changed",
-        roomId: run.room_id,
-        authorizationAction: "execute",
-        resources: [{ kind: "backend_run", id: run.id, uri: `samurai://backend-runs/${run.id}` }],
-        payload: { run_id: run.id, status: run.status, action: action.data }
-      });
-    }
-    res.json(apiResponse(req, result as unknown as JsonValue, replayed));
+    res.json(apiResponse(req, execution.result as unknown as JsonValue, execution.replayed));
   }));
 
   app.get("/api/v1/workspaces/:workspaceId/events", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -612,11 +605,6 @@ function requireRoom(context: { room_id?: string }): string {
   return context.room_id;
 }
 
-function assertRunContext(roomId: string | undefined, sessionId: string | undefined, run: BackendRunRecord): void {
-  if (roomId !== undefined && roomId !== run.room_id) throw new WorkspaceServerError("domain_context_mismatch", 400);
-  if (sessionId !== undefined && sessionId !== run.session_id) throw new WorkspaceServerError("domain_context_mismatch", 400);
-}
-
 function activityStatus(outcome: "completed" | "failed" | "cancelled" | "unknown" | "not_run"): Exclude<ActivityRecord["status"], "recording"> {
   if (outcome === "completed") return "completed";
   if (outcome === "failed") return "failed";
@@ -626,14 +614,6 @@ function activityStatus(outcome: "completed" | "failed" | "cancelled" | "unknown
 
 function deterministicActivityId(workspaceId: string, roomId: string, dedupeKey: string): string {
   return `activity_${createHash("sha256").update(`${workspaceId}|${roomId}|${dedupeKey}`).digest("hex").slice(0, 48)}`;
-}
-
-function isSettledRun(run: BackendRunRecord): boolean {
-  return ["completed", "failed", "cancelled", "outcome_unknown"].includes(run.status);
-}
-
-function isRunChatResult(value: BackendRunRecord | { backendRun: BackendRunRecord }): value is { backendRun: BackendRunRecord } {
-  return Boolean(value && typeof value === "object" && "backendRun" in value);
 }
 
 function isReplayResult(value: unknown): boolean {

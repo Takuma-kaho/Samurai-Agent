@@ -101,6 +101,10 @@ export interface IdempotentOperationResult<T> {
   replayed: boolean;
 }
 
+type IdempotentOperationOptions = {
+  lockRoomHierarchy?: boolean;
+};
+
 export interface CreateInvitationResult {
   invitation: WorkspaceInvitation;
   token: string;
@@ -807,7 +811,7 @@ export class WorkspaceServerStore {
         details: { workspace_version: input.expectedWorkspaceVersion, parent_room_id: input.parentRoomId ?? null }
       });
       return mapped;
-    });
+    }, { lockRoomHierarchy: true });
     return { room: result.value, replayed: result.replayed };
   }
 
@@ -895,7 +899,7 @@ export class WorkspaceServerStore {
         }
       });
       return { room: mapped, affectedRoomIds: result.affectedRoomIds };
-    });
+    }, { lockRoomHierarchy: true });
     const visibleAffectedRoomIds = await this.visibleRoomIds(
       { workspaceId: context.workspaceId, accountId: context.accountId },
       result.value.affectedRoomIds
@@ -937,7 +941,7 @@ export class WorkspaceServerStore {
         }
         throw error;
       }
-    });
+    }, { lockRoomHierarchy: true });
     return {
       member: result.value.member,
       revalidationRoomIds: result.value.affectedRoomIds,
@@ -992,7 +996,7 @@ export class WorkspaceServerStore {
         }
         throw error;
       }
-    });
+    }, { lockRoomHierarchy: true });
     const visibleAffectedRoomIds = await this.visibleRoomIds(
       { workspaceId: context.workspaceId, accountId: context.accountId },
       result.value.affectedRoomIds
@@ -1626,9 +1630,10 @@ export class WorkspaceServerStore {
   async runIdempotent<T>(
     context: WorkspaceRequestContext,
     request: { action: string; input: unknown },
-    action: (sql: WorkspaceSql) => Promise<T>
+    action: (sql: WorkspaceSql) => Promise<T>,
+    options: IdempotentOperationOptions = {}
   ): Promise<T> {
-    return (await this.runIdempotentResult(context, request, action)).value;
+    return (await this.runIdempotentResult(context, request, action, options)).value;
   }
 
   /**
@@ -1639,7 +1644,8 @@ export class WorkspaceServerStore {
   async runIdempotentResult<T>(
     context: WorkspaceRequestContext,
     request: { action: string; input: unknown },
-    action: (sql: WorkspaceSql) => Promise<T>
+    action: (sql: WorkspaceSql) => Promise<T>,
+    options: IdempotentOperationOptions = {}
   ): Promise<IdempotentOperationResult<T>> {
     assertOpaqueId(context.workspaceId, "workspace_id_invalid");
     assertOpaqueId(context.accountId, "account_id_invalid");
@@ -1647,6 +1653,17 @@ export class WorkspaceServerStore {
     const requestHash = hash(canonicalJson(request));
     let originalFailure: unknown;
     const value = await this.database.withContext(context, async (sql) => {
+      if (options.lockRoomHierarchy) {
+        // Room hierarchy mutations also lock this key inside their guarded SQL
+        // functions. Acquire it before inserting the operation ledger row:
+        // that insert holds a workspace foreign-key lock, while the SQL
+        // function later locks the Workspace row. Keeping this order prevents
+        // a concurrent hierarchy mutation from forming a lock cycle.
+        await sql.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('samurai.workspace.room_hierarchy:' || $1, 0))",
+          [context.workspaceId]
+        );
+      }
       const inserted = await sql.query<{ id: string }>(
         `INSERT INTO workspace_operations(workspace_id, id, idempotency_key, actor_account_id, request_hash, status)
          VALUES ($1, $2, $2, $3, $4, 'running')

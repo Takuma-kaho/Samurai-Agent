@@ -421,50 +421,61 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const memberRoomsAfterRemoval = await store.listRooms({ workspaceId, accountId: member.id });
     assert(memberRoomsAfterRemoval.map((room) => room.id).join(",") === rootRoom.id, "server03_revoked_member_still_sees_descendant");
 
-    const concurrentParent = await createRoom(ownerContext(operationId("concurrent-parent")), {
-      name: "Concurrent parent",
-      expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
-    });
-    const concurrentDestination = await createRoom(ownerContext(operationId("concurrent-destination")), {
-      name: "Concurrent destination",
-      expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
-    });
-    const concurrentChild = await createRoom(ownerContext(operationId("concurrent-child")), {
-      name: "Concurrent child",
-      parentRoomId: concurrentParent.id,
-      expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
-    });
-    for (const room of [concurrentParent, concurrentDestination, concurrentChild]) {
-      await store.setRoomMember(ownerContext(operationId("concurrent-member-" + room.id)), {
-        roomId: room.id,
-        accountId: parentOnlyMember.id,
-        role: "member",
-        state: "active",
-        expectedVersion: 0
-      });
-    }
-    const concurrentParentMember = await store.getRoomMember({ workspaceId, accountId: owner.id }, concurrentParent.id, parentOnlyMember.id);
-    assert(Boolean(concurrentParentMember), "server03_concurrent_parent_member_missing");
-    const [concurrentMove] = await Promise.all([
-      store.moveRoom(ownerContext(operationId("concurrent-move")), {
-        roomId: concurrentChild.id,
-        parentRoomId: concurrentDestination.id,
-        expectedRoomVersion: concurrentChild.version,
+    // Exercise the lock order repeatedly with independent Rooms. This is a
+    // genuine concurrency probe, not a retry: every pass must safely finish
+    // both a move and a membership revoke.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const attemptId = "concurrent-" + attempt;
+      const concurrentParent = await createRoom(ownerContext(operationId(attemptId + "-parent")), {
+        name: "Concurrent parent " + attempt,
         expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
-      }),
-      store.setRoomMember(ownerContext(operationId("concurrent-revoke")), {
-        roomId: concurrentParent.id,
-        accountId: parentOnlyMember.id,
-        role: "member",
-        state: "revoked",
-        expectedVersion: concurrentParentMember!.version
-      })
-    ]);
-    assert(concurrentMove.room.parentRoomId === concurrentDestination.id, "server03_concurrent_move_failed");
-    const concurrentChildMember = await store.getRoomMember({ workspaceId, accountId: owner.id }, concurrentChild.id, parentOnlyMember.id);
-    if (concurrentChildMember?.state === "active") {
-      const destinationMember = await store.getRoomMember({ workspaceId, accountId: owner.id }, concurrentDestination.id, parentOnlyMember.id);
-      assert(destinationMember?.state === "active", "server03_concurrent_membership_invariant_broken");
+      });
+      const concurrentDestination = await createRoom(ownerContext(operationId(attemptId + "-destination")), {
+        name: "Concurrent destination " + attempt,
+        expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
+      });
+      const concurrentChild = await createRoom(ownerContext(operationId(attemptId + "-child")), {
+        name: "Concurrent child " + attempt,
+        parentRoomId: concurrentParent.id,
+        expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
+      });
+      for (const room of [concurrentParent, concurrentDestination, concurrentChild]) {
+        await store.setRoomMember(ownerContext(operationId(attemptId + "-member-" + room.id)), {
+          roomId: room.id,
+          accountId: parentOnlyMember.id,
+          role: "member",
+          state: "active",
+          expectedVersion: 0
+        });
+      }
+      const concurrentParentMember = await store.getRoomMember({ workspaceId, accountId: owner.id }, concurrentParent.id, parentOnlyMember.id);
+      assert(Boolean(concurrentParentMember), "server03_concurrent_parent_member_missing_" + attempt);
+      let concurrentMove: Awaited<ReturnType<WorkspaceServerStore["moveRoom"]>>;
+      try {
+        [concurrentMove] = await Promise.all([
+          store.moveRoom(ownerContext(operationId(attemptId + "-move")), {
+            roomId: concurrentChild.id,
+            parentRoomId: concurrentDestination.id,
+            expectedRoomVersion: concurrentChild.version,
+            expectedWorkspaceVersion: await workspaceVersion(store, workspaceId, owner.id)
+          }),
+          store.setRoomMember(ownerContext(operationId(attemptId + "-revoke")), {
+            roomId: concurrentParent.id,
+            accountId: parentOnlyMember.id,
+            role: "member",
+            state: "revoked",
+            expectedVersion: concurrentParentMember!.version
+          })
+        ]);
+      } catch (error) {
+        throw new Error("server03_concurrent_hierarchy_attempt_" + attempt + "_failed:" + (error instanceof Error ? error.message : String(error)));
+      }
+      assert(concurrentMove.room.parentRoomId === concurrentDestination.id, "server03_concurrent_move_failed_" + attempt);
+      const concurrentChildMember = await store.getRoomMember({ workspaceId, accountId: owner.id }, concurrentChild.id, parentOnlyMember.id);
+      if (concurrentChildMember?.state === "active") {
+        const destinationMember = await store.getRoomMember({ workspaceId, accountId: owner.id }, concurrentDestination.id, parentOnlyMember.id);
+        assert(destinationMember?.state === "active", "server03_concurrent_membership_invariant_broken_" + attempt);
+      }
     }
 
     const realtimeRootMembership = await store.setRoomMember(ownerContext(operationId("realtime-root-member")), {

@@ -1546,14 +1546,20 @@ async function verifyImportedWorkspace(
 ): Promise<void> {
   await assertWorkspaceOwner(store, context);
   const counts = await store.database.withContext(context, async (sql) => {
-    const rows = await Promise.all([
-      count(sql, "rooms", context.workspaceId), count(sql, "workspace_members", context.workspaceId), count(sql, "room_members", context.workspaceId), count(sql, "workspace_records", context.workspaceId), count(sql, "workspace_events", context.workspaceId),
-      count(sql, "workspace_jobs", context.workspaceId), count(sql, "workspace_operations", context.workspaceId), count(sql, "workspace_invitations", context.workspaceId), count(sql, "workspace_audit_entries", context.workspaceId), count(sql, "workspace_files", context.workspaceId),
-      count(sql, "workspace_learning_activities", context.workspaceId), count(sql, "workspace_learning_resources", context.workspaceId), count(sql, "workspace_learning_resource_versions", context.workspaceId), count(sql, "workspace_learning_evidence", context.workspaceId), count(sql, "workspace_learning_resource_links", context.workspaceId), count(sql, "workspace_learning_settings", context.workspaceId), count(sql, "workspace_learning_jobs", context.workspaceId), count(sql, "workspace_learning_job_attempts", context.workspaceId), count(sql, "workspace_learning_resource_uses", context.workspaceId)
-    ]);
+    // WorkspaceSql is one PostgreSQL client and transaction.  Keep its
+    // queries ordered: Promise.all overlaps client.query calls and made the
+    // bundle verification timing-dependent.
+    const tables = [
+      "rooms", "workspace_members", "room_members", "workspace_records", "workspace_events",
+      "workspace_jobs", "workspace_operations", "workspace_invitations", "workspace_audit_entries", "workspace_files",
+      "workspace_learning_activities", "workspace_learning_resources", "workspace_learning_resource_versions", "workspace_learning_evidence", "workspace_learning_resource_links", "workspace_learning_settings", "workspace_learning_jobs", "workspace_learning_job_attempts", "workspace_learning_resource_uses"
+    ] as const;
+    const rows: number[] = [];
+    for (const table of tables) rows.push(await count(sql, table, context.workspaceId));
+    const countAt = (index: number): number => rows[index] ?? 0;
     return {
-      rooms: rows[0], memberships: rows[1], room_memberships: rows[2], records: rows[3], events: rows[4], jobs: rows[5], operations: rows[6], invitations: rows[7], audits: rows[8], files: rows[9],
-      learning_activities: rows[10], learning_resources: rows[11], learning_resource_versions: rows[12], learning_evidence: rows[13], learning_resource_links: rows[14], learning_settings: rows[15], learning_jobs: rows[16], learning_job_attempts: rows[17], learning_resource_uses: rows[18]
+      rooms: countAt(0), memberships: countAt(1), room_memberships: countAt(2), records: countAt(3), events: countAt(4), jobs: countAt(5), operations: countAt(6), invitations: countAt(7), audits: countAt(8), files: countAt(9),
+      learning_activities: countAt(10), learning_resources: countAt(11), learning_resource_versions: countAt(12), learning_evidence: countAt(13), learning_resource_links: countAt(14), learning_settings: countAt(15), learning_jobs: countAt(16), learning_job_attempts: countAt(17), learning_resource_uses: countAt(18)
     };
   });
   // The importer is guaranteed an active Owner membership on the target. If

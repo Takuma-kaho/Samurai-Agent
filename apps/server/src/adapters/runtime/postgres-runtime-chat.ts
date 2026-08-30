@@ -91,6 +91,10 @@ export interface PostgresRuntimeChatCompletionEvent {
   resultSummary?: string;
 }
 
+/** The only mutable Runtime entry used by the public Run Control service. */
+export type PostgresRuntimeRunControlAction = "cancel" | "resume" | "sync" | "recover" | "retry";
+export type PostgresRuntimeRunControlResult = BackendRunRecord | RunChatTurnResult;
+
 export interface PostgresRuntimeKnowledgePage {
   memory: MemoryFrontmatter & { file_path: string };
   content: string;
@@ -2187,6 +2191,29 @@ export class PostgresRuntimeCommandService {
 
   retryBackendRun(runId: string, input: { idempotencyKey: string; confirmUnknown?: boolean }) {
     return this.chat.retryBackendRun(runId, input);
+  }
+
+  /**
+   * Public transports must use this named Run Control boundary instead of
+   * selecting one mutable Runtime method themselves.  The specialized
+   * application service owns validation and replay semantics; this façade
+   * owns the PostgreSQL-backed action dispatch.
+   */
+  executeRunControlAction(input: {
+    action: PostgresRuntimeRunControlAction;
+    runId: string;
+    resumeInput: Record<string, JsonValue>;
+    idempotencyKey: string;
+    confirmUnknown?: boolean;
+  }): Promise<PostgresRuntimeRunControlResult> {
+    if (input.action === "cancel") return this.cancelBackendRun(input.runId);
+    if (input.action === "resume") return this.resumeBackendRun(input.runId, input.resumeInput);
+    if (input.action === "sync") return this.syncBackendRun(input.runId);
+    if (input.action === "recover") return this.recoverBackendRun(input.runId);
+    return this.retryBackendRun(input.runId, {
+      idempotencyKey: input.idempotencyKey,
+      ...(input.confirmUnknown === true ? { confirmUnknown: true } : {})
+    });
   }
 
   listWorkspaceChanges(sessionId?: string) {
