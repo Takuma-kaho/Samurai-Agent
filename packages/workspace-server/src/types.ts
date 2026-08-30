@@ -1,3 +1,5 @@
+import type { ResourceRef } from "@samurai-agent/core-schemas";
+
 export const workspaceServerModes = ["hosted", "self_host"] as const;
 export type WorkspaceServerMode = (typeof workspaceServerModes)[number];
 
@@ -136,6 +138,10 @@ export interface WorkspaceAgent {
   id: string;
   displayName: string;
   description: string;
+  /** Canonical v1 Agent fields; older callers may omit these compatibility fields. */
+  role?: string;
+  instructions?: string;
+  enabled?: boolean;
   /** Backend selected by the Workspace owner for this Agent. */
   backendId: string;
   status: WorkspaceAgentStatus;
@@ -247,6 +253,27 @@ export interface WorkspaceEvent {
   operationId: string;
   payload: WorkspaceRecordPayload;
   createdAt: string;
+}
+
+/** Public, versioned Event shape. Legacy numeric ids stay internal to the old API. */
+export interface WorkspacePublicEvent {
+  eventId: string;
+  eventType: string;
+  eventVersion: string;
+  cursor: string;
+  occurredAt: string;
+  actor: { kind: "human" | "agent" | "system"; id?: string };
+  scope: { organizationId?: string; workspaceId: string; roomId?: string };
+  resources: ResourceRef[];
+  operationId?: string;
+  correlationId?: string;
+  payload: WorkspaceRecordPayload;
+}
+
+export interface WorkspacePublicEventPage {
+  events: WorkspacePublicEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
 }
 
 export interface WorkspaceFile {

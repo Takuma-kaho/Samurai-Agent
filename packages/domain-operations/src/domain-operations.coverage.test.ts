@@ -7,9 +7,9 @@ import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads the complete 167-operation strict gate with unique handlers", () => {
+  it("loads the complete 169-operation strict gate with unique handlers", () => {
     const ids = operationDefinitions.map((definition) => definition.id);
-    expect(operationDefinitions).toHaveLength(167);
+    expect(operationDefinitions).toHaveLength(169);
     expect(new Set(ids).size).toBe(ids.length);
     expect(operationDefinitions.every((definition) => definition.input && definition.output && typeof definition.createHandler === "function")).toBe(true);
     expect(Object.keys(domainOperationIds)).toHaveLength(operationDefinitions.length);
@@ -169,6 +169,7 @@ describe("Domain Operation strict gate coverage", () => {
           if (name === "settleDispatch") return (args[0] as { record: unknown }).record;
           if (name === "markOutcomeUnknown") return { id: "external.send.dispatch-fixture", status: "outcome_unknown", channel: "webhook", target: {}, title: "External send fixture", body: "fixture", created_at: "2026-07-16T00:00:00.000Z", updated_at: "2026-07-16T00:00:00.000Z" };
           if (name === "getWorkItemObjective") return { ...fixtureRecord(String(args[0])), room_id: "coverage-room" };
+          if (name === "listArtifacts" || name === "viewArtifact") return outputs.get(id);
           if (name === "listCollectionRecords") return { collection_id: "sample", count: 0, items: [], linked_data: {}, schema_fields: {} };
           if (name === "getActivityHistory") {
             abortDuringActivityReadController?.abort();
@@ -508,8 +509,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(167);
-    expect(portCalls.size).toBe(166);
+    expect(bindings).toHaveLength(169);
+    expect(portCalls.size).toBe(168);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;

@@ -10,164 +10,166 @@ import operation5 from "../operations/agent/view.operation.js";
 import operation6 from "../operations/agent/workspace-permission-set.operation.js";
 import operation7 from "../operations/artifact/create.operation.js";
 import operation8 from "../operations/artifact/export_pdf.operation.js";
-import operation9 from "../operations/artifact/repair.operation.js";
-import operation10 from "../operations/artifact/restore_revision.operation.js";
-import operation11 from "../operations/artifact/revise.operation.js";
-import operation12 from "../operations/automation/job/manager_resume.operation.js";
-import operation13 from "../operations/automation/job/manager_stop.operation.js";
-import operation14 from "../operations/automation/job/reauthorize.operation.js";
-import operation15 from "../operations/automation/job/rebind_authority.operation.js";
-import operation16 from "../operations/automation/job/release_lock.operation.js";
-import operation17 from "../operations/automation/job/requeue.operation.js";
-import operation18 from "../operations/automation/job/run.operation.js";
-import operation19 from "../operations/automation/job/save.operation.js";
-import operation20 from "../operations/automation/job/set_status.operation.js";
-import operation21 from "../operations/automation/memory_review/run.operation.js";
-import operation22 from "../operations/browser/download_to_workspace.operation.js";
-import operation23 from "../operations/browser/extract.operation.js";
-import operation24 from "../operations/browser/interact.operation.js";
-import operation25 from "../operations/browser/navigate.operation.js";
-import operation26 from "../operations/browser/screenshot.operation.js";
-import operation27 from "../operations/chat/turn/run.operation.js";
-import operation28 from "../operations/client/event/ack.operation.js";
-import operation29 from "../operations/client/event/deliver.operation.js";
-import operation30 from "../operations/client/event/expire.operation.js";
-import operation31 from "../operations/client/event/fail.operation.js";
-import operation32 from "../operations/client/event/save.operation.js";
-import operation33 from "../operations/collection/action/run.operation.js";
-import operation34 from "../operations/collection/patch/apply.operation.js";
-import operation35 from "../operations/collection/record/create.operation.js";
-import operation36 from "../operations/collection/record/delete.operation.js";
-import operation37 from "../operations/collection/records/list.operation.js";
-import operation38 from "../operations/collection/reindex.operation.js";
-import operation39 from "../operations/collection/schema/docs.operation.js";
-import operation40 from "../operations/collection/schema/get.operation.js";
-import operation41 from "../operations/collection/schema/save.operation.js";
-import operation42 from "../operations/search/collection.operation.js";
-import operation43 from "../operations/collection/view/present.operation.js";
-import operation44 from "../operations/curator/pause.operation.js";
-import operation45 from "../operations/curator/restore.operation.js";
-import operation46 from "../operations/curator/resume.operation.js";
-import operation47 from "../operations/curator/run.operation.js";
-import operation48 from "../operations/curator/snapshot/create.operation.js";
-import operation49 from "../operations/curator/snapshot/list.operation.js";
-import operation50 from "../operations/evaluation/run.operation.js";
-import operation51 from "../operations/external_app/connection/create.operation.js";
-import operation52 from "../operations/external_app/connection/revoke.operation.js";
-import operation53 from "../operations/external_app/connection/update_scope.operation.js";
-import operation54 from "../operations/external/send.operation.js";
-import operation55 from "../operations/external/send/dispatch.operation.js";
-import operation56 from "../operations/external/send/prepare.operation.js";
-import operation57 from "../operations/file/inspect.operation.js";
-import operation58 from "../operations/file/list.operation.js";
-import operation59 from "../operations/file/patch.operation.js";
-import operation60 from "../operations/file/read.operation.js";
-import operation61 from "../operations/file/write.operation.js";
-import operation62 from "../operations/gateway/concurrency_lock/expire.operation.js";
-import operation63 from "../operations/gateway/inbound/route.operation.js";
-import operation64 from "../operations/gateway/mcp_config/save.operation.js";
-import operation65 from "../operations/gateway/pairing_policy/save.operation.js";
-import operation66 from "../operations/gateway/pairing/approve.operation.js";
-import operation67 from "../operations/gateway/pairing/expire.operation.js";
-import operation68 from "../operations/gateway/pairing/reject.operation.js";
-import operation69 from "../operations/gateway/pairing/revoke.operation.js";
-import operation70 from "../operations/gateway/pairing/rotate.operation.js";
-import operation71 from "../operations/gateway/routing_policy/save.operation.js";
-import operation72 from "../operations/gateway/sandbox/delete.operation.js";
-import operation73 from "../operations/gateway/sandbox/recreate.operation.js";
-import operation74 from "../operations/gateway/sandbox/sync.operation.js";
-import operation75 from "../operations/gateway/state/repair.operation.js";
-import operation76 from "../operations/generated_surface/action/run.operation.js";
-import operation77 from "../operations/generated_surface/create.operation.js";
-import operation78 from "../operations/generated_surface/export.operation.js";
-import operation79 from "../operations/generated_surface/interaction/record.operation.js";
-import operation80 from "../operations/generated_surface/revise.operation.js";
-import operation81 from "../operations/generated_surface/state.operation.js";
-import operation82 from "../operations/graph/create.operation.js";
-import operation83 from "../operations/graph/patch.operation.js";
-import operation84 from "../operations/image/edit.operation.js";
-import operation85 from "../operations/image/generate.operation.js";
-import operation86 from "../operations/learning/background_review/apply.operation.js";
-import operation87 from "../operations/learning/resource/usage/record.operation.js";
-import operation88 from "../operations/learning/resource/version/restore.operation.js";
-import operation89 from "../operations/learning/resource/version/update.operation.js";
-import operation90 from "../operations/learning/snapshot/prune.operation.js";
-import operation91 from "../operations/mcp/call.operation.js";
-import operation92 from "../operations/memory/archive.operation.js";
-import operation93 from "../operations/search/memory.operation.js";
-import operation94 from "../operations/memory/session/create.operation.js";
-import operation95 from "../operations/memory/topic/create.operation.js";
-import operation96 from "../operations/message/presentation/update.operation.js";
-import operation97 from "../operations/objective/create.operation.js";
-import operation98 from "../operations/objective/transition.operation.js";
-import operation99 from "../operations/plugin/status/set.operation.js";
-import operation100 from "../operations/policy/change/request.operation.js";
-import operation101 from "../operations/presentation/plan.operation.js";
-import operation102 from "../operations/profile/change/request.operation.js";
-import operation103 from "../operations/reflection/run.operation.js";
-import operation104 from "../operations/reflection/suggestion/apply.operation.js";
-import operation105 from "../operations/resource/copy.operation.js";
-import operation106 from "../operations/resource/move.operation.js";
-import operation107 from "../operations/resource/promote.operation.js";
-import operation108 from "../operations/resource/redact.operation.js";
-import operation109 from "../operations/resource/translation_job/save.operation.js";
-import operation110 from "../operations/resource/translation/save.operation.js";
-import operation111 from "../operations/resource/version/get.operation.js";
-import operation112 from "../operations/rollback/restore.operation.js";
-import operation113 from "../operations/room/agent-permission-set.operation.js";
-import operation114 from "../operations/room/agent-remove.operation.js";
-import operation115 from "../operations/room/create.operation.js";
-import operation116 from "../operations/room/list.operation.js";
-import operation117 from "../operations/room/member-add.operation.js";
-import operation118 from "../operations/room/member-list.operation.js";
-import operation119 from "../operations/room/member-remove.operation.js";
-import operation120 from "../operations/room/member-role-change.operation.js";
-import operation121 from "../operations/room/owner-recover.operation.js";
-import operation122 from "../operations/room/owner-transfer.operation.js";
-import operation123 from "../operations/room/ownerless-list.operation.js";
-import operation124 from "../operations/room/patch.operation.js";
-import operation125 from "../operations/room/resource-share.operation.js";
-import operation126 from "../operations/room/resource-share-list.operation.js";
-import operation127 from "../operations/room/resource-share-revoke.operation.js";
-import operation128 from "../operations/room/view.operation.js";
-import operation129 from "../operations/sandbox/exec.operation.js";
-import operation130 from "../operations/session/create.operation.js";
-import operation131 from "../operations/search/session.operation.js";
-import operation132 from "../operations/session/search/reindex.operation.js";
-import operation133 from "../operations/settings/patch.operation.js";
-import operation134 from "../operations/skill/candidate/create.operation.js";
-import operation135 from "../operations/skill/lifecycle/apply.operation.js";
-import operation136 from "../operations/skill/optimization/cancel.operation.js";
-import operation137 from "../operations/skill/optimization/promote.operation.js";
-import operation138 from "../operations/skill/optimization/reject.operation.js";
-import operation139 from "../operations/skill/optimization/rollback.operation.js";
-import operation140 from "../operations/skill/optimization/start.operation.js";
-import operation141 from "../operations/skill/patch.operation.js";
-import operation142 from "../operations/skill/project/save.operation.js";
-import operation143 from "../operations/search/skill.operation.js";
-import operation144 from "../operations/skill/support_file/save.operation.js";
-import operation145 from "../operations/skill/usage/record.operation.js";
-import operation146 from "../operations/skill/view.operation.js";
-import operation147 from "../operations/soul/change/request.operation.js";
-import operation148 from "../operations/wiki/accept.operation.js";
-import operation149 from "../operations/wiki/archive.operation.js";
-import operation150 from "../operations/wiki/patch.operation.js";
-import operation151 from "../operations/wiki/proposal/create.operation.js";
-import operation152 from "../operations/wiki/reindex.operation.js";
-import operation153 from "../operations/wiki/reject.operation.js";
-import operation154 from "../operations/search/wiki.operation.js";
-import operation155 from "../operations/work_item/create.operation.js";
-import operation156 from "../operations/work_item/follow_up.operation.js";
-import operation157 from "../operations/work_item/steer.operation.js";
-import operation158 from "../operations/workspace/backup/create.operation.js";
-import operation159 from "../operations/workspace/backup/restore.operation.js";
-import operation160 from "../operations/workspace/context/get.operation.js";
-import operation161 from "../operations/workspace/member-add.operation.js";
-import operation162 from "../operations/workspace/member-list.operation.js";
-import operation163 from "../operations/workspace/member-remove.operation.js";
-import operation164 from "../operations/workspace/member-role-change.operation.js";
-import operation165 from "../operations/workspace/owner-transfer.operation.js";
-import operation166 from "../operations/workspace/repair.operation.js";
+import operation9 from "../operations/artifact/list.operation.js";
+import operation10 from "../operations/artifact/repair.operation.js";
+import operation11 from "../operations/artifact/restore_revision.operation.js";
+import operation12 from "../operations/artifact/revise.operation.js";
+import operation13 from "../operations/artifact/view.operation.js";
+import operation14 from "../operations/automation/job/manager_resume.operation.js";
+import operation15 from "../operations/automation/job/manager_stop.operation.js";
+import operation16 from "../operations/automation/job/reauthorize.operation.js";
+import operation17 from "../operations/automation/job/rebind_authority.operation.js";
+import operation18 from "../operations/automation/job/release_lock.operation.js";
+import operation19 from "../operations/automation/job/requeue.operation.js";
+import operation20 from "../operations/automation/job/run.operation.js";
+import operation21 from "../operations/automation/job/save.operation.js";
+import operation22 from "../operations/automation/job/set_status.operation.js";
+import operation23 from "../operations/automation/memory_review/run.operation.js";
+import operation24 from "../operations/browser/download_to_workspace.operation.js";
+import operation25 from "../operations/browser/extract.operation.js";
+import operation26 from "../operations/browser/interact.operation.js";
+import operation27 from "../operations/browser/navigate.operation.js";
+import operation28 from "../operations/browser/screenshot.operation.js";
+import operation29 from "../operations/chat/turn/run.operation.js";
+import operation30 from "../operations/client/event/ack.operation.js";
+import operation31 from "../operations/client/event/deliver.operation.js";
+import operation32 from "../operations/client/event/expire.operation.js";
+import operation33 from "../operations/client/event/fail.operation.js";
+import operation34 from "../operations/client/event/save.operation.js";
+import operation35 from "../operations/collection/action/run.operation.js";
+import operation36 from "../operations/collection/patch/apply.operation.js";
+import operation37 from "../operations/collection/record/create.operation.js";
+import operation38 from "../operations/collection/record/delete.operation.js";
+import operation39 from "../operations/collection/records/list.operation.js";
+import operation40 from "../operations/collection/reindex.operation.js";
+import operation41 from "../operations/collection/schema/docs.operation.js";
+import operation42 from "../operations/collection/schema/get.operation.js";
+import operation43 from "../operations/collection/schema/save.operation.js";
+import operation44 from "../operations/search/collection.operation.js";
+import operation45 from "../operations/collection/view/present.operation.js";
+import operation46 from "../operations/curator/pause.operation.js";
+import operation47 from "../operations/curator/restore.operation.js";
+import operation48 from "../operations/curator/resume.operation.js";
+import operation49 from "../operations/curator/run.operation.js";
+import operation50 from "../operations/curator/snapshot/create.operation.js";
+import operation51 from "../operations/curator/snapshot/list.operation.js";
+import operation52 from "../operations/evaluation/run.operation.js";
+import operation53 from "../operations/external_app/connection/create.operation.js";
+import operation54 from "../operations/external_app/connection/revoke.operation.js";
+import operation55 from "../operations/external_app/connection/update_scope.operation.js";
+import operation56 from "../operations/external/send.operation.js";
+import operation57 from "../operations/external/send/dispatch.operation.js";
+import operation58 from "../operations/external/send/prepare.operation.js";
+import operation59 from "../operations/file/inspect.operation.js";
+import operation60 from "../operations/file/list.operation.js";
+import operation61 from "../operations/file/patch.operation.js";
+import operation62 from "../operations/file/read.operation.js";
+import operation63 from "../operations/file/write.operation.js";
+import operation64 from "../operations/gateway/concurrency_lock/expire.operation.js";
+import operation65 from "../operations/gateway/inbound/route.operation.js";
+import operation66 from "../operations/gateway/mcp_config/save.operation.js";
+import operation67 from "../operations/gateway/pairing_policy/save.operation.js";
+import operation68 from "../operations/gateway/pairing/approve.operation.js";
+import operation69 from "../operations/gateway/pairing/expire.operation.js";
+import operation70 from "../operations/gateway/pairing/reject.operation.js";
+import operation71 from "../operations/gateway/pairing/revoke.operation.js";
+import operation72 from "../operations/gateway/pairing/rotate.operation.js";
+import operation73 from "../operations/gateway/routing_policy/save.operation.js";
+import operation74 from "../operations/gateway/sandbox/delete.operation.js";
+import operation75 from "../operations/gateway/sandbox/recreate.operation.js";
+import operation76 from "../operations/gateway/sandbox/sync.operation.js";
+import operation77 from "../operations/gateway/state/repair.operation.js";
+import operation78 from "../operations/generated_surface/action/run.operation.js";
+import operation79 from "../operations/generated_surface/create.operation.js";
+import operation80 from "../operations/generated_surface/export.operation.js";
+import operation81 from "../operations/generated_surface/interaction/record.operation.js";
+import operation82 from "../operations/generated_surface/revise.operation.js";
+import operation83 from "../operations/generated_surface/state.operation.js";
+import operation84 from "../operations/graph/create.operation.js";
+import operation85 from "../operations/graph/patch.operation.js";
+import operation86 from "../operations/image/edit.operation.js";
+import operation87 from "../operations/image/generate.operation.js";
+import operation88 from "../operations/learning/background_review/apply.operation.js";
+import operation89 from "../operations/learning/resource/usage/record.operation.js";
+import operation90 from "../operations/learning/resource/version/restore.operation.js";
+import operation91 from "../operations/learning/resource/version/update.operation.js";
+import operation92 from "../operations/learning/snapshot/prune.operation.js";
+import operation93 from "../operations/mcp/call.operation.js";
+import operation94 from "../operations/memory/archive.operation.js";
+import operation95 from "../operations/search/memory.operation.js";
+import operation96 from "../operations/memory/session/create.operation.js";
+import operation97 from "../operations/memory/topic/create.operation.js";
+import operation98 from "../operations/message/presentation/update.operation.js";
+import operation99 from "../operations/objective/create.operation.js";
+import operation100 from "../operations/objective/transition.operation.js";
+import operation101 from "../operations/plugin/status/set.operation.js";
+import operation102 from "../operations/policy/change/request.operation.js";
+import operation103 from "../operations/presentation/plan.operation.js";
+import operation104 from "../operations/profile/change/request.operation.js";
+import operation105 from "../operations/reflection/run.operation.js";
+import operation106 from "../operations/reflection/suggestion/apply.operation.js";
+import operation107 from "../operations/resource/copy.operation.js";
+import operation108 from "../operations/resource/move.operation.js";
+import operation109 from "../operations/resource/promote.operation.js";
+import operation110 from "../operations/resource/redact.operation.js";
+import operation111 from "../operations/resource/translation_job/save.operation.js";
+import operation112 from "../operations/resource/translation/save.operation.js";
+import operation113 from "../operations/resource/version/get.operation.js";
+import operation114 from "../operations/rollback/restore.operation.js";
+import operation115 from "../operations/room/agent-permission-set.operation.js";
+import operation116 from "../operations/room/agent-remove.operation.js";
+import operation117 from "../operations/room/create.operation.js";
+import operation118 from "../operations/room/list.operation.js";
+import operation119 from "../operations/room/member-add.operation.js";
+import operation120 from "../operations/room/member-list.operation.js";
+import operation121 from "../operations/room/member-remove.operation.js";
+import operation122 from "../operations/room/member-role-change.operation.js";
+import operation123 from "../operations/room/owner-recover.operation.js";
+import operation124 from "../operations/room/owner-transfer.operation.js";
+import operation125 from "../operations/room/ownerless-list.operation.js";
+import operation126 from "../operations/room/patch.operation.js";
+import operation127 from "../operations/room/resource-share.operation.js";
+import operation128 from "../operations/room/resource-share-list.operation.js";
+import operation129 from "../operations/room/resource-share-revoke.operation.js";
+import operation130 from "../operations/room/view.operation.js";
+import operation131 from "../operations/sandbox/exec.operation.js";
+import operation132 from "../operations/session/create.operation.js";
+import operation133 from "../operations/search/session.operation.js";
+import operation134 from "../operations/session/search/reindex.operation.js";
+import operation135 from "../operations/settings/patch.operation.js";
+import operation136 from "../operations/skill/candidate/create.operation.js";
+import operation137 from "../operations/skill/lifecycle/apply.operation.js";
+import operation138 from "../operations/skill/optimization/cancel.operation.js";
+import operation139 from "../operations/skill/optimization/promote.operation.js";
+import operation140 from "../operations/skill/optimization/reject.operation.js";
+import operation141 from "../operations/skill/optimization/rollback.operation.js";
+import operation142 from "../operations/skill/optimization/start.operation.js";
+import operation143 from "../operations/skill/patch.operation.js";
+import operation144 from "../operations/skill/project/save.operation.js";
+import operation145 from "../operations/search/skill.operation.js";
+import operation146 from "../operations/skill/support_file/save.operation.js";
+import operation147 from "../operations/skill/usage/record.operation.js";
+import operation148 from "../operations/skill/view.operation.js";
+import operation149 from "../operations/soul/change/request.operation.js";
+import operation150 from "../operations/wiki/accept.operation.js";
+import operation151 from "../operations/wiki/archive.operation.js";
+import operation152 from "../operations/wiki/patch.operation.js";
+import operation153 from "../operations/wiki/proposal/create.operation.js";
+import operation154 from "../operations/wiki/reindex.operation.js";
+import operation155 from "../operations/wiki/reject.operation.js";
+import operation156 from "../operations/search/wiki.operation.js";
+import operation157 from "../operations/work_item/create.operation.js";
+import operation158 from "../operations/work_item/follow_up.operation.js";
+import operation159 from "../operations/work_item/steer.operation.js";
+import operation160 from "../operations/workspace/backup/create.operation.js";
+import operation161 from "../operations/workspace/backup/restore.operation.js";
+import operation162 from "../operations/workspace/context/get.operation.js";
+import operation163 from "../operations/workspace/member-add.operation.js";
+import operation164 from "../operations/workspace/member-list.operation.js";
+import operation165 from "../operations/workspace/member-remove.operation.js";
+import operation166 from "../operations/workspace/member-role-change.operation.js";
+import operation167 from "../operations/workspace/owner-transfer.operation.js";
+import operation168 from "../operations/workspace/repair.operation.js";
 
 export interface DomainOperationContractMap {
   "activity.history.list": {
@@ -215,795 +217,805 @@ export interface DomainOperationContractMap {
     input: z.input<typeof operation8.input>;
     output: z.output<typeof operation8.output>;
   };
-  "artifact.repair": {
+  "artifact.list": {
     kind: typeof operation9.kind;
     input: z.input<typeof operation9.input>;
     output: z.output<typeof operation9.output>;
   };
-  "artifact.restore_revision": {
+  "artifact.repair": {
     kind: typeof operation10.kind;
     input: z.input<typeof operation10.input>;
     output: z.output<typeof operation10.output>;
   };
-  "artifact.revise": {
+  "artifact.restore_revision": {
     kind: typeof operation11.kind;
     input: z.input<typeof operation11.input>;
     output: z.output<typeof operation11.output>;
   };
-  "automation.job.manager_resume": {
+  "artifact.revise": {
     kind: typeof operation12.kind;
     input: z.input<typeof operation12.input>;
     output: z.output<typeof operation12.output>;
   };
-  "automation.job.manager_stop": {
+  "artifact.view": {
     kind: typeof operation13.kind;
     input: z.input<typeof operation13.input>;
     output: z.output<typeof operation13.output>;
   };
-  "automation.job.reauthorize": {
+  "automation.job.manager_resume": {
     kind: typeof operation14.kind;
     input: z.input<typeof operation14.input>;
     output: z.output<typeof operation14.output>;
   };
-  "automation.job.rebind_authority": {
+  "automation.job.manager_stop": {
     kind: typeof operation15.kind;
     input: z.input<typeof operation15.input>;
     output: z.output<typeof operation15.output>;
   };
-  "automation.job.release_lock": {
+  "automation.job.reauthorize": {
     kind: typeof operation16.kind;
     input: z.input<typeof operation16.input>;
     output: z.output<typeof operation16.output>;
   };
-  "automation.job.requeue": {
+  "automation.job.rebind_authority": {
     kind: typeof operation17.kind;
     input: z.input<typeof operation17.input>;
     output: z.output<typeof operation17.output>;
   };
-  "automation.job.run": {
+  "automation.job.release_lock": {
     kind: typeof operation18.kind;
     input: z.input<typeof operation18.input>;
     output: z.output<typeof operation18.output>;
   };
-  "automation.job.save": {
+  "automation.job.requeue": {
     kind: typeof operation19.kind;
     input: z.input<typeof operation19.input>;
     output: z.output<typeof operation19.output>;
   };
-  "automation.job.set_status": {
+  "automation.job.run": {
     kind: typeof operation20.kind;
     input: z.input<typeof operation20.input>;
     output: z.output<typeof operation20.output>;
   };
-  "automation.memory_review.run": {
+  "automation.job.save": {
     kind: typeof operation21.kind;
     input: z.input<typeof operation21.input>;
     output: z.output<typeof operation21.output>;
   };
-  "browser.download_to_workspace": {
+  "automation.job.set_status": {
     kind: typeof operation22.kind;
     input: z.input<typeof operation22.input>;
     output: z.output<typeof operation22.output>;
   };
-  "browser.extract": {
+  "automation.memory_review.run": {
     kind: typeof operation23.kind;
     input: z.input<typeof operation23.input>;
     output: z.output<typeof operation23.output>;
   };
-  "browser.interact": {
+  "browser.download_to_workspace": {
     kind: typeof operation24.kind;
     input: z.input<typeof operation24.input>;
     output: z.output<typeof operation24.output>;
   };
-  "browser.navigate": {
+  "browser.extract": {
     kind: typeof operation25.kind;
     input: z.input<typeof operation25.input>;
     output: z.output<typeof operation25.output>;
   };
-  "browser.screenshot": {
+  "browser.interact": {
     kind: typeof operation26.kind;
     input: z.input<typeof operation26.input>;
     output: z.output<typeof operation26.output>;
   };
-  "chat.turn.run": {
+  "browser.navigate": {
     kind: typeof operation27.kind;
     input: z.input<typeof operation27.input>;
     output: z.output<typeof operation27.output>;
   };
-  "client.event.ack": {
+  "browser.screenshot": {
     kind: typeof operation28.kind;
     input: z.input<typeof operation28.input>;
     output: z.output<typeof operation28.output>;
   };
-  "client.event.deliver": {
+  "chat.turn.run": {
     kind: typeof operation29.kind;
     input: z.input<typeof operation29.input>;
     output: z.output<typeof operation29.output>;
   };
-  "client.event.expire": {
+  "client.event.ack": {
     kind: typeof operation30.kind;
     input: z.input<typeof operation30.input>;
     output: z.output<typeof operation30.output>;
   };
-  "client.event.fail": {
+  "client.event.deliver": {
     kind: typeof operation31.kind;
     input: z.input<typeof operation31.input>;
     output: z.output<typeof operation31.output>;
   };
-  "client.event.save": {
+  "client.event.expire": {
     kind: typeof operation32.kind;
     input: z.input<typeof operation32.input>;
     output: z.output<typeof operation32.output>;
   };
-  "collection.action.run": {
+  "client.event.fail": {
     kind: typeof operation33.kind;
     input: z.input<typeof operation33.input>;
     output: z.output<typeof operation33.output>;
   };
-  "collection.patch.apply": {
+  "client.event.save": {
     kind: typeof operation34.kind;
     input: z.input<typeof operation34.input>;
     output: z.output<typeof operation34.output>;
   };
-  "collection.record.create": {
+  "collection.action.run": {
     kind: typeof operation35.kind;
     input: z.input<typeof operation35.input>;
     output: z.output<typeof operation35.output>;
   };
-  "collection.record.delete": {
+  "collection.patch.apply": {
     kind: typeof operation36.kind;
     input: z.input<typeof operation36.input>;
     output: z.output<typeof operation36.output>;
   };
-  "collection.records.list": {
+  "collection.record.create": {
     kind: typeof operation37.kind;
     input: z.input<typeof operation37.input>;
     output: z.output<typeof operation37.output>;
   };
-  "collection.reindex": {
+  "collection.record.delete": {
     kind: typeof operation38.kind;
     input: z.input<typeof operation38.input>;
     output: z.output<typeof operation38.output>;
   };
-  "collection.schema.docs": {
+  "collection.records.list": {
     kind: typeof operation39.kind;
     input: z.input<typeof operation39.input>;
     output: z.output<typeof operation39.output>;
   };
-  "collection.schema.get": {
+  "collection.reindex": {
     kind: typeof operation40.kind;
     input: z.input<typeof operation40.input>;
     output: z.output<typeof operation40.output>;
   };
-  "collection.schema.save": {
+  "collection.schema.docs": {
     kind: typeof operation41.kind;
     input: z.input<typeof operation41.input>;
     output: z.output<typeof operation41.output>;
   };
-  "collection.search": {
+  "collection.schema.get": {
     kind: typeof operation42.kind;
     input: z.input<typeof operation42.input>;
     output: z.output<typeof operation42.output>;
   };
-  "collection.view.present": {
+  "collection.schema.save": {
     kind: typeof operation43.kind;
     input: z.input<typeof operation43.input>;
     output: z.output<typeof operation43.output>;
   };
-  "curator.pause": {
+  "collection.search": {
     kind: typeof operation44.kind;
     input: z.input<typeof operation44.input>;
     output: z.output<typeof operation44.output>;
   };
-  "curator.restore": {
+  "collection.view.present": {
     kind: typeof operation45.kind;
     input: z.input<typeof operation45.input>;
     output: z.output<typeof operation45.output>;
   };
-  "curator.resume": {
+  "curator.pause": {
     kind: typeof operation46.kind;
     input: z.input<typeof operation46.input>;
     output: z.output<typeof operation46.output>;
   };
-  "curator.run": {
+  "curator.restore": {
     kind: typeof operation47.kind;
     input: z.input<typeof operation47.input>;
     output: z.output<typeof operation47.output>;
   };
-  "curator.snapshot.create": {
+  "curator.resume": {
     kind: typeof operation48.kind;
     input: z.input<typeof operation48.input>;
     output: z.output<typeof operation48.output>;
   };
-  "curator.snapshot.list": {
+  "curator.run": {
     kind: typeof operation49.kind;
     input: z.input<typeof operation49.input>;
     output: z.output<typeof operation49.output>;
   };
-  "evaluation.run": {
+  "curator.snapshot.create": {
     kind: typeof operation50.kind;
     input: z.input<typeof operation50.input>;
     output: z.output<typeof operation50.output>;
   };
-  "external_app.connection.create": {
+  "curator.snapshot.list": {
     kind: typeof operation51.kind;
     input: z.input<typeof operation51.input>;
     output: z.output<typeof operation51.output>;
   };
-  "external_app.connection.revoke": {
+  "evaluation.run": {
     kind: typeof operation52.kind;
     input: z.input<typeof operation52.input>;
     output: z.output<typeof operation52.output>;
   };
-  "external_app.connection.update_scope": {
+  "external_app.connection.create": {
     kind: typeof operation53.kind;
     input: z.input<typeof operation53.input>;
     output: z.output<typeof operation53.output>;
   };
-  "external.send": {
+  "external_app.connection.revoke": {
     kind: typeof operation54.kind;
     input: z.input<typeof operation54.input>;
     output: z.output<typeof operation54.output>;
   };
-  "external.send.dispatch": {
+  "external_app.connection.update_scope": {
     kind: typeof operation55.kind;
     input: z.input<typeof operation55.input>;
     output: z.output<typeof operation55.output>;
   };
-  "external.send.prepare": {
+  "external.send": {
     kind: typeof operation56.kind;
     input: z.input<typeof operation56.input>;
     output: z.output<typeof operation56.output>;
   };
-  "file.inspect": {
+  "external.send.dispatch": {
     kind: typeof operation57.kind;
     input: z.input<typeof operation57.input>;
     output: z.output<typeof operation57.output>;
   };
-  "file.list": {
+  "external.send.prepare": {
     kind: typeof operation58.kind;
     input: z.input<typeof operation58.input>;
     output: z.output<typeof operation58.output>;
   };
-  "file.patch": {
+  "file.inspect": {
     kind: typeof operation59.kind;
     input: z.input<typeof operation59.input>;
     output: z.output<typeof operation59.output>;
   };
-  "file.read": {
+  "file.list": {
     kind: typeof operation60.kind;
     input: z.input<typeof operation60.input>;
     output: z.output<typeof operation60.output>;
   };
-  "file.write": {
+  "file.patch": {
     kind: typeof operation61.kind;
     input: z.input<typeof operation61.input>;
     output: z.output<typeof operation61.output>;
   };
-  "gateway.concurrency_lock.expire": {
+  "file.read": {
     kind: typeof operation62.kind;
     input: z.input<typeof operation62.input>;
     output: z.output<typeof operation62.output>;
   };
-  "gateway.inbound.route": {
+  "file.write": {
     kind: typeof operation63.kind;
     input: z.input<typeof operation63.input>;
     output: z.output<typeof operation63.output>;
   };
-  "gateway.mcp_config.save": {
+  "gateway.concurrency_lock.expire": {
     kind: typeof operation64.kind;
     input: z.input<typeof operation64.input>;
     output: z.output<typeof operation64.output>;
   };
-  "gateway.pairing_policy.save": {
+  "gateway.inbound.route": {
     kind: typeof operation65.kind;
     input: z.input<typeof operation65.input>;
     output: z.output<typeof operation65.output>;
   };
-  "gateway.pairing.approve": {
+  "gateway.mcp_config.save": {
     kind: typeof operation66.kind;
     input: z.input<typeof operation66.input>;
     output: z.output<typeof operation66.output>;
   };
-  "gateway.pairing.expire": {
+  "gateway.pairing_policy.save": {
     kind: typeof operation67.kind;
     input: z.input<typeof operation67.input>;
     output: z.output<typeof operation67.output>;
   };
-  "gateway.pairing.reject": {
+  "gateway.pairing.approve": {
     kind: typeof operation68.kind;
     input: z.input<typeof operation68.input>;
     output: z.output<typeof operation68.output>;
   };
-  "gateway.pairing.revoke": {
+  "gateway.pairing.expire": {
     kind: typeof operation69.kind;
     input: z.input<typeof operation69.input>;
     output: z.output<typeof operation69.output>;
   };
-  "gateway.pairing.rotate": {
+  "gateway.pairing.reject": {
     kind: typeof operation70.kind;
     input: z.input<typeof operation70.input>;
     output: z.output<typeof operation70.output>;
   };
-  "gateway.routing_policy.save": {
+  "gateway.pairing.revoke": {
     kind: typeof operation71.kind;
     input: z.input<typeof operation71.input>;
     output: z.output<typeof operation71.output>;
   };
-  "gateway.sandbox.delete": {
+  "gateway.pairing.rotate": {
     kind: typeof operation72.kind;
     input: z.input<typeof operation72.input>;
     output: z.output<typeof operation72.output>;
   };
-  "gateway.sandbox.recreate": {
+  "gateway.routing_policy.save": {
     kind: typeof operation73.kind;
     input: z.input<typeof operation73.input>;
     output: z.output<typeof operation73.output>;
   };
-  "gateway.sandbox.sync": {
+  "gateway.sandbox.delete": {
     kind: typeof operation74.kind;
     input: z.input<typeof operation74.input>;
     output: z.output<typeof operation74.output>;
   };
-  "gateway.state.repair": {
+  "gateway.sandbox.recreate": {
     kind: typeof operation75.kind;
     input: z.input<typeof operation75.input>;
     output: z.output<typeof operation75.output>;
   };
-  "generated_surface.action.run": {
+  "gateway.sandbox.sync": {
     kind: typeof operation76.kind;
     input: z.input<typeof operation76.input>;
     output: z.output<typeof operation76.output>;
   };
-  "generated_surface.create": {
+  "gateway.state.repair": {
     kind: typeof operation77.kind;
     input: z.input<typeof operation77.input>;
     output: z.output<typeof operation77.output>;
   };
-  "generated_surface.export": {
+  "generated_surface.action.run": {
     kind: typeof operation78.kind;
     input: z.input<typeof operation78.input>;
     output: z.output<typeof operation78.output>;
   };
-  "generated_surface.interaction.record": {
+  "generated_surface.create": {
     kind: typeof operation79.kind;
     input: z.input<typeof operation79.input>;
     output: z.output<typeof operation79.output>;
   };
-  "generated_surface.revise": {
+  "generated_surface.export": {
     kind: typeof operation80.kind;
     input: z.input<typeof operation80.input>;
     output: z.output<typeof operation80.output>;
   };
-  "generated_surface.state": {
+  "generated_surface.interaction.record": {
     kind: typeof operation81.kind;
     input: z.input<typeof operation81.input>;
     output: z.output<typeof operation81.output>;
   };
-  "graph.create": {
+  "generated_surface.revise": {
     kind: typeof operation82.kind;
     input: z.input<typeof operation82.input>;
     output: z.output<typeof operation82.output>;
   };
-  "graph.patch": {
+  "generated_surface.state": {
     kind: typeof operation83.kind;
     input: z.input<typeof operation83.input>;
     output: z.output<typeof operation83.output>;
   };
-  "image.edit": {
+  "graph.create": {
     kind: typeof operation84.kind;
     input: z.input<typeof operation84.input>;
     output: z.output<typeof operation84.output>;
   };
-  "image.generate": {
+  "graph.patch": {
     kind: typeof operation85.kind;
     input: z.input<typeof operation85.input>;
     output: z.output<typeof operation85.output>;
   };
-  "learning.background_review.apply": {
+  "image.edit": {
     kind: typeof operation86.kind;
     input: z.input<typeof operation86.input>;
     output: z.output<typeof operation86.output>;
   };
-  "learning.resource.usage.record": {
+  "image.generate": {
     kind: typeof operation87.kind;
     input: z.input<typeof operation87.input>;
     output: z.output<typeof operation87.output>;
   };
-  "learning.resource.version.restore": {
+  "learning.background_review.apply": {
     kind: typeof operation88.kind;
     input: z.input<typeof operation88.input>;
     output: z.output<typeof operation88.output>;
   };
-  "learning.resource.version.update": {
+  "learning.resource.usage.record": {
     kind: typeof operation89.kind;
     input: z.input<typeof operation89.input>;
     output: z.output<typeof operation89.output>;
   };
-  "learning.snapshot.prune": {
+  "learning.resource.version.restore": {
     kind: typeof operation90.kind;
     input: z.input<typeof operation90.input>;
     output: z.output<typeof operation90.output>;
   };
-  "mcp.call": {
+  "learning.resource.version.update": {
     kind: typeof operation91.kind;
     input: z.input<typeof operation91.input>;
     output: z.output<typeof operation91.output>;
   };
-  "memory.archive": {
+  "learning.snapshot.prune": {
     kind: typeof operation92.kind;
     input: z.input<typeof operation92.input>;
     output: z.output<typeof operation92.output>;
   };
-  "memory.search": {
+  "mcp.call": {
     kind: typeof operation93.kind;
     input: z.input<typeof operation93.input>;
     output: z.output<typeof operation93.output>;
   };
-  "memory.session.create": {
+  "memory.archive": {
     kind: typeof operation94.kind;
     input: z.input<typeof operation94.input>;
     output: z.output<typeof operation94.output>;
   };
-  "memory.topic.create": {
+  "memory.search": {
     kind: typeof operation95.kind;
     input: z.input<typeof operation95.input>;
     output: z.output<typeof operation95.output>;
   };
-  "message.presentation.update": {
+  "memory.session.create": {
     kind: typeof operation96.kind;
     input: z.input<typeof operation96.input>;
     output: z.output<typeof operation96.output>;
   };
-  "objective.create": {
+  "memory.topic.create": {
     kind: typeof operation97.kind;
     input: z.input<typeof operation97.input>;
     output: z.output<typeof operation97.output>;
   };
-  "objective.transition": {
+  "message.presentation.update": {
     kind: typeof operation98.kind;
     input: z.input<typeof operation98.input>;
     output: z.output<typeof operation98.output>;
   };
-  "plugin.status.set": {
+  "objective.create": {
     kind: typeof operation99.kind;
     input: z.input<typeof operation99.input>;
     output: z.output<typeof operation99.output>;
   };
-  "policy.change.request": {
+  "objective.transition": {
     kind: typeof operation100.kind;
     input: z.input<typeof operation100.input>;
     output: z.output<typeof operation100.output>;
   };
-  "presentation.plan": {
+  "plugin.status.set": {
     kind: typeof operation101.kind;
     input: z.input<typeof operation101.input>;
     output: z.output<typeof operation101.output>;
   };
-  "profile.change.request": {
+  "policy.change.request": {
     kind: typeof operation102.kind;
     input: z.input<typeof operation102.input>;
     output: z.output<typeof operation102.output>;
   };
-  "reflection.run": {
+  "presentation.plan": {
     kind: typeof operation103.kind;
     input: z.input<typeof operation103.input>;
     output: z.output<typeof operation103.output>;
   };
-  "reflection.suggestion.apply": {
+  "profile.change.request": {
     kind: typeof operation104.kind;
     input: z.input<typeof operation104.input>;
     output: z.output<typeof operation104.output>;
   };
-  "resource.copy": {
+  "reflection.run": {
     kind: typeof operation105.kind;
     input: z.input<typeof operation105.input>;
     output: z.output<typeof operation105.output>;
   };
-  "resource.move": {
+  "reflection.suggestion.apply": {
     kind: typeof operation106.kind;
     input: z.input<typeof operation106.input>;
     output: z.output<typeof operation106.output>;
   };
-  "resource.promote": {
+  "resource.copy": {
     kind: typeof operation107.kind;
     input: z.input<typeof operation107.input>;
     output: z.output<typeof operation107.output>;
   };
-  "resource.redact": {
+  "resource.move": {
     kind: typeof operation108.kind;
     input: z.input<typeof operation108.input>;
     output: z.output<typeof operation108.output>;
   };
-  "resource.translation_job.save": {
+  "resource.promote": {
     kind: typeof operation109.kind;
     input: z.input<typeof operation109.input>;
     output: z.output<typeof operation109.output>;
   };
-  "resource.translation.save": {
+  "resource.redact": {
     kind: typeof operation110.kind;
     input: z.input<typeof operation110.input>;
     output: z.output<typeof operation110.output>;
   };
-  "resource.version.get": {
+  "resource.translation_job.save": {
     kind: typeof operation111.kind;
     input: z.input<typeof operation111.input>;
     output: z.output<typeof operation111.output>;
   };
-  "rollback.restore": {
+  "resource.translation.save": {
     kind: typeof operation112.kind;
     input: z.input<typeof operation112.input>;
     output: z.output<typeof operation112.output>;
   };
-  "room.agent.permission.set": {
+  "resource.version.get": {
     kind: typeof operation113.kind;
     input: z.input<typeof operation113.input>;
     output: z.output<typeof operation113.output>;
   };
-  "room.agent.remove": {
+  "rollback.restore": {
     kind: typeof operation114.kind;
     input: z.input<typeof operation114.input>;
     output: z.output<typeof operation114.output>;
   };
-  "room.create": {
+  "room.agent.permission.set": {
     kind: typeof operation115.kind;
     input: z.input<typeof operation115.input>;
     output: z.output<typeof operation115.output>;
   };
-  "room.list": {
+  "room.agent.remove": {
     kind: typeof operation116.kind;
     input: z.input<typeof operation116.input>;
     output: z.output<typeof operation116.output>;
   };
-  "room.member.add": {
+  "room.create": {
     kind: typeof operation117.kind;
     input: z.input<typeof operation117.input>;
     output: z.output<typeof operation117.output>;
   };
-  "room.member.list": {
+  "room.list": {
     kind: typeof operation118.kind;
     input: z.input<typeof operation118.input>;
     output: z.output<typeof operation118.output>;
   };
-  "room.member.remove": {
+  "room.member.add": {
     kind: typeof operation119.kind;
     input: z.input<typeof operation119.input>;
     output: z.output<typeof operation119.output>;
   };
-  "room.member.role.change": {
+  "room.member.list": {
     kind: typeof operation120.kind;
     input: z.input<typeof operation120.input>;
     output: z.output<typeof operation120.output>;
   };
-  "room.owner.recover": {
+  "room.member.remove": {
     kind: typeof operation121.kind;
     input: z.input<typeof operation121.input>;
     output: z.output<typeof operation121.output>;
   };
-  "room.owner.transfer": {
+  "room.member.role.change": {
     kind: typeof operation122.kind;
     input: z.input<typeof operation122.input>;
     output: z.output<typeof operation122.output>;
   };
-  "room.ownerless.list": {
+  "room.owner.recover": {
     kind: typeof operation123.kind;
     input: z.input<typeof operation123.input>;
     output: z.output<typeof operation123.output>;
   };
-  "room.patch": {
+  "room.owner.transfer": {
     kind: typeof operation124.kind;
     input: z.input<typeof operation124.input>;
     output: z.output<typeof operation124.output>;
   };
-  "room.resource.share": {
+  "room.ownerless.list": {
     kind: typeof operation125.kind;
     input: z.input<typeof operation125.input>;
     output: z.output<typeof operation125.output>;
   };
-  "room.resource.share.list": {
+  "room.patch": {
     kind: typeof operation126.kind;
     input: z.input<typeof operation126.input>;
     output: z.output<typeof operation126.output>;
   };
-  "room.resource.share.revoke": {
+  "room.resource.share": {
     kind: typeof operation127.kind;
     input: z.input<typeof operation127.input>;
     output: z.output<typeof operation127.output>;
   };
-  "room.view": {
+  "room.resource.share.list": {
     kind: typeof operation128.kind;
     input: z.input<typeof operation128.input>;
     output: z.output<typeof operation128.output>;
   };
-  "sandbox.exec": {
+  "room.resource.share.revoke": {
     kind: typeof operation129.kind;
     input: z.input<typeof operation129.input>;
     output: z.output<typeof operation129.output>;
   };
-  "session.create": {
+  "room.view": {
     kind: typeof operation130.kind;
     input: z.input<typeof operation130.input>;
     output: z.output<typeof operation130.output>;
   };
-  "session.search": {
+  "sandbox.exec": {
     kind: typeof operation131.kind;
     input: z.input<typeof operation131.input>;
     output: z.output<typeof operation131.output>;
   };
-  "session.search.reindex": {
+  "session.create": {
     kind: typeof operation132.kind;
     input: z.input<typeof operation132.input>;
     output: z.output<typeof operation132.output>;
   };
-  "settings.patch": {
+  "session.search": {
     kind: typeof operation133.kind;
     input: z.input<typeof operation133.input>;
     output: z.output<typeof operation133.output>;
   };
-  "skill.candidate.create": {
+  "session.search.reindex": {
     kind: typeof operation134.kind;
     input: z.input<typeof operation134.input>;
     output: z.output<typeof operation134.output>;
   };
-  "skill.lifecycle.apply": {
+  "settings.patch": {
     kind: typeof operation135.kind;
     input: z.input<typeof operation135.input>;
     output: z.output<typeof operation135.output>;
   };
-  "skill.optimization.cancel": {
+  "skill.candidate.create": {
     kind: typeof operation136.kind;
     input: z.input<typeof operation136.input>;
     output: z.output<typeof operation136.output>;
   };
-  "skill.optimization.promote": {
+  "skill.lifecycle.apply": {
     kind: typeof operation137.kind;
     input: z.input<typeof operation137.input>;
     output: z.output<typeof operation137.output>;
   };
-  "skill.optimization.reject": {
+  "skill.optimization.cancel": {
     kind: typeof operation138.kind;
     input: z.input<typeof operation138.input>;
     output: z.output<typeof operation138.output>;
   };
-  "skill.optimization.rollback": {
+  "skill.optimization.promote": {
     kind: typeof operation139.kind;
     input: z.input<typeof operation139.input>;
     output: z.output<typeof operation139.output>;
   };
-  "skill.optimization.start": {
+  "skill.optimization.reject": {
     kind: typeof operation140.kind;
     input: z.input<typeof operation140.input>;
     output: z.output<typeof operation140.output>;
   };
-  "skill.patch": {
+  "skill.optimization.rollback": {
     kind: typeof operation141.kind;
     input: z.input<typeof operation141.input>;
     output: z.output<typeof operation141.output>;
   };
-  "skill.project.save": {
+  "skill.optimization.start": {
     kind: typeof operation142.kind;
     input: z.input<typeof operation142.input>;
     output: z.output<typeof operation142.output>;
   };
-  "skill.search": {
+  "skill.patch": {
     kind: typeof operation143.kind;
     input: z.input<typeof operation143.input>;
     output: z.output<typeof operation143.output>;
   };
-  "skill.support_file.save": {
+  "skill.project.save": {
     kind: typeof operation144.kind;
     input: z.input<typeof operation144.input>;
     output: z.output<typeof operation144.output>;
   };
-  "skill.usage.record": {
+  "skill.search": {
     kind: typeof operation145.kind;
     input: z.input<typeof operation145.input>;
     output: z.output<typeof operation145.output>;
   };
-  "skill.view": {
+  "skill.support_file.save": {
     kind: typeof operation146.kind;
     input: z.input<typeof operation146.input>;
     output: z.output<typeof operation146.output>;
   };
-  "soul.change.request": {
+  "skill.usage.record": {
     kind: typeof operation147.kind;
     input: z.input<typeof operation147.input>;
     output: z.output<typeof operation147.output>;
   };
-  "wiki.accept": {
+  "skill.view": {
     kind: typeof operation148.kind;
     input: z.input<typeof operation148.input>;
     output: z.output<typeof operation148.output>;
   };
-  "wiki.archive": {
+  "soul.change.request": {
     kind: typeof operation149.kind;
     input: z.input<typeof operation149.input>;
     output: z.output<typeof operation149.output>;
   };
-  "wiki.patch": {
+  "wiki.accept": {
     kind: typeof operation150.kind;
     input: z.input<typeof operation150.input>;
     output: z.output<typeof operation150.output>;
   };
-  "wiki.proposal.create": {
+  "wiki.archive": {
     kind: typeof operation151.kind;
     input: z.input<typeof operation151.input>;
     output: z.output<typeof operation151.output>;
   };
-  "wiki.reindex": {
+  "wiki.patch": {
     kind: typeof operation152.kind;
     input: z.input<typeof operation152.input>;
     output: z.output<typeof operation152.output>;
   };
-  "wiki.reject": {
+  "wiki.proposal.create": {
     kind: typeof operation153.kind;
     input: z.input<typeof operation153.input>;
     output: z.output<typeof operation153.output>;
   };
-  "wiki.search": {
+  "wiki.reindex": {
     kind: typeof operation154.kind;
     input: z.input<typeof operation154.input>;
     output: z.output<typeof operation154.output>;
   };
-  "work_item.create": {
+  "wiki.reject": {
     kind: typeof operation155.kind;
     input: z.input<typeof operation155.input>;
     output: z.output<typeof operation155.output>;
   };
-  "work_item.follow_up": {
+  "wiki.search": {
     kind: typeof operation156.kind;
     input: z.input<typeof operation156.input>;
     output: z.output<typeof operation156.output>;
   };
-  "work_item.steer": {
+  "work_item.create": {
     kind: typeof operation157.kind;
     input: z.input<typeof operation157.input>;
     output: z.output<typeof operation157.output>;
   };
-  "workspace.backup.create": {
+  "work_item.follow_up": {
     kind: typeof operation158.kind;
     input: z.input<typeof operation158.input>;
     output: z.output<typeof operation158.output>;
   };
-  "workspace.backup.restore": {
+  "work_item.steer": {
     kind: typeof operation159.kind;
     input: z.input<typeof operation159.input>;
     output: z.output<typeof operation159.output>;
   };
-  "workspace.context.get": {
+  "workspace.backup.create": {
     kind: typeof operation160.kind;
     input: z.input<typeof operation160.input>;
     output: z.output<typeof operation160.output>;
   };
-  "workspace.member.add": {
+  "workspace.backup.restore": {
     kind: typeof operation161.kind;
     input: z.input<typeof operation161.input>;
     output: z.output<typeof operation161.output>;
   };
-  "workspace.member.list": {
+  "workspace.context.get": {
     kind: typeof operation162.kind;
     input: z.input<typeof operation162.input>;
     output: z.output<typeof operation162.output>;
   };
-  "workspace.member.remove": {
+  "workspace.member.add": {
     kind: typeof operation163.kind;
     input: z.input<typeof operation163.input>;
     output: z.output<typeof operation163.output>;
   };
-  "workspace.member.role.change": {
+  "workspace.member.list": {
     kind: typeof operation164.kind;
     input: z.input<typeof operation164.input>;
     output: z.output<typeof operation164.output>;
   };
-  "workspace.owner.transfer": {
+  "workspace.member.remove": {
     kind: typeof operation165.kind;
     input: z.input<typeof operation165.input>;
     output: z.output<typeof operation165.output>;
   };
-  "workspace.repair": {
+  "workspace.member.role.change": {
     kind: typeof operation166.kind;
     input: z.input<typeof operation166.input>;
     output: z.output<typeof operation166.output>;
+  };
+  "workspace.owner.transfer": {
+    kind: typeof operation167.kind;
+    input: z.input<typeof operation167.input>;
+    output: z.output<typeof operation167.output>;
+  };
+  "workspace.repair": {
+    kind: typeof operation168.kind;
+    input: z.input<typeof operation168.input>;
+    output: z.output<typeof operation168.output>;
   };
 }
 
@@ -1162,6 +1174,8 @@ export const domainQueryIds = Object.freeze([
   "activity.history.list",
   "agent.list",
   "agent.view",
+  "artifact.list",
+  "artifact.view",
   "browser.extract",
   "collection.records.list",
   "collection.schema.docs",
@@ -1198,9 +1212,11 @@ export const domainOperationIds = Object.freeze({
   agentWorkspacePermissionSet: "agent.workspace_permission.set",
   artifactCreate: "artifact.create",
   artifactExportPdf: "artifact.export_pdf",
+  artifactList: "artifact.list",
   artifactRepair: "artifact.repair",
   artifactRestoreRevision: "artifact.restore_revision",
   artifactRevise: "artifact.revise",
+  artifactView: "artifact.view",
   automationJobManagerResume: "automation.job.manager_resume",
   automationJobManagerStop: "automation.job.manager_stop",
   automationJobReauthorize: "automation.job.reauthorize",
@@ -1376,164 +1392,166 @@ const domainOperationInputSchemas = Object.freeze({
   "agent.workspace_permission.set": operation6.input,
   "artifact.create": operation7.input,
   "artifact.export_pdf": operation8.input,
-  "artifact.repair": operation9.input,
-  "artifact.restore_revision": operation10.input,
-  "artifact.revise": operation11.input,
-  "automation.job.manager_resume": operation12.input,
-  "automation.job.manager_stop": operation13.input,
-  "automation.job.reauthorize": operation14.input,
-  "automation.job.rebind_authority": operation15.input,
-  "automation.job.release_lock": operation16.input,
-  "automation.job.requeue": operation17.input,
-  "automation.job.run": operation18.input,
-  "automation.job.save": operation19.input,
-  "automation.job.set_status": operation20.input,
-  "automation.memory_review.run": operation21.input,
-  "browser.download_to_workspace": operation22.input,
-  "browser.extract": operation23.input,
-  "browser.interact": operation24.input,
-  "browser.navigate": operation25.input,
-  "browser.screenshot": operation26.input,
-  "chat.turn.run": operation27.input,
-  "client.event.ack": operation28.input,
-  "client.event.deliver": operation29.input,
-  "client.event.expire": operation30.input,
-  "client.event.fail": operation31.input,
-  "client.event.save": operation32.input,
-  "collection.action.run": operation33.input,
-  "collection.patch.apply": operation34.input,
-  "collection.record.create": operation35.input,
-  "collection.record.delete": operation36.input,
-  "collection.records.list": operation37.input,
-  "collection.reindex": operation38.input,
-  "collection.schema.docs": operation39.input,
-  "collection.schema.get": operation40.input,
-  "collection.schema.save": operation41.input,
-  "collection.search": operation42.input,
-  "collection.view.present": operation43.input,
-  "curator.pause": operation44.input,
-  "curator.restore": operation45.input,
-  "curator.resume": operation46.input,
-  "curator.run": operation47.input,
-  "curator.snapshot.create": operation48.input,
-  "curator.snapshot.list": operation49.input,
-  "evaluation.run": operation50.input,
-  "external_app.connection.create": operation51.input,
-  "external_app.connection.revoke": operation52.input,
-  "external_app.connection.update_scope": operation53.input,
-  "external.send": operation54.input,
-  "external.send.dispatch": operation55.input,
-  "external.send.prepare": operation56.input,
-  "file.inspect": operation57.input,
-  "file.list": operation58.input,
-  "file.patch": operation59.input,
-  "file.read": operation60.input,
-  "file.write": operation61.input,
-  "gateway.concurrency_lock.expire": operation62.input,
-  "gateway.inbound.route": operation63.input,
-  "gateway.mcp_config.save": operation64.input,
-  "gateway.pairing_policy.save": operation65.input,
-  "gateway.pairing.approve": operation66.input,
-  "gateway.pairing.expire": operation67.input,
-  "gateway.pairing.reject": operation68.input,
-  "gateway.pairing.revoke": operation69.input,
-  "gateway.pairing.rotate": operation70.input,
-  "gateway.routing_policy.save": operation71.input,
-  "gateway.sandbox.delete": operation72.input,
-  "gateway.sandbox.recreate": operation73.input,
-  "gateway.sandbox.sync": operation74.input,
-  "gateway.state.repair": operation75.input,
-  "generated_surface.action.run": operation76.input,
-  "generated_surface.create": operation77.input,
-  "generated_surface.export": operation78.input,
-  "generated_surface.interaction.record": operation79.input,
-  "generated_surface.revise": operation80.input,
-  "generated_surface.state": operation81.input,
-  "graph.create": operation82.input,
-  "graph.patch": operation83.input,
-  "image.edit": operation84.input,
-  "image.generate": operation85.input,
-  "learning.background_review.apply": operation86.input,
-  "learning.resource.usage.record": operation87.input,
-  "learning.resource.version.restore": operation88.input,
-  "learning.resource.version.update": operation89.input,
-  "learning.snapshot.prune": operation90.input,
-  "mcp.call": operation91.input,
-  "memory.archive": operation92.input,
-  "memory.search": operation93.input,
-  "memory.session.create": operation94.input,
-  "memory.topic.create": operation95.input,
-  "message.presentation.update": operation96.input,
-  "objective.create": operation97.input,
-  "objective.transition": operation98.input,
-  "plugin.status.set": operation99.input,
-  "policy.change.request": operation100.input,
-  "presentation.plan": operation101.input,
-  "profile.change.request": operation102.input,
-  "reflection.run": operation103.input,
-  "reflection.suggestion.apply": operation104.input,
-  "resource.copy": operation105.input,
-  "resource.move": operation106.input,
-  "resource.promote": operation107.input,
-  "resource.redact": operation108.input,
-  "resource.translation_job.save": operation109.input,
-  "resource.translation.save": operation110.input,
-  "resource.version.get": operation111.input,
-  "rollback.restore": operation112.input,
-  "room.agent.permission.set": operation113.input,
-  "room.agent.remove": operation114.input,
-  "room.create": operation115.input,
-  "room.list": operation116.input,
-  "room.member.add": operation117.input,
-  "room.member.list": operation118.input,
-  "room.member.remove": operation119.input,
-  "room.member.role.change": operation120.input,
-  "room.owner.recover": operation121.input,
-  "room.owner.transfer": operation122.input,
-  "room.ownerless.list": operation123.input,
-  "room.patch": operation124.input,
-  "room.resource.share": operation125.input,
-  "room.resource.share.list": operation126.input,
-  "room.resource.share.revoke": operation127.input,
-  "room.view": operation128.input,
-  "sandbox.exec": operation129.input,
-  "session.create": operation130.input,
-  "session.search": operation131.input,
-  "session.search.reindex": operation132.input,
-  "settings.patch": operation133.input,
-  "skill.candidate.create": operation134.input,
-  "skill.lifecycle.apply": operation135.input,
-  "skill.optimization.cancel": operation136.input,
-  "skill.optimization.promote": operation137.input,
-  "skill.optimization.reject": operation138.input,
-  "skill.optimization.rollback": operation139.input,
-  "skill.optimization.start": operation140.input,
-  "skill.patch": operation141.input,
-  "skill.project.save": operation142.input,
-  "skill.search": operation143.input,
-  "skill.support_file.save": operation144.input,
-  "skill.usage.record": operation145.input,
-  "skill.view": operation146.input,
-  "soul.change.request": operation147.input,
-  "wiki.accept": operation148.input,
-  "wiki.archive": operation149.input,
-  "wiki.patch": operation150.input,
-  "wiki.proposal.create": operation151.input,
-  "wiki.reindex": operation152.input,
-  "wiki.reject": operation153.input,
-  "wiki.search": operation154.input,
-  "work_item.create": operation155.input,
-  "work_item.follow_up": operation156.input,
-  "work_item.steer": operation157.input,
-  "workspace.backup.create": operation158.input,
-  "workspace.backup.restore": operation159.input,
-  "workspace.context.get": operation160.input,
-  "workspace.member.add": operation161.input,
-  "workspace.member.list": operation162.input,
-  "workspace.member.remove": operation163.input,
-  "workspace.member.role.change": operation164.input,
-  "workspace.owner.transfer": operation165.input,
-  "workspace.repair": operation166.input,
+  "artifact.list": operation9.input,
+  "artifact.repair": operation10.input,
+  "artifact.restore_revision": operation11.input,
+  "artifact.revise": operation12.input,
+  "artifact.view": operation13.input,
+  "automation.job.manager_resume": operation14.input,
+  "automation.job.manager_stop": operation15.input,
+  "automation.job.reauthorize": operation16.input,
+  "automation.job.rebind_authority": operation17.input,
+  "automation.job.release_lock": operation18.input,
+  "automation.job.requeue": operation19.input,
+  "automation.job.run": operation20.input,
+  "automation.job.save": operation21.input,
+  "automation.job.set_status": operation22.input,
+  "automation.memory_review.run": operation23.input,
+  "browser.download_to_workspace": operation24.input,
+  "browser.extract": operation25.input,
+  "browser.interact": operation26.input,
+  "browser.navigate": operation27.input,
+  "browser.screenshot": operation28.input,
+  "chat.turn.run": operation29.input,
+  "client.event.ack": operation30.input,
+  "client.event.deliver": operation31.input,
+  "client.event.expire": operation32.input,
+  "client.event.fail": operation33.input,
+  "client.event.save": operation34.input,
+  "collection.action.run": operation35.input,
+  "collection.patch.apply": operation36.input,
+  "collection.record.create": operation37.input,
+  "collection.record.delete": operation38.input,
+  "collection.records.list": operation39.input,
+  "collection.reindex": operation40.input,
+  "collection.schema.docs": operation41.input,
+  "collection.schema.get": operation42.input,
+  "collection.schema.save": operation43.input,
+  "collection.search": operation44.input,
+  "collection.view.present": operation45.input,
+  "curator.pause": operation46.input,
+  "curator.restore": operation47.input,
+  "curator.resume": operation48.input,
+  "curator.run": operation49.input,
+  "curator.snapshot.create": operation50.input,
+  "curator.snapshot.list": operation51.input,
+  "evaluation.run": operation52.input,
+  "external_app.connection.create": operation53.input,
+  "external_app.connection.revoke": operation54.input,
+  "external_app.connection.update_scope": operation55.input,
+  "external.send": operation56.input,
+  "external.send.dispatch": operation57.input,
+  "external.send.prepare": operation58.input,
+  "file.inspect": operation59.input,
+  "file.list": operation60.input,
+  "file.patch": operation61.input,
+  "file.read": operation62.input,
+  "file.write": operation63.input,
+  "gateway.concurrency_lock.expire": operation64.input,
+  "gateway.inbound.route": operation65.input,
+  "gateway.mcp_config.save": operation66.input,
+  "gateway.pairing_policy.save": operation67.input,
+  "gateway.pairing.approve": operation68.input,
+  "gateway.pairing.expire": operation69.input,
+  "gateway.pairing.reject": operation70.input,
+  "gateway.pairing.revoke": operation71.input,
+  "gateway.pairing.rotate": operation72.input,
+  "gateway.routing_policy.save": operation73.input,
+  "gateway.sandbox.delete": operation74.input,
+  "gateway.sandbox.recreate": operation75.input,
+  "gateway.sandbox.sync": operation76.input,
+  "gateway.state.repair": operation77.input,
+  "generated_surface.action.run": operation78.input,
+  "generated_surface.create": operation79.input,
+  "generated_surface.export": operation80.input,
+  "generated_surface.interaction.record": operation81.input,
+  "generated_surface.revise": operation82.input,
+  "generated_surface.state": operation83.input,
+  "graph.create": operation84.input,
+  "graph.patch": operation85.input,
+  "image.edit": operation86.input,
+  "image.generate": operation87.input,
+  "learning.background_review.apply": operation88.input,
+  "learning.resource.usage.record": operation89.input,
+  "learning.resource.version.restore": operation90.input,
+  "learning.resource.version.update": operation91.input,
+  "learning.snapshot.prune": operation92.input,
+  "mcp.call": operation93.input,
+  "memory.archive": operation94.input,
+  "memory.search": operation95.input,
+  "memory.session.create": operation96.input,
+  "memory.topic.create": operation97.input,
+  "message.presentation.update": operation98.input,
+  "objective.create": operation99.input,
+  "objective.transition": operation100.input,
+  "plugin.status.set": operation101.input,
+  "policy.change.request": operation102.input,
+  "presentation.plan": operation103.input,
+  "profile.change.request": operation104.input,
+  "reflection.run": operation105.input,
+  "reflection.suggestion.apply": operation106.input,
+  "resource.copy": operation107.input,
+  "resource.move": operation108.input,
+  "resource.promote": operation109.input,
+  "resource.redact": operation110.input,
+  "resource.translation_job.save": operation111.input,
+  "resource.translation.save": operation112.input,
+  "resource.version.get": operation113.input,
+  "rollback.restore": operation114.input,
+  "room.agent.permission.set": operation115.input,
+  "room.agent.remove": operation116.input,
+  "room.create": operation117.input,
+  "room.list": operation118.input,
+  "room.member.add": operation119.input,
+  "room.member.list": operation120.input,
+  "room.member.remove": operation121.input,
+  "room.member.role.change": operation122.input,
+  "room.owner.recover": operation123.input,
+  "room.owner.transfer": operation124.input,
+  "room.ownerless.list": operation125.input,
+  "room.patch": operation126.input,
+  "room.resource.share": operation127.input,
+  "room.resource.share.list": operation128.input,
+  "room.resource.share.revoke": operation129.input,
+  "room.view": operation130.input,
+  "sandbox.exec": operation131.input,
+  "session.create": operation132.input,
+  "session.search": operation133.input,
+  "session.search.reindex": operation134.input,
+  "settings.patch": operation135.input,
+  "skill.candidate.create": operation136.input,
+  "skill.lifecycle.apply": operation137.input,
+  "skill.optimization.cancel": operation138.input,
+  "skill.optimization.promote": operation139.input,
+  "skill.optimization.reject": operation140.input,
+  "skill.optimization.rollback": operation141.input,
+  "skill.optimization.start": operation142.input,
+  "skill.patch": operation143.input,
+  "skill.project.save": operation144.input,
+  "skill.search": operation145.input,
+  "skill.support_file.save": operation146.input,
+  "skill.usage.record": operation147.input,
+  "skill.view": operation148.input,
+  "soul.change.request": operation149.input,
+  "wiki.accept": operation150.input,
+  "wiki.archive": operation151.input,
+  "wiki.patch": operation152.input,
+  "wiki.proposal.create": operation153.input,
+  "wiki.reindex": operation154.input,
+  "wiki.reject": operation155.input,
+  "wiki.search": operation156.input,
+  "work_item.create": operation157.input,
+  "work_item.follow_up": operation158.input,
+  "work_item.steer": operation159.input,
+  "workspace.backup.create": operation160.input,
+  "workspace.backup.restore": operation161.input,
+  "workspace.context.get": operation162.input,
+  "workspace.member.add": operation163.input,
+  "workspace.member.list": operation164.input,
+  "workspace.member.remove": operation165.input,
+  "workspace.member.role.change": operation166.input,
+  "workspace.owner.transfer": operation167.input,
+  "workspace.repair": operation168.input,
 } as const);
 
 export function parseDomainOperationInput<Id extends DomainOperationId>(
@@ -1714,4 +1732,6 @@ export const operationDefinitions: readonly OperationDefinition[] = Object.freez
   operation164,
   operation165,
   operation166,
+  operation167,
+  operation168,
 ]);

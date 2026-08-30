@@ -229,7 +229,7 @@ function sanitizeWorkspaceAttachmentInput(input: unknown): Record<string, unknow
   };
 }
 
-function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; workspaceId: string; roomId?: string; kind?: string } | undefined {
+function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; workspaceId: string; roomId?: string; kind?: string; eventId?: string; cursor?: string } | undefined {
   if (!input || typeof input !== "object") return undefined;
   const value = input as Record<string, unknown>;
   const type = typeof value.type === "string" && /^(?:event|access_changed|access_revoked|room_access_changed|room_access_revoked)$/.test(value.type)
@@ -237,9 +237,11 @@ function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; worksp
     : undefined;
   const workspaceId = typeof value.workspaceId === "string" && opaque(value.workspaceId) ? value.workspaceId : undefined;
   if (!type || !workspaceId) return undefined;
-  const output: { type: string; workspaceId: string; roomId?: string; kind?: string } = { type, workspaceId };
+  const output: { type: string; workspaceId: string; roomId?: string; kind?: string; eventId?: string; cursor?: string } = { type, workspaceId };
   if (typeof value.roomId === "string" && opaque(value.roomId)) output.roomId = value.roomId;
   if (typeof value.kind === "string" && /^[a-z][a-z0-9._-]{0,80}$/.test(value.kind)) output.kind = value.kind;
+  if (typeof value.eventId === "string" && opaque(value.eventId)) output.eventId = value.eventId;
+  if (typeof value.cursor === "string" && value.cursor.length <= 512) output.cursor = value.cursor;
   return output;
 }
 

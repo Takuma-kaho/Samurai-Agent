@@ -1,6 +1,7 @@
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const artifactKinds = new Set(["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"]);
 const locales = new Set(["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"]);
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 export function workspaceArtifactListRequest(input: unknown): { roomId: string } {
   const value = object(input);
@@ -12,11 +13,11 @@ export function workspaceArtifactIdRequest(input: unknown): { roomId: string; ar
   return { roomId: requiredOpaque(value, "roomId"), artifactId: requiredOpaque(value, "artifactId") };
 }
 
-export function workspaceArtifactCreateRequest(input: unknown): { operationId: string; body: Record<string, unknown> } {
+export function workspaceArtifactCreateRequest(input: unknown): { operationId: string; body: Record<string, JsonValue> } {
   const value = object(input);
   const content = value.content;
   if (typeof content !== "string" && !isJsonValue(content)) throw new Error("content_invalid");
-  const body: Record<string, unknown> = {
+  const body: Record<string, JsonValue> = {
     room_id: requiredOpaque(value, "roomId"),
     title: requiredText(value, "title", 20_000),
     content
@@ -61,16 +62,16 @@ function requiredLocale(value: unknown): string {
   return value;
 }
 
-function requiredJsonObject(value: unknown, key: string): Record<string, unknown> {
+function requiredJsonObject(value: unknown, key: string): Record<string, JsonValue> {
   if (!value || typeof value !== "object" || Array.isArray(value) || !isJsonObject(value) || JSON.stringify(value).length > 200_000) throw new Error(`${key}_invalid`);
-  return value as Record<string, unknown>;
+  return value as Record<string, JsonValue>;
 }
 
-function isJsonObject(value: unknown): boolean {
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
   return !!value && typeof value === "object" && !Array.isArray(value) && Object.values(value as Record<string, unknown>).every(isJsonValue);
 }
 
-function isJsonValue(value: unknown): boolean {
+function isJsonValue(value: unknown): value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (Array.isArray(value)) return value.every(isJsonValue);

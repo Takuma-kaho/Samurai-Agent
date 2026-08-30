@@ -162,6 +162,112 @@ describe("Workspace Bundle v3 credential boundary", () => {
     }
   });
 
+  it("accepts a workspace-scoped public Event and preserves its public fields", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [],
+        roomMemberships: [],
+        events: [{
+          source_event_id: 17,
+          workspace_id: workspaceId,
+          room_id: null,
+          kind: "workspace.agent.changed",
+          record_type: "agent",
+          record_id: "agent_one",
+          operation_id: "operation_one",
+          payload: { agent_id: "agent_one", action: "patched" },
+          created_at: timestamp,
+          event_id: "event_agent_one",
+          event_version: "1.0",
+          actor_kind: "human",
+          actor_id: accountId,
+          organization_id: null,
+          cursor: "cursor_agent_one",
+          correlation_id: "correlation_one",
+          resources: [{ kind: "agent", id: "agent_one", uri: "samurai://agent/agent_one", label: "Agent" }]
+        }]
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).resolves.toMatchObject({
+        manifest: { record_counts: { events: 1 } }
+      });
+      const event = JSON.parse((await readFile(path.join(root, "events.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(event).toMatchObject({
+        room_id: null,
+        event_id: "event_agent_one",
+        event_version: "1.0",
+        actor_kind: "human",
+        actor_id: accountId,
+        cursor: "cursor_agent_one",
+        correlation_id: "correlation_one"
+      });
+      expect(event.resources).toEqual([{ kind: "agent", id: "agent_one", uri: "samurai://agent/agent_one", label: "Agent" }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a legacy V3 Event without public Event fields", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        events: [{
+          source_event_id: 18,
+          workspace_id: workspaceId,
+          room_id: "room_root",
+          kind: "legacy.event",
+          record_type: null,
+          record_id: null,
+          operation_id: "legacy_operation",
+          payload: { legacy: true },
+          created_at: timestamp
+        }]
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).resolves.toMatchObject({
+        manifest: { record_counts: { events: 1 } }
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed public Event fields", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [],
+        roomMemberships: [],
+        events: [{
+          source_event_id: 19,
+          workspace_id: workspaceId,
+          room_id: null,
+          kind: "workspace.agent.changed",
+          record_type: "agent",
+          record_id: "agent_one",
+          operation_id: "operation_one",
+          payload: {},
+          created_at: timestamp,
+          event_id: "event_agent_one",
+          event_version: "broken",
+          actor_kind: "human",
+          actor_id: accountId,
+          organization_id: null,
+          cursor: "cursor_agent_one",
+          correlation_id: "correlation_one",
+          resources: []
+        }]
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_v3_schema_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a child Room whose direct member is absent from its parent", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
     try {
@@ -369,6 +475,7 @@ async function writeHierarchyBundle(
     schemaVersion?: number;
     rooms: Record<string, unknown>[];
     roomMemberships: Record<string, unknown>[];
+    events?: Record<string, unknown>[];
     workspaceFiles?: Array<{ path: string; content: Uint8Array }>;
     learning?: Partial<Record<LearningFile, Record<string, unknown>[]>>;
   }
@@ -400,7 +507,7 @@ async function writeHierarchyBundle(
     }])],
     ["room-memberships.jsonl", jsonLines(input.roomMemberships)],
     ["records.jsonl", ""],
-    ["events.jsonl", ""],
+    ["events.jsonl", jsonLines(input.events ?? [])],
     ["jobs.jsonl", ""],
     ["operations.jsonl", ""],
     ["invitations.jsonl", ""],
@@ -426,7 +533,7 @@ async function writeHierarchyBundle(
     memberships: 1,
     room_memberships: input.roomMemberships.length,
     records: 0,
-    events: 0,
+    events: input.events?.length ?? 0,
     jobs: 0,
     operations: 0,
     invitations: 0,

@@ -50,6 +50,7 @@ import {
 } from "@samurai-agent/workspace-server";
 import { createWorkspaceServerCore, type WorkspaceServerCore } from "./core";
 import { WorkspaceRealtimeGate, roomSocketRoom, workspaceSocketRoom } from "./realtime";
+import { mountDomainApiV1 } from "./domain-api-v1";
 import { WorkspaceWorkerSupervisor } from "../workers/workspace-worker-supervisor";
 import { createWorkspaceCompletionBackendReviewPort } from "../workers/workspace-completion-review-port";
 import { createWorkspaceLearningBackendReviewPort } from "../workers/workspace-learning-review-port";
@@ -435,6 +436,33 @@ export async function createWorkspaceServerHttp(
     hostComplete: skillOptimizationHostComplete,
     autoStartOptimization: false,
     ...(roomId ? { roomId } : {})
+  });
+
+  mountDomainApiV1({
+    app,
+    io,
+    store,
+    commands,
+    artifacts,
+    realtimeGate,
+    authenticateWorkspace,
+    asyncRoute,
+    workspaceContext,
+    operationContext,
+    requestId: (req) => authenticated(req).requestId,
+    runtimeFor: (req) => {
+      const context = operationContext(req);
+      return postgresRuntimeCommands(
+        core.database,
+        config,
+        backendRegistry,
+        context,
+        io,
+        store,
+        knowledgeMemory,
+        (event) => recordPostgresChatCompletionActivity(commands, context, event)
+      );
+    }
   });
 
   app.get("/api/health", asyncRoute(async (_req, res) => {
@@ -3087,8 +3115,19 @@ export async function createWorkspaceServerHttp(
     });
   });
 
-  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     const normalized = normalizeError(error);
+    if (req.path.startsWith("/api/v1/")) {
+      const requestId = (req as AuthenticatedRequest).samurai?.requestId ?? req.header("x-samurai-request-id") ?? "unknown";
+      res.status(normalized.status).json({
+        error: {
+          code: normalized.code,
+          request_id: requestId,
+          ...(normalized.details ? { details: normalized.details } : {})
+        }
+      });
+      return;
+    }
     res.status(normalized.status).json({ error: normalized.code, ...(normalized.details ? { details: normalized.details } : {}) });
   });
 

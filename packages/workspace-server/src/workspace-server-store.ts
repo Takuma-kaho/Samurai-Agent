@@ -20,6 +20,8 @@ import type {
   WorkspaceMembership,
   WorkspaceRecord,
   WorkspaceRecordPayload,
+  WorkspacePublicEvent,
+  WorkspacePublicEventPage,
   WorkspaceRequestContext,
   WorkspaceRoom,
   WorkspaceRoomCreateResult,
@@ -32,6 +34,7 @@ import type {
   WorkspaceState,
   WorkspaceSummary
 } from "./types";
+import type { ResourceRef } from "@samurai-agent/core-schemas";
 
 const roleSet = new Set<WorkspaceMembershipRole>(["owner", "admin", "member", "guest"]);
 const recordTypePattern = /^[a-z][a-z0-9_]{0,63}$/;
@@ -77,6 +80,21 @@ export interface PutJobResult {
   replayed: boolean;
 }
 
+export interface AppendPublicEventInput {
+  eventId?: string;
+  eventType: string;
+  eventVersion?: string;
+  roomId?: string;
+  organizationId?: string;
+  actor: WorkspacePublicEvent["actor"];
+  resources?: ResourceRef[];
+  operationId?: string;
+  correlationId?: string;
+  /** The already-authorized state change that produced this notification. */
+  authorizationAction?: "edit" | "execute";
+  payload: WorkspaceRecordPayload;
+}
+
 /** The durable value of an idempotent operation plus whether this call is a replay. */
 export interface IdempotentOperationResult<T> {
   value: T;
@@ -104,6 +122,9 @@ export interface RegisterWorkspaceAgentInput {
   id?: string;
   displayName: string;
   description?: string;
+  role?: string;
+  instructions?: string;
+  enabled?: boolean;
   backendId?: string;
 }
 
@@ -326,7 +347,7 @@ export class WorkspaceServerStore {
   async listAgents(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<WorkspaceAgent[]> {
     return this.database.withContext(context, async (sql) => {
       const result = await sql.query<AgentRow>(
-        `SELECT workspace_id, id, display_name, description, backend_id, status, version, created_by, created_at, updated_at
+        `SELECT workspace_id, id, display_name, description, role, instructions, enabled, backend_id, status, version, created_by, created_at, updated_at
          FROM workspace_agents WHERE workspace_id = $1 ORDER BY created_at, id`,
         [context.workspaceId]
       );
@@ -337,13 +358,21 @@ export class WorkspaceServerStore {
   async registerAgent(context: WorkspaceRequestContext, input: RegisterWorkspaceAgentInput): Promise<{ agent: WorkspaceAgent; replayed: boolean }> {
     if (!input.displayName.trim() || input.displayName.trim().length > 200) throw new WorkspaceServerError("workspace_agent_display_name_invalid", 400);
     const backendId = normalizeAgentBackendId(input.backendId);
+    const role = input.role?.trim() || "workspace_agent";
+    const instructions = input.instructions?.trim() || input.description?.trim() || "Workspace Agent";
+    if (role.length > 500 || instructions.length > 20_000) throw new WorkspaceServerError("workspace_agent_input_invalid", 400);
     const id = input.id ?? operationScopedId("agent", context.workspaceId, context.operationId);
     assertOpaqueId(id, "workspace_agent_id_invalid");
-    const result = await this.runIdempotentResult(context, { action: "workspace.agent.register", input: { id, displayName: input.displayName.trim(), description: input.description?.trim() ?? "", backendId } }, async (sql) => {
+    const useV1Profile = input.role !== undefined || input.instructions !== undefined || input.enabled !== undefined;
+    const result = await this.runIdempotentResult(context, { action: "workspace.agent.register", input: { id, displayName: input.displayName.trim(), description: input.description?.trim() ?? "", role, instructions, enabled: input.enabled ?? true, backendId } }, async (sql) => {
       await this.assertWorkspaceWritable(sql, context.workspaceId);
       try {
-        await sql.query("SELECT samurai_register_workspace_agent($1, $2, $3, $4)", [context.workspaceId, id, input.displayName.trim(), input.description?.trim() ?? ""]);
-        if (backendId !== "samurai-native") {
+        if (useV1Profile) {
+          await sql.query("SELECT samurai_register_workspace_agent_v1($1, $2, $3, $4, $5, $6, $7)", [context.workspaceId, id, input.displayName.trim(), role, instructions, backendId, input.enabled ?? true]);
+        } else {
+          await sql.query("SELECT samurai_register_workspace_agent($1, $2, $3, $4)", [context.workspaceId, id, input.displayName.trim(), input.description?.trim() ?? ""]);
+        }
+        if (!useV1Profile && backendId !== "samurai-native") {
           await sql.query("SELECT samurai_set_workspace_agent_backend($1, $2, $3)", [context.workspaceId, id, backendId]);
         }
       } catch (error) {
@@ -351,7 +380,7 @@ export class WorkspaceServerStore {
         throw error;
       }
       const saved = await sql.query<AgentRow>(
-        `SELECT workspace_id, id, display_name, description, backend_id, status, version, created_by, created_at, updated_at
+        `SELECT workspace_id, id, display_name, description, role, instructions, enabled, backend_id, status, version, created_by, created_at, updated_at
          FROM workspace_agents WHERE workspace_id = $1 AND id = $2`,
         [context.workspaceId, id]
       );
@@ -369,6 +398,152 @@ export class WorkspaceServerStore {
       return mapped;
     });
     return { agent: result.value, replayed: result.replayed };
+  }
+
+  async patchRoom(
+    context: WorkspaceRequestContext,
+    input: { id: string; name: string; expectedVersion?: number }
+  ): Promise<{ room: WorkspaceRoom; replayed: boolean }> {
+    assertOpaqueId(input.id, "room_id_invalid");
+    if (!input.name.trim() || input.name.trim().length > 200) throw new WorkspaceServerError("room_name_required", 400);
+    const current = await this.getRoom(context, input.id);
+    const expectedVersion = input.expectedVersion ?? current.version;
+    assertExpectedVersion(expectedVersion, "room_expected_version_invalid", 1);
+    const requestInput = {
+      id: input.id,
+      name: input.name,
+      ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion })
+    };
+    const result = await this.runIdempotentResult(context, { action: "room.patch", input: requestInput }, async (sql) => {
+      try {
+        await sql.query("SELECT samurai_patch_room($1, $2, $3, $4)", [context.workspaceId, input.id, input.name.trim(), expectedVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("room_version_conflict")) {
+          const latest = await sql.query<{ version: number | string }>("SELECT version FROM rooms WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.id]);
+          throw new WorkspaceServerError("room_version_conflict", 409, { latest_version: latest.rows[0] ? Number(latest.rows[0].version) : null });
+        }
+        throw error;
+      }
+      const saved = await sql.query<RoomRow>(
+        "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        [context.workspaceId, input.id]
+      );
+      const row = saved.rows[0];
+      if (!row) throw new WorkspaceServerError("room_not_available", 404);
+      const room = roomFromRow(row);
+      await this.insertEvent(sql, context, { roomId: room.id, kind: "room.updated", recordType: "room", recordId: room.id, payload: { version: room.version } });
+      await this.insertAudit(sql, context, { action: "room.patch", roomId: room.id, subjectKind: "room", subjectId: room.id, beforeVersion: expectedVersion, afterVersion: room.version });
+      return room;
+    });
+    return { room: result.value, replayed: result.replayed };
+  }
+
+  async getRoom(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string): Promise<WorkspaceRoom> {
+    assertOpaqueId(roomId, "room_id_invalid");
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<RoomRow>(
+        `SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at,
+                samurai_can_room(workspace_id, id, 'manage') AS can_manage,
+                samurai_can_room(workspace_id, id, 'execute') AS can_execute
+         FROM rooms WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, roomId]
+      );
+      const row = result.rows[0];
+      if (!row) throw new WorkspaceServerError("room_not_available", 404);
+      return roomFromRow(row);
+    });
+  }
+
+  async patchAgent(
+    context: WorkspaceRequestContext,
+    input: { id: string; name?: string; role?: string; instructions?: string; enabled?: boolean; expectedVersion?: number }
+  ): Promise<{ agent: WorkspaceAgent; replayed: boolean }> {
+    assertOpaqueId(input.id, "workspace_agent_id_invalid");
+    const current = await this.getAgent(context, input.id);
+    const expectedVersion = input.expectedVersion ?? current.version;
+    assertExpectedVersion(expectedVersion, "workspace_agent_expected_version_invalid", 1);
+    const requestInput = {
+      id: input.id,
+      ...(input.name === undefined ? {} : { name: input.name }),
+      ...(input.role === undefined ? {} : { role: input.role }),
+      ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion })
+    };
+    const result = await this.runIdempotentResult(context, { action: "workspace.agent.patch", input: requestInput }, async (sql) => {
+      try {
+        await sql.query("SELECT samurai_patch_workspace_agent($1, $2, $3, $4, $5, $6, $7)", [context.workspaceId, input.id, input.name ?? null, input.role ?? null, input.instructions ?? null, input.enabled ?? null, expectedVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_agent_version_conflict")) {
+          const latest = await sql.query<{ version: number | string }>("SELECT version FROM workspace_agents WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.id]);
+          throw new WorkspaceServerError("workspace_agent_version_conflict", 409, { latest_version: latest.rows[0] ? Number(latest.rows[0].version) : null });
+        }
+        throw error;
+      }
+      const saved = await sql.query<AgentRow>(
+        `SELECT workspace_id, id, display_name, description, role, instructions, enabled, backend_id, status, version, created_by, created_at, updated_at
+         FROM workspace_agents WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, input.id]
+      );
+      const row = saved.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_agent_not_active", 404);
+      const agent = agentFromRow(row);
+      await this.insertAudit(sql, context, { action: "workspace.agent.patch", subjectKind: "workspace_agent", subjectId: agent.id, beforeVersion: expectedVersion, afterVersion: agent.version, details: { enabled: agent.enabled ?? agent.status === "active" } });
+      return agent;
+    });
+    return { agent: result.value, replayed: result.replayed };
+  }
+
+  async bindAgentBackend(
+    context: WorkspaceRequestContext,
+    input: { id: string; backendId: string; expectedVersion?: number }
+  ): Promise<{ agent: WorkspaceAgent; replayed: boolean }> {
+    assertOpaqueId(input.id, "workspace_agent_id_invalid");
+    const backendId = normalizeAgentBackendId(input.backendId);
+    const current = await this.getAgent(context, input.id);
+    const expectedVersion = input.expectedVersion ?? current.version;
+    assertExpectedVersion(expectedVersion, "workspace_agent_expected_version_invalid", 1);
+    const requestInput = {
+      id: input.id,
+      backendId,
+      ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion })
+    };
+    const result = await this.runIdempotentResult(context, { action: "workspace.agent.backend.bind", input: requestInput }, async (sql) => {
+      try {
+        await sql.query("SELECT samurai_set_workspace_agent_backend_v1($1, $2, $3, $4)", [context.workspaceId, input.id, backendId, expectedVersion]);
+      } catch (error) {
+        if (postgresMessage(error).includes("workspace_agent_version_conflict")) {
+          const latest = await sql.query<{ version: number | string }>("SELECT version FROM workspace_agents WHERE workspace_id = $1 AND id = $2", [context.workspaceId, input.id]);
+          throw new WorkspaceServerError("workspace_agent_version_conflict", 409, { latest_version: latest.rows[0] ? Number(latest.rows[0].version) : null });
+        }
+        throw error;
+      }
+      const saved = await sql.query<AgentRow>(
+        `SELECT workspace_id, id, display_name, description, role, instructions, enabled, backend_id, status, version, created_by, created_at, updated_at
+         FROM workspace_agents WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, input.id]
+      );
+      const row = saved.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_agent_not_active", 404);
+      const agent = agentFromRow(row);
+      await this.insertAudit(sql, context, { action: "workspace.agent.backend.bind", subjectKind: "workspace_agent", subjectId: agent.id, beforeVersion: expectedVersion, afterVersion: agent.version, details: { backend_id: agent.backendId } });
+      return agent;
+    });
+    return { agent: result.value, replayed: result.replayed };
+  }
+
+  async getAgent(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, agentId: string): Promise<WorkspaceAgent> {
+    assertOpaqueId(agentId, "workspace_agent_id_invalid");
+    return this.database.withContext(context, async (sql) => {
+      const result = await sql.query<AgentRow>(
+        `SELECT workspace_id, id, display_name, description, role, instructions, enabled, backend_id, status, version, created_by, created_at, updated_at
+         FROM workspace_agents WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, agentId]
+      );
+      const row = result.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_agent_not_found", 404);
+      return agentFromRow(row);
+    });
   }
 
   async listAgentRoomPermissions(
@@ -1129,6 +1304,144 @@ export class WorkspaceServerStore {
     });
   }
 
+  /** Reads the versioned Event Journal through the same RLS boundary as all Workspace data. */
+  async listPublicEvents(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { roomId?: string; afterCursor?: string; limit?: number } = {}
+  ): Promise<WorkspacePublicEventPage> {
+    if (input.roomId) {
+      await this.assertRoomReadable(context, input.roomId);
+    }
+    const limit = boundedLimit(input.limit);
+    return this.database.withContext(context, async (sql) => {
+      let afterId = 0;
+      if (input.afterCursor) {
+        const cursor = await sql.query<{ id: number | string }>(
+          "SELECT id FROM workspace_events WHERE workspace_id = $1 AND cursor = $2",
+          [context.workspaceId, input.afterCursor]
+        );
+        if (!cursor.rows[0]) throw new WorkspaceServerError("workspace_event_cursor_invalid", 400);
+        afterId = Number(cursor.rows[0].id);
+      }
+      const result = await sql.query<PublicEventRow>(
+        `SELECT id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at,
+                event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+         FROM workspace_events
+         WHERE workspace_id = $1
+           AND id > $2
+           AND ($3::TEXT IS NULL OR room_id = $3)
+         ORDER BY id ASC
+         LIMIT $4`,
+        [context.workspaceId, afterId, input.roomId ?? null, limit + 1]
+      );
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+      return {
+        events: rows.map(publicEventFromRow),
+        ...(hasMore && rows.length > 0 ? { nextCursor: String(rows[rows.length - 1]!.cursor) } : {}),
+        hasMore
+      };
+    });
+  }
+
+  /** Appends one public Event after the owning state change has been persisted. */
+  async appendPublicEvent(
+    context: WorkspaceRequestContext,
+    input: AppendPublicEventInput
+  ): Promise<{ event: WorkspacePublicEvent; replayed: boolean }> {
+    assertOpaqueId(context.workspaceId, "workspace_id_invalid");
+    const eventType = input.eventType.trim();
+    if (!/^[a-z][a-z0-9._-]{0,127}$/.test(eventType)) throw new WorkspaceServerError("workspace_event_type_invalid", 400);
+    const eventVersion = input.eventVersion ?? "1.0";
+    if (!/^\d+\.\d+$/.test(eventVersion)) throw new WorkspaceServerError("workspace_event_version_invalid", 400);
+    if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    if (input.organizationId) assertOpaqueId(input.organizationId, "organization_id_invalid");
+    if (input.actor.kind !== "system" && !input.actor.id) throw new WorkspaceServerError("workspace_event_actor_invalid", 400);
+    if (input.actor.id) assertOpaqueId(input.actor.id, "workspace_event_actor_invalid");
+    const eventId = input.eventId ?? `event_${hash(canonicalJson({ workspaceId: context.workspaceId, eventType, roomId: input.roomId ?? null, operationId: input.operationId ?? context.operationId, payload: input.payload })).slice(0, 48)}`;
+    assertOpaqueId(eventId, "workspace_event_id_invalid");
+    const cursor = `cursor_${hash(`${context.workspaceId}|${eventId}`).slice(0, 48)}`;
+    const operationId = input.operationId ?? context.operationId;
+    assertOpaqueId(operationId, "operation_id_invalid");
+    const resources = input.resources ?? [];
+    return this.database.withContext(context, async (sql) => {
+      if (input.roomId) {
+        const authorizationAction = input.authorizationAction ?? "edit";
+        const allowed = await sql.query<{ allowed: boolean }>(
+          "SELECT samurai_can_room($1, $2, $3) AND samurai_workspace_is_writable($1) AS allowed",
+          [context.workspaceId, input.roomId, authorizationAction]
+        );
+        if (allowed.rows[0]?.allowed !== true) throw new WorkspaceServerError("room_not_writable_or_access_denied", 403);
+      } else {
+        const allowed = await sql.query<{ allowed: boolean }>(
+          "SELECT samurai_can_workspace($1, 'admin') AND samurai_workspace_is_writable($1) AS allowed",
+          [context.workspaceId]
+        );
+        if (allowed.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_admin_permission_required", 403);
+      }
+      const saved = await sql.query<PublicEventRow>(
+        `INSERT INTO workspace_events(
+           workspace_id, room_id, kind, record_type, record_id, operation_id, payload,
+           event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB, $8, $9, $10, $11, $12, $13, $14, $15::JSONB)
+         ON CONFLICT (workspace_id, event_id) DO NOTHING
+         RETURNING id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at,
+                   event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources`,
+        [
+          context.workspaceId,
+          input.roomId ?? null,
+          eventType,
+          resources[0]?.kind ?? null,
+          resources[0]?.id ?? null,
+          operationId,
+          canonicalJson(input.payload),
+          eventId,
+          eventVersion,
+          input.actor.kind,
+          input.actor.id ?? null,
+          input.organizationId ?? null,
+          cursor,
+          input.correlationId ?? operationId,
+          canonicalJson(resources)
+        ]
+      );
+      if (saved.rows[0]) return { event: publicEventFromRow(saved.rows[0]), replayed: false };
+      const existing = await sql.query<PublicEventRow>(
+        `SELECT id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at,
+                event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+         FROM workspace_events WHERE workspace_id = $1 AND event_id = $2`,
+        [context.workspaceId, eventId]
+      );
+      const row = existing.rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_event_creation_failed", 500);
+      const existingEvent = publicEventFromRow(row);
+      const requested = {
+        eventType,
+        eventVersion,
+        roomId: input.roomId,
+        organizationId: input.organizationId,
+        actor: input.actor,
+        operationId,
+        correlationId: input.correlationId ?? operationId,
+        payload: input.payload,
+        resources
+      };
+      const stored = {
+        eventType: existingEvent.eventType,
+        eventVersion: existingEvent.eventVersion,
+        roomId: existingEvent.scope.roomId,
+        organizationId: existingEvent.scope.organizationId,
+        actor: existingEvent.actor,
+        operationId: existingEvent.operationId,
+        correlationId: existingEvent.correlationId,
+        payload: existingEvent.payload,
+        resources: existingEvent.resources
+      };
+      if (canonicalJson(requested) !== canonicalJson(stored)) throw new WorkspaceServerError("workspace_event_idempotency_conflict", 409);
+      return { event: existingEvent, replayed: true };
+    });
+  }
+
   async putJob(context: WorkspaceRequestContext, input: {
     roomId: string;
     id?: string;
@@ -1580,6 +1893,9 @@ interface AgentRow {
   id: string;
   display_name: string;
   description: string;
+  role?: string;
+  instructions?: string;
+  enabled?: boolean;
   backend_id: string;
   status: WorkspaceAgent["status"];
   version: number | string;
@@ -1635,13 +1951,25 @@ interface RecordRow {
 interface EventRow {
   id: number | string;
   workspace_id: string;
-  room_id: string;
+  room_id: string | null;
   kind: string;
   record_type: string | null;
   record_id: string | null;
   operation_id: string;
   payload: WorkspaceRecordPayload | string;
   created_at: Date | string;
+}
+
+interface PublicEventRow extends EventRow {
+  room_id: string | null;
+  event_id: string;
+  event_version: string;
+  actor_kind: "human" | "agent" | "system";
+  actor_id: string | null;
+  organization_id: string | null;
+  cursor: string;
+  correlation_id: string | null;
+  resources: unknown;
 }
 
 interface JobRow {
@@ -1740,6 +2068,9 @@ function agentFromRow(row: AgentRow): WorkspaceAgent {
     id: row.id,
     displayName: row.display_name,
     description: row.description,
+    ...(row.role ? { role: row.role } : {}),
+    ...(row.instructions ? { instructions: row.instructions } : {}),
+    ...(row.enabled === undefined ? {} : { enabled: row.enabled }),
     backendId: row.backend_id,
     status: row.status,
     version: Number(row.version),
@@ -1803,13 +2134,41 @@ function eventFromRow(row: EventRow): WorkspaceEvent {
   return {
     id: Number(row.id),
     workspaceId: row.workspace_id,
-    roomId: row.room_id,
+    roomId: row.room_id ?? "",
     kind: row.kind,
     ...(row.record_type ? { recordType: row.record_type } : {}),
     ...(row.record_id ? { recordId: row.record_id } : {}),
     operationId: row.operation_id,
     payload: jsonObject(row.payload),
     createdAt: iso(row.created_at)
+  };
+}
+
+function publicEventFromRow(row: PublicEventRow): WorkspacePublicEvent {
+  const resources = Array.isArray(row.resources)
+    ? row.resources as ResourceRef[]
+    : typeof row.resources === "string"
+      ? JSON.parse(row.resources) as ResourceRef[]
+      : [];
+  return {
+    eventId: row.event_id,
+    eventType: row.kind,
+    eventVersion: row.event_version,
+    cursor: row.cursor,
+    occurredAt: iso(row.created_at),
+    actor: {
+      kind: row.actor_kind,
+      ...(row.actor_id ? { id: row.actor_id } : {})
+    },
+    scope: {
+      workspaceId: row.workspace_id,
+      ...(row.organization_id ? { organizationId: row.organization_id } : {}),
+      ...(row.room_id ? { roomId: row.room_id } : {})
+    },
+    resources,
+    ...(row.operation_id ? { operationId: row.operation_id } : {}),
+    ...(row.correlation_id ? { correlationId: row.correlation_id } : {}),
+    payload: jsonObject(row.payload)
   };
 }
 

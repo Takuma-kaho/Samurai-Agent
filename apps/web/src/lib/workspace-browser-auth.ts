@@ -34,6 +34,8 @@ export interface BrowserWorkspaceRealtimeEvent {
   workspaceId: string;
   roomId?: string;
   kind?: string;
+  eventId?: string;
+  cursor?: string;
 }
 
 interface StoredBrowserWorkspaceConnection extends BrowserWorkspaceConnection {
@@ -48,6 +50,8 @@ let cachedConnection: StoredBrowserWorkspaceConnection | null | undefined;
 let connectionLoad: Promise<StoredBrowserWorkspaceConnection | undefined> | undefined;
 let browserRealtimeSocket: Socket | undefined;
 let browserRealtimeGeneration = 0;
+let browserRealtimeLastCursor: string | undefined;
+const browserRealtimeSeenEventIds = new Set<string>();
 const browserRealtimeListeners = new Set<(event: BrowserWorkspaceRealtimeEvent | undefined) => void>();
 
 export async function loadBrowserWorkspaceConnection(): Promise<BrowserWorkspaceConnection | undefined> {
@@ -82,6 +86,8 @@ export async function configureBrowserWorkspaceConnection(input: BrowserWorkspac
   };
   await writeStoredConnection(connection);
   cachedConnection = connection;
+  browserRealtimeLastCursor = undefined;
+  browserRealtimeSeenEventIds.clear();
   restartBrowserWorkspaceRealtime();
   return publicConnection(connection);
 }
@@ -91,6 +97,8 @@ export async function clearBrowserWorkspaceConnection(): Promise<void> {
   await withStore("readwrite", (store) => store.delete(activeConnectionKey));
   cachedConnection = null;
   connectionLoad = undefined;
+  browserRealtimeLastCursor = undefined;
+  browserRealtimeSeenEventIds.clear();
   restartBrowserWorkspaceRealtime();
 }
 
@@ -167,9 +175,12 @@ export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspa
     }
   }
   if (!response.ok) {
-    const code = responseBody && typeof responseBody === "object" && typeof (responseBody as { error?: unknown }).error === "string"
-      ? (responseBody as { error: string }).error
-      : "workspace_server_request_failed";
+    const errorValue = responseBody && typeof responseBody === "object" ? (responseBody as { error?: unknown }).error : undefined;
+    const code = typeof errorValue === "string"
+      ? errorValue
+      : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
+        ? (errorValue as { code: string }).code
+        : "workspace_server_request_failed";
     throw new Error(`${code}:${response.status}`);
   }
   return responseBody as T;
@@ -364,7 +375,11 @@ async function ensureBrowserWorkspaceRealtime(): Promise<void> {
   const isCurrent = () => generation === browserRealtimeGeneration && browserRealtimeSocket === socket;
   socket.on("connect", () => {
     if (!isCurrent()) return;
-    void refreshBrowserWorkspaceRealtimeRooms(socket, connection, isCurrent);
+    void syncBrowserWorkspaceRealtime(socket, connection, isCurrent);
+  });
+  socket.on("workspace:v1:event", (event: unknown) => {
+    if (!isCurrent() || !acceptBrowserPublicEvent(event)) return;
+    notifyBrowserWorkspaceRealtime("event", connection.workspaceId, event);
   });
   socket.on("workspace:event", (event: unknown) => {
     if (!isCurrent()) return;
@@ -444,17 +459,71 @@ async function refreshBrowserWorkspaceRealtimeRooms(
   }
 }
 
+async function syncBrowserWorkspaceRealtime(
+  socket: Socket,
+  connection: StoredBrowserWorkspaceConnection,
+  isCurrent: () => boolean
+): Promise<void> {
+  try {
+    socket.emit("workspace:v1:subscribe", {});
+    let afterCursor = browserRealtimeLastCursor;
+    for (let page = 0; page < 20 && isCurrent(); page += 1) {
+      const query = afterCursor ? `?after_cursor=${encodeURIComponent(afterCursor)}&limit=500` : "?limit=500";
+      const response = await browserWorkspaceRequest<{ events?: unknown; next_cursor?: unknown; has_more?: unknown }>({
+        method: "GET",
+        path: `/api/v1/workspaces/${encodeURIComponent(connection.workspaceId)}/events${query}`,
+        workspaceScoped: true
+      });
+      if (!isCurrent() || !Array.isArray(response.events)) break;
+      for (const event of response.events) {
+        if (!acceptBrowserPublicEvent(event)) continue;
+        notifyBrowserWorkspaceRealtime("event", connection.workspaceId, event);
+      }
+      const nextCursor = typeof response.next_cursor === "string" ? response.next_cursor : undefined;
+      if (response.has_more === true && nextCursor) {
+        afterCursor = nextCursor;
+        continue;
+      }
+      break;
+    }
+    await refreshBrowserWorkspaceRealtimeRooms(socket, connection, isCurrent);
+  } catch {
+    // The next Socket reconnect retries HTTP replay. A missed notification is
+    // never treated as a successful synchronization.
+  }
+}
+
+function acceptBrowserPublicEvent(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const value = event as { event_id?: unknown; cursor?: unknown };
+  if (typeof value.event_id === "string") {
+    if (browserRealtimeSeenEventIds.has(value.event_id)) return false;
+    browserRealtimeSeenEventIds.add(value.event_id);
+    if (browserRealtimeSeenEventIds.size > 2_000) {
+      const first = browserRealtimeSeenEventIds.values().next().value;
+      if (typeof first === "string") browserRealtimeSeenEventIds.delete(first);
+    }
+  }
+  if (typeof value.cursor === "string") browserRealtimeLastCursor = value.cursor;
+  return true;
+}
+
 function notifyBrowserWorkspaceRealtime(
   type: BrowserWorkspaceRealtimeEvent["type"],
   expectedWorkspaceId: string,
   event: unknown
 ): void {
   if (!event || typeof event !== "object") return;
-  const value = event as { workspaceId?: unknown; roomId?: unknown; kind?: unknown };
-  if (value.workspaceId !== expectedWorkspaceId) return;
+  const value = event as { workspaceId?: unknown; roomId?: unknown; kind?: unknown; event_type?: unknown; scope?: { workspace_id?: unknown; room_id?: unknown } };
+  const workspaceId = value.workspaceId ?? value.scope?.workspace_id;
+  if (workspaceId !== expectedWorkspaceId) return;
   const notice: BrowserWorkspaceRealtimeEvent = { type, workspaceId: expectedWorkspaceId };
-  if (typeof value.roomId === "string" && isWorkspaceOpaqueId(value.roomId)) notice.roomId = value.roomId;
-  if (typeof value.kind === "string" && /^[a-z][a-z0-9._-]{0,80}$/.test(value.kind)) notice.kind = value.kind;
+  const roomId = value.roomId ?? value.scope?.room_id;
+  if (typeof roomId === "string" && isWorkspaceOpaqueId(roomId)) notice.roomId = roomId;
+  const kind = value.kind ?? value.event_type;
+  if (typeof kind === "string" && /^[a-z][a-z0-9._-]{0,127}$/.test(kind)) notice.kind = kind;
+  if (typeof (value as { event_id?: unknown }).event_id === "string") notice.eventId = (value as { event_id: string }).event_id;
+  if (typeof (value as { cursor?: unknown }).cursor === "string") notice.cursor = (value as { cursor: string }).cursor;
   for (const listener of browserRealtimeListeners) listener(notice);
 }
 

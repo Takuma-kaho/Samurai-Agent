@@ -1,6 +1,8 @@
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const supportedLocales = new Set(["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"]);
 
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
 export type WorkspaceChatSessionRequest = {
   roomId: string;
   operationId: string;
@@ -22,8 +24,8 @@ export type WorkspaceChatTurnRequest = {
     backend_id?: string;
     input_locale?: string;
     output_locale?: string;
-    metadata?: Record<string, unknown>;
-    temporary_context?: Array<Record<string, unknown>>;
+    metadata?: Record<string, JsonValue>;
+    temporary_context?: Array<Record<string, JsonValue>>;
   };
 };
 
@@ -111,7 +113,7 @@ function optionalLocale(value: Record<string, unknown>, key: string): string | u
   return value[key];
 }
 
-function optionalJsonObject(value: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+function optionalJsonObject(value: Record<string, unknown>, key: string): Record<string, JsonValue> | undefined {
   if (value[key] === undefined || value[key] === null) return undefined;
   const candidate = value[key];
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) || !isJsonObject(candidate)) {
@@ -119,7 +121,7 @@ function optionalJsonObject(value: Record<string, unknown>, key: string): Record
   }
   const encoded = JSON.stringify(candidate);
   if (encoded.length > 200_000) throw new Error(`${key}_too_large`);
-  return candidate as Record<string, unknown>;
+  return candidate as Record<string, JsonValue>;
 }
 
 function optionalAttachments(value: Record<string, unknown>, key: string): Array<Record<string, string>> | undefined {
@@ -144,7 +146,7 @@ function optionalAttachments(value: Record<string, unknown>, key: string): Array
   return attachments;
 }
 
-function optionalTemporaryContext(value: Record<string, unknown>, key: string): Array<Record<string, unknown>> | undefined {
+function optionalTemporaryContext(value: Record<string, unknown>, key: string): Array<Record<string, JsonValue>> | undefined {
   if (value[key] === undefined || value[key] === null) return undefined;
   if (!Array.isArray(value[key]) || value[key].length > 4) throw new Error(`${key}_invalid`);
   return value[key].map((item) => {

@@ -1020,9 +1020,9 @@ export class PostgresRuntimeChat {
     });
     if (admission.replay) {
       if (isSettled(admission.run)) {
-        const replayed = await this.project(admission.run);
-        await this.notifyCompletionActivity(replayed, content);
-        return replayed;
+        const projected = await this.project(admission.run);
+        await this.notifyCompletionActivity(projected, content);
+        return markChatReplay(projected);
       }
       throw new WorkspaceServerError(`runtime_run_in_progress:${admission.run.id}`, 409);
     }
@@ -2460,6 +2460,14 @@ function summarizePayload(value: JsonValue | undefined): string {
 
 function isSettled(run: BackendRunRecord): boolean {
   return run.phase === "settled" || run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
+}
+
+function markChatReplay(result: RunChatTurnResult): RunChatTurnResult {
+  // Replay is transport metadata, not a second field in the persisted Chat
+  // result contract. Keep it non-enumerable so legacy JSON consumers retain
+  // their exact shape while the v1 adapter can report the envelope flag.
+  Object.defineProperty(result, "replayed", { value: true, enumerable: false });
+  return result;
 }
 
 function isTerminalRunState(status: string, phase: string | null): boolean {

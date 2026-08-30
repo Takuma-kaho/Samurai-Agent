@@ -88,7 +88,7 @@ register({ scope: "room_content", action: "execute" }, "artifact.export_pdf", "b
 // workspace.context.get checks that its requested Room equals the trusted
 // target before loading human-owned metadata; it must not infer a Room from a
 // caller-controlled Workspace field.
-register({ scope: "room_content", action: "read" }, "activity.history.list", "collection.schema.docs", "collection.search", "file.list", "memory.search", "resource.version.get", "session.search", "skill.search", "wiki.search", "workspace.context.get");
+register({ scope: "room_content", action: "read" }, "activity.history.list", "artifact.list", "artifact.view", "collection.schema.docs", "collection.search", "file.list", "memory.search", "resource.version.get", "session.search", "skill.search", "wiki.search", "workspace.context.get");
 register({ scope: "room_content", action: "edit", target: { kind: "artifact", idField: "artifact_id" } }, "artifact.repair", "artifact.restore_revision", "artifact.revise", "graph.patch", "image.edit");
 register({ scope: "room_content", action: "edit", target: [
   { kind: "collection_schema", idField: "collection_id" },

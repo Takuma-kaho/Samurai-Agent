@@ -33,6 +33,7 @@ export interface ArtifactExecutionPort {
   defaultLocales(): Promise<{ inputLocale: SupportedLocale; outputLocale: SupportedLocale }>;
   runMutation<TExtra extends Record<string, unknown>>(input: ArtifactMutationInput<TExtra>): Promise<ArtifactWriteResult & TExtra>;
   getArtifact(id: string): Promise<ArtifactRecord | undefined>;
+  listArtifacts?(): Promise<ArtifactRecord[]>;
   readContent(id: string): Promise<string | undefined>;
   getRevision(id: string): Promise<ArtifactRevisionRecord | undefined>;
   readRevisionContent(id: string): Promise<Uint8Array | undefined>;
@@ -49,6 +50,17 @@ export class ArtifactDomainService {
 
   contract(id: string) { return this.artifacts.contract(id); }
   getArtifact(id: string) { return this.artifacts.getArtifact(id); }
+  async listArtifacts(): Promise<ArtifactRecord[]> {
+    if (!this.artifacts.listArtifacts) throw this.artifacts.requestError("provider_not_configured", "artifact_list_unavailable");
+    return this.artifacts.listArtifacts();
+  }
+  async viewArtifact(id: string): Promise<{ artifact: ArtifactRecord; content: string }> {
+    const artifact = await this.artifacts.getArtifact(id);
+    if (!artifact) throw this.artifacts.requestError("not_found", "artifact_not_found");
+    const content = await this.artifacts.readContent(id);
+    if (content === undefined) throw this.artifacts.requestError("not_found", "artifact_content_not_found");
+    return { artifact, content };
+  }
   artifactDefaultLocales() { return this.artifacts.defaultLocales(); }
   async repairRevisionSource(id: string): Promise<{ repaired: boolean }> {
     // The repository may return its internal revision for repair diagnostics.

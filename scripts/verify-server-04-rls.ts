@@ -238,6 +238,15 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     if (!resumed) throw new Error("server04_configuration_block_resume_missing");
     assert(resumed.id === blockedActivity.job?.id && resumed.status === "completed", "server04_configuration_block_not_resumed");
 
+    const bundlePublicEvent = await store.appendPublicEvent(ownerContext(operationId("public-event")), {
+      eventType: "workspace.agent.changed",
+      actor: { kind: "human", id: owner.id },
+      resources: [{ kind: "agent", id: "agent_bundle_probe", uri: "samurai://agent/agent_bundle_probe", label: "Bundle Agent" }],
+      correlationId: "learning04_public_event_correlation",
+      payload: { agent_id: "agent_bundle_probe", action: "patched" }
+    });
+    assert(!bundlePublicEvent.replayed && bundlePublicEvent.event.scope.roomId === undefined, "server04_workspace_public_event_not_created");
+
     stage = "bundle_v3";
     const bundles = new WorkspaceBundleV3Service(store);
     const bundleDirectory = path.join(root, "source.bundle");
@@ -266,6 +275,19 @@ async function runProbe(target: ProbeTarget): Promise<void> {
     const imported = await new WorkspaceBundleV3Service(restoreStore).importNew({ accountId: owner.id, operationId: operationId("bundle-import") }, {
       sourceDirectory: bundleDirectory, targetWorkspaceId: restoredWorkspaceId, targetWorkspaceName: "Restored learning loop"
     });
+    const restoredEvents = await restoreStore.listPublicEvents(
+      { workspaceId: imported.workspaceId, accountId: owner.id },
+      { limit: 100 }
+    );
+    const restoredPublicEvent = restoredEvents.events.find((event) => event.eventType === "workspace.agent.changed");
+    if (!restoredPublicEvent) throw new Error("server04_bundle_public_event_missing");
+    assert(restoredPublicEvent.scope.workspaceId === imported.workspaceId && restoredPublicEvent.scope.roomId === undefined, "server04_bundle_workspace_event_scope_changed");
+    assert(restoredPublicEvent.eventId === bundlePublicEvent.event.eventId && restoredPublicEvent.occurredAt === bundlePublicEvent.event.occurredAt, "server04_bundle_public_event_identity_changed");
+    assert(restoredPublicEvent.eventVersion === "1.0" && restoredPublicEvent.actor.kind === "human" && restoredPublicEvent.actor.id === owner.id, "server04_bundle_public_event_actor_changed");
+    assert(restoredPublicEvent.cursor === bundlePublicEvent.event.cursor && restoredPublicEvent.correlationId === "learning04_public_event_correlation", "server04_bundle_public_event_cursor_changed");
+    assert(restoredPublicEvent.resources.length === 1 && restoredPublicEvent.resources[0]?.kind === "agent" && restoredPublicEvent.resources[0]?.id === "agent_bundle_probe", "server04_bundle_public_event_resources_changed");
+    assert(restoredPublicEvent.payload.agent_id === "agent_bundle_probe" && restoredPublicEvent.payload.action === "patched", "server04_bundle_public_event_payload_changed");
+    await verifyImportSessionEventPolicy(database, adminDatabase, workspaceId, restoredWorkspaceId, otherRoomMember, roomExecutor);
     const restored = await new WorkspaceLearningService(restoreStore).listResources({ workspaceId: imported.workspaceId, accountId: owner.id }, { scope: { kind: "room", roomId: rootRoom.id }, includeArchived: true });
     assert(restored.some((resource) => resource.title === "Verified deployment"), "server04_bundle_learning_roundtrip_failed");
     console.log(`[Server04] ${target.label}: learning, RLS, fixed state, feedback, and restore probe passed`);
@@ -338,6 +360,74 @@ async function cleanup(adminDatabase: PostgresWorkspaceAdminDatabase, workspaceI
     await sql.query("DELETE FROM account_operations WHERE account_id = ANY($1::TEXT[])", [accountIds]);
     await sql.query("DELETE FROM accounts WHERE id = ANY($1::TEXT[])", [accountIds]);
   });
+}
+
+async function verifyImportSessionEventPolicy(
+  database: PostgresWorkspaceDatabase,
+  adminDatabase: PostgresWorkspaceAdminDatabase,
+  sourceWorkspaceId: string,
+  targetWorkspaceId: string,
+  validAccount: ProbeAccount,
+  mismatchedAccount: ProbeAccount
+): Promise<void> {
+  const suffix = randomUUID().replaceAll("-", "");
+  const validSessionId = `import_policy_valid_${suffix}`;
+  const expiredSessionId = `import_policy_expired_${suffix}`;
+  const completedSessionId = `import_policy_completed_${suffix}`;
+  const abortedSessionId = `import_policy_aborted_${suffix}`;
+  const failedSessionId = `import_policy_failed_${suffix}`;
+  const wrongWorkspaceSessionId = `import_policy_wrong_workspace_${suffix}`;
+  const insertSession = async (workspaceId: string, sessionId: string, accountId: string, state: string, expiresAt: string) => {
+    await adminDatabase.withAdmin(async (sql) => {
+      await sql.query(
+        "INSERT INTO workspace_import_sessions(workspace_id, id, account_id, state, expires_at) VALUES ($1, $2, $3, $4, $5::TIMESTAMPTZ)",
+        [workspaceId, sessionId, accountId, state, expiresAt]
+      );
+    });
+  };
+  const insertWorkspaceEvent = (workspaceId: string, account: ProbeAccount, importId: string | undefined, eventId: string) =>
+    database.withContext({ workspaceId, accountId: account.id, ...(importId ? { importId } : {}) }, async (sql) => {
+      await sql.query(
+        `INSERT INTO workspace_events(
+           workspace_id, room_id, kind, operation_id, payload,
+           event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+         ) VALUES ($1, NULL, 'workspace.import.policy.probe', $2, '{}'::JSONB,
+                   $3, '1.0', 'system', NULL, NULL, $4, $5, '[]'::JSONB)`,
+        [workspaceId, `import_policy_operation_${eventId}`, eventId, `cursor_${eventId}`, `correlation_${eventId}`]
+      );
+    });
+
+  await insertSession(targetWorkspaceId, validSessionId, validAccount.id, "writing", new Date(Date.now() + 60_000).toISOString());
+  await insertWorkspaceEvent(targetWorkspaceId, validAccount, validSessionId, `event_policy_valid_${suffix}`);
+
+  await insertSession(targetWorkspaceId, expiredSessionId, validAccount.id, "writing", new Date(Date.now() - 60_000).toISOString());
+  await expectRlsRejection("expired_import_session", () => insertWorkspaceEvent(targetWorkspaceId, validAccount, expiredSessionId, `event_policy_expired_${suffix}`));
+
+  await insertSession(targetWorkspaceId, completedSessionId, validAccount.id, "completed", new Date(Date.now() + 60_000).toISOString());
+  await expectRlsRejection("completed_import_session", () => insertWorkspaceEvent(targetWorkspaceId, validAccount, completedSessionId, `event_policy_completed_${suffix}`));
+
+  await insertSession(targetWorkspaceId, abortedSessionId, validAccount.id, "aborted", new Date(Date.now() + 60_000).toISOString());
+  await expectRlsRejection("aborted_import_session", () => insertWorkspaceEvent(targetWorkspaceId, validAccount, abortedSessionId, `event_policy_aborted_${suffix}`));
+
+  await insertSession(targetWorkspaceId, failedSessionId, validAccount.id, "failed", new Date(Date.now() + 60_000).toISOString());
+  await expectRlsRejection("failed_import_session", () => insertWorkspaceEvent(targetWorkspaceId, validAccount, failedSessionId, `event_policy_failed_${suffix}`));
+
+  await expectRlsRejection("import_session_account_mismatch", () => insertWorkspaceEvent(targetWorkspaceId, mismatchedAccount, validSessionId, `event_policy_account_mismatch_${suffix}`));
+
+  await insertSession(sourceWorkspaceId, wrongWorkspaceSessionId, validAccount.id, "writing", new Date(Date.now() + 60_000).toISOString());
+  await expectRlsRejection("import_session_workspace_mismatch", () => insertWorkspaceEvent(targetWorkspaceId, validAccount, wrongWorkspaceSessionId, `event_policy_workspace_mismatch_${suffix}`));
+
+  await expectRlsRejection("missing_import_session", () => insertWorkspaceEvent(targetWorkspaceId, validAccount, undefined, `event_policy_missing_${suffix}`));
+}
+
+async function expectRlsRejection(label: string, action: () => Promise<unknown>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("row-level security policy")) return;
+    throw new Error(`${label}_unexpected_error:${error instanceof Error ? error.message : String(error)}`);
+  }
+  throw new Error(`${label}_accepted`);
 }
 
 function accountIdentity(): ProbeAccount {
