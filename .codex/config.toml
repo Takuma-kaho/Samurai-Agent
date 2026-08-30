@@ -1,0 +1,6 @@
+[agents]
+# 役割テンプレートは5種類。実際の起動数は担当範囲が独立している時だけ増やす。
+enabled = true
+max_concurrent_threads_per_session = 10
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "max"
