@@ -79,6 +79,34 @@ export class WorkspaceServerCommandService {
     return this.store.registerAgent(context, input);
   }
 
+  patchRoom(
+    context: Parameters<WorkspaceServerStore["patchRoom"]>[0],
+    input: Parameters<WorkspaceServerStore["patchRoom"]>[1]
+  ) {
+    return this.store.patchRoom(context, input);
+  }
+
+  patchAgent(
+    context: Parameters<WorkspaceServerStore["patchAgent"]>[0],
+    input: Parameters<WorkspaceServerStore["patchAgent"]>[1]
+  ) {
+    return this.store.patchAgent(context, input);
+  }
+
+  bindAgentBackend(
+    context: Parameters<WorkspaceServerStore["bindAgentBackend"]>[0],
+    input: Parameters<WorkspaceServerStore["bindAgentBackend"]>[1]
+  ) {
+    return this.store.bindAgentBackend(context, input);
+  }
+
+  appendPublicEvent(
+    context: Parameters<WorkspaceServerStore["appendPublicEvent"]>[0],
+    input: Parameters<WorkspaceServerStore["appendPublicEvent"]>[1]
+  ) {
+    return this.store.appendPublicEvent(context, input);
+  }
+
   setAgentRoomPermission(
     context: Parameters<WorkspaceServerStore["setAgentRoomPermission"]>[0],
     input: Parameters<WorkspaceServerStore["setAgentRoomPermission"]>[1]
@@ -332,6 +360,13 @@ export class WorkspaceServerCommandService {
     input: Parameters<WorkspaceRuntimeActivityService["ingestFinalizedActivity"]>[1]
   ) {
     return this.requireRuntimeActivities().ingestFinalizedActivity(context, input);
+  }
+
+  ingestFinalizedRuntimeActivityWithReplay(
+    context: WorkspaceRequestContext,
+    input: Parameters<WorkspaceRuntimeActivityService["ingestFinalizedActivity"]>[1]
+  ) {
+    return this.requireRuntimeActivities().ingestFinalizedActivityWithReplay(context, input);
   }
 
   finalizeRuntimeActivity(

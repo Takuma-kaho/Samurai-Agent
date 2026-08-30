@@ -80,6 +80,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@samurai-agent/domain-api':
+        specifier: workspace:*
+        version: link:../../packages/domain-api
       socket.io-client:
         specifier: ^4.8.3
         version: 4.8.3
@@ -108,6 +111,9 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../../packages/core-schemas
+      '@samurai-agent/domain-api':
+        specifier: workspace:*
+        version: link:../../packages/domain-api
       '@samurai-agent/domain-operations':
         specifier: workspace:*
         version: link:../../packages/domain-operations
@@ -154,6 +160,9 @@ importers:
       '@samurai-agent/core-schemas':
         specifier: workspace:*
         version: link:../../packages/core-schemas
+      '@samurai-agent/domain-api':
+        specifier: workspace:*
+        version: link:../../packages/domain-api
       '@samurai-agent/localization':
         specifier: workspace:*
         version: link:../../packages/localization
@@ -245,6 +254,15 @@ importers:
       '@samurai-agent/skills':
         specifier: workspace:*
         version: link:../skills
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
+  packages/domain-api:
+    dependencies:
+      '@samurai-agent/core-schemas':
+        specifier: workspace:*
+        version: link:../core-schemas
       zod:
         specifier: ^3.25.76
         version: 3.25.76

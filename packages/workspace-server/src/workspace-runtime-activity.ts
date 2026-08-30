@@ -108,6 +108,21 @@ export class WorkspaceRuntimeActivityService {
 
   /** Records an already terminal external result atomically with its evidence. */
   async ingestFinalizedActivity(context: WorkspaceRequestContext, input: RuntimeFinalizedActivityInput): Promise<ActivityRecord> {
+    return (await this.ingestFinalizedActivityWithReplay(context, input)).activity;
+  }
+
+  /** Same evidence path with the idempotency outcome exposed to HTTP clients. */
+  async ingestFinalizedActivityWithReplay(
+    context: WorkspaceRequestContext,
+    input: RuntimeFinalizedActivityInput
+  ): Promise<{ activity: ActivityRecord; replayed: boolean }> {
+    return this.ingestFinalizedActivityResult(context, input);
+  }
+
+  private async ingestFinalizedActivityResult(
+    context: WorkspaceRequestContext,
+    input: RuntimeFinalizedActivityInput
+  ): Promise<{ activity: ActivityRecord; replayed: boolean }> {
     const activity = sanitizeActivity(ActivityRecordSchema.parse(input.activity));
     if (activity.status !== "recording") throw new WorkspaceServerError("activity_initial_status_must_be_recording", 400);
     assertWorkspace(activity, context);
@@ -137,7 +152,7 @@ export class WorkspaceRuntimeActivityService {
       if (!locked) throw new WorkspaceServerError("activity_not_found", 404);
       const current = activityFromRow(locked);
       if (current.status !== "recording") {
-        if (sameFinalActivityClaim(current, finalization)) return current;
+        if (sameFinalActivityClaim(current, finalization)) return { activity: current, replayed: true };
         throw new WorkspaceServerError("activity_finalized_immutable", 409);
       }
       for (const usageInput of input.resourceUsage) {
@@ -192,7 +207,7 @@ export class WorkspaceRuntimeActivityService {
         [context.workspaceId, current.id, next.status, next.backend_run_id ?? null, jsonText(next), now]
       );
       if (!updated.rows[0]) throw new WorkspaceServerError("activity_finalized_immutable", 409);
-      return activityFromRow(updated.rows[0]);
+      return { activity: activityFromRow(updated.rows[0]), replayed: false };
     });
   }
 
@@ -517,6 +532,9 @@ function sameActivityClaim(existing: ActivityRecord, requested: ActivityRecord):
     principal: existing.principal,
     source: existing.source,
     idempotency_key: existing.idempotency_key,
+    source_event_id: existing.source_event_id,
+    payload_hash: existing.payload_hash,
+    occurred_at: existing.occurred_at,
     instruction_summary: existing.instruction_summary,
     correction_of_activity_id: existing.correction_of_activity_id,
     session_ref: existing.session_ref,
@@ -527,6 +545,9 @@ function sameActivityClaim(existing: ActivityRecord, requested: ActivityRecord):
     principal: requested.principal,
     source: requested.source,
     idempotency_key: requested.idempotency_key,
+    source_event_id: requested.source_event_id,
+    payload_hash: requested.payload_hash,
+    occurred_at: requested.occurred_at,
     instruction_summary: requested.instruction_summary,
     correction_of_activity_id: requested.correction_of_activity_id,
     session_ref: requested.session_ref,

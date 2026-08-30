@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { ResourceRefSchema } from "@samurai-agent/core-schemas";
 import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { assertAccountIdMatchesPublicKey, canonicalJson } from "./auth";
 import { WorkspaceServerError } from "./errors";
@@ -83,7 +84,10 @@ const portableSchema: Readonly<Record<string, { required: readonly string[]; all
   },
   "events.jsonl": {
     required: ["source_event_id", "workspace_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at"],
-    allowed: ["source_event_id", "workspace_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at"]
+    // Public Event columns were added after the first V3 bundles. Keep them
+    // optional on input so old bundles remain importable; new exports always
+    // include the complete public Event projection.
+    allowed: ["source_event_id", "workspace_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at", "event_id", "event_version", "actor_kind", "actor_id", "organization_id", "cursor", "correlation_id", "resources"]
   },
   "jobs.jsonl": {
     required: ["workspace_id", "room_id", "id", "kind", "status", "version", "idempotency_key", "payload", "created_by", "updated_by", "created_at", "updated_at"],
@@ -752,7 +756,7 @@ export class WorkspaceBundleV3Service {
       const memberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM workspace_members WHERE workspace_id = $1 ORDER BY account_id", [context.workspaceId]);
       const roomMemberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM room_members WHERE workspace_id = $1 ORDER BY room_id, account_id", [context.workspaceId]);
       const records = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, record_type, id, version, payload, search_text, content_hash, created_by, updated_by, created_at, updated_at FROM workspace_records WHERE workspace_id = $1 ORDER BY record_type, id", [context.workspaceId]);
-      const events = await sql.query<Record<string, unknown>>("SELECT id AS source_event_id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at FROM workspace_events WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const events = await sql.query<Record<string, unknown>>("SELECT id AS source_event_id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at, event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources FROM workspace_events WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const jobs = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, id, kind, status, version, idempotency_key, payload, created_by, updated_by, created_at, updated_at FROM workspace_jobs WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       // Idempotency results may contain a one-time invite token. The ledger is
       // intentionally not portable; immutable events/audits preserve history.
@@ -1349,7 +1353,6 @@ async function importSnapshot(sql: WorkspaceSql, input: {
   await sql.query("SELECT samurai_validate_workspace_room_hierarchy($1)", [input.targetWorkspaceId]);
   for (const [file, table, columns] of [
     ["records.jsonl", "workspace_records", ["room_id", "record_type", "id", "version", "payload", "search_text", "content_hash", "created_by", "updated_by", "created_at", "updated_at"]],
-    ["events.jsonl", "workspace_events", ["source_event_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at"]],
     ["jobs.jsonl", "workspace_jobs", ["room_id", "id", "kind", "status", "version", "idempotency_key", "payload", "created_by", "updated_by", "created_at", "updated_at"]],
     ["files.jsonl", "workspace_files", ["room_id", "path", "version", "sha256", "size", "created_by", "updated_by", "created_at", "updated_at"]]
   ] as const) {
@@ -1361,6 +1364,7 @@ async function importSnapshot(sql: WorkspaceSql, input: {
       await sql.query(`INSERT INTO ${table}(${sqlColumns}) VALUES ($1, ${placeholders})`, [input.targetWorkspaceId, ...values]);
     }
   }
+  await importWorkspaceEvents(sql, input.targetWorkspaceId, await readJsonl(path.join(input.sourceDirectory, "events.jsonl")));
   // Learning data is part of the Workspace's portable history.  It is kept
   // separate from generic records so Restore cannot accidentally turn a
   // historical note into executable state.  A running job has no portable
@@ -1503,6 +1507,37 @@ async function importSnapshot(sql: WorkspaceSql, input: {
   }
 }
 
+const workspaceEventBaseColumns = [
+  "source_event_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at"
+] as const;
+const workspaceEventPublicColumns = [
+  "event_id", "event_version", "actor_kind", "actor_id", "organization_id", "cursor", "correlation_id", "resources"
+] as const;
+
+async function importWorkspaceEvents(
+  sql: WorkspaceSql,
+  targetWorkspaceId: string,
+  rows: Record<string, unknown>[]
+): Promise<void> {
+  for (const row of rows) {
+    // Public columns are optional only for backwards compatibility with
+    // older V3 bundles. Omitting them lets the database apply the safe
+    // legacy defaults; a current export includes and preserves every value.
+    const columns = [...workspaceEventBaseColumns] as string[];
+    const values = workspaceEventBaseColumns.map((column) => jsonColumnValue(row[column]));
+    for (const column of workspaceEventPublicColumns) {
+      if (!(column in row)) continue;
+      columns.push(column);
+      values.push(jsonColumnValue(row[column]));
+    }
+    const placeholders = columns.map((_, index) => `$${index + 2}`).join(", ");
+    await sql.query(
+      `INSERT INTO workspace_events(workspace_id, ${columns.join(", ")}) VALUES ($1, ${placeholders})`,
+      [targetWorkspaceId, ...values]
+    );
+  }
+}
+
 async function verifyImportedWorkspace(
   store: WorkspaceServerStore,
   context: WorkspaceRequestContext,
@@ -1511,14 +1546,20 @@ async function verifyImportedWorkspace(
 ): Promise<void> {
   await assertWorkspaceOwner(store, context);
   const counts = await store.database.withContext(context, async (sql) => {
-    const rows = await Promise.all([
-      count(sql, "rooms", context.workspaceId), count(sql, "workspace_members", context.workspaceId), count(sql, "room_members", context.workspaceId), count(sql, "workspace_records", context.workspaceId), count(sql, "workspace_events", context.workspaceId),
-      count(sql, "workspace_jobs", context.workspaceId), count(sql, "workspace_operations", context.workspaceId), count(sql, "workspace_invitations", context.workspaceId), count(sql, "workspace_audit_entries", context.workspaceId), count(sql, "workspace_files", context.workspaceId),
-      count(sql, "workspace_learning_activities", context.workspaceId), count(sql, "workspace_learning_resources", context.workspaceId), count(sql, "workspace_learning_resource_versions", context.workspaceId), count(sql, "workspace_learning_evidence", context.workspaceId), count(sql, "workspace_learning_resource_links", context.workspaceId), count(sql, "workspace_learning_settings", context.workspaceId), count(sql, "workspace_learning_jobs", context.workspaceId), count(sql, "workspace_learning_job_attempts", context.workspaceId), count(sql, "workspace_learning_resource_uses", context.workspaceId)
-    ]);
+    // WorkspaceSql is one PostgreSQL client and transaction.  Keep its
+    // queries ordered: Promise.all overlaps client.query calls and made the
+    // bundle verification timing-dependent.
+    const tables = [
+      "rooms", "workspace_members", "room_members", "workspace_records", "workspace_events",
+      "workspace_jobs", "workspace_operations", "workspace_invitations", "workspace_audit_entries", "workspace_files",
+      "workspace_learning_activities", "workspace_learning_resources", "workspace_learning_resource_versions", "workspace_learning_evidence", "workspace_learning_resource_links", "workspace_learning_settings", "workspace_learning_jobs", "workspace_learning_job_attempts", "workspace_learning_resource_uses"
+    ] as const;
+    const rows: number[] = [];
+    for (const table of tables) rows.push(await count(sql, table, context.workspaceId));
+    const countAt = (index: number): number => rows[index] ?? 0;
     return {
-      rooms: rows[0], memberships: rows[1], room_memberships: rows[2], records: rows[3], events: rows[4], jobs: rows[5], operations: rows[6], invitations: rows[7], audits: rows[8], files: rows[9],
-      learning_activities: rows[10], learning_resources: rows[11], learning_resource_versions: rows[12], learning_evidence: rows[13], learning_resource_links: rows[14], learning_settings: rows[15], learning_jobs: rows[16], learning_job_attempts: rows[17], learning_resource_uses: rows[18]
+      rooms: countAt(0), memberships: countAt(1), room_memberships: countAt(2), records: countAt(3), events: countAt(4), jobs: countAt(5), operations: countAt(6), invitations: countAt(7), audits: countAt(8), files: countAt(9),
+      learning_activities: countAt(10), learning_resources: countAt(11), learning_resource_versions: countAt(12), learning_evidence: countAt(13), learning_resource_links: countAt(14), learning_settings: countAt(15), learning_jobs: countAt(16), learning_job_attempts: countAt(17), learning_resource_uses: countAt(18)
     };
   });
   // The importer is guaranteed an active Owner membership on the target. If
@@ -1618,6 +1659,7 @@ async function assertPortableJsonFile(file: string, relativeFile: string): Promi
     if (!row || typeof row !== "object" || Array.isArray(row)) throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
     const record = row as Record<string, unknown>;
     assertExactPortableFields(record, schema);
+    if (relativeFile === "events.jsonl") assertPortableEventFields(record);
     assertCredentialFree(record);
   }
   return rows as Record<string, unknown>[];
@@ -1644,6 +1686,40 @@ function assertCredentialFree(value: unknown): void {
 function assertExactPortableFields(value: Record<string, unknown>, schema: { required: readonly string[]; allowed: readonly string[] }): void {
   const allowed = new Set(schema.allowed);
   if (Object.keys(value).some((key) => !allowed.has(key)) || schema.required.some((key) => !(key in value))) {
+    throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+  }
+}
+
+function assertPortableEventFields(row: Record<string, unknown>): void {
+  if (row.room_id !== null && typeof row.room_id !== "string") {
+    throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+  }
+  for (const field of ["event_id", "event_version", "cursor"] as const) {
+    if (row[field] !== undefined && typeof row[field] !== "string") {
+      throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+    }
+  }
+  if (row.event_id !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.event_id as string)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+  }
+  if (row.event_version !== undefined && !/^\d+\.\d+$/.test(row.event_version as string)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+  }
+  if (row.cursor !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.cursor as string)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+  }
+  if (row.actor_kind !== undefined && !["human", "agent", "system"].includes(row.actor_kind as string)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+  }
+  for (const field of ["actor_id", "organization_id", "correlation_id"] as const) {
+    if (row[field] !== undefined && row[field] !== null && typeof row[field] !== "string") {
+      throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+    }
+    if (row[field] !== undefined && row[field] !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row[field] as string)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
+    }
+  }
+  if (row.resources !== undefined && !ResourceRefSchema.array().max(100).safeParse(row.resources).success) {
     throw new WorkspaceServerError("workspace_bundle_v3_schema_invalid", 400);
   }
 }
@@ -1769,7 +1845,7 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     }
   }
   for (const row of rowsByFile.get("events.jsonl") ?? []) {
-    if (!roomIds.has(opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid"))) {
+    if (row.room_id !== null && !roomIds.has(opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid"))) {
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
   }

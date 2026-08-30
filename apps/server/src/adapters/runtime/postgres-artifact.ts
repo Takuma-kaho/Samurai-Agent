@@ -187,6 +187,53 @@ export class PostgresArtifact {
     });
   }
 
+  /** Rebuilds a missing current-revision file from its verified content blob. */
+  async repair(context: WorkspaceRequestContext, input: { roomId: string; artifactId: string }): Promise<{ artifact: ArtifactRecord; repair: { repaired: boolean }; replayed: boolean }> {
+    const record = await this.commands.getRecord(context, { roomId: input.roomId, recordType: "artifact", id: input.artifactId });
+    const artifact = artifactFromPayload(record.payload);
+    const revisionId = typeof artifact.metadata.current_revision_id === "string" ? artifact.metadata.current_revision_id : undefined;
+    if (!revisionId) throw new WorkspaceServerError("artifact_revision_not_found", 404);
+    const revision = await this.getRevision(context, input.roomId, revisionId);
+    const sourcePath = artifact.file_ref.uri;
+    try {
+      const existing = await this.files.read(context, { roomId: input.roomId, path: sourcePath });
+      if (existing.file.sha256 === revision.content_hash) return { artifact, repair: { repaired: false }, replayed: true };
+      throw new WorkspaceServerError("artifact_source_hash_mismatch", 409, { artifact_id: artifact.id });
+    } catch (error) {
+      if (!(error instanceof WorkspaceServerError) || error.status !== 404) throw error;
+    }
+    const blob = await this.files.read(context, { roomId: input.roomId, path: revision.blob_ref.uri });
+    if (blob.file.sha256 !== revision.content_hash) throw new WorkspaceServerError("artifact_blob_hash_mismatch", 500);
+    try {
+      await this.files.write({ ...context, operationId: `${context.operationId}_repair` }, {
+        roomId: input.roomId,
+        path: sourcePath,
+        content: blob.content,
+        expectedVersion: 0
+      });
+    } catch (error) {
+      if (!(error instanceof WorkspaceServerError) || error.status !== 409) throw error;
+      const current = await this.files.read(context, { roomId: input.roomId, path: sourcePath });
+      if (current.file.sha256 !== revision.content_hash) throw new WorkspaceServerError("artifact_source_hash_mismatch", 409, { artifact_id: artifact.id });
+      return { artifact, repair: { repaired: false }, replayed: true };
+    }
+    await this.ingestActivity({ ...context, operationId: `${context.operationId}_activity` }, {
+      id: `artifact_repair_activity_${createHash("sha256").update(`${context.workspaceId}|${artifact.id}|${revision.id}`).digest("hex").slice(0, 40)}`,
+      roomId: input.roomId,
+      sourceApp: "workspace-artifact",
+      sourceId: revision.id,
+      operationId: context.operationId,
+      instructionSummary: `Artifactを修復: ${artifact.title}`,
+      resultSummary: `Artifact source file was restored from revision ${revision.revision}.`,
+      changedResources: [artifact.id, revision.id],
+      verificationOutcome: "confirmed",
+      failureState: "none",
+      outcome: "completed",
+      payload: { artifact_id: artifact.id, revision_id: revision.id, file_path: sourcePath, content_hash: revision.content_hash }
+    });
+    return { artifact, repair: { repaired: true }, replayed: false };
+  }
+
   async create(context: WorkspaceRequestContext, input: PostgresArtifactCreateInput): Promise<{ artifact: ArtifactRecord; content: string; replayed: boolean }> {
     const roomId = requiredText(input.roomId, "artifact_room_id_required", 160);
     const title = requiredText(input.title, "artifact_title_required", 20_000);

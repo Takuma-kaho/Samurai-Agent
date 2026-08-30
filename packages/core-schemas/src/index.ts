@@ -779,6 +779,10 @@ export const ActivityRecordSchema = z.object({
   source: TrustedWorkspaceSourceSchema,
   status: ActivityRecordStatusSchema,
   idempotency_key: z.string().trim().min(1).max(512),
+  /** Source identity and hash are retained for canonical Ingest dedupe. */
+  source_event_id: z.string().trim().min(1).max(512).optional(),
+  payload_hash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  occurred_at: z.string().datetime().optional(),
   instruction_summary: z.string().trim().min(1).max(20_000),
   result_summary: z.string().trim().min(1).max(20_000).optional(),
   verification: z.array(ActivityVerificationRecordSchema).max(200).default([]),

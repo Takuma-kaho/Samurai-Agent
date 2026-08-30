@@ -8491,6 +8491,237 @@ const migrations: readonly WorkspaceServerMigration[] = [
         workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute')
       )`
     ]
+  },
+  {
+    // Public v1 Events are an append-only journal. Legacy rows receive an
+    // explicit system actor because their original actor cannot be recovered
+    // safely from the old event shape.
+    version: 74,
+    name: "workspace_server_public_event_journal",
+    statements: [
+      "ALTER TABLE workspace_events ALTER COLUMN room_id DROP NOT NULL",
+      "ALTER TABLE workspace_events ADD COLUMN event_id TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN event_version TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN actor_kind TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN actor_id TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN organization_id TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN cursor TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN correlation_id TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN resources JSONB",
+      `UPDATE workspace_events
+       SET event_id = COALESCE(event_id, 'legacy_' || id::TEXT),
+           event_version = COALESCE(event_version, '1.0'),
+           actor_kind = COALESCE(actor_kind, 'system'),
+           cursor = COALESCE(cursor, 'legacy_cursor_' || id::TEXT),
+           resources = COALESCE(resources, '[]'::JSONB)
+       WHERE event_id IS NULL OR event_version IS NULL OR actor_kind IS NULL OR cursor IS NULL OR resources IS NULL`,
+      "ALTER TABLE workspace_events ALTER COLUMN event_id SET NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN event_id SET DEFAULT ('event_' || md5(random()::TEXT || clock_timestamp()::TEXT))",
+      "ALTER TABLE workspace_events ALTER COLUMN event_version SET NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN event_version SET DEFAULT '1.0'",
+      "ALTER TABLE workspace_events ALTER COLUMN actor_kind SET NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN actor_kind SET DEFAULT 'system'",
+      "ALTER TABLE workspace_events ALTER COLUMN cursor SET NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN cursor SET DEFAULT ('cursor_' || md5(random()::TEXT || clock_timestamp()::TEXT))",
+      "ALTER TABLE workspace_events ALTER COLUMN resources SET NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN resources SET DEFAULT '[]'::JSONB",
+      "ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_event_id_nonempty CHECK (btrim(event_id) <> '')",
+      "ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_event_version_valid CHECK (event_version ~ '^([0-9]+)\\.([0-9]+)$')",
+      "ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_actor_kind_valid CHECK (actor_kind IN ('human', 'agent', 'system'))",
+      "ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_cursor_nonempty CHECK (btrim(cursor) <> '')",
+      "CREATE UNIQUE INDEX workspace_events_public_event_id_unique ON workspace_events(workspace_id, event_id)",
+      "CREATE UNIQUE INDEX workspace_events_public_cursor_unique ON workspace_events(workspace_id, cursor)",
+      "DROP POLICY IF EXISTS workspace_events_read ON workspace_events",
+      `CREATE POLICY workspace_events_read ON workspace_events FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          (room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+        )
+      )`,
+      "DROP POLICY IF EXISTS workspace_events_write ON workspace_events",
+      `CREATE POLICY workspace_events_write ON workspace_events FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          (room_id IS NULL AND samurai_can_workspace(workspace_id, 'admin') AND samurai_workspace_is_writable(workspace_id))
+          OR (room_id IS NOT NULL AND (samurai_is_bootstrap() OR (samurai_can_room(workspace_id, room_id, 'edit') AND samurai_workspace_is_writable(workspace_id))))
+        )
+      )`
+    ]
+  },
+  {
+    // v1 exposes the canonical Agent and Room records. These columns and
+    // guarded functions keep their mutation behind the same Server boundary
+    // used by the legacy routes.
+    version: 75,
+    name: "workspace_server_v1_room_agent_mutation_contract",
+    statements: [
+      "ALTER TABLE workspace_agents ADD COLUMN role TEXT NOT NULL DEFAULT 'workspace_agent'",
+      "ALTER TABLE workspace_agents ADD COLUMN instructions TEXT NOT NULL DEFAULT 'Workspace Agent'",
+      "ALTER TABLE workspace_agents ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE",
+      `UPDATE workspace_agents
+       SET role = CASE WHEN btrim(role) = '' THEN 'workspace_agent' ELSE role END,
+           instructions = CASE WHEN btrim(instructions) = '' THEN COALESCE(NULLIF(description, ''), 'Workspace Agent') ELSE instructions END,
+           enabled = status = 'active'`,
+      "ALTER TABLE workspace_agents ADD CONSTRAINT workspace_agents_role_nonempty CHECK (btrim(role) <> '')",
+      "ALTER TABLE workspace_agents ADD CONSTRAINT workspace_agents_instructions_nonempty CHECK (btrim(instructions) <> '')",
+      `CREATE OR REPLACE FUNCTION samurai_register_workspace_agent_v1(
+        target_workspace_id TEXT,
+        target_agent_id TEXT,
+        target_display_name TEXT,
+        target_role TEXT,
+        target_instructions TEXT,
+        target_backend_id TEXT,
+        target_enabled BOOLEAN
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+          RAISE EXCEPTION 'workspace_admin_permission_required';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF btrim(target_agent_id) = '' OR btrim(target_display_name) = ''
+          OR btrim(target_role) = '' OR btrim(target_instructions) = '' OR btrim(target_backend_id) = '' THEN
+          RAISE EXCEPTION 'workspace_agent_input_invalid';
+        END IF;
+        INSERT INTO workspace_agents(
+          workspace_id, id, display_name, description, role, instructions, backend_id, enabled, status, created_by
+        ) VALUES (
+          target_workspace_id, btrim(target_agent_id), btrim(target_display_name), btrim(target_instructions),
+          btrim(target_role), btrim(target_instructions), btrim(target_backend_id), COALESCE(target_enabled, TRUE),
+          CASE WHEN COALESCE(target_enabled, TRUE) THEN 'active' ELSE 'disabled' END, samurai_current_account_id()
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_patch_room(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_name TEXT,
+        target_expected_version BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_permission_denied';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF btrim(target_name) = '' OR target_expected_version < 1 THEN
+          RAISE EXCEPTION 'room_patch_input_invalid';
+        END IF;
+        UPDATE rooms
+        SET name = btrim(target_name), version = version + 1, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = target_room_id AND version = target_expected_version;
+        IF NOT FOUND THEN RAISE EXCEPTION 'room_version_conflict'; END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_patch_workspace_agent(
+        target_workspace_id TEXT,
+        target_agent_id TEXT,
+        target_display_name TEXT,
+        target_role TEXT,
+        target_instructions TEXT,
+        target_enabled BOOLEAN,
+        target_expected_version BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+          RAISE EXCEPTION 'workspace_admin_permission_required';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF target_expected_version < 1
+          OR (target_display_name IS NOT NULL AND btrim(target_display_name) = '')
+          OR (target_role IS NOT NULL AND btrim(target_role) = '')
+          OR (target_instructions IS NOT NULL AND btrim(target_instructions) = '') THEN
+          RAISE EXCEPTION 'workspace_agent_input_invalid';
+        END IF;
+        UPDATE workspace_agents
+        SET display_name = COALESCE(NULLIF(btrim(target_display_name), ''), display_name),
+            role = COALESCE(NULLIF(btrim(target_role), ''), role),
+            instructions = COALESCE(NULLIF(btrim(target_instructions), ''), instructions),
+            enabled = COALESCE(target_enabled, enabled),
+            status = CASE WHEN COALESCE(target_enabled, enabled) THEN 'active' ELSE 'disabled' END,
+            version = version + 1,
+            updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = target_agent_id
+          AND status <> 'revoked' AND version = target_expected_version;
+        IF NOT FOUND THEN
+          IF NOT EXISTS (SELECT 1 FROM workspace_agents WHERE workspace_id = target_workspace_id AND id = target_agent_id) THEN
+            RAISE EXCEPTION 'workspace_agent_not_active';
+          END IF;
+          RAISE EXCEPTION 'workspace_agent_version_conflict';
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_workspace_agent_backend_v1(
+        target_workspace_id TEXT,
+        target_agent_id TEXT,
+        target_backend_id TEXT,
+        target_expected_version BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(target_workspace_id, 'admin') THEN
+          RAISE EXCEPTION 'workspace_admin_permission_required';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        IF btrim(target_agent_id) = '' OR btrim(target_backend_id) = '' OR target_expected_version < 1 THEN
+          RAISE EXCEPTION 'workspace_agent_backend_input_invalid';
+        END IF;
+        UPDATE workspace_agents
+        SET backend_id = btrim(target_backend_id), version = version + 1, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = target_agent_id
+          AND status <> 'revoked' AND version = target_expected_version;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_agent_version_conflict'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_register_workspace_agent_v1(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_patch_room(TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_patch_workspace_agent(TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, BIGINT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_workspace_agent_backend_v1(TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC"
+    ]
+  },
+  {
+    // A Room executor may produce a durable Run or Activity Event without
+    // having Room edit permission. The Event Journal must accept that result
+    // while the append path still performs its action-specific check.
+    version: 76,
+    name: "workspace_server_public_event_execute_policy",
+    statements: [
+      "DROP POLICY IF EXISTS workspace_events_write ON workspace_events",
+      `CREATE POLICY workspace_events_write ON workspace_events FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          (room_id IS NULL AND samurai_can_workspace(workspace_id, 'admin') AND samurai_workspace_is_writable(workspace_id))
+          OR (room_id IS NOT NULL AND (samurai_is_bootstrap() OR ((samurai_can_room(workspace_id, room_id, 'edit') OR samurai_can_room(workspace_id, room_id, 'execute')) AND samurai_workspace_is_writable(workspace_id))))
+        )
+      )`
+    ]
+  },
+  {
+    // Bundle restore writes the portable historical Event rows while the
+    // target Workspace is intentionally read-only. The import-session guard
+    // is narrower than workspace writability and is already bound to the
+    // authenticated account, target Workspace, expiry, and writing state.
+    version: 77,
+    name: "workspace_server_public_event_import_policy",
+    statements: [
+      "DROP POLICY IF EXISTS workspace_events_write ON workspace_events",
+      `CREATE POLICY workspace_events_write ON workspace_events FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            (room_id IS NULL AND samurai_can_workspace(workspace_id, 'admin') AND samurai_workspace_is_writable(workspace_id))
+            OR (room_id IS NOT NULL AND (samurai_is_bootstrap() OR ((samurai_can_room(workspace_id, room_id, 'edit') OR samurai_can_room(workspace_id, room_id, 'execute')) AND samurai_workspace_is_writable(workspace_id))))
+          )
+        )
+      )`
+    ]
   }
 ];
 
@@ -9064,7 +9295,11 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_set_workspace_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_set_room_member_with_impact(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_register_workspace_agent(TEXT, TEXT, TEXT, TEXT)",
+    "samurai_register_workspace_agent_v1(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN)",
     "samurai_set_workspace_agent_backend(TEXT, TEXT, TEXT)",
+    "samurai_set_workspace_agent_backend_v1(TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_patch_room(TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_patch_workspace_agent(TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, BIGINT)",
     "samurai_set_workspace_agent_room_permission(TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN, BOOLEAN, BIGINT)",
     "samurai_upsert_workspace_connection_descriptor(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT[], INTEGER, TEXT[], BIGINT)",
     "samurai_preview_room_member_change(TEXT, TEXT, TEXT, TEXT, TEXT)",

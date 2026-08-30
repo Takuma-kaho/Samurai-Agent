@@ -91,6 +91,10 @@ export interface PostgresRuntimeChatCompletionEvent {
   resultSummary?: string;
 }
 
+/** The only mutable Runtime entry used by the public Run Control service. */
+export type PostgresRuntimeRunControlAction = "cancel" | "resume" | "sync" | "recover" | "retry";
+export type PostgresRuntimeRunControlResult = BackendRunRecord | RunChatTurnResult;
+
 export interface PostgresRuntimeKnowledgePage {
   memory: MemoryFrontmatter & { file_path: string };
   content: string;
@@ -1020,9 +1024,9 @@ export class PostgresRuntimeChat {
     });
     if (admission.replay) {
       if (isSettled(admission.run)) {
-        const replayed = await this.project(admission.run);
-        await this.notifyCompletionActivity(replayed, content);
-        return replayed;
+        const projected = await this.project(admission.run);
+        await this.notifyCompletionActivity(projected, content);
+        return markChatReplay(projected);
       }
       throw new WorkspaceServerError(`runtime_run_in_progress:${admission.run.id}`, 409);
     }
@@ -2189,6 +2193,29 @@ export class PostgresRuntimeCommandService {
     return this.chat.retryBackendRun(runId, input);
   }
 
+  /**
+   * Public transports must use this named Run Control boundary instead of
+   * selecting one mutable Runtime method themselves.  The specialized
+   * application service owns validation and replay semantics; this façade
+   * owns the PostgreSQL-backed action dispatch.
+   */
+  executeRunControlAction(input: {
+    action: PostgresRuntimeRunControlAction;
+    runId: string;
+    resumeInput: Record<string, JsonValue>;
+    idempotencyKey: string;
+    confirmUnknown?: boolean;
+  }): Promise<PostgresRuntimeRunControlResult> {
+    if (input.action === "cancel") return this.cancelBackendRun(input.runId);
+    if (input.action === "resume") return this.resumeBackendRun(input.runId, input.resumeInput);
+    if (input.action === "sync") return this.syncBackendRun(input.runId);
+    if (input.action === "recover") return this.recoverBackendRun(input.runId);
+    return this.retryBackendRun(input.runId, {
+      idempotencyKey: input.idempotencyKey,
+      ...(input.confirmUnknown === true ? { confirmUnknown: true } : {})
+    });
+  }
+
   listWorkspaceChanges(sessionId?: string) {
     return this.chat.listWorkspaceChanges(sessionId);
   }
@@ -2460,6 +2487,14 @@ function summarizePayload(value: JsonValue | undefined): string {
 
 function isSettled(run: BackendRunRecord): boolean {
   return run.phase === "settled" || run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
+}
+
+function markChatReplay(result: RunChatTurnResult): RunChatTurnResult {
+  // Replay is transport metadata, not a second field in the persisted Chat
+  // result contract. Keep it non-enumerable so legacy JSON consumers retain
+  // their exact shape while the v1 adapter can report the envelope flag.
+  Object.defineProperty(result, "replayed", { value: true, enumerable: false });
+  return result;
 }
 
 function isTerminalRunState(status: string, phase: string | null): boolean {

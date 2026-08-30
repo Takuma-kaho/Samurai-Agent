@@ -415,6 +415,8 @@ export interface RunChatTurnResult {
   reflectionRuns: ReflectionRunRecord[];
   reflectionSuggestions: ReflectionSuggestionRecord[];
   toolRuns: ToolRunRecord[];
+  /** Set by the durable PostgreSQL adapter when admission reused a prior Run. */
+  replayed?: boolean;
 }
 
 type RuntimeToolDispatchOutcome =

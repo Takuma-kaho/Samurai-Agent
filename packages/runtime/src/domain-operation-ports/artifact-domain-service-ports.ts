@@ -1,7 +1,8 @@
 import type { DomainOperationPorts } from "@samurai-agent/domain-operations";
 import type { RuntimeDomainServices } from "../domain-operation-services.js";
+import { readOnlyQueryPort } from "./read-only-query-port.js";
 
-type Ports = Pick<DomainOperationPorts, "artifact.create" | "artifact.export_pdf" | "artifact.repair" | "artifact.restore_revision" | "artifact.revise" | "graph.create" | "graph.patch" | "image.edit" | "image.generate">;
+type Ports = Pick<DomainOperationPorts, "artifact.create" | "artifact.export_pdf" | "artifact.list" | "artifact.repair" | "artifact.restore_revision" | "artifact.revise" | "artifact.view" | "graph.create" | "graph.patch" | "image.edit" | "image.generate">;
 
 export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainServices, "artifactDomainService">): Ports {
   return {
@@ -19,6 +20,7 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
       createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
+    "artifact.list": readOnlyQueryPort<Ports["artifact.list"]>({ listArtifacts: () => services.artifactDomainService.listArtifacts() }),
     "artifact.repair": {
       artifactContract: (id) => services.artifactDomainService.contract(id),
       getArtifact: (id) => services.artifactDomainService.getArtifact(id),
@@ -44,6 +46,7 @@ export function createArtifactDomainServicePorts(services: Pick<RuntimeDomainSer
       createArtifactRevision: (input) => services.artifactDomainService.createRevision(input), createArtifactRollback: (operation, refs, before, after) => services.artifactDomainService.createArtifactRollback(operation, refs, before, after),
       runArtifactMutation: (input) => services.artifactDomainService.runArtifactMutation(input)
     },
+    "artifact.view": readOnlyQueryPort<Ports["artifact.view"]>({ viewArtifact: (context, id) => services.artifactDomainService.viewArtifact(id) }),
     "graph.create": {
       artifactContract: (id) => services.artifactDomainService.contract(id), validateGraphArtifactContent: (content) => services.artifactDomainService.validateGraphContent(content),
       artifactDefaultLocales: () => services.artifactDomainService.artifactDefaultLocales(),

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { io, type Socket } from "socket.io-client";
+import { DomainApiClient, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
 import {
   app,
   BrowserWindow,
@@ -194,6 +195,8 @@ let workspaceConnectionRegistryPath = "";
 let workspaceIdentityStore: WorkspaceIdentityStore | undefined;
 let workspaceRealtimeSocket: Socket | undefined;
 let workspaceRealtimeGeneration = 0;
+let workspaceRealtimeLastCursor: string | undefined;
+const workspaceRealtimeSeenEventIds = new Set<string>();
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -517,11 +520,9 @@ function registerIpcHandlers(): void {
   // These are deliberate, purpose-specific signed operations.  The renderer
   // never receives a generic signed-request capability or this private key.
   ipcMain.handle("samurai:workspace-server:rooms:list", async () => {
-    return activeWorkspaceServerRequest({
-      method: "GET",
-      path: activeWorkspaceRoomsPath(),
-      workspaceScoped: true
-    });
+    const connection = requireActiveWorkspaceConnection();
+    const response = await activeWorkspaceDomainApiClient().executeQuery<PublicRoomRecord[]>(connection.workspaceId, "room.list", { context: {}, input: {} });
+    return { rooms: response.result.map(toDesktopWorkspaceRoom) };
   });
   ipcMain.handle("samurai:workspace-server:settings:get", async () => {
     return activeWorkspaceServerRequest({
@@ -564,13 +565,13 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:chat:session:create", async (_event, input: unknown) => {
     const request = workspaceChatSessionRequest(input);
-    return activeWorkspaceServerRequest({
-      method: "POST",
-     path: `${activeWorkspaceChatPath()}/sessions`,
-     workspaceScoped: true,
-      operationId: request.operationId,
-     body: request.body
-    });
+    const connection = requireActiveWorkspaceConnection();
+    const { room_id: _roomId, ...operationInput } = request.body;
+    const response = await activeWorkspaceDomainApiClient().executeOperation(connection.workspaceId, "session.create", {
+      context: { room_id: request.roomId },
+      input: operationInput
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    return response.result;
   });
   ipcMain.handle("samurai:workspace-server:chat:session:get", async (_event, input: unknown) => {
     const sessionId = workspaceChatSessionIdRequest(input);
@@ -582,13 +583,12 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:chat:message:send", async (_event, input: unknown) => {
     const request = workspaceChatTurnRequest(input);
-    return activeWorkspaceServerRequest({
-      method: "POST",
-      path: `${activeWorkspaceChatPath()}/sessions/${encodeURIComponent(request.sessionId)}/messages`,
-      workspaceScoped: true,
-      idempotencyKey: request.idempotencyKey,
-      body: request.body
-    });
+    const connection = requireActiveWorkspaceConnection();
+    const response = await activeWorkspaceDomainApiClient().executeOperation(connection.workspaceId, "chat.turn.run", {
+      context: { session_id: request.sessionId },
+      input: request.body
+    }, { operationId: request.idempotencyKey, idempotencyKey: request.idempotencyKey });
+    return response.result;
   });
   ipcMain.handle("samurai:workspace-server:files:attachment:write", async (_event, input: unknown) => {
     const request = workspaceAttachmentRequest(input);
@@ -946,15 +946,41 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:artifacts:list", async (_event, input: unknown) => {
     const request = workspaceArtifactListRequest(input);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceArtifactsPath()}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+    const connection = requireActiveWorkspaceConnection();
+    const response = await activeWorkspaceDomainApiClient().executeQuery(connection.workspaceId, "artifact.list", { context: { room_id: request.roomId }, input: {} });
+    return { artifacts: response.result };
   });
   ipcMain.handle("samurai:workspace-server:artifact:get", async (_event, input: unknown) => {
     const request = workspaceArtifactIdRequest(input);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceArtifactsPath()}/${encodeURIComponent(request.artifactId)}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+    const connection = requireActiveWorkspaceConnection();
+    const response = await activeWorkspaceDomainApiClient().executeQuery<{ artifact: unknown; content: string }>(connection.workspaceId, "artifact.view", { context: { room_id: request.roomId }, input: { id: request.artifactId } });
+    return { ...response.result, auditRecords: [] };
   });
   ipcMain.handle("samurai:workspace-server:artifact:create", async (_event, input: unknown) => {
     const request = workspaceArtifactCreateRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: activeWorkspaceArtifactsPath(), workspaceScoped: true, operationId: request.operationId, body: request.body });
+    const connection = requireActiveWorkspaceConnection();
+    if (typeof request.body.content !== "string") {
+      // Preserve the existing structured-content compatibility input. The v1
+      // artifact.create contract currently publishes string content only.
+      return activeWorkspaceServerRequest({
+        method: "POST",
+        path: activeWorkspaceArtifactsPath(),
+        workspaceScoped: true,
+        operationId: request.operationId,
+        idempotencyKey: request.operationId,
+        body: request.body
+      });
+    }
+    const { room_id: roomId, locale, source_locales: sourceLocales, ...baseInput } = request.body;
+    const response = await activeWorkspaceDomainApiClient().executeOperation(connection.workspaceId, "artifact.create", {
+      context: { room_id: String(roomId) },
+      input: {
+        ...baseInput,
+        ...(locale ? { output_locale: locale } : {}),
+        ...(Array.isArray(sourceLocales) && sourceLocales[0] ? { input_locale: sourceLocales[0] } : {})
+      }
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    return response.result;
   });
   ipcMain.handle("samurai:workspace-server:artifact:surface", async (_event, input: unknown) => {
     const request = workspaceArtifactSurfaceOperationRequest(input);
@@ -992,6 +1018,14 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:room:create", async (_event, input: unknown) => {
     const request = workspaceRoomCreateRequest(input);
+    if (!request.body.parent_room_id) {
+      const connection = requireActiveWorkspaceConnection();
+      const response = await activeWorkspaceDomainApiClient().executeOperation<PublicRoomRecord>(connection.workspaceId, "room.create", {
+        context: {},
+        input: { name: request.body.name }
+      }, { operationId: request.operationId, idempotencyKey: request.operationId });
+      return { room: toDesktopWorkspaceRoom(response.result), replayed: response.replayed };
+    }
     return activeWorkspaceServerRequest({
       method: "POST",
       path: activeWorkspaceRoomsPath(),
@@ -1148,7 +1182,7 @@ function applyWorkspaceConnection(connection: WorkspaceConnection | undefined): 
 interface WorkspaceServerRequestInput {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
-  body?: Record<string, unknown>;
+  body?: unknown;
   operationId?: string;
   idempotencyKey?: string;
   workspaceScoped: boolean;
@@ -1159,6 +1193,8 @@ type WorkspaceRealtimeNotice = {
   workspaceId: string;
   roomId?: string;
   kind?: string;
+  eventId?: string;
+  cursor?: string;
 };
 
 function requireWorkspaceIdentityStore(): WorkspaceIdentityStore {
@@ -1244,9 +1280,12 @@ async function activeWorkspaceServerRequest(input: WorkspaceServerRequestInput):
   const result = await signedWorkspaceServerRequest(connection, privateKey, input);
   if (result.status < 200 || result.status >= 300) {
     const body = result.body;
-    const code = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
-      ? (body as { error: string }).error
-      : "workspace_server_request_failed";
+    const errorValue = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+    const code = typeof errorValue === "string"
+      ? errorValue
+      : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
+        ? (errorValue as { code: string }).code
+        : "workspace_server_request_failed";
     const latestVersion = body && typeof body === "object"
       && "details" in body
       && (body as { details?: unknown }).details
@@ -1258,9 +1297,48 @@ async function activeWorkspaceServerRequest(input: WorkspaceServerRequestInput):
   return result.body;
 }
 
+function activeWorkspaceDomainApiClient(): DomainApiClient {
+  return new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+    return await activeWorkspaceServerRequest({
+      method: request.method,
+      path: request.path,
+      workspaceScoped: true,
+      ...(request.operationId ? { operationId: request.operationId } : {}),
+      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+      ...(request.body === undefined ? {} : { body: request.body })
+    }) as T;
+  });
+}
+
+function toDesktopWorkspaceRoom(room: PublicRoomRecord): {
+  id: string;
+  workspaceId: string;
+  parentRoomId?: string;
+  name: string;
+  version: number;
+  canManage?: boolean;
+  canExecute?: boolean;
+  createdAt: string;
+  updatedAt: string;
+} {
+  return {
+    id: room.id,
+    workspaceId: room.workspace_id,
+    ...(room.parent_room_id ? { parentRoomId: room.parent_room_id } : {}),
+    name: room.name,
+    version: room.version,
+    ...(room.can_manage === undefined ? {} : { canManage: room.can_manage }),
+    ...(room.can_execute === undefined ? {} : { canExecute: room.can_execute }),
+    createdAt: room.created_at,
+    updatedAt: room.updated_at
+  };
+}
+
 /** Main owns Socket.IO authentication and the private key used to sign it. */
 function reconnectActiveWorkspaceRealtime(): void {
   const generation = ++workspaceRealtimeGeneration;
+  workspaceRealtimeLastCursor = undefined;
+  workspaceRealtimeSeenEventIds.clear();
   workspaceRealtimeSocket?.disconnect();
   workspaceRealtimeSocket = undefined;
   const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
@@ -1289,7 +1367,11 @@ function reconnectActiveWorkspaceRealtime(): void {
     const isCurrent = () => generation === workspaceRealtimeGeneration && workspaceRealtimeSocket === socket;
     socket.on("connect", () => {
       if (!isCurrent()) return;
-      void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+      void syncWorkspaceRealtime(socket, connection, privateKey, isCurrent);
+    });
+    socket.on("workspace:v1:event", (event: unknown) => {
+      if (!isCurrent() || !acceptWorkspacePublicEvent(event)) return;
+      forwardWorkspaceRealtimeNotice("event", connection, event);
     });
     socket.on("workspace:event", (event: unknown) => {
       if (!isCurrent()) return;
@@ -1365,14 +1447,78 @@ async function refreshWorkspaceRealtimeRooms(
   }
 }
 
+async function syncWorkspaceRealtime(
+  socket: Socket,
+  connection: WorkspaceConnection,
+  privateKey: string,
+  isCurrent: () => boolean
+): Promise<void> {
+  try {
+    socket.emit("workspace:v1:subscribe", {});
+    let afterCursor = workspaceRealtimeLastCursor;
+    for (let page = 0; page < 20 && isCurrent(); page += 1) {
+      const query = afterCursor ? `?after_cursor=${encodeURIComponent(afterCursor)}&limit=500` : "?limit=500";
+      const response = await signedWorkspaceServerRequest(connection, privateKey, {
+        method: "GET",
+        path: `/api/v1/workspaces/${encodeURIComponent(connection.workspaceId)}/events${query}`,
+        workspaceScoped: true
+      });
+      if (!isCurrent() || response.status < 200 || response.status >= 300 || !response.body || typeof response.body !== "object") break;
+      const body = response.body as { events?: unknown; next_cursor?: unknown; has_more?: unknown };
+      if (!Array.isArray(body.events)) break;
+      for (const event of body.events) {
+        if (!acceptWorkspacePublicEvent(event)) continue;
+        forwardWorkspaceRealtimeNotice("event", connection, event);
+      }
+      const nextCursor = typeof body.next_cursor === "string" ? body.next_cursor : undefined;
+      if (body.has_more === true && nextCursor) {
+        afterCursor = nextCursor;
+        continue;
+      }
+      break;
+    }
+    await refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+  } catch {
+    // The next Socket.IO reconnect retries HTTP replay.
+  }
+}
+
+function acceptWorkspacePublicEvent(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const value = event as { event_id?: unknown; cursor?: unknown };
+  if (typeof value.event_id === "string") {
+    if (workspaceRealtimeSeenEventIds.has(value.event_id)) return false;
+    workspaceRealtimeSeenEventIds.add(value.event_id);
+    if (workspaceRealtimeSeenEventIds.size > 2_000) {
+      const first = workspaceRealtimeSeenEventIds.values().next().value;
+      if (typeof first === "string") workspaceRealtimeSeenEventIds.delete(first);
+    }
+  }
+  if (typeof value.cursor === "string") workspaceRealtimeLastCursor = value.cursor;
+  return true;
+}
+
 /** Only the small, non-secret event shape crosses the Main-to-renderer IPC boundary. */
 function forwardWorkspaceRealtimeNotice(type: WorkspaceRealtimeNotice["type"], connection: WorkspaceConnection, event: unknown): void {
   if (!mainWindow || mainWindow.isDestroyed() || !event || typeof event !== "object") return;
-  const value = event as { workspaceId?: unknown; roomId?: unknown; kind?: unknown };
-  if (value.workspaceId !== connection.workspaceId) return;
+  const value = event as {
+    workspaceId?: unknown;
+    roomId?: unknown;
+    kind?: unknown;
+    event_id?: unknown;
+    cursor?: unknown;
+    event_type?: unknown;
+    scope?: { workspace_id?: unknown; room_id?: unknown };
+  };
+  const workspaceId = value.workspaceId ?? value.scope?.workspace_id;
+  if (workspaceId !== connection.workspaceId) return;
   const notice: WorkspaceRealtimeNotice = { type, workspaceId: connection.workspaceId };
-  if (typeof value.roomId === "string" && isWorkspaceOpaqueId(value.roomId)) notice.roomId = value.roomId;
-  if (typeof value.kind === "string" && /^[a-z][a-z0-9._-]{0,80}$/.test(value.kind)) notice.kind = value.kind;
+  const roomId = value.roomId ?? value.scope?.room_id;
+  if (typeof roomId === "string" && isWorkspaceOpaqueId(roomId)) notice.roomId = roomId;
+  const kind = value.kind ?? value.event_type;
+  if (typeof kind === "string" && /^[a-z][a-z0-9._-]{0,127}$/.test(kind)) notice.kind = kind;
+  if (typeof value.event_id === "string" && isWorkspaceOpaqueId(value.event_id)) notice.eventId = value.event_id;
+  if (typeof value.cursor === "string" && value.cursor.length <= 512) notice.cursor = value.cursor;
   mainWindow.webContents.send("samurai:workspace-server:event", notice);
 }
 

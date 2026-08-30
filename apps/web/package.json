@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@samurai-agent/core-schemas": "workspace:*",
+    "@samurai-agent/domain-api": "workspace:*",
     "@samurai-agent/localization": "workspace:*",
     "@samurai-agent/ui-protocol": "workspace:*",
     "lucide-vue-next": "^0.468.0",

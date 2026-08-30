@@ -7,13 +7,17 @@ import ts from "typescript";
 
 const root = process.env.SAMURAI_REPO_ROOT ? path.resolve(process.env.SAMURAI_REPO_ROOT) : process.cwd();
 const storeMutationVerbs = new Set(["save", "update", "delete", "set", "upsert", "archive", "apply", "create", "claim", "revoke", "rotate", "repair", "restore", "reindex", "prune", "expire", "requeue", "release", "mark", "ack", "fail", "patch"]);
-const runtimeMutationVerbs = new Set(["save", "create", "patch", "delete", "archive", "restore", "apply", "run", "reindex", "approve", "deny", "reject", "rotate", "revoke", "expire", "repair", "recreate", "sync", "dispatch", "prepare", "handle"]);
+const runtimeMutationVerbs = new Set(["save", "create", "patch", "delete", "archive", "restore", "apply", "run", "reindex", "approve", "deny", "reject", "rotate", "revoke", "expire", "repair", "recreate", "cancel", "resume", "sync", "recover", "retry", "dispatch", "prepare", "handle"]);
 const workspaceServerStoreMutationVerbs = new Set(["register", "accept", "put"]);
 const workspaceServerFileMutationVerbs = new Set(["write"]);
 const workspaceServerBundleMutationVerbs = new Set(["import", "stage", "put", "complete", "begin", "record", "rollback"]);
 const allowedRuntimeEntrances = new Set([
   "runDomainCommand", "runDomainQuery", "runCollectionManageCompatibility", "runSurfaceOperation",
-  "runBackendToolBridgeCall", "runDueAutomationJobs", "syncBackendStream", "runGeneratedSurfaceAction"
+  "runBackendToolBridgeCall", "runDueAutomationJobs", "syncBackendStream", "runGeneratedSurfaceAction",
+  // The public Run Control application service dispatches through this single
+  // typed Runtime façade. Individual cancel/resume/sync/recover/retry calls
+  // from a transport remain prohibited.
+  "executeRunControlAction"
 ]);
 const issues = [];
 

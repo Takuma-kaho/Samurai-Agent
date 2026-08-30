@@ -6,11 +6,12 @@ import {
   registerBrowserWorkspaceAccount,
   subscribeBrowserWorkspaceRealtime
 } from "./workspace-browser-auth";
+import { DomainApiClient, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
 import type {
   AgentBackendStatus,
   ArtifactDetail,
   AuditPayload,
-  ChatSurfaceOperationResult,
+  ChatTurnResult,
   DesktopRoomMemberPreview,
   DesktopRoomMovePreview,
   DesktopWorkspaceConnection,
@@ -40,6 +41,7 @@ import type {
   BackendRunRecord,
   CollectionRecord,
   CollectionSchema,
+  ArtifactRecord,
   JsonValue,
   MemoryFrontmatter,
   ResourceRef,
@@ -76,34 +78,45 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     getWorkspaceServerStatus: browserWorkspaceServerStatus,
     getWorkspaceSettings: () => workspaceRequest<SettingsRecord>("GET", "/settings"),
     patchWorkspaceSettings: (input) => workspaceRequest("PATCH", "/settings", input.patch, input.operationId),
-    listWorkspaceRooms: () => workspaceRequest<{ rooms: DesktopWorkspaceRoom[] }>("GET", "/rooms"),
+    listWorkspaceRooms: async () => {
+      const connection = await requireBrowserWorkspaceConnection();
+      const response = await browserDomainApiClient.executeQuery<PublicRoomRecord[]>(connection.workspaceId, "room.list", { context: {}, input: {} });
+      return { rooms: response.result.map(toDesktopWorkspaceRoom) };
+    },
     listWorkspaceAgentBackends: () => workspaceRequest<AgentBackendStatus[]>("GET", "/agent-backends"),
     getWorkspaceSurfaceContract: (source) => {
       const query = source ? `?source=${encodeURIComponent(source)}` : "";
       return workspaceRequest<SurfaceContractPayload>("GET", `/surface/contract${query}`);
     },
     listWorkspaceChatSessions: () => workspaceRequest<SessionRecord[]>("GET", "/chat/sessions"),
-    createWorkspaceChatSession: (input) => workspaceRequest<SessionRecord>("POST", "/chat/sessions", {
-      room_id: input.roomId,
-      ...(input.title ? { title: input.title } : {}),
-      ...(input.uiLocale ? { ui_locale: input.uiLocale } : {}),
-      ...(input.outputLocale ? { output_locale: input.outputLocale } : {})
-    }, input.operationId),
+    createWorkspaceChatSession: async (input) => {
+      const connection = await requireBrowserWorkspaceConnection();
+      const response = await browserDomainApiClient.executeOperation<SessionRecord>(connection.workspaceId, "session.create", {
+        context: { room_id: input.roomId },
+        input: {
+          ...(input.title ? { title: input.title } : {}),
+          ...(input.uiLocale ? { ui_locale: input.uiLocale } : {}),
+          ...(input.outputLocale ? { output_locale: input.outputLocale } : {})
+        }
+      }, { operationId: input.operationId, idempotencyKey: input.operationId });
+      return response.result;
+    },
     getWorkspaceChatSession: (input) => workspaceRequest<SessionDetail>("GET", `/chat/sessions/${encodeURIComponent(input.sessionId)}`),
-    sendWorkspaceChatMessage: async (input) => workspaceRequest<ChatSurfaceOperationResult>(
-      "POST",
-      `/chat/sessions/${encodeURIComponent(input.sessionId)}/messages`,
-      {
-        content: input.content,
-        ...(input.inputLocale ? { input_locale: input.inputLocale } : {}),
-        output_locale: input.outputLocale,
-        ...(input.backendId ? { backend_id: input.backendId } : {}),
-        ...(input.metadata ? { metadata: input.metadata } : {}),
-        ...(input.attachments?.length ? { attachments: input.attachments } : {})
-      },
-      undefined,
-      input.idempotencyKey
-    ),
+    sendWorkspaceChatMessage: async (input) => {
+      const connection = await requireBrowserWorkspaceConnection();
+      const response = await browserDomainApiClient.executeOperation<ChatTurnResult>(connection.workspaceId, "chat.turn.run", {
+        context: { session_id: input.sessionId },
+        input: {
+          content: input.content,
+          ...(input.inputLocale ? { input_locale: input.inputLocale } : {}),
+          ...(input.outputLocale ? { output_locale: input.outputLocale } : {}),
+          ...(input.backendId ? { backend_id: input.backendId } : {}),
+          ...(input.metadata ? { metadata: input.metadata } : {}),
+          ...(input.attachments?.length ? { attachments: input.attachments } : {})
+        }
+      }, { operationId: input.idempotencyKey, idempotencyKey: input.idempotencyKey });
+      return response.result;
+    },
     writeWorkspaceAttachment: (input) => workspaceRequest(
       "PUT",
       `/files/${workspaceAttachmentPath(input.path)}`,
@@ -222,17 +235,45 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     listWorkspaceCollectionNotes: (input) => workspaceRequest("GET", `/collections/${encodeURIComponent(input.collectionId)}/notes?room_id=${encodeURIComponent(input.roomId)}`),
     reindexWorkspaceCollections: (input) => workspaceRequest("POST", "/collections/reindex", { room_id: input.roomId }),
     runWorkspaceCollectionSurfaceOperation: (input) => workspaceSurfaceRequest("/collections/surface/operations", input.roomId, input.operation),
-    listWorkspaceArtifacts: (input) => workspaceRequest("GET", `/artifacts?room_id=${encodeURIComponent(input.roomId)}`),
-    getWorkspaceArtifact: (input) => workspaceRequest<ArtifactDetail>("GET", `/artifacts/${encodeURIComponent(input.artifactId)}?room_id=${encodeURIComponent(input.roomId)}`),
-    createWorkspaceArtifact: (input) => workspaceRequest("POST", "/artifacts", {
-      room_id: input.roomId,
-      title: input.title,
-      content: input.content,
-      ...(input.kind ? { kind: input.kind } : {}),
-      ...(input.locale ? { locale: input.locale } : {}),
-      ...(input.sourceLocales ? { source_locales: input.sourceLocales } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {})
-    }, input.operationId),
+    listWorkspaceArtifacts: async (input) => {
+      const connection = await requireBrowserWorkspaceConnection();
+      const response = await browserDomainApiClient.executeQuery<ArtifactRecord[]>(connection.workspaceId, "artifact.list", { context: { room_id: input.roomId }, input: {} });
+      return { artifacts: response.result };
+    },
+    getWorkspaceArtifact: async (input) => {
+      const connection = await requireBrowserWorkspaceConnection();
+      const response = await browserDomainApiClient.executeQuery<{ artifact: ArtifactRecord; content: string }>(connection.workspaceId, "artifact.view", { context: { room_id: input.roomId }, input: { id: input.artifactId } });
+      return { ...response.result, auditRecords: [] };
+    },
+    createWorkspaceArtifact: async (input) => {
+      const connection = await requireBrowserWorkspaceConnection();
+      if (typeof input.content !== "string") {
+        // The legacy Handler still supports structured artifact content. Keep
+        // that compatibility input until the public artifact.create schema is
+        // intentionally expanded in a later phase.
+        return workspaceRequest("POST", "/artifacts", {
+          room_id: input.roomId,
+          title: input.title,
+          content: input.content,
+          ...(input.kind ? { kind: input.kind } : {}),
+          ...(input.locale ? { locale: input.locale } : {}),
+          ...(input.sourceLocales?.length ? { source_locales: input.sourceLocales } : {}),
+          ...(input.metadata ? { metadata: input.metadata } : {})
+        }, input.operationId, input.operationId);
+      }
+      const response = await browserDomainApiClient.executeOperation<{ artifact: ArtifactRecord; content: string; replayed: boolean }>(connection.workspaceId, "artifact.create", {
+        context: { room_id: input.roomId },
+        input: {
+          title: input.title,
+          content: input.content,
+          ...(input.kind ? { kind: input.kind } : {}),
+          ...(input.locale ? { output_locale: input.locale } : {}),
+          ...(input.sourceLocales?.[0] ? { input_locale: input.sourceLocales[0] } : {}),
+          ...(input.metadata ? { metadata: input.metadata } : {})
+        }
+      }, { operationId: input.operationId, idempotencyKey: input.operationId });
+      return response.result;
+    },
     runWorkspaceArtifactSurfaceOperation: (input) => workspaceSurfaceRequest("/artifacts/surface/operations", input.roomId, input.operation),
     getWorkspaceGeneratedSurface: (input) => workspaceRequest<GeneratedSurfaceDetail>("GET", `/generated-surfaces/${encodeURIComponent(input.surfaceId)}?room_id=${encodeURIComponent(input.roomId)}`),
     getWorkspaceGeneratedSurfaceBundle: (input) => workspaceRequest<GeneratedSurfaceBundleDetail>("GET", `/generated-surfaces/${encodeURIComponent(input.surfaceId)}/revisions/${encodeURIComponent(input.revisionId)}/bundle?room_id=${encodeURIComponent(input.roomId)}`),
@@ -270,7 +311,17 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     setWorkspaceAutomationManagement: (input) => workspaceRequest("POST", `/automation/jobs/${encodeURIComponent(input.jobId)}/management`, { state: input.state }, input.operationId),
     runWorkspaceAutomationNow: (input) => workspaceRequest("POST", "/automation/run-now", { room_id: input.roomId, ...(input.kind ? { kind: input.kind } : {}) }, input.operationId),
     listWorkspaceRoomMembers: (roomId) => workspaceRequest<{ members: DesktopWorkspaceRoomMembership[] }>("GET", `/rooms/${encodeURIComponent(roomId)}/members`),
-    createWorkspaceRoom: (input) => workspaceRequest("POST", "/rooms", { name: input.name, ...(input.parentRoomId ? { parent_room_id: input.parentRoomId } : {}), expected_workspace_version: input.expectedWorkspaceVersion }, input.operationId),
+    createWorkspaceRoom: async (input) => {
+      if (input.parentRoomId) {
+        return workspaceRequest("POST", "/rooms", { name: input.name, parent_room_id: input.parentRoomId, expected_workspace_version: input.expectedWorkspaceVersion }, input.operationId);
+      }
+      const connection = await requireBrowserWorkspaceConnection();
+      const response = await browserDomainApiClient.executeOperation<PublicRoomRecord>(connection.workspaceId, "room.create", {
+        context: {},
+        input: { name: input.name }
+      }, { operationId: input.operationId, idempotencyKey: input.operationId });
+      return { room: toDesktopWorkspaceRoom(response.result), replayed: response.replayed };
+    },
     previewWorkspaceRoomMove: (input) => workspaceRequest<{ preview: DesktopRoomMovePreview }>("POST", `/rooms/${encodeURIComponent(input.roomId)}/parent/preview`, { parent_room_id: input.parentRoomId }),
     moveWorkspaceRoom: (input) => workspaceRequest("PUT", `/rooms/${encodeURIComponent(input.roomId)}/parent`, { parent_room_id: input.parentRoomId, expected_room_version: input.expectedRoomVersion, expected_workspace_version: input.expectedWorkspaceVersion }, input.operationId),
     previewWorkspaceRoomMember: (input) => workspaceRequest<{ preview: DesktopRoomMemberPreview }>("POST", `/rooms/${encodeURIComponent(input.roomId)}/members/${encodeURIComponent(input.accountId)}/preview`, { role: input.role, state: input.state }),
@@ -368,6 +419,37 @@ async function workspaceRequest<T>(
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(body === undefined ? {} : { body })
   });
+}
+
+const browserDomainApiClient = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+  return browserWorkspaceRequest<T>({
+    method: request.method,
+    path: request.path,
+    workspaceScoped: true,
+    ...(request.operationId ? { operationId: request.operationId } : {}),
+    ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+    ...(request.body === undefined ? {} : { body: request.body })
+  });
+});
+
+async function requireBrowserWorkspaceConnection(): Promise<NonNullable<Awaited<ReturnType<typeof loadBrowserWorkspaceConnection>>>> {
+  const connection = await loadBrowserWorkspaceConnection();
+  if (!connection) throw new Error("workspace_connection_required");
+  return connection;
+}
+
+function toDesktopWorkspaceRoom(room: PublicRoomRecord): DesktopWorkspaceRoom {
+  return {
+    id: room.id,
+    workspaceId: room.workspace_id,
+    ...(room.parent_room_id ? { parentRoomId: room.parent_room_id } : {}),
+    name: room.name,
+    version: room.version,
+    ...(room.can_manage === undefined ? {} : { canManage: room.can_manage }),
+    ...(room.can_execute === undefined ? {} : { canExecute: room.can_execute }),
+    createdAt: room.created_at,
+    updatedAt: room.updated_at
+  };
 }
 
 async function workspaceSurfaceRequest<T = unknown>(suffix: string, roomId: string, operation: SurfaceOperation): Promise<SurfaceOperationResultEnvelope<T>> {
