@@ -7,7 +7,7 @@ const Output = roomValueSchema;
 export interface RoomCreatePorts { createRoom(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<z.infer<typeof Output>>; }
 
 const roomCreate = defineCommand<RoomCreatePorts>()({
-  id: "room.create", version: "1.0", availability: "active", title: "Create Room", description: "Create a persistent Room in the current Workspace.",
+  id: "room.create", version: "1.1", availability: "active", title: "Create Room", description: "Create a persistent Room in the current Workspace.",
   sources: ["runtime_api", "surface_operation", "provider_tool_call"], effect: "workspace_mutation", idempotency: "required", concurrency: "append_or_unique",
   render: ["status_timeline"], resourceKinds: ["room"], proposedEffects: ["Create a Room."], outputResourceKind: "room", uiDisplayCategory: "workspace", providerToolNames: ["samurai.room.create"],
   provenance: [{ source: "samurai", commit_sha: "workspace-design-v1", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Keep Room identity in Workspace PostgreSQL, separate from Backend execution." }],

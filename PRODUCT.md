@@ -207,7 +207,7 @@ Native Appは、Workspace CoreとRuntimeを利用者へ届けるSamuraiの公式
 
 Chatは操作入口の一つである。チームAgentの見せ方や実行体験はNative App設計で決めるため、この正本では固定しない。利用者はNative Appを閉じている時でも、許可された外部アプリから同じWorkspaceを利用できる。
 
-具体的な画面構成やVisual Designは`WEB_UI_DESIGN.md`を補助資料として扱い、この文書の責務境界に従う。
+具体的な画面構成やVisual DesignはNative Appの設計で定め、この文書では責務境界を固定する。
 
 ---
 

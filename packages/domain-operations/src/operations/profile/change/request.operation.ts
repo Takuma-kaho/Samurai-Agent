@@ -10,7 +10,7 @@ export interface ProfileChangeRequestPorts extends HumanChangeRequestPorts {}
 
 const profileChangeRequest = defineCommand<ProfileChangeRequestPorts>()({
   id: "profile.change.request",
-  version: "1.0",
+  version: "1.1",
   availability: "active",
   title: "Request a human Profile change",
   description: "Record a request for a human to review a Profile change; it never changes Profile directly.",

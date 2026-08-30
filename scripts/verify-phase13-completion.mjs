@@ -38,10 +38,16 @@ const definitions = [
     args: ["scripts/verify-source-quality.mjs"]
   },
   {
-    id: "core-additions",
+    id: "domain-contract-ledger",
     kind: "quality",
     command: process.execPath,
-    args: ["scripts/verify-core-additions.mjs"]
+    args: ["scripts/run-domain-contract-ledger.mjs"]
+  },
+  {
+    id: "domain-contracts",
+    kind: "quality",
+    command: process.execPath,
+    args: ["scripts/verify-domain-contracts.mjs"]
   },
   {
     id: "ci-full",

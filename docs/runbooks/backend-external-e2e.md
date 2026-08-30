@@ -2,7 +2,7 @@
 
 最終更新: 2026-06-28
 
-このメモは、`backend-current-state-oss-comparison.md` と `backend-architecture-completion-ledger.md` で運用検証として残している実外部backend / 実sandbox / 実外部channel E2Eの実行条件を固定する。
+このRunbookは、実外部backend・実sandbox・実外部channel E2Eを安全に実行するための条件を固定する。
 
 ## 目的
 
@@ -129,10 +129,7 @@ pnpm run sandbox:verify -- \
 
 ## 記録先
 
-完了または失敗したら以下へ記録する。
-
-- `plans/backend-architecture-completion-ledger.md`
-- `plans/backend-current-state-oss-comparison.md`
+完了または失敗したら`reports/`内の該当する検証記録へ記録する。
 
 記録する項目。
 

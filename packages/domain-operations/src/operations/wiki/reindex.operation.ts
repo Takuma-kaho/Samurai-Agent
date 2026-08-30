@@ -17,7 +17,7 @@ const wikiReindex = defineCommand<WikiReindexPorts>()({
   ...{
   "kind": "command",
   "id": "wiki.reindex",
-  "version": "3.0",
+  "version": "3.1",
   "availability": "active",
   "title": "Reindex Knowledge Wiki",
   "description": "Refresh the Knowledge Wiki PostgreSQL projection from markdown pages.",

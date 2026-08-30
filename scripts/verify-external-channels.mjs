@@ -33,9 +33,9 @@ const summary = {
       status: "manual_opt_in_required",
       effect: "external_channel_service",
       reason: "Requires real Slack, Telegram, LINE, or Email provider credentials and may send or receive live messages.",
-      command: "manual: run the channel service E2E checklist in plans/backend-external-e2e-runbook.md",
+      command: "manual: run the channel service E2E checklist in docs/runbooks/backend-external-e2e.md",
       confirmation_flag: "--confirm-external-effects",
-      runbook: "plans/backend-external-e2e-runbook.md"
+      runbook: "docs/runbooks/backend-external-e2e.md"
     }
   ]
 };
@@ -208,7 +208,7 @@ function manualE2E(channel) {
   return {
     status: "manual_opt_in_required",
     channel,
-    runbook: "plans/backend-external-e2e-runbook.md",
+    runbook: "docs/runbooks/backend-external-e2e.md",
     confirmation_flag: "--confirm-external-effects"
   };
 }

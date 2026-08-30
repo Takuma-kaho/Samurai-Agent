@@ -43,7 +43,7 @@ const collectionSchemaSave = defineCommand<CollectionSchemaSavePorts>()({
   ...{
   "kind": "command",
   "id": "collection.schema.save",
-  "version": "4.0",
+  "version": "4.1",
   "availability": "active",
   "title": "Save collection schema",
   "description": "Save a Collection schema with validated fields and Workspace view definitions.",

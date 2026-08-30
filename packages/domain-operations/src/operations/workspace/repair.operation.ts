@@ -16,7 +16,7 @@ const workspaceRepair = defineCommand<WorkspaceRepairPorts>()({
   ...{
   "kind": "command",
   "id": "workspace.repair",
-  "version": "2.0",
+  "version": "2.1",
   "availability": "active",
   "title": "Repair workspace",
   "description": "Inspect and repair recoverable Workspace integrity issues.",

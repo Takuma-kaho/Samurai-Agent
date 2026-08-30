@@ -112,8 +112,9 @@ const completedAt = new Date().toISOString();
 const sources = [
   "scripts/verify-release-hygiene.mjs",
   "scripts/verify-phase13-completion.mjs",
+  "scripts/verify-domain-contracts.mjs",
   "scripts/lib/core-evidence.mjs",
-  "plans/core-completion-scorecard.json",
+  "contracts/domain-command-contract-ledger.json",
   "package.json"
 ];
 const commitSha = run("git", ["rev-parse", "HEAD"]);

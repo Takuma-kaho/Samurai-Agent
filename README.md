@@ -200,8 +200,7 @@ Vitest results as authoritative.
 
 - `PRODUCT.md`: product definition, concepts, and public language
 - `ARCHITECTURE.md`: technical boundaries and verification invariants
-- `WEB_UI_DESIGN.md`: supporting Native App UI guidance
-- `plans/`: implementation plans and reviews
+- `design-lab/web-ui-demo/`: static UI demo for visual reference; it is not a product specification
 - `reports/`: point-in-time verification evidence
 
 ## Workspace Data

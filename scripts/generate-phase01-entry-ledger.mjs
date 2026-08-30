@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = process.env.SAMURAI_REPO_ROOT
   ? path.resolve(process.env.SAMURAI_REPO_ROOT)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputPath = path.join(root, "plans/phase-0-1-entry-ledger.json");
+const outputPath = path.join(root, ".cache/samurai/generated/phase-0-1-entry-ledger.json");
 const sourceRoots = [
   "apps/server/src",
   "apps/web/src",
@@ -66,6 +66,7 @@ if (process.argv.includes("--check")) {
   }
   process.stdout.write(`verified ${uniqueRows.length} Phase 0-1 entries\n`);
 } else {
+  mkdirSync(path.dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, output);
   process.stdout.write(`generated ${uniqueRows.length} Phase 0-1 entries\n`);
 }

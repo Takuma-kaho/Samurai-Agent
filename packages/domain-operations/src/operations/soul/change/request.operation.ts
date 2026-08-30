@@ -10,7 +10,7 @@ export interface SoulChangeRequestPorts extends HumanChangeRequestPorts {}
 
 const soulChangeRequest = defineCommand<SoulChangeRequestPorts>()({
   id: "soul.change.request",
-  version: "1.0",
+  version: "1.1",
   availability: "active",
   title: "Request a human Soul change",
   description: "Record a request for a human to review a Soul change; it never changes Soul directly.",

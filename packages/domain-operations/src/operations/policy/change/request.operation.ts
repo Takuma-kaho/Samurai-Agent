@@ -10,7 +10,7 @@ export interface PolicyChangeRequestPorts extends HumanChangeRequestPorts {}
 
 const policyChangeRequest = defineCommand<PolicyChangeRequestPorts>()({
   id: "policy.change.request",
-  version: "1.0",
+  version: "1.1",
   availability: "active",
   title: "Request a human Policy change",
   description: "Record a request for a human to review a Policy change; it never changes Policy directly.",

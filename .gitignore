@@ -28,9 +28,12 @@ coverage/
 workspace-data/
 *.timestamp-*.mjs
 
+# Local generated artifacts and temporary plans
+/.cache/
+/plans/
+
 # Temporary bundles produced by domain-command verification
 /domain-command-ingress-fixed.mjs
-/domain-command-schema-matrix.mjs
 
 # Editor / local tooling
 .idea/

@@ -100,7 +100,7 @@ ledger.catalog_hash = createHash("sha256").update(stableJson(ledger)).digest("he
 const output = JSON.stringify(ledger, null, 2) + "\n";
 const outputPath = process.env.SAMURAI_DOMAIN_LEDGER_OUTPUT
   ? path.resolve(process.env.SAMURAI_DOMAIN_LEDGER_OUTPUT)
-  : path.resolve(process.cwd(), "plans/domain-command-contract-ledger.json");
+  : path.resolve(process.cwd(), "contracts/domain-command-contract-ledger.json");
 try {
   const previous = JSON.parse(await readFile(outputPath, "utf8"));
   assertContractVersionDiscipline(

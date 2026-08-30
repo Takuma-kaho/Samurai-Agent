@@ -10,9 +10,9 @@ export interface RoomOwnerlessListPorts extends DomainQueryPorts {
 }
 
 const roomOwnerlessList = defineQuery<RoomOwnerlessListPorts>()({
-  id: "room.ownerless.list", version: "1.0", availability: "active", title: "List ownerless Rooms", description: "List Rooms that require explicit Workspace Owner recovery.",
+  id: "room.ownerless.list", version: "1.1", availability: "active", title: "List ownerless Rooms", description: "List Rooms that require explicit Workspace Owner recovery.",
   sources: ["runtime_api"], render: ["table"], resourceKinds: ["room", "room_member"], proposedEffects: ["Read ownerless Rooms for explicit recovery."], outputResourceKind: "room", uiDisplayCategory: "workspace",
-  provenance: [{ source: "samurai", commit_sha: "core-06", reference_file: "SAMURAI_AGENT_MANUAL.md", decision: "adapted", reason: "Ownerless Room recovery is explicit and visible only to the Workspace Owner." }], input: Input, output: Output,
+  provenance: [{ source: "samurai", commit_sha: "core-06", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Ownerless Room recovery is explicit and visible only to the Workspace Owner." }], input: Input, output: Output,
   createHandler(ports) { return { execute: async function handleRoomOwnerlessList(context: TrustedDomainContext, _input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> { return { ok: true, value: Output.parse(await ports.listOwnerlessRooms(context)) }; } }; }
 });
 

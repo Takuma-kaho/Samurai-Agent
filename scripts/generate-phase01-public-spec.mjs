@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -19,7 +19,7 @@ import {
 import { operationDefinitions } from "../packages/domain-operations/src/index.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputPath = path.join(root, "plans/phase-0-1-public-api-spec.json");
+const outputPath = path.join(root, ".cache/samurai/generated/phase-0-1-public-api-spec.json");
 const publicOperationIdSet = new Set(publicDomainOperationIds);
 const publicDefinitions = operationDefinitions
   .filter((definition) => publicOperationIdSet.has(definition.id) && definition.sources.includes("runtime_api"))
@@ -154,6 +154,7 @@ if (process.argv.includes("--check")) {
   }
   process.stdout.write(`verified Phase 0-1 public API spec: ${contracts.length} contracts, ${eventCatalog.length} event types\n`);
 } else {
+  mkdirSync(path.dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, output);
   process.stdout.write(`generated Phase 0-1 public API spec: ${contracts.length} contracts, ${eventCatalog.length} event types\n`);
 }

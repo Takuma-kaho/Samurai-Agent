@@ -38,7 +38,7 @@ export function committedSourceEvidence(root, sourceFiles) {
     imports: extractImportSpecifiers(sourceContents.get(file)).sort()
   }));
   const sourceGraphSha256 = createHash("sha256").update(JSON.stringify(sourceGraph)).digest("hex");
-  const contractVersions = readContractVersions(readSourceFile(root, "plans/domain-command-contract-ledger.json"));
+  const contractVersions = readContractVersions(readSourceFile(root, "contracts/domain-command-contract-ledger.json"));
   const contractVersionsSha256 = createHash("sha256").update(JSON.stringify(contractVersions)).digest("hex");
   const headBlobs = new Map(execFileSync("git", ["ls-tree", "-r", "HEAD"], { cwd: root, encoding: "utf8" }).trim().split("\n").filter(Boolean).map((line) => { const match = line.match(/^\d+\s+blob\s+([0-9a-f]+)\t(.+)$/); return match ? [match[2], match[1]] : ["", ""]; }));
   const worktreeClean = files.every((file) => {
@@ -82,7 +82,8 @@ function readContractVersions(content) {
 
 function readSourceFile(root, file) {
   try {
-    return execFileSync(process.execPath, ["-e", sourceReadScript, path.join(root, file)], {
+    const sourcePath = path.isAbsolute(file) ? file : path.join(root, file);
+    return execFileSync(process.execPath, ["-e", sourceReadScript, sourcePath], {
       cwd: root,
       encoding: null,
       timeout: sourceReadTimeoutMs,

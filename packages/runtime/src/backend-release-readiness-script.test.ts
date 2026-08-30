@@ -53,7 +53,7 @@ describe("backend release readiness verification script", () => {
       gate.status === "manual_opt_in_required" && gate.confirmation_flag === "--confirm-external-effects"
     )).toBe(true);
     expect(result.manual_gates.every((gate: { runbook: string }) =>
-      gate.runbook === "plans/backend-external-e2e-runbook.md"
+      gate.runbook === "docs/runbooks/backend-external-e2e.md"
     )).toBe(true);
     expect(result.profiles.map((profile: { id: string }) => profile.id)).toEqual(["local_oss", "production_ops"]);
     expect(result.profiles.find((profile: { id: string }) => profile.id === "production_ops")).toMatchObject({

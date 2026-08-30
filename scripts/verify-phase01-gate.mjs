@@ -5,9 +5,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ledgerPath = path.join(root, "plans/phase-0-1-entry-ledger.json");
-execFileSync(process.execPath, [path.join(root, "scripts/generate-phase01-entry-ledger.mjs"), "--check"], { cwd: root, stdio: "inherit" });
-execFileSync(process.execPath, ["--import", "tsx", path.join(root, "scripts/generate-phase01-public-spec.mjs"), "--check"], { cwd: root, stdio: "inherit" });
+const generatedDirectory = path.join(root, ".cache/samurai/generated");
+const ledgerPath = path.join(generatedDirectory, "phase-0-1-entry-ledger.json");
+// The ledger and public spec are derived files. Recreate them for every gate
+// run so a fresh clone does not depend on ignored local cache contents.
+execFileSync(process.execPath, [path.join(root, "scripts/generate-phase01-entry-ledger.mjs")], { cwd: root, stdio: "inherit" });
+execFileSync(process.execPath, ["--import", "tsx", path.join(root, "scripts/generate-phase01-public-spec.mjs")], { cwd: root, stdio: "inherit" });
 const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
 const requiredRequirements = ["P0-01", "P0-02", "P0-03", "P0-04", "P1-01", "P1-02", "P1-03", "P1-04", "P1-05", "P1-06", "P1-07", "P1-08", "P1-09"];
 assert.deepEqual(ledger.phase_scope, Array.from({ length: 11 }, (_value, index) => index));
@@ -60,7 +63,7 @@ for (const eventType of ["workspace.room.changed", "workspace.agent.changed", "w
   assert.ok(domainApiSource.includes(`\"${eventType}\"`), `phase01_event_schema_missing:${eventType}`);
 }
 assert.ok(existsSync(path.join(root, "packages/domain-api/src/index.ts")), "phase01_public_contract_package_missing");
-assert.ok(existsSync(path.join(root, "plans/phase-0-1-public-api-spec.json")), "phase01_public_api_spec_missing");
+assert.ok(existsSync(path.join(generatedDirectory, "phase-0-1-public-api-spec.json")), "phase01_public_api_spec_missing");
 process.stdout.write(`verified Phase 0-1 gate: ${ledger.entries.length} entries, unclassified=0, direct_persistence=0\n`);
 
 function filesUnder(directory) {

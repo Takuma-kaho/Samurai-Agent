@@ -14,7 +14,7 @@ const manualGates = [
     reason: "Requires explicit confirmation because it may use authenticated external services, network, and provider quota.",
     command: "pnpm run backend:external:verify -- --run --confirm-external-effects --resume --require-configured --backend <id>",
     confirmation_flag: "--confirm-external-effects",
-    runbook: "plans/backend-external-e2e-runbook.md"
+    runbook: "docs/runbooks/backend-external-e2e.md"
   },
   {
     id: "external-sandbox-run",
@@ -24,7 +24,7 @@ const manualGates = [
     reason: "Docker, SSH, and remote sandbox runs can create remote or container side effects.",
     command: "pnpm run sandbox:verify -- --run --confirm-external-effects --backend docker|ssh|remote",
     confirmation_flag: "--confirm-external-effects",
-    runbook: "plans/backend-external-e2e-runbook.md"
+    runbook: "docs/runbooks/backend-external-e2e.md"
   },
   {
     id: "external-channel-service-e2e",
@@ -32,9 +32,9 @@ const manualGates = [
     status: "manual_opt_in_required",
     effect: "external_channel_service",
     reason: "Requires real Slack, Telegram, LINE, or Email provider credentials and may send or receive live messages.",
-    command: "manual: run the channel service E2E checklist in plans/backend-external-e2e-runbook.md",
+    command: "manual: run the channel service E2E checklist in docs/runbooks/backend-external-e2e.md",
     confirmation_flag: "--confirm-external-effects",
-    runbook: "plans/backend-external-e2e-runbook.md"
+    runbook: "docs/runbooks/backend-external-e2e.md"
   }
 ];
 
@@ -164,7 +164,7 @@ function releaseProfiles(manualGates) {
       non_destructive_command: "CI=true pnpm run backend:release:verify -- --json",
       required_gate_ids: nonDestructiveGateIds,
       manual_gate_ids: [],
-      runbook: "plans/backend-external-e2e-runbook.md",
+      runbook: "docs/runbooks/backend-external-e2e.md",
       notes: [
         "No authenticated external service calls are started by this profile.",
         "Use this before publishing local backend changes or opening a release PR."
@@ -177,7 +177,7 @@ function releaseProfiles(manualGates) {
       non_destructive_command: "CI=true pnpm run backend:release:verify -- --json",
       required_gate_ids: nonDestructiveGateIds,
       manual_gate_ids: manualGates.map((gate) => gate.id),
-      runbook: "plans/backend-external-e2e-runbook.md",
+      runbook: "docs/runbooks/backend-external-e2e.md",
       notes: [
         "Run the manual gates only after credentials, quotas, remote targets, and message side effects are approved.",
         "The verifier lists this profile but does not start authenticated external runs by itself."
@@ -404,8 +404,7 @@ async function runPublicNamingScan() {
     "package.json",
     "apps",
     "packages",
-    "scripts",
-    "web-front.md"
+    "scripts"
   ];
   const files = [];
   for (const target of targets) {

@@ -14,7 +14,7 @@ const workspaceBackupCreate = defineCommand<WorkspaceBackupCreatePorts>()({
   ...{
   "kind": "command",
   "id": "workspace.backup.create",
-  "version": "2.1",
+  "version": "2.2",
   "availability": "active",
   "title": "Create workspace backup",
   "description": "Create an atomic Workspace backup.",

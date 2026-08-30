@@ -22,7 +22,7 @@
   ],
   "counts": {
     "commands": 139,
-    "queries": 28,
+    "queries": 30,
     "deprecated_commands": 5
   },
   "compatibility_adapters": [
@@ -143,8 +143,8 @@
     {
       "kind": "command",
       "id": "agent.backend.bind",
-      "contract_version": "1.0",
-      "contract_fingerprint": "c9166d21219ad957ddddd0b5142d076b18896168a191b1a5f6b4e7bcd47f9c52",
+      "contract_version": "1.1",
+      "contract_fingerprint": "56f25967a8aa56a00effcde9b8e690f0567d06bb7e13a38699aaf39b5b9b7198",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -155,6 +155,10 @@
           "backend_id": {
             "type": "string",
             "minLength": 1
+          },
+          "expected_version": {
+            "type": "integer",
+            "exclusiveMinimum": 0
           }
         },
         "required": [
@@ -402,8 +406,8 @@
     {
       "kind": "command",
       "id": "agent.patch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "e245a956b92a1ae19f23c53213cd25204c7759a168eedda356c1034399585f16",
+      "contract_version": "1.1",
+      "contract_fingerprint": "54739352c46818e2444191e8cdf15ce28126e80f9bdf111e4bb65b133636b239",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -428,6 +432,10 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "expected_version": {
+            "type": "integer",
+            "exclusiveMinimum": 0
           }
         },
         "required": [
@@ -536,8 +544,8 @@
     {
       "kind": "command",
       "id": "agent.workspace_permission.set",
-      "contract_version": "1.0",
-      "contract_fingerprint": "2343feca99f65742be952ff424091f730e90e978d9b448e3b41e013c909bf739",
+      "contract_version": "1.1",
+      "contract_fingerprint": "11159249367c30369de472db38dcb1766410dfb9d82e7001115facfe043cd14e",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -620,7 +628,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Agents can create Rooms only through an explicit permission."
         }
@@ -27784,8 +27792,8 @@
     {
       "kind": "command",
       "id": "collection.reindex",
-      "contract_version": "3.1",
-      "contract_fingerprint": "7cc9d79e616d52df920f8464f21d90950fa919687f2ff05f5734d0a61b8d89ec",
+      "contract_version": "3.2",
+      "contract_fingerprint": "61da270c4bdbbca2b711692bf1054ab6f62df54555e1c1c6d38073821d308f45",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -28409,8 +28417,8 @@
     {
       "kind": "command",
       "id": "collection.schema.save",
-      "contract_version": "4.0",
-      "contract_fingerprint": "32188e8a3c08aec105edee1db0b1bdca121a5b117688fe850536f8c263287048",
+      "contract_version": "4.1",
+      "contract_fingerprint": "fd9a8ffbd2cbb54d5040d1e69eb70ee0af6c30839d5981f15671029682a6586a",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -58316,8 +58324,8 @@
     {
       "kind": "command",
       "id": "policy.change.request",
-      "contract_version": "1.0",
-      "contract_fingerprint": "78115ccaacdddf748ed1c953926c7f406b2e909dc2851bcd503470d373694d37",
+      "contract_version": "1.1",
+      "contract_fingerprint": "8bb4b06d0844fcc34a08482968ab68f0acabdcf8dff7d78ece36b0e42f3e17c7",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -58525,6 +58533,19 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512
+              },
+              "source_event_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
               },
               "instruction_summary": {
                 "type": "string",
@@ -58788,8 +58809,8 @@
     {
       "kind": "command",
       "id": "profile.change.request",
-      "contract_version": "1.0",
-      "contract_fingerprint": "4f92d32a9029cfff62841e3d4efe1369324eec729ab3804108cc75c894781834",
+      "contract_version": "1.1",
+      "contract_fingerprint": "7f505cee493fd0d93ca0c3f590afa990140682954d5c1837ae8ac343226a45f4",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -58997,6 +59018,19 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512
+              },
+              "source_event_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
               },
               "instruction_summary": {
                 "type": "string",
@@ -65837,8 +65871,8 @@
     {
       "kind": "command",
       "id": "room.agent.permission.set",
-      "contract_version": "1.0",
-      "contract_fingerprint": "83bf8f562d4ac1c215a1f0a78fc0b89bbebefa00b5a20ddfe63324c5f4490966",
+      "contract_version": "1.1",
+      "contract_fingerprint": "42dd8c92a6780248b101fc0dc3a40872367792bad18bd34174b7c53870e2e6ae",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -65933,7 +65967,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Agents do not occupy the human role hierarchy."
         }
@@ -65965,8 +65999,8 @@
     {
       "kind": "command",
       "id": "room.agent.remove",
-      "contract_version": "1.0",
-      "contract_fingerprint": "6c113c2a6b4dbb8e8d1c939e6fd87c5c966c2c7f50d5d61fd911dbd6e8379213",
+      "contract_version": "1.1",
+      "contract_fingerprint": "147d0ead49d4e46c490c1d38689d34d8d8c4e67cef0cafdfcaf790058237fb7d",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66049,7 +66083,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Agent removal disables new Room reads and runs immediately."
         }
@@ -66081,8 +66115,8 @@
     {
       "kind": "command",
       "id": "room.create",
-      "contract_version": "1.0",
-      "contract_fingerprint": "5d995b057c1f18804c8c38a6d6dde68d92821633ba069d3e88ba1e9d7481492c",
+      "contract_version": "1.1",
+      "contract_fingerprint": "5cfe79100f7cfee45b6bb025d51832d198d2b35a0a05d5b2dede768df0c99bf2",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66148,7 +66182,7 @@
           "commit_sha": "workspace-design-v1",
           "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
-          "reason": "Keep Room identity in Workspace SQLite, separate from Backend execution."
+          "reason": "Keep Room identity in Workspace PostgreSQL, separate from Backend execution."
         }
       ],
       "oss_reference": [
@@ -66178,8 +66212,8 @@
     {
       "kind": "command",
       "id": "room.member.add",
-      "contract_version": "1.0",
-      "contract_fingerprint": "aad51825962ca705d8840d51640fee00194f9f450cb23956c0b4856fd1fc8d4b",
+      "contract_version": "1.1",
+      "contract_fingerprint": "8b54f4643b60edd077408e2bb741ef72234ea887758fbb1a430a564f3b617151",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66269,7 +66303,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Room participation is separate from Workspace membership."
         }
@@ -66301,8 +66335,8 @@
     {
       "kind": "command",
       "id": "room.member.remove",
-      "contract_version": "1.0",
-      "contract_fingerprint": "1dba7f7a6ad56fc848707163817658fd26358330a06286c64a6989e7d3e32f05",
+      "contract_version": "1.1",
+      "contract_fingerprint": "22a1e4c878f5405a66f66e264142e295c64092e9320de1655db2bbec587cef4c",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66383,7 +66417,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Removed participants lose new access immediately without history deletion."
         }
@@ -66415,8 +66449,8 @@
     {
       "kind": "command",
       "id": "room.member.role.change",
-      "contract_version": "1.0",
-      "contract_fingerprint": "13744a8b7a1c20e1e542633de75ef7b4c15785bb96bca1f35ed46c43b289968f",
+      "contract_version": "1.1",
+      "contract_fingerprint": "f8cb17ee3187738833820ccf2b9efb4a08d7c0d4edb7fae3591002545f3ad64d",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66506,7 +66540,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Owner transfer has a separate atomic operation."
         }
@@ -66538,8 +66572,8 @@
     {
       "kind": "command",
       "id": "room.owner.recover",
-      "contract_version": "1.0",
-      "contract_fingerprint": "82775be367722f7982d4af91f3276d1a669c6eb1b9847de44b905b36ef777ae6",
+      "contract_version": "1.1",
+      "contract_fingerprint": "9360271e97e4b888da08a9742eb90ed18deb81a557bb798bede7498f1cf4dbe1",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66620,7 +66654,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Only the Workspace Owner can recover an ownerless Room."
         }
@@ -66652,8 +66686,8 @@
     {
       "kind": "command",
       "id": "room.owner.transfer",
-      "contract_version": "1.0",
-      "contract_fingerprint": "040af4b87b71040505aeabc9283e1bede920bc3cf123d011fcb9eba5fb1cecca",
+      "contract_version": "1.1",
+      "contract_fingerprint": "27a380ca352db75e9e8ba2ef9c219f576ea009f217b54667f971b1bb7fa3c2d6",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66747,7 +66781,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Owner transfer is not a normal role change."
         }
@@ -66779,8 +66813,8 @@
     {
       "kind": "command",
       "id": "room.patch",
-      "contract_version": "1.0",
-      "contract_fingerprint": "b75be0d2d23ef6c7739f5e2aa6b2643e78e4596b2b853babbb633e5c33cafc33",
+      "contract_version": "1.1",
+      "contract_fingerprint": "32466ad4d947be79faea858be2020ec45a58a27379d676de133cff4ddcd707ff",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -66792,6 +66826,10 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200
+          },
+          "expected_version": {
+            "type": "integer",
+            "exclusiveMinimum": 0
           }
         },
         "required": [
@@ -66850,7 +66888,7 @@
           "commit_sha": "workspace-design-v1",
           "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
-          "reason": "Keep Room identity in Workspace SQLite."
+          "reason": "Keep Room identity in Workspace PostgreSQL."
         }
       ],
       "oss_reference": [
@@ -66880,8 +66918,8 @@
     {
       "kind": "command",
       "id": "room.resource.share",
-      "contract_version": "2.0",
-      "contract_fingerprint": "c4ef2257ef6a7552aadeaab278568566254b0b23dcb862f40057275d2619a430",
+      "contract_version": "2.1",
+      "contract_fingerprint": "81938c8b48ab24620d6ba7405dcb43e9531be835ec844bcfbbb194c44d611a58",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -67092,7 +67130,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Room sharing keeps original resource provenance instead of copying data."
         }
@@ -67124,8 +67162,8 @@
     {
       "kind": "command",
       "id": "room.resource.share.revoke",
-      "contract_version": "2.0",
-      "contract_fingerprint": "ef095b41216289b590c399a3d3e25121eb0f12e7f45dc56083dd626d95e4c211",
+      "contract_version": "2.1",
+      "contract_fingerprint": "2656d016fb99bcec945e2c547c0442379b8fae3747255acbdb8d001105ad01f0",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -67372,7 +67410,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Share revocation blocks future reads while preserving prior records."
         }
@@ -76510,8 +76548,8 @@
     {
       "kind": "command",
       "id": "soul.change.request",
-      "contract_version": "1.0",
-      "contract_fingerprint": "f4fe0e10d3cb76798d290847fb933300ea32854545f0fff0ff94b7447ef3463b",
+      "contract_version": "1.1",
+      "contract_fingerprint": "a5965877c0e00459862b54fefa4afd21f916217cf79957ea42b24a5e1f7e735f",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -76719,6 +76757,19 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512
+              },
+              "source_event_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
               },
               "instruction_summary": {
                 "type": "string",
@@ -80751,8 +80802,8 @@
     {
       "kind": "command",
       "id": "wiki.reindex",
-      "contract_version": "3.0",
-      "contract_fingerprint": "3c989026e6ebedc3dbd22821cfbe9b207289db097028a52606b7d0035a906ffa",
+      "contract_version": "3.1",
+      "contract_fingerprint": "5b0f1723f9caf7bae56972c157b2cddae210e0eac42d2a0fd95c6d1aa4ffabd4",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -82904,8 +82955,8 @@
     {
       "kind": "command",
       "id": "workspace.backup.create",
-      "contract_version": "2.1",
-      "contract_fingerprint": "3894b3d866f9634e06495d2803ba6783085367f63fc667adcfc1fb2116970d68",
+      "contract_version": "2.2",
+      "contract_fingerprint": "7a8df42498bf208cffcc8ee646ed615f19a210b85af005ffabcf72573ddfed59",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -82943,7 +82994,7 @@
                   "source_root": {
                     "type": "string"
                   },
-                  "db_file": {
+                  "database_ref": {
                     "type": "string"
                   },
                   "file_roots": {
@@ -82963,8 +83014,8 @@
                         "source_of_truth": {
                           "type": "string",
                           "enum": [
+                            "postgresql",
                             "filesystem",
-                            "sqlite",
                             "derived"
                           ]
                         },
@@ -82974,16 +83025,17 @@
                             "type": "string"
                           }
                         },
-                        "sqlite_tables": {
+                        "postgres_tables": {
                           "type": "array",
                           "items": {
                             "type": "string"
                           }
                         },
-                        "sqlite_role": {
+                        "postgres_role": {
                           "type": "string",
                           "enum": [
                             "none",
+                            "primary",
                             "index",
                             "history",
                             "queue",
@@ -82999,8 +83051,8 @@
                         "resource",
                         "source_of_truth",
                         "file_roots",
-                        "sqlite_tables",
-                        "sqlite_role",
+                        "postgres_tables",
+                        "postgres_role",
                         "note"
                       ],
                       "additionalProperties": false
@@ -83023,7 +83075,7 @@
                   "id",
                   "created_at",
                   "source_root",
-                  "db_file",
+                  "database_ref",
                   "file_roots",
                   "resource_boundaries",
                   "health_ok",
@@ -83055,9 +83107,9 @@
                     "type": "string",
                     "const": "."
                   },
-                  "db_file": {
+                  "database_ref": {
                     "type": "string",
-                    "const": "workspace.sqlite"
+                    "const": "postgresql"
                   },
                   "file_roots": {
                     "type": "array",
@@ -83090,7 +83142,7 @@
                   "id",
                   "created_at",
                   "source_root",
-                  "db_file",
+                  "database_ref",
                   "file_roots",
                   "resource_boundaries",
                   "health_ok",
@@ -83159,8 +83211,8 @@
     {
       "kind": "command",
       "id": "workspace.backup.restore",
-      "contract_version": "2.1",
-      "contract_fingerprint": "c64085281593969726ac1955b1c49d6c88433341e6b7fa6c363dc0d68bfaa3d1",
+      "contract_version": "2.2",
+      "contract_fingerprint": "8ce21b515d1a289f8d6b4c19f7390e122db82998a799497776821860ed72e65f",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -83220,7 +83272,7 @@
                   "source_root": {
                     "type": "string"
                   },
-                  "db_file": {
+                  "database_ref": {
                     "type": "string"
                   },
                   "file_roots": {
@@ -83240,8 +83292,8 @@
                         "source_of_truth": {
                           "type": "string",
                           "enum": [
+                            "postgresql",
                             "filesystem",
-                            "sqlite",
                             "derived"
                           ]
                         },
@@ -83251,16 +83303,17 @@
                             "type": "string"
                           }
                         },
-                        "sqlite_tables": {
+                        "postgres_tables": {
                           "type": "array",
                           "items": {
                             "type": "string"
                           }
                         },
-                        "sqlite_role": {
+                        "postgres_role": {
                           "type": "string",
                           "enum": [
                             "none",
+                            "primary",
                             "index",
                             "history",
                             "queue",
@@ -83276,8 +83329,8 @@
                         "resource",
                         "source_of_truth",
                         "file_roots",
-                        "sqlite_tables",
-                        "sqlite_role",
+                        "postgres_tables",
+                        "postgres_role",
                         "note"
                       ],
                       "additionalProperties": false
@@ -83300,7 +83353,7 @@
                   "id",
                   "created_at",
                   "source_root",
-                  "db_file",
+                  "database_ref",
                   "file_roots",
                   "resource_boundaries",
                   "health_ok",
@@ -83332,9 +83385,9 @@
                     "type": "string",
                     "const": "."
                   },
-                  "db_file": {
+                  "database_ref": {
                     "type": "string",
-                    "const": "workspace.sqlite"
+                    "const": "postgresql"
                   },
                   "file_roots": {
                     "type": "array",
@@ -83367,7 +83420,7 @@
                   "id",
                   "created_at",
                   "source_root",
-                  "db_file",
+                  "database_ref",
                   "file_roots",
                   "resource_boundaries",
                   "health_ok",
@@ -83391,7 +83444,7 @@
               "root_dir": {
                 "type": "string"
               },
-              "db_path": {
+              "database_ref": {
                 "type": "string"
               },
               "layout": {
@@ -83934,7 +83987,7 @@
               "ok",
               "checked_at",
               "root_dir",
-              "db_path",
+              "database_ref",
               "layout",
               "resource_boundaries",
               "indexes",
@@ -83953,7 +84006,7 @@
                 "type": "string",
                 "format": "date-time"
               },
-              "db": {
+              "database": {
                 "type": "object",
                 "properties": {
                   "ok": {
@@ -83962,14 +84015,14 @@
                   "result": {
                     "type": "string"
                   },
-                  "path": {
+                  "target": {
                     "type": "string"
                   }
                 },
                 "required": [
                   "ok",
                   "result",
-                  "path"
+                  "target"
                 ],
                 "additionalProperties": false
               },
@@ -83980,7 +84033,7 @@
             "required": [
               "ok",
               "checked_at",
-              "db",
+              "database",
               "workspace"
             ],
             "additionalProperties": false
@@ -84051,8 +84104,8 @@
     {
       "kind": "command",
       "id": "workspace.member.add",
-      "contract_version": "1.0",
-      "contract_fingerprint": "5be15dc37ba3978a235fafaf1eec08df7b2b561331e7a7f871ff5af4c3b3da22",
+      "contract_version": "1.1",
+      "contract_fingerprint": "1e99bc01b23721e12fd550e64b820b98344e7ecfa64d1d738667c40c03d03f16",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -84138,7 +84191,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Workspace membership never implies Room visibility."
         }
@@ -84170,8 +84223,8 @@
     {
       "kind": "command",
       "id": "workspace.member.remove",
-      "contract_version": "1.0",
-      "contract_fingerprint": "07d52c9cea148e9efd9c5697eaccebedf854dfa11613252d2bc708c3b51caef4",
+      "contract_version": "1.1",
+      "contract_fingerprint": "35fe439441b511d21dbf6a261060157ba9f8ca7c33952c01d8e35e64ff8416b8",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -84248,7 +84301,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Removal preserves the membership history."
         }
@@ -84280,8 +84333,8 @@
     {
       "kind": "command",
       "id": "workspace.member.role.change",
-      "contract_version": "1.0",
-      "contract_fingerprint": "65f774ceaff9e17d8ad74f6cb765951d36d87ffbc0f841a3e2bbc4985a538612",
+      "contract_version": "1.1",
+      "contract_fingerprint": "fa67a9e02c9763161faf3c63be0ce1c35bb7826754c8a3896bd37c522a35891c",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -84367,7 +84420,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Owner transfer has a separate atomic operation."
         }
@@ -84399,8 +84452,8 @@
     {
       "kind": "command",
       "id": "workspace.owner.transfer",
-      "contract_version": "1.0",
-      "contract_fingerprint": "f8e900500ee9746cf30b5bbe17c2ce853a858ee8f661e815dede6b74c84a5252",
+      "contract_version": "1.1",
+      "contract_fingerprint": "40debde509974842d4208b6d855c98754732f7b3d522793b3a0792b95d705bd9",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -84490,9 +84543,9 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
-          "reason": "Ownership is transferred in one SQLite transaction."
+          "reason": "Ownership is transferred in one PostgreSQL transaction."
         }
       ],
       "oss_reference": [
@@ -84522,8 +84575,8 @@
     {
       "kind": "command",
       "id": "workspace.repair",
-      "contract_version": "2.0",
-      "contract_fingerprint": "7d47e49ec7463f95eb5260613fd960265f44d969b68fe1f4c22fea6dc311bd6b",
+      "contract_version": "2.1",
+      "contract_fingerprint": "5874193933d5b08044939e3bbce65cda5d87be3c4fbe5fc4bbbf902d74e20c4f",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -84712,7 +84765,7 @@
               "root_dir": {
                 "type": "string"
               },
-              "db_path": {
+              "database_ref": {
                 "type": "string"
               },
               "layout": {
@@ -84774,8 +84827,8 @@
                     "source_of_truth": {
                       "type": "string",
                       "enum": [
+                        "postgresql",
                         "filesystem",
-                        "sqlite",
                         "derived"
                       ]
                     },
@@ -84785,16 +84838,17 @@
                         "type": "string"
                       }
                     },
-                    "sqlite_tables": {
+                    "postgres_tables": {
                       "type": "array",
                       "items": {
                         "type": "string"
                       }
                     },
-                    "sqlite_role": {
+                    "postgres_role": {
                       "type": "string",
                       "enum": [
                         "none",
+                        "primary",
                         "index",
                         "history",
                         "queue",
@@ -84810,8 +84864,8 @@
                     "resource",
                     "source_of_truth",
                     "file_roots",
-                    "sqlite_tables",
-                    "sqlite_role",
+                    "postgres_tables",
+                    "postgres_role",
                     "note"
                   ],
                   "additionalProperties": false
@@ -85286,7 +85340,7 @@
               "ok",
               "checked_at",
               "root_dir",
-              "db_path",
+              "database_ref",
               "layout",
               "resource_boundaries",
               "indexes",
@@ -85356,8 +85410,8 @@
     {
       "kind": "query",
       "id": "activity.history.list",
-      "contract_version": "1.0",
-      "contract_fingerprint": "a59476b16d33631ef8a36b67cb65bab76a4153ae85f5cb4cd722982eccf0768a",
+      "contract_version": "1.1",
+      "contract_fingerprint": "51259906312c08ba20e16191f2781d43c7b58c555f725fb533323750ef97f406",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -85575,6 +85629,19 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 512
+                },
+                "source_event_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "payload_hash": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "occurred_at": {
+                  "type": "string",
+                  "format": "date-time"
                 },
                 "instruction_summary": {
                   "type": "string",
@@ -86032,6 +86099,420 @@
           "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Read Agent records through the Runtime boundary."
+        }
+      ],
+      "oss_reference": [
+        {
+          "source": "mulmoclaude",
+          "commit_sha": "14ba3afe41f682794c4412c3e12fcab34e610778",
+          "reference_file": "docs/plugin-runtime.md",
+          "decision": "adapted",
+          "reason": "Adopt schema and handler proximity plus registration collision checks as a local contract pattern; do not copy the host implementation."
+        },
+        {
+          "source": "hermes",
+          "commit_sha": "9df5f879b4a5925c0f8f947e7e16ed8e845932c3",
+          "reference_file": "tools/registry.py",
+          "decision": "adapted",
+          "reason": "Use registration and error-wrapping ideas while keeping Samurai handlers and ports independent."
+        },
+        {
+          "source": "openclaw",
+          "commit_sha": "855659a1dd0542f6fc76dcc8343335e983f9189c",
+          "reference_file": "packages/gateway-protocol/src/schema.ts",
+          "decision": "adapted",
+          "reason": "Adopt server-derived session context, effective inventories, shared execution paths, and idempotency-key boundaries."
+        }
+      ]
+    },
+    {
+      "kind": "query",
+      "id": "artifact.list",
+      "contract_version": "1.0",
+      "contract_fingerprint": "8a808a2711e27093fa94ee91c8eb52456b93d6d82d488e37ffda73958b7f26c2",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "output_schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "markdown",
+                "document",
+                "table",
+                "chart",
+                "graph",
+                "image",
+                "pdf",
+                "structured_draft",
+                "generated_report",
+                "note"
+              ]
+            },
+            "locale": {
+              "type": "string",
+              "enum": [
+                "en",
+                "ja",
+                "zh",
+                "ko",
+                "es",
+                "pt-BR",
+                "fr",
+                "de"
+              ]
+            },
+            "source_locales": {
+              "type": "array",
+              "items": {
+                "$ref": "#/items/properties/locale"
+              }
+            },
+            "file_ref": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uri": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "version": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "uri"
+              ],
+              "additionalProperties": false
+            },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/items/properties/metadata/additionalProperties"
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": {
+                      "$ref": "#/items/properties/metadata/additionalProperties"
+                    }
+                  }
+                ]
+              }
+            },
+            "source_operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "created_by": {
+              "type": "string",
+              "minLength": 1
+            },
+            "created_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "updated_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "kind",
+            "locale",
+            "source_locales",
+            "file_ref",
+            "metadata",
+            "source_operation_id",
+            "created_by",
+            "created_at",
+            "updated_at"
+          ],
+          "additionalProperties": false
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "allowed_sources": [
+        "runtime_api",
+        "external_app"
+      ],
+      "effect_kind": "read_only",
+      "idempotency_policy": "none",
+      "concurrency_policy": "none",
+      "availability": "active",
+      "runtime_requirements": [],
+      "implementation_target": "domain_operation",
+      "render_kinds": [
+        "table"
+      ],
+      "provenance": [
+        {
+          "source": "samurai",
+          "commit_sha": "workspace-design-v1",
+          "reference_file": "domain-api",
+          "decision": "adapted",
+          "reason": "Expose the existing Room-scoped Artifact projection through the shared Query contract."
+        }
+      ],
+      "oss_reference": [
+        {
+          "source": "mulmoclaude",
+          "commit_sha": "14ba3afe41f682794c4412c3e12fcab34e610778",
+          "reference_file": "docs/plugin-runtime.md",
+          "decision": "adapted",
+          "reason": "Adopt schema and handler proximity plus registration collision checks as a local contract pattern; do not copy the host implementation."
+        },
+        {
+          "source": "hermes",
+          "commit_sha": "9df5f879b4a5925c0f8f947e7e16ed8e845932c3",
+          "reference_file": "tools/registry.py",
+          "decision": "adapted",
+          "reason": "Use registration and error-wrapping ideas while keeping Samurai handlers and ports independent."
+        },
+        {
+          "source": "openclaw",
+          "commit_sha": "855659a1dd0542f6fc76dcc8343335e983f9189c",
+          "reference_file": "packages/gateway-protocol/src/schema.ts",
+          "decision": "adapted",
+          "reason": "Adopt server-derived session context, effective inventories, shared execution paths, and idempotency-key boundaries."
+        }
+      ]
+    },
+    {
+      "kind": "query",
+      "id": "artifact.view",
+      "contract_version": "1.0",
+      "contract_fingerprint": "583082160a11d2991b651470d2b54ae2ec0d6b351a865ee0130eb1baff1f46d6",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "markdown",
+                  "document",
+                  "table",
+                  "chart",
+                  "graph",
+                  "image",
+                  "pdf",
+                  "structured_draft",
+                  "generated_report",
+                  "note"
+                ]
+              },
+              "locale": {
+                "type": "string",
+                "enum": [
+                  "en",
+                  "ja",
+                  "zh",
+                  "ko",
+                  "es",
+                  "pt-BR",
+                  "fr",
+                  "de"
+                ]
+              },
+              "source_locales": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/properties/artifact/properties/locale"
+                }
+              },
+              "file_ref": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uri": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "uri"
+                ],
+                "additionalProperties": false
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/properties/artifact/properties/metadata/additionalProperties"
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/properties/artifact/properties/metadata/additionalProperties"
+                      }
+                    }
+                  ]
+                }
+              },
+              "source_operation_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "created_by": {
+                "type": "string",
+                "minLength": 1
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "kind",
+              "locale",
+              "source_locales",
+              "file_ref",
+              "metadata",
+              "source_operation_id",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ],
+            "additionalProperties": false
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact",
+          "content"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "allowed_sources": [
+        "runtime_api",
+        "external_app"
+      ],
+      "effect_kind": "read_only",
+      "idempotency_policy": "none",
+      "concurrency_policy": "none",
+      "availability": "active",
+      "runtime_requirements": [],
+      "implementation_target": "domain_operation",
+      "render_kinds": [
+        "artifact"
+      ],
+      "provenance": [
+        {
+          "source": "samurai",
+          "commit_sha": "workspace-design-v1",
+          "reference_file": "domain-api",
+          "decision": "adapted",
+          "reason": "Expose the existing Room-scoped Artifact projection through the shared Query contract."
         }
       ],
       "oss_reference": [
@@ -89499,8 +89980,8 @@
     {
       "kind": "query",
       "id": "room.member.list",
-      "contract_version": "1.0",
-      "contract_fingerprint": "6b1b50828bb50b69f8ef36b7c6272187426b560c5b4e3b4c6ebd0c9c88ef1ab0",
+      "contract_version": "1.1",
+      "contract_fingerprint": "04404d5da21ab3e9178ea0b5a8488b51f67e244ecbf8f867d8ae0e8fa3e12cbc",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -89639,7 +90120,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Agents remain distinct from human role membership."
         }
@@ -89671,8 +90152,8 @@
     {
       "kind": "query",
       "id": "room.ownerless.list",
-      "contract_version": "1.0",
-      "contract_fingerprint": "7a6a2c84ee3fbf8b9c9d984ded1387551035232c3bba6d10ce89fdec706d392d",
+      "contract_version": "1.1",
+      "contract_fingerprint": "8111481fb876aa8bff1825fcd93d6c7bc0d6916a04064bb2cc692ac353122fee",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -89728,7 +90209,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Ownerless Room recovery is explicit and visible only to the Workspace Owner."
         }
@@ -89760,8 +90241,8 @@
     {
       "kind": "query",
       "id": "room.resource.share.list",
-      "contract_version": "2.0",
-      "contract_fingerprint": "1430d382b60af8fe2380b2812648def825d0d05c643e6bc4631131348dd91c18",
+      "contract_version": "2.1",
+      "contract_fingerprint": "096a2e4594f6de2344bd3a9f249bfe54825f222570230b098eee8b60f60fb59c",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -90006,7 +90487,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Share status is visible only through a participating Room."
         }
@@ -91209,8 +91690,8 @@
     {
       "kind": "query",
       "id": "workspace.member.list",
-      "contract_version": "1.0",
-      "contract_fingerprint": "d7da7b189b69f5a08b979850765419569df674f1755aac2c270651d1012540c4",
+      "contract_version": "1.1",
+      "contract_fingerprint": "f940a2431de03b76d050a4fa51802313bf3d819d0e8332fb9b93614334a6ae0f",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -91282,7 +91763,7 @@
         {
           "source": "samurai",
           "commit_sha": "core-06",
-          "reference_file": "SAMURAI_AGENT_MANUAL.md",
+          "reference_file": "ARCHITECTURE.md",
           "decision": "adapted",
           "reason": "Membership administration is distinct from Room access."
         }
@@ -91474,5 +91955,5 @@
       }
     }
   ],
-  "catalog_hash": "2beefbfa6c224d07ce8446c8036c72ae9b7501718e8e56b9a582c5020c590e82"
+  "catalog_hash": "02705911e6bfc1127b5dc98ebd1c0e819608688aff438b8a458ffebfb159c029"
 }

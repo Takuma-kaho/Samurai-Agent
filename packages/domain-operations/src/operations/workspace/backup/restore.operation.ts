@@ -16,7 +16,7 @@ const workspaceBackupRestore = defineCommand<WorkspaceBackupRestorePorts>()({
   ...{
   "kind": "command",
   "id": "workspace.backup.restore",
-  "version": "2.1",
+  "version": "2.2",
   "availability": "active",
   "title": "Restore workspace backup",
   "description": "Restore a verified Workspace backup.",

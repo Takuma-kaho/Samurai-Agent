@@ -107,7 +107,7 @@ describe("turn preparation policy", () => {
   it("keeps output intent parity and excludes file/path requests from artifacts", () => {
     expect(expectedBackendOutputs("議事録を作って")).toContain("artifact");
     expect(expectedBackendOutputs("議事録をファイルに保存して")).not.toContain("artifact");
-    expect(expectedBackendOutputs("plans/notes.md を作って")).not.toContain("artifact");
+    expect(expectedBackendOutputs("notes/meeting.md を作って")).not.toContain("artifact");
   });
 
   it("preserves wildcard tools and the complete Gateway runtime snapshot", () => {

@@ -22,7 +22,7 @@ export interface ActivityHistoryListPorts extends DomainQueryPorts {
 
 const activityHistoryList = defineQuery<ActivityHistoryListPorts>()({
   ...{
-    kind: "query", id: "activity.history.list", version: "1.0", availability: "active",
+    kind: "query", id: "activity.history.list", version: "1.1", availability: "active",
     title: "List Activity history", description: "Read Room-scoped Activity evidence without mutating Workspace state.",
     sources: ["runtime_api", "external_app"], effect: "read_only", idempotency: "none", concurrency: "none",
     render: ["run_history", "status_timeline"], resourceKinds: ["activity"],

@@ -7,9 +7,9 @@ const Input = z.object({ target_room_id: z.string().trim().min(1), resource: roo
 const Output = roomResourceShareValueSchema;
 export interface RoomResourceShareRevokePorts { revokeResourceShare(context: TrustedDomainContext, input: { sourceRoomId: string; targetRoomId: string; resource: RoomShareableResourceReference }): Promise<z.infer<typeof Output>>; }
 const roomResourceShareRevoke = defineCommand<RoomResourceShareRevokePorts>()({
-  id: "room.resource.share.revoke", version: "2.0", availability: "active", title: "Revoke Room resource share", description: "Revoke a target Room's future access without deleting history.",
+  id: "room.resource.share.revoke", version: "2.1", availability: "active", title: "Revoke Room resource share", description: "Revoke a target Room's future access without deleting history.",
   sources: ["runtime_api"], effect: "workspace_mutation", idempotency: "required", concurrency: "state_transition", render: ["status_timeline"], resourceKinds: ["room_resource_share"], proposedEffects: ["Revoke a Room resource share."], outputResourceKind: "room_resource_share", uiDisplayCategory: "workspace",
-  provenance: [{ source: "samurai", commit_sha: "core-06", reference_file: "SAMURAI_AGENT_MANUAL.md", decision: "adapted", reason: "Share revocation blocks future reads while preserving prior records." }], input: Input, output: Output,
+  provenance: [{ source: "samurai", commit_sha: "core-06", reference_file: "ARCHITECTURE.md", decision: "adapted", reason: "Share revocation blocks future reads while preserving prior records." }], input: Input, output: Output,
   createHandler(ports) { return { execute: async function handleRoomResourceShareRevoke(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> { return { ok: true, value: Output.parse(await ports.revokeResourceShare(context, { sourceRoomId: requireRoomContext(context, "room.resource.share.revoke"), targetRoomId: input.target_room_id, resource: shareReference(input.resource) })) }; } }; }
 });
 export default roomResourceShareRevoke;

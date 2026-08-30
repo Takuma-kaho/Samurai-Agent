@@ -17,7 +17,7 @@ const collectionReindex = defineCommand<CollectionReindexPorts>()({
   ...{
   "kind": "command",
   "id": "collection.reindex",
-  "version": "3.1",
+  "version": "3.2",
   "availability": "active",
   "title": "Reindex collections",
   "description": "Refresh Collection PostgreSQL projections from schema and record files.",
