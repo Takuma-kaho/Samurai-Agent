@@ -200,8 +200,21 @@ Vitest results as authoritative.
 
 - `PRODUCT.md`: product definition, concepts, and public language
 - `ARCHITECTURE.md`: technical boundaries and verification invariants
+- `docs/designs/`: current feature designs; see `docs/designs/README.md` before creating one
+- `plans/`: agreed implementation plans and work procedures
+- `reports/`: executed verification evidence and unverified scope
 - `design-lab/web-ui-demo/`: static UI demo for visual reference; it is not a product specification
-- `reports/`: point-in-time verification evidence
+
+## Repository Layout
+
+- `apps/`: product entry points such as the Native App, Web, and Server
+- `packages/`: shared Domain, Runtime, authorization, and persistence code
+- `contracts/`: public API, Schema, and Event contracts
+- `workers/`: retryable asynchronous jobs
+- `scripts/`: development, migration, and verification commands
+- `docker/`: reproducible runtime configurations
+- `docs/`: current designs, runbooks, and supporting documentation
+- `plans/` and `reports/`: plans and evidence kept separate from source code
 
 ## Workspace Data
 
