@@ -1,25 +1,24 @@
 # 個別設計書
 
-ここには、機能領域ごとの現行設計を置く。正本は`PRODUCT.md`と`ARCHITECTURE.md`であり、個別設計書はその範囲を具体化する。
+ここには、機能領域ごとの設計を置く。正本は`PRODUCT.md`と`ARCHITECTURE.md`であり、個別設計書はその範囲を具体化する。
 
 ## 読み方
 
 作業時は正本2つを確認し、今回の変更に関係する設計書だけを読む。
 
-設計書は利用者の明示指示がある場合だけ作成・更新する。ここに名前があっても、ファイルが存在するとは限らない。
+設計書は利用者の明示指示がある場合だけ作成・更新する。実装済みの説明と実装前の合意済み設計は、文書の状態欄で明確に区別する。ここに名前があっても、ファイルが存在するとは限らない。
 
 ## 現在の設計書
 
-現在の個別設計書はありません。作成した設計書はこの一覧へ追加します。
+- `organization.md`：Phase 2 の合意済み Organization 設計。Membership、権限、招待、Workspace 所属、移行を扱う。
+- `native-app.md`：Phase 2 の合意済み Native App 設計。React、Chat、Electron、実機確認を扱う。
 
 ## 作成候補
 
-- `organization.md`：Organizationとメンバー管理
 - `workspace-room.md`：Workspace、Room、権限
 - `client-api-events.md`：Client APIとEvent
 - `runtime.md`：Agent実行と復旧
 - `knowledge-learning.md`：Activity、Knowledge、Skill
-- `native-app.md`：Native Appの体験と接続
 - `external-connections.md`：外部アプリとGateway
 
 作成時は`<domain>-<topic>.md`の形式で、現在の仕組みを示す安定した名前を付ける。
