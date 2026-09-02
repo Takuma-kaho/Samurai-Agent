@@ -6,13 +6,36 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
       expect(schema).toContain(`workspace_id`);
     }
     expect(schema).toContain("samurai_current_workspace_id()");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_organization_boundary_and_workspace_backfill");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS organizations");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS organization_members");
+    expect(schema).toContain("ALTER TABLE workspaces ALTER COLUMN organization_id SET NOT NULL");
+    expect(schema).toContain("workspace_event_organization_mismatch");
+    expect(schema).toContain("organization_last_owner_cannot_be_changed");
+    expect(schema).toContain("organization_operations ADD COLUMN IF NOT EXISTS consumed_at");
+    expect(schema).toContain("DROP CONSTRAINT IF EXISTS workspace_events_workspace_organization_fkey");
+    expect(schema).not.toContain("ADD CONSTRAINT workspace_events_workspace_organization_fkey");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_organization_invitation_and_move_hardening");
+    expect(schema).toContain("samurai_resolve_organization_invitation");
+    expect(schema).toContain("organization.deleted_at IS NULL");
+    expect(schema).toContain("organizations_pending_invitation_revoke");
+    expect(schema).toContain("organization_invitation_accept_guard");
+    expect(schema).toContain("IF source_organization_id < target_organization_id THEN");
+    const hardening = migrations.find((migration) => migration.name === "workspace_server_organization_invitation_and_move_hardening");
+    const hardeningSql = hardening?.statements.join("\n") ?? "";
+    expect(hardeningSql.indexOf("Resolve a candidate without taking the invitation row lock first")).toBeGreaterThanOrEqual(0);
+    expect(hardeningSql.indexOf("Resolve a candidate without taking the invitation row lock first")).toBeLessThan(hardeningSql.indexOf("pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:'"));
+    expect(hardeningSql.indexOf("Re-read under the Organization lock and lock the invitation")).toBeGreaterThan(hardeningSql.indexOf("pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:'"));
+    expect(hardeningSql.lastIndexOf("FOR UPDATE;")).toBeGreaterThan(hardeningSql.indexOf("Re-read under the Organization lock and lock the invitation"));
+    expect(schema).toContain("samurai.organization:");
+    expect(schema).toContain("token_hash");
     expect(schema).toContain("samurai_can_room(workspace_id, room_id, 'read')");
     expect(schema).toContain("source_event_id");
     expect(schema).toContain("account_operations");

@@ -50,7 +50,13 @@ import {
 } from "@samurai-agent/workspace-server";
 import { createWorkspaceServerCore, type WorkspaceServerCore } from "./core";
 import { WorkspaceRealtimeGate, roomSocketRoom, workspaceSocketRoom } from "./realtime";
-import { mountDomainApiV1 } from "./domain-api-v1";
+import {
+  executeOrganizationCommandOperation,
+  executeOrganizationQueryOperation,
+  mountDomainApiV1,
+  publicOperationResult,
+  type OrganizationApiRequestContext
+} from "./domain-api-v1";
 import { WorkspaceWorkerSupervisor } from "../workers/workspace-worker-supervisor";
 import { createWorkspaceCompletionBackendReviewPort } from "../workers/workspace-completion-review-port";
 import { createWorkspaceLearningBackendReviewPort } from "../workers/workspace-learning-review-port";
@@ -276,12 +282,16 @@ export async function createWorkspaceServerHttp(
   const resolveWorkerContexts = async (signal: AbortSignal) => {
     if (signal.aborted) return { state: "disabled" as const, reason: "aborted_before_identity_resolution" };
     if (config.mode === "self_host") {
-      if (!config.selfHostWorkspaceId || !config.initialAdminId) {
-        return { state: "disabled" as const, reason: "self_host_worker_identity_unconfigured" };
-      }
-      const identity = await maintenance.getIdentity({ workspaceId: config.selfHostWorkspaceId, accountId: config.initialAdminId });
-      return identity.accountId
-        ? { state: "enabled" as const, contexts: [{ workspaceId: config.selfHostWorkspaceId, accountId: identity.accountId }] }
+      const [activeWorkspaces, configuredIdentities] = await Promise.all([
+        store.listActiveWorkspaceIds(),
+        maintenance.listConfiguredIdentities()
+      ]);
+      const activeWorkspaceIds = new Set(activeWorkspaces.map(({ workspaceId }) => workspaceId));
+      const contexts = configuredIdentities
+        .filter(({ workspaceId }) => activeWorkspaceIds.has(workspaceId))
+        .map(({ workspaceId, accountId }) => ({ workspaceId, accountId }));
+      return contexts.length > 0
+        ? { state: "enabled" as const, contexts }
         : { state: "disabled" as const, reason: "maintenance_identity_unconfigured" };
     }
     const identities = await maintenance.listConfiguredIdentities();
@@ -446,9 +456,11 @@ export async function createWorkspaceServerHttp(
     artifacts,
     realtimeGate,
     authenticateWorkspace,
+    authenticateAccount: authenticate,
     asyncRoute,
     workspaceContext,
     operationContext,
+    organizationContext: (req, organizationId, options) => organizationRequestContext(req, organizationId, options),
     requestId: (req) => authenticated(req).requestId,
     runtimeFor: (req) => {
       const context = operationContext(req);
@@ -465,6 +477,14 @@ export async function createWorkspaceServerHttp(
     }
   });
 
+  mountOrganizationRestRoutes({
+    app,
+    authenticateAccount: authenticate,
+    asyncRoute,
+    commands,
+    organizationContext: (req, organizationId, options) => organizationRequestContext(req, organizationId, options)
+  });
+
   app.get("/api/health", asyncRoute(async (_req, res) => {
     const workerStatus = workerSupervisor.status();
     let database: { ok: true } | { ok: false; reason: string };
@@ -479,7 +499,6 @@ export async function createWorkspaceServerHttp(
       storage: "postgresql",
       db: database,
       mode: config.mode,
-      ...(config.mode === "self_host" ? { workspace_id: config.selfHostWorkspaceId } : {}),
       rls: "required",
       public_network: config.publicNetwork,
       worker_supervisor: {
@@ -520,15 +539,14 @@ export async function createWorkspaceServerHttp(
   }));
 
   app.post("/api/workspaces", authenticate, asyncRoute(async (req, res) => {
-    if (config.mode !== "hosted") throw new WorkspaceServerError("self_host_accepts_one_workspace", 409);
     const body = objectBody(req.body);
     const workspace = await commands.createWorkspace({
       id: stringField(body, "workspace_id"),
       name: stringField(body, "name"),
       ownerAccountId: authenticated(req).accountId,
       operationId: stringHeader(req, "x-samurai-operation-id"),
-      hostingMode: "hosted",
-      databasePlacement: "shared"
+      hostingMode: config.mode,
+      databasePlacement: config.mode === "self_host" ? "dedicated" : "shared"
     });
     res.status(201).json(workspace);
   }));
@@ -543,6 +561,7 @@ export async function createWorkspaceServerHttp(
     }, {
       transport: body.bundle,
       targetWorkspaceId,
+      targetOrganizationId: stringField(body, "target_organization_id"),
       ...(optionalStringField(body, "target_workspace_name") ? { targetWorkspaceName: optionalStringField(body, "target_workspace_name") } : {})
     });
     res.status(201).json({ workspace_id: imported.workspaceId, manifest: imported.manifest, ...(imported.receipt ? { receipt: imported.receipt } : {}) });
@@ -554,6 +573,7 @@ export async function createWorkspaceServerHttp(
     const operationId = stringHeader(req, "x-samurai-operation-id");
     await commands.stageWorkspaceBundle({ accountId: authenticated(req).accountId, operationId }, {
       targetWorkspaceId: stringField(body, "target_workspace_id"),
+      targetOrganizationId: stringField(body, "target_organization_id"),
       ...(optionalStringField(body, "target_workspace_name") ? { targetWorkspaceName: optionalStringField(body, "target_workspace_name") } : {}),
       manifest: workspaceBundleManifestField(body, "manifest")
     });
@@ -3190,6 +3210,303 @@ export async function startWorkspaceServer(config = loadWorkspaceServerConfig())
   return server;
 }
 
+type OrganizationRestRouteDependencies = {
+  app: express.Express;
+  authenticateAccount: (req: Request, res: Response, next: NextFunction) => void;
+  asyncRoute: (handler: (req: Request, res: Response, next: NextFunction) => Promise<void>) => (req: Request, res: Response, next: NextFunction) => void;
+  commands: WorkspaceServerCommandService;
+  organizationContext: (req: Request, organizationId?: string, options?: { mutation?: boolean }) => OrganizationApiRequestContext;
+};
+
+/**
+ * Legacy REST aliases for the Native App.  The aliases are intentionally thin:
+ * every command is translated to the shared Organization Domain Operation and
+ * no Organization route can be used to read Room/Message content.
+ */
+function mountOrganizationRestRoutes(dependencies: OrganizationRestRouteDependencies): void {
+  const { app, authenticateAccount, asyncRoute, commands, organizationContext } = dependencies;
+
+  type OrganizationSelector = string | ((req: Request) => string | undefined) | undefined;
+  const selectedOrganizationId = (req: Request, selector: OrganizationSelector): string | undefined =>
+    typeof selector === "function" ? selector(req) : selector;
+
+  const queryNoBody = (queryId: string, inputFactory: (req: Request) => Record<string, unknown>, organizationSelector?: OrganizationSelector) => asyncRoute(async (req, res) => {
+    const operation = organizationContext(req, selectedOrganizationId(req, organizationSelector), { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId, input: inputFactory(req), operation, commands });
+    res.json(publicOperationResult(queryId, value, operation.accountId));
+  });
+  const commandNoBody = (operationId: string, inputFactory: (req: Request) => Record<string, unknown>, organizationSelector?: OrganizationSelector, status = 200) => asyncRoute(async (req, res) => {
+    const operation = organizationContext(req, selectedOrganizationId(req, organizationSelector), { mutation: true });
+    const result = await executeOrganizationCommandOperation({ operationId, input: inputFactory(req), operation, commands });
+    const value = publicOperationResult(operationId, result.value, operation.accountId);
+    res.status(result.replayed ? 200 : status).json(restOrganizationResult(operationId, value));
+  });
+
+  app.get("/api/organizations", authenticateAccount, queryNoBody("organization.list", organizationListInput));
+  app.get("/api/organizations/:organizationId", authenticateAccount, asyncRoute(async (req, res) => {
+    const organizationId = pathParam(req, "organizationId");
+    const operation = organizationContext(req, organizationId, { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId: "organization.view", input: { organization_id: organizationId }, operation, commands });
+    res.json(publicOperationResult("organization.view", value, operation.accountId));
+  }));
+  app.post("/api/organizations", authenticateAccount, commandNoBody("organization.create", (req) => organizationCreateInput(objectBody(req.body)), undefined, 201));
+  app.patch("/api/organizations/:organizationId", authenticateAccount, commandNoBody("organization.patch", (req) => {
+    const body = objectBody(req.body);
+    const organizationId = pathParam(req, "organizationId");
+    return organizationPatchInput(organizationId, body);
+  }, pathParamPlaceholder("organizationId")));
+  app.delete("/api/organizations/:organizationId", authenticateAccount, commandNoBody("organization.delete", (req) => {
+    const body = objectBody(req.body);
+    return organizationDeleteInput(pathParam(req, "organizationId"), body);
+  }, pathParamPlaceholder("organizationId"), 204));
+
+  app.get("/api/organizations/:organizationId/members", authenticateAccount, asyncRoute(async (req, res) => {
+    const organizationId = pathParam(req, "organizationId");
+    const operation = organizationContext(req, organizationId, { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId: "organization.member.list", input: organizationMemberListInput(organizationId, req), operation, commands });
+    res.json(publicOperationResult("organization.member.list", value, operation.accountId));
+  }));
+  app.post("/api/organizations/:organizationId/members/leave", authenticateAccount, commandNoBody("organization.member.leave", (req) => organizationMemberLeaveInput(pathParam(req, "organizationId"), objectBody(req.body)), pathParamPlaceholder("organizationId"), 200));
+  app.patch("/api/organizations/:organizationId/members/:accountId", authenticateAccount, commandNoBody("organization.member.role.change", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    const body = objectBody(req.body);
+    return {
+      organization_id: organizationId,
+      target_account_id: pathParam(req, "accountId"),
+      role: stringField(body, "role"),
+      ...expectedVersionInput(body)
+    };
+  }, pathParamPlaceholder("organizationId")));
+  app.delete("/api/organizations/:organizationId/members/:accountId", authenticateAccount, commandNoBody("organization.member.remove", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    return { organization_id: organizationId, target_account_id: pathParam(req, "accountId"), ...expectedVersionInput(objectBody(req.body)) };
+  }, pathParamPlaceholder("organizationId"), 204));
+
+  app.get("/api/organizations/:organizationId/invitations", authenticateAccount, asyncRoute(async (req, res) => {
+    const organizationId = pathParam(req, "organizationId");
+    const operation = organizationContext(req, organizationId, { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId: "organization.invitation.list", input: organizationInvitationListInput(organizationId, req), operation, commands });
+    res.json(publicOperationResult("organization.invitation.list", value, operation.accountId));
+  }));
+  app.post("/api/organizations/:organizationId/invitations", authenticateAccount, commandNoBody("organization.member.invite", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    return organizationMemberInviteInput(organizationId, objectBody(req.body));
+  }, pathParamPlaceholder("organizationId"), 201));
+  app.post("/api/organizations/:organizationId/invitations/:invitationId/revoke", authenticateAccount, commandNoBody("organization.invitation.revoke", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    return { organization_id: organizationId, invitation_id: pathParam(req, "invitationId"), ...expectedVersionInput(objectBody(req.body)) };
+  }, pathParamPlaceholder("organizationId"), 200));
+  app.post("/api/organizations/:organizationId/invitations/:invitationId/reissue", authenticateAccount, commandNoBody("organization.invitation.reissue", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    return { organization_id: organizationId, invitation_id: pathParam(req, "invitationId"), ...expectedVersionInput(objectBody(req.body)) };
+  }, pathParamPlaceholder("organizationId"), 201));
+  app.post("/api/organizations/:organizationId/invitations/:invitationId/extend", authenticateAccount, commandNoBody("organization.invitation.extend", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    const body = objectBody(req.body);
+    return { organization_id: organizationId, invitation_id: pathParam(req, "invitationId"), expires_at: stringField(body, "expires_at"), ...expectedVersionInput(body) };
+  }, pathParamPlaceholder("organizationId"), 200));
+  app.post("/api/organization-invitations/:token/accept", authenticateAccount, commandNoBody("organization.member.accept", (req) => {
+    const body = objectBody(req.body);
+    return {
+      token: pathParam(req, "token"),
+      ...(optionalStringField(body, "invitation_id") ? { invitation_id: optionalStringField(body, "invitation_id") } : {}),
+      ...(optionalStringField(body, "organization_id") ? { organization_id: optionalStringField(body, "organization_id") } : {})
+    };
+  }, undefined, 201));
+
+  app.get("/api/organizations/:organizationId/workspaces", authenticateAccount, asyncRoute(async (req, res) => {
+    const organizationId = pathParam(req, "organizationId");
+    const operation = organizationContext(req, organizationId, { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId: "organization.workspace.list", input: organizationWorkspaceListInput(organizationId, req), operation, commands });
+    res.json(publicOperationResult("organization.workspace.list", value, operation.accountId));
+  }));
+  app.post("/api/organizations/:organizationId/workspaces", authenticateAccount, commandNoBody("organization.workspace.create", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    return { organization_id: organizationId, name: stringField(objectBody(req.body), "name") };
+  }, pathParamPlaceholder("organizationId"), 201));
+  app.post("/api/organizations/:organizationId/workspaces/:workspaceId/members/:accountId", authenticateAccount, commandNoBody("organization.workspace.member.grant", (req) => {
+    const body = objectBody(req.body);
+    return {
+      organization_id: pathParam(req, "organizationId"),
+      workspace_id: pathParam(req, "workspaceId"),
+      target_account_id: pathParam(req, "accountId"),
+      role: stringField(body, "role")
+    };
+  }, pathParamPlaceholder("organizationId"), 200));
+  app.delete("/api/organizations/:organizationId/workspaces/:workspaceId/members/:accountId", authenticateAccount, commandNoBody("organization.workspace.member.revoke", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    return {
+      organization_id: organizationId,
+      workspace_id: pathParam(req, "workspaceId"),
+      target_account_id: pathParam(req, "accountId"),
+      ...expectedVersionInput(objectBody(req.body))
+    };
+  }, pathParamPlaceholder("organizationId"), 204));
+  app.post("/api/organizations/:organizationId/workspaces/:workspaceId/archive", authenticateAccount, commandNoBody("organization.workspace.archive", (req) => organizationWorkspaceStateInput(req, true), pathParamPlaceholder("organizationId"), 200));
+  app.post("/api/organizations/:organizationId/workspaces/:workspaceId/restore", authenticateAccount, commandNoBody("organization.workspace.restore", (req) => organizationWorkspaceStateInput(req, true), pathParamPlaceholder("organizationId"), 200));
+  app.delete("/api/organizations/:organizationId/workspaces/:workspaceId", authenticateAccount, commandNoBody("organization.workspace.delete", (req) => organizationWorkspaceStateInput(req, true), pathParamPlaceholder("organizationId"), 204));
+
+  app.post("/api/organizations/:organizationId/workspaces/:workspaceId/move/preflight", authenticateAccount, queryNoBody("workspace.organization.move.preflight", (req) => {
+    const sourceOrganizationId = pathParam(req, "organizationId");
+    const body = objectBody(req.body);
+    return {
+      source_organization_id: sourceOrganizationId,
+      target_organization_id: stringField(body, "target_organization_id"),
+      workspace_id: pathParam(req, "workspaceId"),
+      ...expectedVersionInput(body, "expected_workspace_version")
+    };
+  }, pathParamPlaceholder("organizationId")));
+  app.post("/api/organizations/:organizationId/workspaces/:workspaceId/move/commit", authenticateAccount, commandNoBody("workspace.organization.move.commit", (req) => {
+    const sourceOrganizationId = pathParam(req, "organizationId");
+    const body = objectBody(req.body);
+    return {
+      preflight_id: stringField(body, "preflight_id"),
+      source_organization_id: sourceOrganizationId,
+      target_organization_id: stringField(body, "target_organization_id"),
+      workspace_id: pathParam(req, "workspaceId"),
+      confirm_guest_membership: requiredTrueField(body, "confirm_guest_membership"),
+      ...expectedVersionInput(body, "expected_workspace_version")
+    };
+  }, pathParamPlaceholder("organizationId"), 200));
+  app.get("/api/organizations/:organizationId/workspaces/:workspaceId/move/:operationId", authenticateAccount, asyncRoute(async (req, res) => {
+    const organizationId = pathParam(req, "organizationId");
+    const operation = organizationContext(req, organizationId, { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId: "workspace.organization.move.status", input: { operation_id: pathParam(req, "operationId") }, operation, commands });
+    res.json(publicOperationResult("workspace.organization.move.status", value, operation.accountId));
+  }));
+  app.get("/api/organizations/:organizationId/moves/:operationId", authenticateAccount, asyncRoute(async (req, res) => {
+    const organizationId = pathParam(req, "organizationId");
+    const operation = organizationContext(req, organizationId, { mutation: false });
+    const value = await executeOrganizationQueryOperation({ queryId: "workspace.organization.move.status", input: { operation_id: pathParam(req, "operationId") }, operation, commands });
+    res.json(publicOperationResult("workspace.organization.move.status", value, operation.accountId));
+  }));
+  app.post("/api/organizations/:organizationId/workspaces/:workspaceId/bundle/export", authenticateAccount, commandNoBody("workspace.bundle.export", (req) => {
+    const organizationId = pathParam(req, "organizationId");
+    const body = objectBody(req.body);
+    return { organization_id: organizationId, workspace_id: pathParam(req, "workspaceId"), ...expectedVersionInput(body, "expected_workspace_version") };
+  }, pathParamPlaceholder("organizationId"), 201));
+  app.post("/api/organizations/:organizationId/bundles/restore", authenticateAccount, commandNoBody("workspace.bundle.restore", (req) => {
+    const body = objectBody(req.body);
+    return { bundle_id: stringField(body, "bundle_id"), target_organization_id: pathParam(req, "organizationId"), confirm: requiredTrueField(body, "confirm") };
+  }, pathParamPlaceholder("organizationId"), 201));
+}
+
+/** A route factory needs a path parameter, not a value captured at mount time. */
+function pathParamPlaceholder(name: string): (req: Request) => string {
+  return (req) => pathParam(req, name);
+}
+
+function restOrganizationResult(operationId: string, value: JsonValue): JsonValue {
+  if (operationId !== "organization.member.invite" && operationId !== "organization.invitation.reissue") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const body = value as Record<string, JsonValue>;
+  if (typeof body.one_time_token !== "string") return value;
+  const { one_time_token: token, ...rest } = body;
+  return { ...rest, token } as JsonValue;
+}
+
+function organizationCreateInput(body: Record<string, unknown>): Record<string, unknown> {
+  return {
+    name: stringField(body, "name"),
+    ...(optionalStringField(body, "icon") ? { icon: optionalStringField(body, "icon") } : {}),
+    ...(optionalStringField(body, "description") ? { description: optionalStringField(body, "description") } : {})
+  };
+}
+
+function organizationPatchInput(organizationId: string, body: Record<string, unknown>): Record<string, unknown> {
+  const input: Record<string, unknown> = { organization_id: organizationId, ...expectedVersionInput(body) };
+  if ("name" in body) input.name = stringField(body, "name");
+  if ("icon" in body) input.icon = body.icon === null ? null : stringField(body, "icon");
+  if ("description" in body) input.description = body.description === null ? null : stringField(body, "description");
+  return input;
+}
+
+function organizationDeleteInput(organizationId: string, body: Record<string, unknown>): Record<string, unknown> {
+  return { organization_id: organizationId, ...expectedVersionInput(body), confirm: requiredTrueField(body, "confirm") };
+}
+
+function organizationMemberListInput(organizationId: string, req: Request): Record<string, unknown> {
+  return {
+    organization_id: organizationId,
+    ...(queryString(req, "cursor") ? { cursor: queryString(req, "cursor") } : {}),
+    ...(queryNumber(req, "limit") === undefined ? {} : { limit: queryNumber(req, "limit") }),
+    ...(queryBoolean(req, "include_removed") === undefined ? {} : { include_removed: queryBoolean(req, "include_removed") })
+  };
+}
+
+function organizationListInput(req: Request): Record<string, unknown> {
+  return {
+    ...(queryString(req, "cursor") ? { cursor: queryString(req, "cursor") } : {}),
+    ...(queryNumber(req, "limit") === undefined ? {} : { limit: queryNumber(req, "limit") })
+  };
+}
+
+function organizationInvitationListInput(organizationId: string, req: Request): Record<string, unknown> {
+  return {
+    organization_id: organizationId,
+    ...(queryString(req, "cursor") ? { cursor: queryString(req, "cursor") } : {}),
+    ...(queryNumber(req, "limit") === undefined ? {} : { limit: queryNumber(req, "limit") }),
+    ...(queryBoolean(req, "include_resolved") === undefined ? {} : { include_resolved: queryBoolean(req, "include_resolved") })
+  };
+}
+
+function organizationWorkspaceListInput(organizationId: string, req: Request): Record<string, unknown> {
+  return {
+    organization_id: organizationId,
+    ...(queryString(req, "cursor") ? { cursor: queryString(req, "cursor") } : {}),
+    ...(queryNumber(req, "limit") === undefined ? {} : { limit: queryNumber(req, "limit") }),
+    ...(queryBoolean(req, "include_deleted") === undefined ? {} : { include_deleted: queryBoolean(req, "include_deleted") })
+  };
+}
+
+function organizationMemberInviteInput(organizationId: string, body: Record<string, unknown>): Record<string, unknown> {
+  const grants = body.workspace_grants;
+  if (grants !== undefined && (!Array.isArray(grants))) throw new WorkspaceServerError("workspace_grants_invalid", 400);
+  return {
+    organization_id: organizationId,
+    ...(optionalStringField(body, "target_account_id") ? { target_account_id: optionalStringField(body, "target_account_id") } : {}),
+    role: stringField(body, "role"),
+    workspace_grants: (grants as unknown[] | undefined ?? []).map((entry) => {
+      const grant = objectBody(entry);
+      return { workspace_id: stringField(grant, "workspace_id"), role: stringField(grant, "role") };
+    }),
+    ...(optionalStringField(body, "expires_at") ? { expires_at: optionalStringField(body, "expires_at") } : {})
+  };
+}
+
+function organizationMemberLeaveInput(organizationId: string, body: Record<string, unknown>): Record<string, unknown> {
+  return { organization_id: organizationId, ...expectedVersionInput(body) };
+}
+
+function organizationWorkspaceStateInput(req: Request, requireConfirmation: boolean): Record<string, unknown> {
+  const organizationId = pathParam(req, "organizationId");
+  const body = objectBody(req.body);
+  return {
+    organization_id: organizationId,
+    workspace_id: pathParam(req, "workspaceId"),
+    ...expectedVersionInput(body),
+    ...(requireConfirmation ? { confirm: requiredTrueField(body, "confirm") } : {})
+  };
+}
+
+function expectedVersionInput(body: Record<string, unknown>, key = "expected_version"): Record<string, unknown> {
+  if (!(key in body)) return {};
+  return { [key]: numberField(body, key) };
+}
+
+function requiredTrueField(body: Record<string, unknown>, key: string): true {
+  if (body[key] !== true) throw new WorkspaceServerError(`${key}_required`, 400);
+  return true;
+}
+
+function queryBoolean(req: Request, key: string): boolean | undefined {
+  const value = queryString(req, key);
+  if (value === undefined) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
 function accountAuthenticator(store: WorkspaceServerStore) {
   return asyncRoute(async (req: AuthenticatedRequest, _res: Response, next: NextFunction) => {
     const signed = signedHeaders(req);
@@ -3296,6 +3613,36 @@ function operationContext(req: Request): WorkspaceRequestContext {
       payload: signed.signedPayload,
       operationId
     })
+  };
+}
+
+/** Account-signed Organization control-plane context.  Organization routes
+ * never resolve a Workspace and therefore cannot widen Workspace content
+ * access for an Organization Owner/Admin. */
+function organizationRequestContext(
+  req: Request,
+  organizationId?: string,
+  options: { mutation?: boolean } = {}
+): OrganizationApiRequestContext {
+  const signed = authenticated(req);
+  const operationHeader = req.header("x-samurai-operation-id")?.trim();
+  const idempotencyHeader = req.header("idempotency-key")?.trim();
+  if (options.mutation && !operationHeader) throw new WorkspaceServerError("organization_operation_id_required", 400);
+  const operationId = operationHeader
+    ? assertOpaqueId(operationHeader, "organization_operation_id_invalid")
+    : assertOpaqueId(signed.requestId, "organization_operation_id_invalid");
+  const idempotencyKey = idempotencyHeader
+    ? assertOpaqueId(idempotencyHeader, "organization_idempotency_key_invalid")
+    : undefined;
+  if (options.mutation && !idempotencyKey) throw new WorkspaceServerError("idempotency_key_required", 400);
+  if (options.mutation && operationHeader !== idempotencyKey) {
+    throw new WorkspaceServerError("organization_operation_idempotency_mismatch", 400);
+  }
+  return {
+    accountId: signed.accountId,
+    requestId: signed.requestId,
+    operationId,
+    ...(organizationId ? { organizationId: assertOpaqueId(organizationId, "organization_id_invalid") } : {})
   };
 }
 

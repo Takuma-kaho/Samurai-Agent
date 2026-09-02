@@ -18,6 +18,18 @@ import type {
   WorkspaceMembershipRole,
   WorkspaceMembershipChangeResult,
   WorkspaceMembership,
+  Organization,
+  OrganizationInvitation,
+  OrganizationInvitationAcceptResult,
+  OrganizationInvitationCreateResult,
+  OrganizationInvitationWorkspaceGrant,
+  OrganizationMembership,
+  OrganizationRole,
+  OrganizationRequestContext,
+  OrganizationWorkspaceMovePreview,
+  OrganizationWorkspaceMoveResult,
+  OrganizationWorkspaceMembership,
+  OrganizationWorkspaceSummary,
   WorkspaceRecord,
   WorkspaceRecordPayload,
   WorkspacePublicEvent,
@@ -57,6 +69,56 @@ export interface CreateWorkspaceInput {
   operationId: string;
   hostingMode?: WorkspaceServerMode;
   databasePlacement?: "shared" | "dedicated";
+  /** Organization that owns the new Workspace. Omit to use the caller's default Organization. */
+  organizationId?: string;
+}
+
+export interface CreateOrganizationInput {
+  id?: string;
+  name: string;
+  icon?: string;
+  description?: string;
+  accountId: string;
+  operationId: string;
+}
+
+export interface PatchOrganizationInput {
+  name?: string;
+  icon?: string | null;
+  description?: string | null;
+  expectedVersion?: number;
+}
+
+export interface ChangeOrganizationMemberRoleInput {
+  accountId: string;
+  role: OrganizationRole;
+  expectedVersion?: number;
+}
+
+export interface InviteOrganizationMemberInput {
+  targetAccountId?: string;
+  target_account_id?: string;
+  role: OrganizationRole;
+  expiresAt?: string;
+  expires_at?: string;
+  workspaceGrants?: Array<{
+    workspaceId?: string;
+    workspace_id?: string;
+    workspaceRole?: Exclude<WorkspaceMembershipRole, "owner">;
+    role?: Exclude<WorkspaceMembershipRole, "owner">;
+    roomId?: string;
+    roomRole?: WorkspaceMembershipRole;
+  }>;
+  workspace_grants?: InviteOrganizationMemberInput["workspaceGrants"];
+}
+
+export interface OrganizationWorkspaceMoveInput {
+  sourceOrganizationId: string;
+  targetOrganizationId: string;
+  workspaceId: string;
+  expectedWorkspaceVersion?: number;
+  /** A commit must explicitly acknowledge automatic Guest memberships. */
+  confirmGuestMemberships?: boolean;
 }
 
 export interface PutRecordInput {
@@ -170,9 +232,6 @@ export class WorkspaceServerStore {
   private readonly invitationTokenSecret: string;
 
   constructor(options: WorkspaceServerStoreOptions) {
-    if (options.mode === "self_host" && (!options.selfHostWorkspaceId || !options.selfHostInitialAdminId)) {
-      throw new WorkspaceServerError("self_host_initial_admin_required", 500);
-    }
     this.database = options.database;
     this.mode = options.mode;
     this.selfHostWorkspaceId = options.selfHostWorkspaceId;
@@ -207,6 +266,7 @@ export class WorkspaceServerStore {
       const account = result.rows[0];
       if (!account) throw new WorkspaceServerError("account_registration_failed", 500);
       if (account.public_key !== input.publicKey) throw new WorkspaceServerError("account_public_key_conflict", 409);
+      let savedAccount: WorkspaceAccount;
       if (account.display_name !== input.displayName.trim()) {
         const updated = await sql.query<AccountRow>(
           `UPDATE accounts SET display_name = $2, updated_at = NOW()
@@ -214,9 +274,30 @@ export class WorkspaceServerStore {
            RETURNING id, public_key, display_name, created_at, updated_at`,
           [input.id, input.displayName.trim()]
         );
-        return accountFromRow(updated.rows[0] ?? account);
+        savedAccount = accountFromRow(updated.rows[0] ?? account);
+      } else {
+        savedAccount = accountFromRow(account);
       }
-      return accountFromRow(account);
+      // Keep the compatibility Organization only for Accounts that have no
+      // active Organization membership.  An invited member must not acquire a
+      // second implicit Organization merely by registering its Account.
+      const membership = await sql.query<{ has_membership: boolean }>(
+        `SELECT EXISTS(
+           SELECT 1 FROM organization_members
+           WHERE account_id = $1 AND state = 'active'
+         ) AS has_membership`, [input.id]
+      );
+      if (membership.rows[0]?.has_membership !== true) {
+        await sql.query(
+          `SELECT samurai_create_organization(
+            'org_' || md5('samurai.legacy.organization|' || $1),
+            COALESCE(NULLIF(btrim($2), ''), 'Account') || ' Organization',
+            NULL, NULL,
+            'organization_bootstrap_' || md5($1)
+          )`, [input.id, input.displayName.trim()]
+        );
+      }
+      return savedAccount;
     });
   }
 
@@ -257,36 +338,676 @@ export class WorkspaceServerStore {
     }
   }
 
-  async createWorkspace(input: CreateWorkspaceInput): Promise<{ workspace: WorkspaceSummary; defaultRoom: WorkspaceRoom }> {
+  /** Organization metadata query. It intentionally does not require a Workspace context. */
+  async listOrganizations(context: OrganizationRequestContext, _input: { cursor?: string; limit?: number } = {}): Promise<Organization[]> {
+    assertOpaqueId(context.accountId, "account_id_invalid");
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const result = await sql.query<OrganizationRow>(
+        `SELECT organization.id, organization.name, organization.icon, organization.description,
+                organization.created_by, organization.version, organization.created_at,
+                organization.updated_at, organization.deleted_at
+           FROM organizations organization
+           JOIN organization_members member ON member.organization_id = organization.id
+          WHERE member.account_id = $1 AND member.state = 'active' AND organization.deleted_at IS NULL
+          ORDER BY organization.updated_at DESC, organization.id`,
+        [context.accountId]
+      );
+      return result.rows.map(organizationFromRow);
+    });
+  }
+
+  async viewOrganization(context: OrganizationRequestContext, organizationId: string): Promise<Organization> {
+    const id = organizationIdFrom(context, organizationId);
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const row = (await sql.query<OrganizationRow>(
+        `SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at
+           FROM organizations WHERE id = $1 AND deleted_at IS NULL`, [id]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_not_found", 404);
+      return organizationFromRow(row);
+    });
+  }
+
+  async createOrganization(
+    context: OrganizationRequestContext,
+    input: Omit<CreateOrganizationInput, "accountId" | "operationId"> & { id?: string }
+  ): Promise<Organization> {
+    assertOpaqueId(context.accountId, "account_id_invalid");
+    assertOpaqueId(context.operationId, "organization_operation_id_invalid");
+    const name = input.name.trim();
+    if (!name || name.length > 200) throw new WorkspaceServerError("organization_name_required", 400);
+    const id = input.id?.trim() || operationScopedId("organization", context.accountId, context.operationId);
+    assertOpaqueId(id, "organization_id_invalid");
+    const result = await this.runOrganizationIdempotentResult(context, undefined, {
+      action: "organization.create",
+      input: { id, name, icon: input.icon ?? null, description: input.description ?? null }
+    }, async (sql) => {
+      try {
+        await sql.query("SELECT samurai_create_organization($1, $2, $3, $4, $5)", [
+          id, name, input.icon ?? null, input.description ?? null, context.operationId
+        ]);
+      } catch (error) {
+        if (postgresMessage(error).includes("organization_id_conflict")) throw new WorkspaceServerError("organization_id_conflict", 409);
+        throw error;
+      }
+      const row = (await sql.query<OrganizationRow>(
+        "SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at FROM organizations WHERE id = $1",
+        [id]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_creation_failed", 500);
+      return organizationFromRow(row);
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async patchOrganization(
+    context: OrganizationRequestContext,
+    input: PatchOrganizationInput & { organizationId?: string; organization_id?: string; expected_version?: number }
+  ): Promise<Organization> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_expected_version_invalid", 1);
+    if (input.name !== undefined && (!input.name.trim() || input.name.trim().length > 200)) {
+      throw new WorkspaceServerError("organization_name_required", 400);
+    }
+    const result = await this.runOrganizationIdempotentResult(context, id, {
+      action: "organization.patch",
+      input: {
+        id,
+        name: input.name ?? null,
+        icon: input.icon,
+        description: input.description,
+        expectedVersion: suppliedExpectedVersion ?? null
+      }
+    }, async (sql) => {
+      const current = (await sql.query<OrganizationRow>(
+        `SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at
+           FROM organizations WHERE id = $1 AND deleted_at IS NULL`, [id]
+      )).rows[0];
+      if (!current) throw new WorkspaceServerError("organization_not_found", 404);
+      const expectedVersion = suppliedExpectedVersion ?? Number(current.version);
+      const name = input.name === undefined ? current.name : input.name.trim();
+      // null is an explicit clear operation; undefined retains the current
+      // value. The SQL function uses NULL as its compatibility "unchanged"
+      // marker, so an explicit clear is represented by an empty string.
+      const icon = input.icon === undefined ? null : input.icon ?? "";
+      const description = input.description === undefined ? null : input.description ?? "";
+      try {
+        await sql.query("SELECT samurai_patch_organization($1, $2, $3, $4, $5, $6)", [id, name, icon, description, expectedVersion, context.operationId]);
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "organization_patch_failed");
+      }
+      const row = (await sql.query<OrganizationRow>(
+        "SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at FROM organizations WHERE id = $1",
+        [id]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_not_found", 404);
+      return organizationFromRow(row);
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async deleteOrganization(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; expectedVersion?: number; expected_version?: number; confirm?: true }
+  ): Promise<Organization> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_expected_version_invalid", 1);
+    const result = await this.runOrganizationIdempotentResult(context, id, { action: "organization.delete", input: { id, confirm: input.confirm ?? true, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      const current = (await sql.query<{ version: number | string }>(
+        "SELECT version FROM organizations WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [id]
+      )).rows[0];
+      if (!current) throw new WorkspaceServerError("organization_not_found", 404);
+      if (suppliedExpectedVersion !== undefined && Number(current.version) !== suppliedExpectedVersion) {
+        throw new WorkspaceServerError("organization_version_conflict", 409);
+      }
+      try {
+        await sql.query("SELECT samurai_delete_organization($1, $2)", [id, context.operationId]);
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "organization_delete_failed");
+      }
+      const row = (await sql.query<OrganizationRow>(
+        "SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at FROM organizations WHERE id = $1",
+        [id]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_not_found", 404);
+      return organizationFromRow(row);
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async listOrganizationMembers(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; includeRemoved?: boolean; include_removed?: boolean; limit?: number } = {}
+  ): Promise<OrganizationMembership[]> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const includeRemoved = input.includeRemoved ?? input.include_removed ?? false;
+      const result = await sql.query<OrganizationMembershipRow>(
+        `SELECT member.organization_id, member.account_id, member.role, member.state, member.version,
+                member.joined_at, member.removed_at, member.created_by, member.updated_by
+           FROM organization_members member
+          WHERE member.organization_id = $1 AND ($2::BOOLEAN OR member.state = 'active')
+          ORDER BY member.joined_at, member.account_id`, [id, includeRemoved]
+      );
+      return result.rows.map(organizationMembershipFromRow);
+    });
+  }
+
+  async changeOrganizationMemberRole(
+    context: OrganizationRequestContext,
+    input: ChangeOrganizationMemberRoleInput & { organizationId?: string; organization_id?: string; target_account_id?: string; expected_version?: number }
+  ): Promise<OrganizationMembership> {
+    return this.setOrganizationMember(context, input, "active");
+  }
+
+  async removeOrganizationMember(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; accountId?: string; target_account_id?: string; expectedVersion?: number; expected_version?: number }
+  ): Promise<OrganizationMembership> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const accountId = assertOpaqueId(input.accountId ?? input.target_account_id ?? "", "account_id_invalid");
+    return this.setOrganizationMember(context, { organizationId: id, accountId, expectedVersion: input.expectedVersion ?? input.expected_version }, "removed");
+  }
+
+  async leaveOrganization(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; expectedVersion?: number; expected_version?: number } = {}
+  ): Promise<OrganizationMembership> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    return this.setOrganizationMember(context, { organizationId: id, accountId: context.accountId, expectedVersion: input.expectedVersion ?? input.expected_version }, "removed");
+  }
+
+  async inviteOrganizationMember(
+    context: OrganizationRequestContext,
+    input: InviteOrganizationMemberInput & { organizationId?: string; organization_id?: string; workspace_grants?: InviteOrganizationMemberInput["workspaceGrants"] }
+  ): Promise<OrganizationInvitationCreateResult> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    assertOrganizationRole(input.role);
+    const suppliedExpiresAt = input.expiresAt ?? input.expires_at;
+    if (suppliedExpiresAt !== undefined) {
+      const parsedExpiresAt = new Date(suppliedExpiresAt);
+      if (!Number.isFinite(parsedExpiresAt.getTime()) || parsedExpiresAt.getTime() <= Date.now()) throw new WorkspaceServerError("organization_invitation_expiry_invalid", 400);
+    }
+    const token = organizationInvitationToken(this.invitationTokenSecret, context, id);
+    const invitationId = operationScopedId("organization_invitation", id, context.operationId);
+    const grants = (input.workspaceGrants ?? input.workspace_grants ?? []).map((grant) => {
+      const workspaceId = grant.workspaceId ?? grant.workspace_id;
+      const workspaceRole = grant.workspaceRole ?? grant.role;
+      assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
+      if (!workspaceRole) throw new WorkspaceServerError("organization_invitation_workspace_grant_invalid", 400);
+      assertRole(workspaceRole);
+      return {
+        workspace_id: workspaceId,
+        workspace_role: workspaceRole,
+        ...(grant.roomId ? { room_id: grant.roomId } : {}),
+        ...(grant.roomRole ? { room_role: grant.roomRole } : {})
+      };
+    });
+    const targetAccountId = input.targetAccountId ?? input.target_account_id;
+    const result = await this.runOrganizationIdempotentResult(context, id, {
+      action: "organization.member.invite",
+      input: { id, invitationId, targetAccountId: targetAccountId ?? null, role: input.role, expiresAt: suppliedExpiresAt ?? null, grants }
+    }, async (sql) => {
+      const expiresAt = new Date(String(suppliedExpiresAt ?? Date.now() + 30 * 24 * 60 * 60 * 1000));
+      if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) throw new WorkspaceServerError("organization_invitation_expiry_invalid", 400);
+      try {
+        await sql.query("SELECT samurai_create_organization_invitation($1, $2, $3, $4, $5, $6, $7, $8::JSONB)", [
+          id, invitationId, targetAccountId ?? null, invitationTokenHash(this.invitationTokenSecret, token), input.role,
+          expiresAt.toISOString(), context.operationId, canonicalJson(grants)
+        ]);
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "organization_invitation_create_failed");
+      }
+      const invitation = await this.selectOrganizationInvitation(sql, id, invitationId);
+      if (!invitation) throw new WorkspaceServerError("organization_invitation_creation_failed", 500);
+      return { invitation, token, replayed: false };
+    });
+    // `runOrganizationIdempotentResult` serializes the complete result. Token
+    // material exists only in this response and in the operation result held
+    // for the same request; it is never included in an Event or invitation row.
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async acceptOrganizationInvitation(
+    context: OrganizationRequestContext,
+    input: { token: string; organizationId?: string; organization_id?: string }
+  ): Promise<OrganizationInvitationAcceptResult> {
+    if (!input.token || input.token.length > 2_048) throw new WorkspaceServerError("organization_invitation_invalid", 400);
+    const id = input.organizationId ?? input.organization_id ?? context.organizationId;
+    if (id !== undefined) assertOpaqueId(id, "organization_id_invalid");
+    const tokenHash = invitationTokenHash(this.invitationTokenSecret, input.token);
+    const result = await this.runOrganizationIdempotentResult(context, id, { action: "organization.member.accept", input: { organizationId: id, tokenHash } }, async (sql) => {
+      try {
+        const row = (await sql.query<{ result: unknown }>(
+          id === undefined
+            ? "SELECT samurai_accept_organization_invitation($1, $2) AS result"
+            : "SELECT samurai_accept_organization_invitation($1, $2, $3) AS result",
+          id === undefined ? [tokenHash, context.operationId] : [id, tokenHash, context.operationId]
+        )).rows[0];
+        if (!row) throw new WorkspaceServerError("organization_invitation_invalid", 400);
+        const value = parseJsonObject(row.result);
+        const organizationId = String(value.organization_id ?? id ?? "");
+        if (!organizationId) throw new WorkspaceServerError("organization_invitation_invalid", 400);
+        const accountId = String(value.account_id ?? context.accountId);
+        const role = assertOrganizationRoleValue(value.role);
+        // Token-only accepts resolve the Organization inside PostgreSQL. Keep
+        // that resolved scope on the operation row so retries/status queries
+        // remain auditable without ever storing the raw token.
+        if (id === undefined) {
+          await sql.query(
+            "UPDATE organization_operations SET organization_id = $3 WHERE actor_account_id = $1 AND id = $2",
+            [context.accountId, context.operationId, organizationId]
+          );
+        }
+        const membershipRow = (await sql.query<OrganizationMembershipRow>(
+          `SELECT organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by
+             FROM organization_members WHERE organization_id = $1 AND account_id = $2`, [organizationId, accountId]
+        )).rows[0];
+        if (!membershipRow) throw new WorkspaceServerError("organization_membership_update_failed", 500);
+        const grants = organizationInvitationGrantsFromJson(value.workspace_grants);
+        const workspaceGrants: OrganizationWorkspaceMembership[] = [];
+        for (const grant of grants) {
+          const workspaceRow = (await sql.query<MembershipRow>(
+            `SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at
+               FROM workspace_members WHERE workspace_id = $1 AND account_id = $2`, [grant.workspaceId, accountId]
+          )).rows[0];
+          if (workspaceRow) workspaceGrants.push(organizationWorkspaceMembershipFromRow(workspaceRow, organizationId));
+        }
+        return { organizationId, accountId, role, membership: organizationMembershipFromRow(membershipRow), workspaceGrants, replayed: false };
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "organization_invitation_invalid");
+      }
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async listOrganizationInvitations(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; includeResolved?: boolean; include_resolved?: boolean } = {}
+  ): Promise<OrganizationInvitation[]> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const includeResolved = input.includeResolved ?? input.include_resolved ?? false;
+      const rows = await sql.query<OrganizationInvitationRow>(
+        `SELECT id, organization_id, target_account_id, role, version, expires_at, issued_by,
+                created_at, updated_at, revoked_at, accepted_by, accepted_at
+           FROM organization_invitations
+          WHERE organization_id = $1
+            AND ($2::BOOLEAN OR (revoked_at IS NULL AND accepted_at IS NULL AND expires_at > NOW()))
+          ORDER BY created_at DESC, id`, [id, includeResolved]
+      );
+      const invitations: OrganizationInvitation[] = [];
+      for (const row of rows.rows) {
+        const invitation = await this.selectOrganizationInvitation(sql, id, row.id);
+        if (invitation) invitations.push(invitation);
+      }
+      return invitations;
+    });
+  }
+
+  async revokeOrganizationInvitation(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; invitationId?: string; invitation_id?: string; expectedVersion?: number; expected_version?: number }): Promise<OrganizationInvitation> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const invitationId = assertOpaqueId(input.invitationId ?? input.invitation_id ?? "", "organization_invitation_id_invalid");
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_invitation_expected_version_invalid", 1);
+    const result = await this.runOrganizationIdempotentResult(context, id, { action: "organization.invitation.revoke", input: { id, invitationId, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      const current = await this.selectOrganizationInvitation(sql, id, invitationId);
+      if (!current) throw new WorkspaceServerError("organization_invitation_not_found", 404);
+      const expectedVersion = suppliedExpectedVersion ?? current.version;
+      try { await sql.query("SELECT samurai_revoke_organization_invitation($1, $2, $3, $4)", [id, invitationId, expectedVersion, context.operationId]); }
+      catch (error) { throw mapOrganizationPostgresError(error, "organization_invitation_revoke_failed"); }
+      return {};
+    });
+    const invitation = await this.getOrganizationInvitation(context, id, invitationId);
+    return { ...invitation, replayed: result.replayed };
+  }
+
+  async extendOrganizationInvitation(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; invitationId?: string; invitation_id?: string; expiresAt?: string; expires_at?: string; expectedVersion?: number; expected_version?: number }): Promise<OrganizationInvitation> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const invitationId = assertOpaqueId(input.invitationId ?? input.invitation_id ?? "", "organization_invitation_id_invalid");
+    const expiresAt = new Date(input.expiresAt ?? input.expires_at ?? "");
+    if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) throw new WorkspaceServerError("organization_invitation_expiry_invalid", 400);
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_invitation_expected_version_invalid", 1);
+    const result = await this.runOrganizationIdempotentResult(context, id, { action: "organization.invitation.extend", input: { id, invitationId, expiresAt: expiresAt.toISOString(), expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      const current = await this.selectOrganizationInvitation(sql, id, invitationId);
+      if (!current) throw new WorkspaceServerError("organization_invitation_not_found", 404);
+      const expectedVersion = suppliedExpectedVersion ?? current.version;
+      try { await sql.query("SELECT samurai_extend_organization_invitation($1, $2, $3, $4, $5)", [id, invitationId, expiresAt.toISOString(), expectedVersion, context.operationId]); }
+      catch (error) { throw mapOrganizationPostgresError(error, "organization_invitation_extend_failed"); }
+      return {};
+    });
+    const invitation = await this.getOrganizationInvitation(context, id, invitationId);
+    return { ...invitation, replayed: result.replayed };
+  }
+
+  async reissueOrganizationInvitation(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; invitationId?: string; invitation_id?: string; expectedVersion?: number; expected_version?: number }): Promise<OrganizationInvitationCreateResult> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const invitationId = assertOpaqueId(input.invitationId ?? input.invitation_id ?? "", "organization_invitation_id_invalid");
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_invitation_expected_version_invalid", 1);
+    const token = organizationInvitationToken(this.invitationTokenSecret, context, id, invitationId);
+    const replacementInvitationId = operationScopedId("organization_invitation", id, `${context.operationId}|replacement`);
+    const replacementExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const result = await this.runOrganizationIdempotentResult(context, id, { action: "organization.invitation.reissue", input: { id, invitationId, replacementInvitationId, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      const current = await this.selectOrganizationInvitation(sql, id, invitationId);
+      if (!current) throw new WorkspaceServerError("organization_invitation_not_found", 404);
+      const expectedVersion = suppliedExpectedVersion ?? current.version;
+      try { await sql.query("SELECT samurai_reissue_organization_invitation($1, $2, $3, $4, $5, $6, $7)", [id, invitationId, replacementInvitationId, invitationTokenHash(this.invitationTokenSecret, token), replacementExpiresAt, expectedVersion, context.operationId]); }
+      catch (error) { throw mapOrganizationPostgresError(error, "organization_invitation_reissue_failed"); }
+      const invitation = await this.selectOrganizationInvitation(sql, id, replacementInvitationId);
+      if (!invitation) throw new WorkspaceServerError("organization_invitation_reissue_failed", 500);
+      return { invitation, token, replayed: false };
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async listOrganizationWorkspaces(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; includeDeleted?: boolean; include_deleted?: boolean } = {}): Promise<OrganizationWorkspaceSummary[]> {
+    const id = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const includeDeleted = input.includeDeleted ?? input.include_deleted ?? false;
+      const result = await sql.query<OrganizationWorkspaceRow>(
+        `SELECT workspace.id, workspace.organization_id, workspace.name, workspace.state, workspace.version,
+                workspace.created_at, workspace.updated_at, member.role AS workspace_role
+           FROM workspaces workspace
+           LEFT JOIN workspace_members member ON member.workspace_id = workspace.id
+            AND member.account_id = $2 AND member.state = 'active'
+          WHERE workspace.organization_id = $1
+            AND ($3::BOOLEAN OR workspace.state <> 'deleted')
+          ORDER BY workspace.updated_at DESC, workspace.id`, [id, context.accountId, includeDeleted]
+      );
+      return result.rows.map(organizationWorkspaceFromRow);
+    });
+  }
+
+  async preflightWorkspaceOrganizationMove(context: OrganizationRequestContext, input: OrganizationWorkspaceMoveInput & { source_organization_id?: string; target_organization_id?: string; workspace_id?: string; expected_workspace_version?: number }): Promise<OrganizationWorkspaceMovePreview> {
+    const sourceId = organizationIdFrom(context, input.sourceOrganizationId ?? input.source_organization_id);
+    const targetId = organizationIdFrom(context, input.targetOrganizationId ?? input.target_organization_id);
+    const workspaceId = input.workspaceId ?? input.workspace_id;
+    assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
+    const expectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
+    const result = await this.runOrganizationIdempotentResult(context, sourceId, {
+      action: "workspace.organization.move.preflight",
+      input: { sourceId, targetId, workspaceId, expectedVersion: expectedVersion ?? null }
+    }, async (sql) => {
+      const capability = await sql.query<{ source_owner: boolean; target_owner: boolean }>(
+        "SELECT samurai_can_organization($1, 'owner') AS source_owner, samurai_can_organization($2, 'owner') AS target_owner", [sourceId, targetId]
+      );
+      const sourceOwner = capability.rows[0]?.source_owner === true;
+      const targetOwner = capability.rows[0]?.target_owner === true;
+      const workspace = (await sql.query<OrganizationWorkspaceRow>(
+        `SELECT id, organization_id, name, state, version, created_at, updated_at
+           FROM workspaces WHERE id = $1`, [workspaceId]
+      )).rows[0];
+      if (!workspace) throw new WorkspaceServerError("workspace_not_found", 404);
+      const workspaceVersion = Number(workspace.version);
+      const workspaceState = workspace.state;
+      if (workspaceState === "read_only" || workspaceState === "deleted") {
+        throw new WorkspaceServerError("workspace_organization_move_state_invalid", 409);
+      }
+      const memberRows = await sql.query<OrganizationWorkspaceMoveMemberRow>(
+        "SELECT account_id, role AS current_workspace_role, state FROM workspace_members WHERE workspace_id = $1 AND state = 'active' ORDER BY account_id", [workspaceId]
+      );
+      const targetMembers = await sql.query<{ account_id: string; role: OrganizationRole }>(
+        "SELECT account_id, role FROM organization_members WHERE organization_id = $1 AND state = 'active' ORDER BY account_id", [targetId]
+      );
+      const targetRoles = new Map(targetMembers.rows.map((row) => [row.account_id, row.role]));
+      const members = memberRows.rows.map((row) => ({
+        accountId: row.account_id,
+        currentWorkspaceRole: row.current_workspace_role,
+        state: row.state,
+        ...(targetRoles.has(row.account_id) ? { targetOrganizationRole: targetRoles.get(row.account_id) } : {})
+      }));
+      const missing = members.filter((member) => !targetRoles.has(member.accountId)).map((member) => member.accountId);
+      const versionOk = expectedVersion === undefined || workspaceVersion === expectedVersion;
+      const stateOk = workspaceState === "active" || workspaceState === "archived";
+      const failureConditions: string[] = [];
+      if (!sourceOwner) failureConditions.push("organization_owner_permission_required");
+      if (!targetOwner) failureConditions.push("target_organization_owner_permission_required");
+      if (workspace.organization_id !== sourceId) failureConditions.push("workspace_organization_move_source_mismatch");
+      if (sourceId === targetId) failureConditions.push("workspace_organization_move_invalid");
+      if (!versionOk) failureConditions.push("workspace_version_conflict");
+      if (!stateOk) failureConditions.push("workspace_organization_move_state_invalid");
+      const allowed = failureConditions.length === 0;
+      const reason = failureConditions[0];
+      const createdAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      return {
+        allowed,
+        ...(reason ? { reason } : {}),
+        sourceOrganizationId: sourceId,
+        targetOrganizationId: targetId,
+        workspaceId,
+        workspaceName: workspace.name,
+        expectedWorkspaceVersion: workspaceVersion,
+        sourceOwner,
+        targetOwner,
+        members,
+        missingTargetMemberships: missing,
+        requiresGuestConfirmation: missing.length > 0,
+        writeFreezeRequired: true,
+        operationId: context.operationId,
+        workspaceState,
+        failureConditions,
+        expiresAt,
+        createdAt
+      };
+    });
+    return { ...result.value, operationId: result.value.operationId ?? context.operationId };
+  }
+
+  async commitWorkspaceOrganizationMove(context: OrganizationRequestContext, input: OrganizationWorkspaceMoveInput & { source_organization_id?: string; target_organization_id?: string; workspace_id?: string; expected_workspace_version?: number; confirm_guest_membership?: boolean; preflight_id?: string }): Promise<OrganizationWorkspaceMoveResult> {
+    const sourceId = organizationIdFrom(context, input.sourceOrganizationId ?? input.source_organization_id);
+    const targetId = organizationIdFrom(context, input.targetOrganizationId ?? input.target_organization_id);
+    const workspaceId = input.workspaceId ?? input.workspace_id;
+    assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
+    const suppliedExpectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "workspace_expected_version_invalid", 1);
+    const preflightId = assertOpaqueId(input.preflight_id ?? "", "workspace_organization_move_preflight_id_invalid");
+    const confirm = input.confirmGuestMemberships ?? input.confirm_guest_membership;
+    if (confirm !== true) throw new WorkspaceServerError("workspace_organization_move_guest_confirmation_required", 400);
+    const result = await this.runOrganizationIdempotentResult(context, sourceId, { action: "workspace.organization.move.commit", input: { sourceId, targetId, workspaceId, expectedVersion: suppliedExpectedVersion ?? null, preflightId } }, async (sql) => {
+      const preflightRow = (await sql.query<{ result: unknown; consumed_at: Date | string | null }>(
+        `SELECT result, consumed_at
+           FROM organization_operations
+          WHERE actor_account_id = $1 AND idempotency_key = $2
+            AND organization_id = $3 AND status = 'completed'
+            AND consumed_at IS NULL AND result IS NOT NULL
+          FOR UPDATE`, [context.accountId, preflightId, sourceId]
+      )).rows[0];
+      if (!preflightRow) throw new WorkspaceServerError("workspace_organization_move_preflight_invalid", 409);
+      const preflight = parseJsonObject(preflightRow.result);
+      if (preflight.allowed !== true) throw new WorkspaceServerError("workspace_organization_move_preflight_not_allowed", 409);
+      const previewSource = String(preflight.sourceOrganizationId ?? preflight.source_organization_id ?? "");
+      const previewTarget = String(preflight.targetOrganizationId ?? preflight.target_organization_id ?? "");
+      const previewWorkspace = String(preflight.workspaceId ?? preflight.workspace_id ?? "");
+      const previewVersion = Number(preflight.expectedWorkspaceVersion ?? preflight.workspace_version);
+      const previewExpiresAt = Date.parse(String(preflight.expiresAt ?? preflight.expires_at ?? ""));
+      if (previewSource !== sourceId || previewTarget !== targetId || previewWorkspace !== workspaceId || !Number.isInteger(previewVersion) || previewVersion < 1) {
+        throw new WorkspaceServerError("workspace_organization_move_preflight_mismatch", 409);
+      }
+      if (!Number.isFinite(previewExpiresAt) || previewExpiresAt <= Date.now()) {
+        throw new WorkspaceServerError("workspace_organization_move_preflight_expired", 409);
+      }
+      if (suppliedExpectedVersion !== undefined && suppliedExpectedVersion !== previewVersion) {
+        throw new WorkspaceServerError("workspace_organization_move_preflight_version_conflict", 409);
+      }
+      const expectedVersion = previewVersion;
+      try {
+        const row = (await sql.query<{ result: unknown }>("SELECT samurai_move_workspace_organization($1, $2, $3, $4, $5) AS result", [sourceId, targetId, workspaceId, expectedVersion, context.operationId])).rows[0];
+        if (!row) throw new WorkspaceServerError("workspace_organization_move_failed", 500);
+        const value = parseJsonObject(row.result);
+        const added = Array.isArray(value.added_guest_account_ids) ? value.added_guest_account_ids.filter((item): item is string => typeof item === "string") : [];
+        const workspace = (await sql.query<OrganizationWorkspaceRow>("SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1", [workspaceId])).rows[0];
+        if (!workspace) throw new WorkspaceServerError("workspace_not_found", 404);
+        await sql.query(
+          `UPDATE organization_operations SET consumed_at = NOW(), updated_at = NOW()
+             WHERE actor_account_id = $1 AND idempotency_key = $2 AND organization_id = $3 AND consumed_at IS NULL`,
+          [context.accountId, preflightId, sourceId]
+        );
+        return {
+          operationId: context.operationId,
+          sourceOrganizationId: sourceId,
+          targetOrganizationId: targetId,
+          workspaceId,
+          status: "committed" as const,
+          workspace: organizationWorkspaceFromRow(workspace),
+          addedGuestAccountIds: added,
+          guestMembershipAccountIds: added,
+          ...(value.event_id === undefined ? {} : { eventId: String(value.event_id) }),
+          committedAt: new Date().toISOString(),
+          replayed: false
+        };
+      } catch (error) { throw mapOrganizationPostgresError(error, "workspace_organization_move_failed"); }
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  async getWorkspaceOrganizationMoveStatus(context: OrganizationRequestContext, operationId: string): Promise<Record<string, unknown>> {
+    assertOpaqueId(operationId, "organization_operation_id_invalid");
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const row = (await sql.query<{ organization_id: string | null; status: string; result: unknown; error_code: string | null; updated_at: Date | string }>(
+        "SELECT organization_id, status, result, error_code, updated_at FROM organization_operations WHERE actor_account_id = $1 AND idempotency_key = $2", [context.accountId, operationId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_operation_not_found", 404);
+      const result = row.result === null ? {} : parseJsonObject(row.result);
+      const workspace = result.workspace && typeof result.workspace === "object" && !Array.isArray(result.workspace)
+        ? result.workspace as Record<string, unknown>
+        : {};
+      const status = row.status === "completed"
+        ? String(result.status ?? "committed")
+        : row.status === "failed" ? "failed" : "running";
+      const guestMembershipAccountIds = Array.isArray(result.guestMembershipAccountIds)
+        ? result.guestMembershipAccountIds.filter((value): value is string => typeof value === "string")
+        : Array.isArray(result.addedGuestAccountIds)
+          ? result.addedGuestAccountIds.filter((value): value is string => typeof value === "string")
+          : [];
+      return {
+        operationId,
+        workspaceId: String(result.workspaceId ?? result.workspace_id ?? workspace.workspaceId ?? workspace.id ?? "unknown"),
+        sourceOrganizationId: String(result.sourceOrganizationId ?? result.source_organization_id ?? row.organization_id ?? "unknown"),
+        targetOrganizationId: String(result.targetOrganizationId ?? result.target_organization_id ?? workspace.organizationId ?? workspace.organization_id ?? "unknown"),
+        status,
+        guestMembershipAccountIds,
+        ...(result.eventId === undefined && result.event_id === undefined ? {} : { eventId: String(result.eventId ?? result.event_id) }),
+        ...(result.committedAt === undefined && result.committed_at === undefined ? {} : { committedAt: String(result.committedAt ?? result.committed_at) }),
+        ...(row.error_code ? { failureCode: row.error_code } : {}),
+        updatedAt: iso(row.updated_at)
+      };
+    });
+  }
+
+  async createOrganizationWorkspace(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; name: string }
+  ): Promise<OrganizationWorkspaceSummary> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const created = await this.createWorkspace({
+      id: operationScopedId("workspace", organizationId, context.operationId),
+      name: input.name,
+      ownerAccountId: context.accountId,
+      operationId: context.operationId,
+      hostingMode: this.mode,
+      databasePlacement: this.mode === "self_host" ? "dedicated" : "shared",
+      organizationId
+    });
+    return { ...organizationWorkspaceFromSummary(created.workspace, organizationId), replayed: created.replayed };
+  }
+
+  async grantOrganizationWorkspaceMembership(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; accountId?: string; target_account_id?: string; role: WorkspaceMembershipRole }
+  ): Promise<OrganizationWorkspaceMembership> {
+    return this.setOrganizationWorkspaceMembership(context, input, "active");
+  }
+
+  async revokeOrganizationWorkspaceMembership(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; accountId?: string; target_account_id?: string; role?: WorkspaceMembershipRole; expectedVersion?: number; expected_version?: number }
+  ): Promise<OrganizationWorkspaceMembership> {
+    const workspaceId = input.workspaceId ?? input.workspace_id;
+    const accountId = input.accountId ?? input.target_account_id;
+    assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
+    assertOpaqueId(accountId ?? "", "account_id_invalid");
+    return this.setOrganizationWorkspaceMembership(context, { ...input, workspaceId, accountId, role: input.role ?? "member" }, "revoked");
+  }
+
+  async archiveOrganizationWorkspace(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; expectedVersion?: number; expected_version?: number; confirm?: true }): Promise<OrganizationWorkspaceSummary> {
+    return this.setOrganizationWorkspaceLifecycle(context, input, "archived");
+  }
+
+  async restoreOrganizationWorkspace(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; expectedVersion?: number; expected_version?: number; confirm?: true }): Promise<OrganizationWorkspaceSummary> {
+    return this.setOrganizationWorkspaceLifecycle(context, input, "active");
+  }
+
+  async deleteOrganizationWorkspace(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; expectedVersion?: number; expected_version?: number; confirm?: true }): Promise<OrganizationWorkspaceSummary> {
+    return this.setOrganizationWorkspaceLifecycle(context, input, "deleted");
+  }
+
+  /** Bundle bytes remain in the Bundle service; this metadata operation keeps
+   * Organization authorization and source ownership explicit for callers. */
+  async exportWorkspaceBundle(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; expectedWorkspaceVersion?: number; expected_workspace_version?: number }): Promise<Record<string, unknown>> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const workspaceId = assertOpaqueId(input.workspaceId ?? input.workspace_id ?? "", "workspace_id_invalid");
+    const workspace = await this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const row = (await sql.query<OrganizationWorkspaceRow>("SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1 AND organization_id = $2", [workspaceId, organizationId])).rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_not_found", 404);
+      const expectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
+      if (expectedVersion !== undefined && Number(row.version) !== expectedVersion) throw new WorkspaceServerError("workspace_version_conflict", 409);
+      const owner = await sql.query<{ allowed: boolean }>("SELECT samurai_can_workspace($1, 'owner') AS allowed", [workspaceId]);
+      if (owner.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_owner_permission_required", 403);
+      return row;
+    });
+    return { bundleId: `bundle_${context.operationId}`, workspaceId, sourceOrganizationId: organizationId, workspaceVersion: Number(workspace.version), state: workspace.state, createdAt: iso(workspace.created_at) };
+  }
+
+  /** Restore is executed by the Bundle service; this method validates the
+   * selected target Organization before that service performs file/database work. */
+  async restoreWorkspaceBundle(context: OrganizationRequestContext, input: { bundleId?: string; bundle_id?: string; targetOrganizationId?: string; target_organization_id?: string; confirm?: true }): Promise<Record<string, unknown>> {
+    const targetOrganizationId = organizationIdFrom(context, input.targetOrganizationId ?? input.target_organization_id);
+    const bundleId = assertOpaqueId(input.bundleId ?? input.bundle_id ?? "", "workspace_bundle_id_invalid");
+    await this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const allowed = await sql.query<{ allowed: boolean }>("SELECT samurai_can_organization($1, 'admin') AS allowed", [targetOrganizationId]);
+      if (allowed.rows[0]?.allowed !== true) throw new WorkspaceServerError("organization_admin_permission_required", 403);
+    });
+    return { bundleId, targetOrganizationId, status: "authorized" };
+  }
+
+  async createWorkspace(input: CreateWorkspaceInput): Promise<{ workspace: WorkspaceSummary; defaultRoom: WorkspaceRoom; replayed?: boolean }> {
     const workspaceId = input.id ?? operationScopedId("workspace", input.ownerAccountId, input.operationId);
     assertOpaqueId(workspaceId, "workspace_id_invalid");
     assertOpaqueId(input.ownerAccountId, "account_id_invalid");
     assertOpaqueId(input.operationId, "workspace_operation_id_invalid");
     if (!input.name.trim()) throw new WorkspaceServerError("workspace_name_required", 400);
     const mode = input.hostingMode ?? this.mode;
-    if (this.mode === "self_host" && workspaceId !== this.selfHostWorkspaceId) {
-      throw new WorkspaceServerError("workspace_not_found", 404);
-    }
     const roomId = operationScopedId("room", workspaceId, input.operationId);
-    return this.runAccountIdempotent(input.ownerAccountId, input.operationId, workspaceId, {
+    const result = await this.runAccountIdempotentResult(input.ownerAccountId, input.operationId, workspaceId, {
       action: "workspace.create",
-      input: { id: workspaceId, name: input.name.trim(), mode, databasePlacement: input.databasePlacement }
+      input: { id: workspaceId, name: input.name.trim(), mode, databasePlacement: input.databasePlacement, organizationId: input.organizationId ?? null }
     }, async (sql) => {
       try {
-        await sql.query("SELECT samurai_create_workspace($1, $2, $3, $4, $5, $6)", [
+        const values = [
           workspaceId,
           input.name.trim(),
           mode,
           input.databasePlacement ?? (mode === "self_host" ? "dedicated" : "shared"),
           roomId,
           "General"
-        ]);
+        ];
+        if (input.organizationId) {
+          assertOpaqueId(input.organizationId, "organization_id_invalid");
+          await sql.query("SELECT samurai_create_workspace($1, $2, $3, $4, $5, $6, $7)", [...values, input.organizationId]);
+        } else {
+          await sql.query("SELECT samurai_create_workspace($1, $2, $3, $4, $5, $6)", values);
+        }
       } catch (error) {
         if (postgresMessage(error).includes("workspace_id_conflict")) throw new WorkspaceServerError("workspace_id_conflict", 409);
         throw error;
       }
       const workspace = (await sql.query<WorkspaceSummaryRow>(
-        `SELECT id, name, state, hosting_mode, storage_namespace, database_placement, version, created_at, updated_at
+        `SELECT id, organization_id, name, state, hosting_mode, storage_namespace, database_placement, version, created_at, updated_at
          FROM workspaces WHERE id = $1`,
         [workspaceId]
       )).rows[0];
@@ -303,13 +1024,14 @@ export class WorkspaceServerStore {
         }
       };
     });
+    return { ...result.value, replayed: result.replayed };
   }
 
   async listWorkspaces(accountId: string): Promise<WorkspaceSummary[]> {
     assertOpaqueId(accountId, "account_id_invalid");
     return this.database.withContext({ accountId }, async (sql) => {
       const result = await sql.query<WorkspaceSummaryRow>(
-        `SELECT w.id, w.name, w.state, w.hosting_mode, w.storage_namespace, w.database_placement, w.version, w.created_at, w.updated_at, m.role
+        `SELECT w.id, w.organization_id, w.name, w.state, w.hosting_mode, w.storage_namespace, w.database_placement, w.version, w.created_at, w.updated_at, m.role
          FROM workspaces AS w
          JOIN workspace_members AS m ON m.workspace_id = w.id
          WHERE m.account_id = $1 AND m.state = 'active'
@@ -320,10 +1042,26 @@ export class WorkspaceServerStore {
     });
   }
 
+  /**
+   * Enumerate active Workspace recovery identities from the server-owned
+   * worker context.  The configured self-host Workspace ID is only a
+   * bootstrap input; normal recovery must discover every active Workspace.
+   */
+  async listActiveWorkspaceIds(): Promise<Array<{ workspaceId: string; accountId: string }>> {
+    return this.database.withContext({ accountId: "workspace-worker", worker: true }, async (sql) => {
+      const result = await sql.query<{ workspace_id: string; account_id: string; hosting_mode: WorkspaceServerMode }>(
+        "SELECT workspace_id, account_id, hosting_mode FROM samurai_list_active_workspace_ids()"
+      );
+      return result.rows
+        .filter((row) => row.hosting_mode === this.mode)
+        .map((row) => ({ workspaceId: row.workspace_id, accountId: row.account_id }));
+    });
+  }
+
   async getWorkspace(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<WorkspaceSummary> {
     return this.database.withContext(context, async (sql) => {
       const result = await sql.query<WorkspaceSummaryRow>(
-        `SELECT w.id, w.name, w.state, w.hosting_mode, w.storage_namespace, w.database_placement, w.version, w.created_at, w.updated_at, m.role
+        `SELECT w.id, w.organization_id, w.name, w.state, w.hosting_mode, w.storage_namespace, w.database_placement, w.version, w.created_at, w.updated_at, m.role
          FROM workspaces AS w
          JOIN workspace_members AS m ON m.workspace_id = w.id
          WHERE w.id = $1 AND m.account_id = $2 AND m.state = 'active'`,
@@ -1369,6 +2107,14 @@ export class WorkspaceServerStore {
     assertOpaqueId(operationId, "operation_id_invalid");
     const resources = input.resources ?? [];
     return this.database.withContext(context, async (sql) => {
+      const workspaceScope = await sql.query<{ organization_id: string }>(
+        "SELECT organization_id FROM workspaces WHERE id = $1", [context.workspaceId]
+      );
+      const organizationId = workspaceScope.rows[0]?.organization_id;
+      if (!organizationId) throw new WorkspaceServerError("workspace_not_found", 404);
+      if (input.organizationId && input.organizationId !== organizationId) {
+        throw new WorkspaceServerError("workspace_event_organization_mismatch", 409);
+      }
       if (input.roomId) {
         const authorizationAction = input.authorizationAction ?? "edit";
         const allowed = await sql.query<{ allowed: boolean }>(
@@ -1403,7 +2149,7 @@ export class WorkspaceServerStore {
           eventVersion,
           input.actor.kind,
           input.actor.id ?? null,
-          input.organizationId ?? null,
+          organizationId,
           cursor,
           input.correlationId ?? operationId,
           canonicalJson(resources)
@@ -1423,7 +2169,7 @@ export class WorkspaceServerStore {
         eventType,
         eventVersion,
         roomId: input.roomId,
-        organizationId: input.organizationId,
+        organizationId,
         actor: input.actor,
         operationId,
         correlationId: input.correlationId ?? operationId,
@@ -1777,6 +2523,195 @@ export class WorkspaceServerStore {
     });
   }
 
+  private async runOrganizationIdempotentResult<T>(
+    context: OrganizationRequestContext,
+    organizationId: string | undefined,
+    request: { action: string; input: unknown },
+    action: (sql: WorkspaceSql) => Promise<T>
+  ): Promise<IdempotentOperationResult<T>> {
+    assertOpaqueId(context.accountId, "account_id_invalid");
+    assertOpaqueId(context.operationId, "organization_operation_id_invalid");
+    if (organizationId) assertOpaqueId(organizationId, "organization_id_invalid");
+    const requestHash = hash(canonicalJson(request));
+    let originalFailure: unknown;
+    const value = await this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const inserted = await sql.query<{ id: string }>(
+        `INSERT INTO organization_operations(actor_account_id, id, organization_id, idempotency_key, request_hash, status)
+         VALUES ($1, $2, $3, $2, $4, 'running')
+         ON CONFLICT (actor_account_id, idempotency_key) DO NOTHING
+         RETURNING id`,
+        [context.accountId, context.operationId, organizationId ?? null, requestHash]
+      );
+      if (!inserted.rows[0]) {
+        const existing = await sql.query<{ request_hash: string; status: string; result: unknown }>(
+          "SELECT request_hash, status, result FROM organization_operations WHERE actor_account_id = $1 AND idempotency_key = $2",
+          [context.accountId, context.operationId]
+        );
+        const operation = existing.rows[0];
+        if (!operation || operation.request_hash !== requestHash) throw new WorkspaceServerError("organization_operation_id_reused", 409);
+        if (operation.status === "failed") throw new WorkspaceServerError("organization_operation_previously_failed", 409);
+        if (operation.status !== "completed" || operation.result === null) throw new WorkspaceServerError("organization_operation_in_progress", 409);
+        return { value: operation.result as T, replayed: true };
+      }
+      await sql.query("SAVEPOINT samurai_organization_operation_action");
+      let completed: T;
+      try {
+        completed = await action(sql);
+      } catch (error) {
+        await sql.query("ROLLBACK TO SAVEPOINT samurai_organization_operation_action");
+        await sql.query("RELEASE SAVEPOINT samurai_organization_operation_action");
+        await sql.query(
+          `UPDATE organization_operations SET status = 'failed', error_code = $3, result = $4::JSONB, updated_at = NOW()
+           WHERE actor_account_id = $1 AND id = $2`,
+          [context.accountId, context.operationId, organizationOperationErrorCode(error), canonicalJson(organizationOperationFailureProjection(request, context.operationId, organizationOperationErrorCode(error)) ?? {})]
+        );
+        originalFailure = error;
+        return { value: undefined as T, replayed: false };
+      }
+      await sql.query("RELEASE SAVEPOINT samurai_organization_operation_action");
+      await sql.query(
+        `UPDATE organization_operations SET status = 'completed', organization_id = COALESCE(organization_id, $3), result = $4::JSONB, updated_at = NOW()
+         WHERE actor_account_id = $1 AND id = $2`,
+        [context.accountId, context.operationId, organizationId ?? null, canonicalJson(stripEphemeralOrganizationSecrets(completed === undefined ? {} : completed))]
+      );
+      return { value: completed, replayed: false };
+    });
+    if (originalFailure) throw originalFailure;
+    return value;
+  }
+
+  private async getOrganizationMember(context: OrganizationRequestContext, organizationId: string, accountId: string): Promise<OrganizationMembership> {
+    assertOpaqueId(accountId, "account_id_invalid");
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const row = (await sql.query<OrganizationMembershipRow>(
+        `SELECT organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by
+           FROM organization_members WHERE organization_id = $1 AND account_id = $2`, [organizationId, accountId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_member_not_found", 404);
+      return organizationMembershipFromRow(row);
+    });
+  }
+
+  private async setOrganizationMember(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; accountId?: string; target_account_id?: string; role?: OrganizationRole; expectedVersion?: number; expected_version?: number },
+    state: "active" | "removed"
+  ): Promise<OrganizationMembership> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const accountId = input.accountId ?? input.target_account_id;
+    assertOpaqueId(accountId ?? "", "account_id_invalid");
+    if (input.role !== undefined) assertOrganizationRole(input.role);
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_membership_expected_version_invalid", 0);
+    const result = await this.runOrganizationIdempotentResult(context, organizationId, { action: state === "active" ? "organization.member.role.change" : "organization.member.remove", input: { organizationId, accountId, ...(input.role ? { role: input.role } : {}), state, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      const current = (await sql.query<OrganizationMembershipRow>(
+        `SELECT organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by
+           FROM organization_members WHERE organization_id = $1 AND account_id = $2`, [organizationId, accountId]
+      )).rows[0];
+      if (!current && state === "removed") throw new WorkspaceServerError("organization_member_not_found", 404);
+      const role = input.role ?? current?.role;
+      if (!role) throw new WorkspaceServerError("organization_role_invalid", 400);
+      const expectedVersion = suppliedExpectedVersion ?? Number(current?.version ?? 0);
+      try {
+        await sql.query("SELECT samurai_set_organization_member($1, $2, $3, $4, $5, $6)", [organizationId, accountId, role, state, expectedVersion, context.operationId]);
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "organization_membership_update_failed");
+      }
+      const row = (await sql.query<OrganizationMembershipRow>(
+        "SELECT organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by FROM organization_members WHERE organization_id = $1 AND account_id = $2", [organizationId, accountId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_membership_update_failed", 500);
+      return organizationMembershipFromRow(row);
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  private async getOrganizationInvitation(context: OrganizationRequestContext, organizationId: string, invitationId: string): Promise<OrganizationInvitation> {
+    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
+      const invitation = await this.selectOrganizationInvitation(sql, organizationId, invitationId);
+      if (!invitation) throw new WorkspaceServerError("organization_invitation_not_found", 404);
+      return invitation;
+    });
+  }
+
+  private async selectOrganizationInvitation(sql: WorkspaceSql, organizationId: string, invitationId: string): Promise<OrganizationInvitation | undefined> {
+    const row = (await sql.query<OrganizationInvitationRow>(
+      `SELECT id, organization_id, target_account_id, role, version, expires_at, issued_by,
+              created_at, updated_at, revoked_at, accepted_by, accepted_at
+         FROM organization_invitations WHERE organization_id = $1 AND id = $2`, [organizationId, invitationId]
+    )).rows[0];
+    if (!row) return undefined;
+    const grants = await sql.query<OrganizationInvitationGrantRow>(
+      `SELECT id, organization_id, invitation_id, workspace_id, workspace_role, room_id, room_role
+         FROM organization_invitation_workspace_grants WHERE organization_id = $1 AND invitation_id = $2 ORDER BY id`, [organizationId, invitationId]
+    );
+    return organizationInvitationFromRow(row, grants.rows);
+  }
+
+  private async setOrganizationWorkspaceMembership(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; accountId?: string; target_account_id?: string; role: WorkspaceMembershipRole; expectedVersion?: number; expected_version?: number },
+    state: "active" | "revoked"
+  ): Promise<OrganizationWorkspaceMembership> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const workspaceId = input.workspaceId ?? input.workspace_id;
+    const accountId = input.accountId ?? input.target_account_id;
+    assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
+    assertOpaqueId(accountId ?? "", "account_id_invalid");
+    assertRole(input.role);
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "workspace_membership_expected_version_invalid", 0);
+    const result = await this.runOrganizationIdempotentResult(context, organizationId, { action: state === "active" ? "organization.workspace.member.grant" : "organization.workspace.member.revoke", input: { organizationId, workspaceId, accountId, role: input.role, state, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      try {
+        await sql.query("SELECT set_config('samurai.workspace_id', $1, true)", [workspaceId]);
+        const current = (await sql.query<MembershipRow>(
+          "SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM workspace_members WHERE workspace_id = $1 AND account_id = $2", [workspaceId, accountId]
+        )).rows[0];
+        if (!current && state === "revoked") throw new WorkspaceServerError("organization_workspace_member_not_found", 404);
+        const expectedVersion = suppliedExpectedVersion ?? Number(current?.version ?? 0);
+        await sql.query("SELECT samurai_set_organization_workspace_member($1, $2, $3, $4, $5, $6, $7)", [organizationId, workspaceId, accountId, input.role, state, expectedVersion, context.operationId]);
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "organization_workspace_membership_update_failed");
+      }
+      const row = (await sql.query<MembershipRow>(
+        "SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM workspace_members WHERE workspace_id = $1 AND account_id = $2", [workspaceId, accountId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("organization_workspace_membership_update_failed", 500);
+      const createdAt = iso(row.created_at);
+      return { id: `${row.workspace_id}:${row.account_id}`, organizationId, workspaceId: row.workspace_id, accountId: row.account_id, role: row.role, state: row.state, version: Number(row.version), joinedAt: createdAt, createdAt, createdBy: row.account_id, updatedAt: iso(row.updated_at), ...(row.revoked_at ? { revokedAt: iso(row.revoked_at) } : {}) };
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  private async setOrganizationWorkspaceLifecycle(
+    context: OrganizationRequestContext,
+    input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; expectedVersion?: number; expected_version?: number; confirm?: true },
+    state: "active" | "archived" | "deleted"
+  ): Promise<OrganizationWorkspaceSummary> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const workspaceId = assertOpaqueId(input.workspaceId ?? input.workspace_id ?? "", "workspace_id_invalid");
+    const suppliedExpectedVersion = input.expectedVersion ?? input.expected_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "workspace_expected_version_invalid", 1);
+    if (input.confirm !== true) throw new WorkspaceServerError("workspace_lifecycle_confirmation_required", 400);
+    const result = await this.runOrganizationIdempotentResult(context, organizationId, { action: `organization.workspace.${state === "active" ? "restore" : state}`, input: { organizationId, workspaceId, state, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
+      await sql.query("SELECT set_config('samurai.workspace_id', $1, true)", [workspaceId]);
+      const current = (await sql.query<{ version: number | string }>(
+        "SELECT version FROM workspaces WHERE id = $1 AND organization_id = $2", [workspaceId, organizationId]
+      )).rows[0];
+      if (!current) throw new WorkspaceServerError("workspace_not_found", 404);
+      const expectedVersion = suppliedExpectedVersion ?? Number(current.version);
+      try {
+        await sql.query("SELECT samurai_set_organization_workspace_lifecycle($1, $2, $3, $4, $5)", [organizationId, workspaceId, state, expectedVersion, context.operationId]);
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "workspace_lifecycle_failed");
+      }
+      const row = (await sql.query<OrganizationWorkspaceRow>("SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1", [workspaceId])).rows[0];
+      if (!row) throw new WorkspaceServerError("workspace_not_found", 404);
+      return organizationWorkspaceFromRow(row);
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
   private async assertWorkspaceWritable(sql: WorkspaceSql, workspaceId: string): Promise<void> {
     const result = await sql.query<{ state: WorkspaceState }>("SELECT state FROM workspaces WHERE id = $1", [workspaceId]);
     const state = result.rows[0]?.state;
@@ -1860,11 +2795,16 @@ export class WorkspaceServerStore {
     recordId?: string;
     payload: WorkspaceRecordPayload;
   }): Promise<WorkspaceEvent> {
+    const workspace = await sql.query<{ organization_id: string }>(
+      "SELECT organization_id FROM workspaces WHERE id = $1", [context.workspaceId]
+    );
+    const organizationId = workspace.rows[0]?.organization_id;
+    if (!organizationId) throw new WorkspaceServerError("workspace_not_found", 404);
     const saved = await sql.query<EventRow>(
-      `INSERT INTO workspace_events(workspace_id, room_id, kind, record_type, record_id, operation_id, payload)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB)
+      `INSERT INTO workspace_events(workspace_id, organization_id, room_id, kind, record_type, record_id, operation_id, payload)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::JSONB)
        RETURNING id, workspace_id, room_id, kind, record_type, record_id, operation_id, payload, created_at`,
-      [context.workspaceId, input.roomId, input.kind, input.recordType ?? null, input.recordId ?? null, context.operationId, canonicalJson(input.payload)]
+      [context.workspaceId, organizationId, input.roomId, input.kind, input.recordType ?? null, input.recordId ?? null, context.operationId, canonicalJson(input.payload)]
     );
     const event = saved.rows[0];
     if (!event) throw new WorkspaceServerError("workspace_event_creation_failed", 500);
@@ -1880,8 +2820,75 @@ interface AccountRow {
   updated_at: Date | string;
 }
 
+interface OrganizationRow {
+  id: string;
+  name: string;
+  icon: string | null;
+  description: string | null;
+  created_by: string;
+  version: number | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+  deleted_at: Date | string | null;
+}
+
+interface OrganizationMembershipRow {
+  organization_id: string;
+  account_id: string;
+  role: OrganizationRole;
+  state: "active" | "removed";
+  version: number | string;
+  joined_at: Date | string;
+  removed_at: Date | string | null;
+  created_by: string;
+  updated_by: string;
+}
+
+interface OrganizationInvitationRow {
+  id: string;
+  organization_id: string;
+  target_account_id: string | null;
+  role: OrganizationRole;
+  version: number | string;
+  expires_at: Date | string;
+  issued_by: string;
+  created_at: Date | string;
+  updated_at: Date | string;
+  revoked_at: Date | string | null;
+  accepted_by: string | null;
+  accepted_at: Date | string | null;
+}
+
+interface OrganizationInvitationGrantRow {
+  id: string;
+  organization_id: string;
+  invitation_id: string;
+  workspace_id: string;
+  workspace_role: WorkspaceMembershipRole;
+  room_id: string | null;
+  room_role: WorkspaceMembershipRole | null;
+}
+
+interface OrganizationWorkspaceRow {
+  id: string;
+  organization_id: string;
+  name: string;
+  state: WorkspaceState;
+  version: number | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+  workspace_role?: WorkspaceMembershipRole | null;
+}
+
+interface OrganizationWorkspaceMoveMemberRow {
+  account_id: string;
+  current_workspace_role: WorkspaceMembershipRole;
+  state: "active" | "revoked";
+}
+
 interface WorkspaceSummaryRow {
   id: string;
+  organization_id?: string;
   name: string;
   state: WorkspaceState;
   hosting_mode: WorkspaceServerMode;
@@ -2050,9 +3057,228 @@ function accountFromRow(row: AccountRow): WorkspaceAccount {
   return { id: row.id, publicKey: row.public_key, displayName: row.display_name, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
+function organizationIdFrom(context: OrganizationRequestContext, explicit: string | undefined): string {
+  const id = explicit ?? context.organizationId;
+  assertOpaqueId(id ?? "", "organization_id_invalid");
+  return id!;
+}
+
+function assertOrganizationRole(value: string): asserts value is OrganizationRole {
+  if (value !== "owner" && value !== "admin" && value !== "member" && value !== "guest") {
+    throw new WorkspaceServerError("organization_role_invalid", 400);
+  }
+}
+
+function assertOrganizationRoleValue(value: unknown): OrganizationRole {
+  if (typeof value !== "string") throw new WorkspaceServerError("organization_role_invalid", 500);
+  assertOrganizationRole(value);
+  return value;
+}
+
+function organizationFromRow(row: OrganizationRow): Organization {
+  return {
+    id: row.id,
+    name: row.name,
+    ...(row.icon ? { icon: row.icon } : {}),
+    ...(row.description ? { description: row.description } : {}),
+    createdBy: row.created_by,
+    version: Number(row.version),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    ...(row.deleted_at ? { deletedAt: iso(row.deleted_at) } : {})
+  };
+}
+
+function organizationMembershipFromRow(row: OrganizationMembershipRow): OrganizationMembership {
+  return {
+    id: `${row.organization_id}:${row.account_id}`,
+    organizationId: row.organization_id,
+    accountId: row.account_id,
+    role: row.role,
+    state: row.state,
+    version: Number(row.version),
+    joinedAt: iso(row.joined_at),
+    ...(row.removed_at ? { removedAt: iso(row.removed_at) } : {}),
+    createdBy: row.created_by,
+    updatedBy: row.updated_by
+  };
+}
+
+function organizationWorkspaceMembershipFromRow(row: MembershipRow, organizationId: string): OrganizationWorkspaceMembership {
+  const joinedAt = iso(row.created_at);
+  return {
+    id: `${row.workspace_id}:${row.account_id}`,
+    organizationId,
+    workspaceId: row.workspace_id,
+    accountId: row.account_id,
+    role: row.role,
+    state: row.state,
+    version: Number(row.version),
+    joinedAt,
+    createdAt: joinedAt,
+    createdBy: row.account_id,
+    updatedAt: iso(row.updated_at),
+    ...(row.revoked_at ? { revokedAt: iso(row.revoked_at) } : {})
+  };
+}
+
+function organizationInvitationFromRow(row: OrganizationInvitationRow, grants: OrganizationInvitationGrantRow[]): OrganizationInvitation {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    ...(row.target_account_id ? { targetAccountId: row.target_account_id } : {}),
+    role: row.role,
+    version: Number(row.version),
+    expiresAt: iso(row.expires_at),
+    issuedBy: row.issued_by,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    ...(row.revoked_at ? { revokedAt: iso(row.revoked_at) } : {}),
+    ...(row.accepted_by ? { acceptedBy: row.accepted_by } : {}),
+    ...(row.accepted_at ? { acceptedAt: iso(row.accepted_at) } : {}),
+    workspaceGrants: grants.map((grant) => ({
+      id: grant.id,
+      organizationId: grant.organization_id,
+      invitationId: grant.invitation_id,
+      workspaceId: grant.workspace_id,
+      workspaceRole: grant.workspace_role,
+      ...(grant.room_id ? { roomId: grant.room_id } : {}),
+      ...(grant.room_role ? { roomRole: grant.room_role } : {})
+    }))
+  };
+}
+
+function organizationInvitationGrantsFromJson(value: unknown): OrganizationInvitationWorkspaceGrant[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    if (typeof row.id !== "string" || typeof row.organization_id !== "string" || typeof row.invitation_id !== "string" || typeof row.workspace_id !== "string" || typeof row.workspace_role !== "string") return [];
+    assertRole(row.workspace_role);
+    const result: OrganizationInvitationWorkspaceGrant = {
+      id: row.id,
+      organizationId: row.organization_id,
+      invitationId: row.invitation_id,
+      workspaceId: row.workspace_id,
+      workspaceRole: row.workspace_role
+    };
+    if (typeof row.room_id === "string" && row.room_id) result.roomId = row.room_id;
+    if (typeof row.room_role === "string" && row.room_role) { assertRole(row.room_role); result.roomRole = row.room_role; }
+    return [result];
+  });
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new WorkspaceServerError("organization_result_invalid", 500);
+  return parsed as Record<string, unknown>;
+}
+
+function organizationWorkspaceFromRow(row: OrganizationWorkspaceRow): OrganizationWorkspaceSummary {
+  return {
+    organizationId: row.organization_id,
+    workspaceId: row.id,
+    name: row.name,
+    state: row.state,
+    hasAccess: Boolean(row.workspace_role),
+    ...(row.workspace_role ? { workspaceRole: row.workspace_role } : {}),
+    version: Number(row.version),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function organizationWorkspaceFromSummary(row: WorkspaceSummary, organizationId: string): OrganizationWorkspaceSummary {
+  return {
+    organizationId,
+    workspaceId: row.id,
+    name: row.name,
+    state: row.state,
+    hasAccess: true,
+    workspaceRole: row.role,
+    version: row.version,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function mapOrganizationPostgresError(error: unknown, _fallback: string): unknown {
+  const message = postgresMessage(error);
+  const known: Array<[string, string, number]> = [
+    ["organization_not_found", "organization_not_found", 404],
+    ["organization_member_not_found", "organization_member_not_found", 404],
+    ["organization_admin_permission_required", "organization_admin_permission_required", 403],
+    ["organization_owner_permission_required", "organization_owner_permission_required", 403],
+    ["organization_last_owner_cannot_be_changed", "organization_last_owner_cannot_be_changed", 409],
+    ["organization_membership_version_conflict", "organization_membership_version_conflict", 409],
+    ["organization_invitation_not_found", "organization_invitation_not_found", 404],
+    ["organization_invitation_version_conflict", "organization_invitation_version_conflict", 409],
+    ["organization_invitation_not_available", "organization_invitation_not_available", 409],
+    ["organization_invitation_invalid", "organization_invitation_invalid", 400],
+    ["organization_invitation_target_mismatch", "organization_invitation_target_mismatch", 403],
+    ["organization_invitation_workspace_grant_invalid", "organization_invitation_workspace_grant_invalid", 400],
+    ["organization_workspaces_remaining", "organization_workspaces_remaining", 409],
+    ["organization_membership_required", "organization_membership_required", 403],
+    ["workspace_not_found", "workspace_not_found", 404],
+    ["organization_workspace_membership_update_failed", "organization_workspace_membership_update_failed", 409],
+    ["organization_workspace_member_not_found", "organization_workspace_member_not_found", 404],
+    ["workspace_membership_version_conflict", "workspace_membership_version_conflict", 409],
+    ["workspace_owner_permission_required", "workspace_owner_permission_required", 403],
+    ["workspace_last_owner_cannot_be_changed", "workspace_last_owner_cannot_be_changed", 409],
+    ["workspace_organization_move_source_mismatch", "workspace_organization_move_source_mismatch", 409],
+    ["workspace_organization_move_state_invalid", "workspace_organization_move_state_invalid", 409],
+    ["workspace_organization_move_invalid", "workspace_organization_move_invalid", 409],
+    ["workspace_organization_move_preflight_invalid", "workspace_organization_move_preflight_invalid", 409],
+    ["workspace_organization_move_preflight_mismatch", "workspace_organization_move_preflight_mismatch", 409],
+    ["workspace_organization_move_preflight_expired", "workspace_organization_move_preflight_expired", 409],
+    ["workspace_organization_move_preflight_not_allowed", "workspace_organization_move_preflight_not_allowed", 409],
+    ["workspace_organization_move_preflight_version_conflict", "workspace_organization_move_preflight_version_conflict", 409],
+    ["workspace_version_conflict", "workspace_version_conflict", 409]
+  ];
+  const hit = known.find(([needle]) => message.includes(needle));
+  if (hit) return new WorkspaceServerError(hit[1], hit[2]);
+  return error;
+}
+
+function organizationOperationErrorCode(error: unknown): string {
+  const code = error instanceof WorkspaceServerError ? error.code : postgresMessage(error).split("\n", 1)[0] || "organization_operation_failed";
+  return code.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 160) || "organization_operation_failed";
+}
+
+/** Keep move status useful after a failed commit without persisting request
+ * payloads such as invitation token hashes in the operation ledger. */
+function organizationOperationFailureProjection(
+  request: { action: string; input: unknown },
+  operationId: string,
+  failureCode: string
+): Record<string, unknown> | undefined {
+  if (request.action !== "workspace.organization.move.commit") return undefined;
+  const input = request.input && typeof request.input === "object" && !Array.isArray(request.input)
+    ? request.input as Record<string, unknown>
+    : {};
+  const value = (key: string): string | undefined => typeof input[key] === "string" ? input[key] as string : undefined;
+  return {
+    operationId,
+    workspaceId: value("workspaceId") ?? "unknown",
+    sourceOrganizationId: value("sourceId") ?? "unknown",
+    targetOrganizationId: value("targetId") ?? "unknown",
+    status: "failed",
+    guestMembershipAccountIds: [],
+    failureCode
+  };
+}
+
+function stripEphemeralOrganizationSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripEphemeralOrganizationSecrets);
+  if (!value || typeof value !== "object") return value;
+  const object = value as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(object).filter(([key]) => !["token", "one_time_token", "raw_token", "token_hash"].includes(key)).map(([key, item]) => [key, stripEphemeralOrganizationSecrets(item)]));
+}
+
 function workspaceSummaryFromRow(row: WorkspaceSummaryRow): WorkspaceSummary {
   return {
     id: row.id,
+    ...(row.organization_id ? { organizationId: row.organization_id } : {}),
     name: row.name,
     state: row.state,
     hostingMode: row.hosting_mode,
@@ -2359,6 +3585,17 @@ function invitationTokenHash(secret: string, token: string): string {
 function invitationToken(secret: string, context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "operationId">): string {
   return createHmac("sha256", secret)
     .update(`samurai-invitation-token-v1|${context.workspaceId}|${context.accountId}|${context.operationId}`)
+    .digest("base64url");
+}
+
+function organizationInvitationToken(
+  secret: string,
+  context: Pick<OrganizationRequestContext, "accountId" | "operationId">,
+  organizationId: string,
+  invitationId?: string
+): string {
+  return createHmac("sha256", secret)
+    .update(`samurai-organization-invitation-token-v1|${organizationId}|${context.accountId}|${context.operationId}|${invitationId ?? ""}`)
     .digest("base64url");
 }
 

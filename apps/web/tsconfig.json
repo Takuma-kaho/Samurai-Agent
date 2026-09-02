@@ -4,8 +4,8 @@
     "allowJs": false,
     "allowArbitraryExtensions": true,
     "composite": true,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "outDir": "dist-ts"
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts", "src/**/*.vue", "vite.config.ts"]
 }

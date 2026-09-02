@@ -7,8 +7,9 @@
   "scripts": {
     "build": "pnpm typecheck && pnpm --filter @samurai-agent/web run build",
     "dev": "node scripts/dev.mjs",
-    "desktop:dev": "pnpm --filter @samurai-agent/desktop run dev",
-    "desktop:build": "pnpm --filter @samurai-agent/desktop run build",
+    "desktop:dev": "node scripts/dev.mjs --desktop",
+    "desktop:build": "pnpm --filter @samurai-agent/desktop run build && node scripts/verify-desktop-artifact.mjs",
+    "desktop:artifact:verify": "node scripts/verify-desktop-artifact.mjs",
     "desktop:verify": "node scripts/verify-desktop-architecture.mjs",
     "desktop:audit": "node scripts/verify-desktop-architecture.mjs --score",
     "dev:parallel": "pnpm --parallel --filter @samurai-agent/server --filter @samurai-agent/web run dev",

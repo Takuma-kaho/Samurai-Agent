@@ -6,10 +6,19 @@ import { completeSample, sample } from "../../../scripts/fixtures/domain-command
 import gatewayMcpConfigSave from "./operations/gateway/mcp_config/save.operation.js";
 import gatewayInboundRoute from "./operations/gateway/inbound/route.operation.js";
 
+const publicContractOnlyOperationIds = new Set([
+  "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
+  "organization.member.list", "organization.member.invite", "organization.member.accept", "organization.member.role.change", "organization.member.remove", "organization.member.leave",
+  "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue", "organization.invitation.extend",
+  "organization.workspace.list", "organization.workspace.create", "organization.workspace.member.grant", "organization.workspace.member.revoke", "organization.workspace.archive", "organization.workspace.restore", "organization.workspace.delete",
+  "workspace.organization.move.preflight", "workspace.organization.move.commit", "workspace.organization.move.status",
+  "workspace.bundle.export", "workspace.bundle.restore"
+]);
+
 describe("Domain Operation strict gate coverage", () => {
-  it("loads the complete 169-operation strict gate with unique handlers", () => {
+  it("loads the complete 196-operation strict gate with unique handlers", () => {
     const ids = operationDefinitions.map((definition) => definition.id);
-    expect(operationDefinitions).toHaveLength(169);
+    expect(operationDefinitions).toHaveLength(196);
     expect(new Set(ids).size).toBe(ids.length);
     expect(operationDefinitions.every((definition) => definition.input && definition.output && typeof definition.createHandler === "function")).toBe(true);
     expect(Object.keys(domainOperationIds)).toHaveLength(operationDefinitions.length);
@@ -485,6 +494,10 @@ describe("Domain Operation strict gate coverage", () => {
         }
         continue;
       }
+      if (publicContractOnlyOperationIds.has(definition.id)) {
+        await expect(binding.execute(context, input)).rejects.toThrow(`domain_operation_public_contract_only:${definition.id}`);
+        continue;
+      }
       await binding.execute(context, input);
       for (const inputSource of definition.sources.slice(1)) {
         await binding.execute({ ...context, inputSource, correlationId: `coverage-${definition.id}-${inputSource}` }, input);
@@ -509,7 +522,7 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(169);
+    expect(bindings).toHaveLength(196);
     expect(portCalls.size).toBe(168);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {

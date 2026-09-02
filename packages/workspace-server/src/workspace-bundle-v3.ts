@@ -10,6 +10,21 @@ import type { WorkspaceBundleV3Manifest, WorkspaceRequestContext, WorkspaceServe
 import { WorkspaceFileStore } from "./workspace-files";
 import { WorkspaceServerStore } from "./workspace-server-store";
 
+/**
+ * Provenance was added after the original V3 contract.  Keep the public
+ * `WorkspaceBundleV3Manifest` type compatible with older callers while
+ * accepting the richer manifest on disk and at the transport boundary.
+ */
+type WorkspaceBundleV3ManifestWithProvenance = WorkspaceBundleV3Manifest & {
+  source: WorkspaceBundleV3Manifest["source"] & { organization_id?: string };
+  /** Stable public spelling used by the Organization/domain contract. */
+  source_organization_id?: string;
+  /** Schema revision of the portable snapshot contract. */
+  schema_revision?: number;
+};
+
+const legacyBundleSchemaRevision = 26;
+
 const manifestFile = "manifest.json";
 const workspaceFile = "workspace.json";
 const coreJsonlFiles = ["accounts.jsonl", "rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "operations.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl"] as const;
@@ -58,7 +73,9 @@ function safeErrorCode(error: unknown): string {
 const portableSchema: Readonly<Record<string, { required: readonly string[]; allowed: readonly string[] }>> = {
   [workspaceFile]: {
     required: ["id", "name", "hosting_mode", "database_placement", "storage_namespace", "created_by", "version", "created_at", "updated_at"],
-    allowed: ["id", "name", "hosting_mode", "database_placement", "storage_namespace", "created_by", "version", "created_at", "updated_at"]
+    // organization_id is emitted by current exports for provenance, but is
+    // optional so pre-Organization V3 Bundles remain importable.
+    allowed: ["id", "name", "organization_id", "hosting_mode", "database_placement", "storage_namespace", "created_by", "version", "created_at", "updated_at"]
   },
   "accounts.jsonl": {
     required: ["id", "public_key", "display_name", "created_at", "updated_at"],
@@ -171,6 +188,9 @@ export interface ImportWorkspaceBundleInput {
   sourceDirectory: string;
   targetWorkspaceId: string;
   targetWorkspaceName?: string;
+  /** The target Organization is explicit; it is never inferred from a
+   * deployment-wide Self-host setting. */
+  targetOrganizationId?: string;
   /** A newer Bundle format can add rows while the v3 target is still
    * read-only and its short-lived import capability is active.  The callback
    * runs only after the verified v3 snapshot is present, and before the
@@ -181,6 +201,7 @@ export interface ImportWorkspaceBundleInput {
 export interface StageWorkspaceBundleInput {
   targetWorkspaceId: string;
   targetWorkspaceName?: string;
+  targetOrganizationId?: string;
   manifest: WorkspaceBundleV3Manifest;
 }
 
@@ -476,6 +497,7 @@ export class WorkspaceBundleV3Service {
     assertOpaqueId(context.accountId, "account_id_invalid");
     assertOpaqueId(context.operationId, "workspace_operation_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
+    const targetOrganizationId = assertWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
     assertBundleManifestCandidate(input.manifest);
     const createdAt = new Date();
     const manifestText = canonicalJson(input.manifest);
@@ -487,6 +509,7 @@ export class WorkspaceBundleV3Service {
       operation_id: context.operationId,
       target_workspace_id: input.targetWorkspaceId,
       ...(input.targetWorkspaceName?.trim() ? { target_workspace_name: input.targetWorkspaceName.trim().slice(0, 500) } : {}),
+      target_organization_id: targetOrganizationId,
       manifest: input.manifest,
       created_at: createdAt.toISOString(),
       expires_at: new Date(createdAt.getTime() + WORKSPACE_BUNDLE_INCOMING_TTL_MS).toISOString(),
@@ -575,6 +598,7 @@ export class WorkspaceBundleV3Service {
       const imported = await this.importNew(context, {
         sourceDirectory: root,
         targetWorkspaceId: metadata.target_workspace_id,
+        targetOrganizationId: metadata.target_organization_id,
         ...(metadata.target_workspace_name ? { targetWorkspaceName: metadata.target_workspace_name } : {})
       });
       await this.writeIncomingMetadata(context, {
@@ -602,15 +626,12 @@ export class WorkspaceBundleV3Service {
     receipt?: WorkspaceTransferReceipt;
   }> {
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
-    if (this.store.mode === "self_host") {
-      if (input.targetWorkspaceId !== this.store.selfHostWorkspaceId) {
-        throw new WorkspaceServerError("workspace_not_found", 404);
-      }
-      // An empty Self-host server is a recovery target, not an unclaimed
-      // Hosted-style Workspace. Registering an Account must never be enough
-      // to take ownership of it.
-      this.store.assertSelfHostInitialAdmin(context.accountId);
-    }
+    const targetOrganizationId = assertWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
+    // Check the target Organization before reading or creating the target
+    // Workspace. The import SQL function repeats this check inside the
+    // transaction, but the explicit service check also covers idempotent
+    // retries that find an already-created target Workspace.
+    await assertTargetOrganizationAdmin(this.store, context.accountId, targetOrganizationId);
     const source = await verifyWorkspaceBundleV3(input.sourceDirectory);
     const sourceWorkspace = await readJsonObject(path.join(source.directory, workspaceFile));
     const sourceWorkspaceVersion = Number(sourceWorkspace.version ?? 1);
@@ -626,7 +647,7 @@ export class WorkspaceBundleV3Service {
       throw error;
     });
     if (existingWorkspace) {
-      await assertImportedBundleMatches(this.store, targetContext, source.manifest);
+      await assertImportedBundleMatches(this.store, targetContext, source.manifest, targetOrganizationId);
       const recovery = await this.store.database.withContext(targetContext, async (sql) => {
         const workspace = await sql.query<{ state: string }>(
           "SELECT state FROM workspaces WHERE id = $1",
@@ -641,6 +662,7 @@ export class WorkspaceBundleV3Service {
         return { state: workspace.rows[0]?.state, importId: session.rows[0]?.id };
       });
       if (recovery.state === "active") {
+        await assertTargetWorkspaceOrganization(this.store, targetContext, targetOrganizationId);
         await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
         return {
           workspaceId: input.targetWorkspaceId,
@@ -675,20 +697,22 @@ export class WorkspaceBundleV3Service {
       await rename(stagingRoot, finalRoot);
       finalRootCreated = true;
       await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
-        await sql.query("SELECT samurai_start_workspace_import($1, $2, $3, $4, $5, $6)", [
-          input.targetWorkspaceId,
-          input.targetWorkspaceName?.trim() || "Imported Workspace",
-          this.store.mode,
-          this.store.mode === "self_host" ? "dedicated" : "shared",
+        await startWorkspaceImport(sql, {
+          targetWorkspaceId: input.targetWorkspaceId,
+          workspaceName: input.targetWorkspaceName?.trim() || "Imported Workspace",
+          mode: this.store.mode,
+          databasePlacement: this.store.mode === "self_host" ? "dedicated" : "shared",
           importId,
-          sourceWorkspaceVersion
-        ]);
+          sourceWorkspaceVersion,
+          targetOrganizationId
+        });
         await importSnapshot(sql, {
           sourceDirectory: source.directory,
           targetWorkspaceId: input.targetWorkspaceId,
           targetWorkspaceName: input.targetWorkspaceName,
           ownerAccountId: context.accountId,
-          mode: this.store.mode
+          mode: this.store.mode,
+          targetOrganizationId
         });
         await sql.query("SELECT samurai_record_import_bundle($1, $2, $3, $4, $5::JSONB)", [
           input.targetWorkspaceId,
@@ -709,7 +733,12 @@ export class WorkspaceBundleV3Service {
           action: "workspace.bundle.import",
           subjectKind: "workspace_bundle",
           subjectId: source.manifest.integrity_hash,
-          details: { source_workspace_id: source.manifest.workspace_id, ...(source.manifest.transfer_id ? { transfer_id: source.manifest.transfer_id } : {}) }
+          details: {
+            source_workspace_id: source.manifest.workspace_id,
+            ...(sourceManifestOrganizationId(source.manifest) ? { source_organization_id: sourceManifestOrganizationId(source.manifest) } : {}),
+            target_organization_id: targetOrganizationId,
+            ...(source.manifest.transfer_id ? { transfer_id: source.manifest.transfer_id } : {})
+          }
         });
       });
       return {
@@ -750,7 +779,14 @@ export class WorkspaceBundleV3Service {
     options: { includeLegacyLearning?: boolean; excludeMembershipAccountIds?: readonly string[] } = {}
   ): Promise<WorkspaceSnapshot> {
     return this.store.database.withReadSnapshot(context, async (sql) => {
-      const workspace = await sql.query<Record<string, unknown>>("SELECT id, name, hosting_mode, database_placement, storage_namespace, created_by, version, created_at, updated_at FROM workspaces WHERE id = $1", [context.workspaceId]);
+      const workspace = await sql.query<Record<string, unknown>>("SELECT id, name, organization_id, hosting_mode, database_placement, storage_namespace, created_by, version, created_at, updated_at FROM workspaces WHERE id = $1", [context.workspaceId]);
+      // Keep the migration level in the manifest so a restore can be
+      // diagnosed against the source schema.  Older test fixtures/databases
+      // may not expose this table; the historical V3 value remains a safe
+      // compatibility fallback until the dedicated migration is applied.
+      const schema = await sql.query<{ revision: number | string | null }>(
+        "SELECT MAX(version)::TEXT AS revision FROM samurai_server_schema_migrations"
+      );
       const accounts = await sql.query<Record<string, unknown>>("SELECT id, public_key, display_name, status, created_at, updated_at FROM samurai_list_workspace_account_identities($1) ORDER BY id", [context.workspaceId]);
       const rooms = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, parent_room_id, name, version, created_by, created_at, updated_at FROM rooms WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const memberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM workspace_members WHERE workspace_id = $1 ORDER BY account_id", [context.workspaceId]);
@@ -780,6 +816,7 @@ export class WorkspaceBundleV3Service {
       const includeLegacyLearning = options.includeLegacyLearning !== false;
       return {
         workspace: workspaceRow,
+        schemaRevision: normalizeSchemaRevision(schema.rows[0]?.revision),
         accounts: accounts.rows,
         rooms: rooms.rows,
         memberships: memberships.rows.filter((row) => !excludedMemberships.has(String(row.account_id ?? ""))),
@@ -920,6 +957,8 @@ interface IncomingBundleMetadata {
   operation_id: string;
   target_workspace_id: string;
   target_workspace_name?: string;
+  /** Required for new staged imports; optional while reading old metadata. */
+  target_organization_id?: string;
   manifest: WorkspaceBundleV3Manifest;
   created_at?: string;
   expires_at?: string;
@@ -935,13 +974,14 @@ interface IncomingBundleCompletion {
   completed_at: string;
 }
 
-function incomingMetadataRequest(metadata: Pick<IncomingBundleMetadata, "format_version" | "account_id" | "operation_id" | "target_workspace_id" | "target_workspace_name" | "manifest">): Record<string, unknown> {
+function incomingMetadataRequest(metadata: Pick<IncomingBundleMetadata, "format_version" | "account_id" | "operation_id" | "target_workspace_id" | "target_workspace_name" | "target_organization_id" | "manifest">): Record<string, unknown> {
   return {
     format_version: metadata.format_version,
     account_id: metadata.account_id,
     operation_id: metadata.operation_id,
     target_workspace_id: metadata.target_workspace_id,
     ...(metadata.target_workspace_name ? { target_workspace_name: metadata.target_workspace_name } : {}),
+    ...(metadata.target_organization_id ? { target_organization_id: metadata.target_organization_id } : {}),
     manifest: metadata.manifest
   };
 }
@@ -979,13 +1019,54 @@ function completionResult(completion: IncomingBundleCompletion): {
 async function assertImportedBundleMatches(
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-  manifest: WorkspaceBundleV3Manifest
+  manifest: WorkspaceBundleV3Manifest,
+  targetOrganizationId: string
 ): Promise<void> {
-  const result = await store.database.withContext(context, async (sql) => sql.query<{ sha256: string }>(
-    "SELECT sha256 FROM workspace_bundles WHERE workspace_id = $1 AND sha256 = $2",
-    [context.workspaceId, manifest.integrity_hash]
+  const result = await store.database.withContext(context, async (sql) => {
+    const bundle = await sql.query<{ sha256: string }>(
+      "SELECT sha256 FROM workspace_bundles WHERE workspace_id = $1 AND sha256 = $2",
+      [context.workspaceId, manifest.integrity_hash]
+    );
+    if (!bundle.rows[0]) return { bundle: false, organizationId: undefined };
+    const workspace = await sql.query<{ organization_id: string | null }>(
+      "SELECT organization_id FROM workspaces WHERE id = $1",
+      [context.workspaceId]
+    );
+    return { bundle: true, organizationId: workspace.rows[0]?.organization_id ?? undefined };
+  });
+  if (!result.bundle) throw new WorkspaceServerError("workspace_import_target_exists", 409);
+  if (result.organizationId !== undefined && result.organizationId !== targetOrganizationId) {
+    throw new WorkspaceServerError("workspace_import_target_organization_mismatch", 409);
+  }
+}
+
+async function assertTargetWorkspaceOrganization(
+  store: WorkspaceServerStore,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  targetOrganizationId: string
+): Promise<void> {
+  const result = await store.database.withContext(context, async (sql) => sql.query<{ organization_id: string | null }>(
+    "SELECT organization_id FROM workspaces WHERE id = $1",
+    [context.workspaceId]
   ));
-  if (!result.rows[0]) throw new WorkspaceServerError("workspace_import_target_exists", 409);
+  const organizationId = result.rows[0]?.organization_id;
+  if (organizationId !== undefined && organizationId !== null && organizationId !== targetOrganizationId) {
+    throw new WorkspaceServerError("workspace_import_target_organization_mismatch", 409);
+  }
+}
+
+async function assertTargetOrganizationAdmin(
+  store: WorkspaceServerStore,
+  accountId: string,
+  targetOrganizationId: string
+): Promise<void> {
+  const result = await store.database.withContext({ accountId }, async (sql) => sql.query<{ allowed: boolean }>(
+    "SELECT samurai_can_organization($1, 'admin') AS allowed",
+    [targetOrganizationId]
+  ));
+  if (result.rows[0]?.allowed !== true) {
+    throw new WorkspaceServerError("organization_admin_permission_required", 403);
+  }
 }
 
 export async function runExclusiveWorkspaceTransferExport<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -1034,6 +1115,50 @@ function snapshotFingerprint(snapshot: WorkspaceSnapshot): string {
   return hashText(canonicalBundleJson(snapshot));
 }
 
+function normalizeSchemaRevision(value: unknown): number {
+  const revision = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : legacyBundleSchemaRevision;
+}
+
+function optionalOpaqueId(value: unknown, code: string): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new WorkspaceServerError(code, 400);
+  return assertOpaqueId(value, code);
+}
+
+function sourceManifestOrganizationId(manifest: WorkspaceBundleV3Manifest): string | undefined {
+  const candidate = manifest as WorkspaceBundleV3ManifestWithProvenance;
+  const nested = optionalOpaqueId(candidate.source?.organization_id, "organization_id_invalid");
+  const topLevel = optionalOpaqueId(candidate.source_organization_id, "organization_id_invalid");
+  if (nested && topLevel && nested !== topLevel) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
+  return topLevel ?? nested;
+}
+
+function bundleV3IntegrityPayload(manifest: WorkspaceBundleV3Manifest): Record<string, unknown> {
+  const candidate = manifest as WorkspaceBundleV3ManifestWithProvenance;
+  const sourceOrganizationId = sourceManifestOrganizationId(manifest);
+  // The first V3 contract hashed only file names/counts. Preserve that exact
+  // formula for old bundles; provenance-bearing manifests use a distinct
+  // payload so those fields cannot be edited without invalidating the hash.
+  if (candidate.schema_revision === undefined && sourceOrganizationId === undefined) {
+    return { files: manifest.files, record_counts: manifest.record_counts };
+  }
+  return {
+    files: manifest.files,
+    record_counts: manifest.record_counts,
+    source: {
+      hosting_mode: manifest.source.hosting_mode,
+      database_placement: manifest.source.database_placement,
+      ...(sourceOrganizationId ? { organization_id: sourceOrganizationId } : {})
+    },
+    ...(manifest.schema_version !== undefined ? { schema_version: manifest.schema_version } : {}),
+    ...(candidate.schema_revision !== undefined ? { schema_revision: candidate.schema_revision } : {}),
+    ...(manifest.transfer_id ? { transfer_id: manifest.transfer_id } : {})
+  };
+}
+
 /** PostgreSQL returns TIMESTAMPTZ columns as Date instances. Bundle JSON must
  * preserve them as ISO strings; canonicalJson alone would see a Date as an
  * object with no enumerable fields and serialize it as {}. */
@@ -1075,6 +1200,7 @@ export async function readWorkspaceTransfer(
 
 interface WorkspaceSnapshot {
   workspace: Record<string, unknown>;
+  schemaRevision: number;
   accounts: Record<string, unknown>[];
   rooms: Record<string, unknown>[];
   memberships: Record<string, unknown>[];
@@ -1167,20 +1293,28 @@ async function writeBundleDirectory(input: {
     learning_resource_uses: input.snapshot.learningResourceUses.length
   };
   const source = input.snapshot.workspace;
-  const manifest: WorkspaceBundleV3Manifest = {
+  const sourceOrganizationId = optionalOpaqueId(source.organization_id, "organization_id_invalid");
+  const schemaRevision = input.snapshot.schemaRevision;
+  const manifest = {
     format_version: 3,
     workspace_id: input.workspaceId,
     exported_at: new Date().toISOString(),
     source: {
       hosting_mode: String(source.hosting_mode) as WorkspaceServerMode,
-      database_placement: String(source.database_placement) as "shared" | "dedicated"
+      database_placement: String(source.database_placement) as "shared" | "dedicated",
+      ...(sourceOrganizationId ? { organization_id: sourceOrganizationId } : {})
     },
-    schema_version: 26,
+    // `schema_version` is retained for older readers. New readers use the
+    // explicit revision field and the Organization reference below.
+    schema_version: schemaRevision,
+    schema_revision: schemaRevision,
+    ...(sourceOrganizationId ? { source_organization_id: sourceOrganizationId } : {}),
     ...(input.transferId ? { transfer_id: input.transferId } : {}),
     files: hashes,
     record_counts: recordCounts,
-    integrity_hash: hashText(canonicalJson({ files: hashes, record_counts: recordCounts }))
-  };
+    integrity_hash: ""
+  } satisfies WorkspaceBundleV3ManifestWithProvenance;
+  manifest.integrity_hash = hashText(canonicalJson(bundleV3IntegrityPayload(manifest)));
   await writeFile(path.join(input.directory, manifestFile), canonicalJson(manifest), { flag: "wx", mode: 0o600 });
   return { manifest };
 }
@@ -1188,7 +1322,7 @@ async function writeBundleDirectory(input: {
 export async function verifyWorkspaceBundleV3(directory: string): Promise<{ directory: string; manifest: WorkspaceBundleV3Manifest }> {
   const root = path.resolve(directory);
   const manifestRaw = await readFile(path.join(root, manifestFile), "utf8");
-  const manifest = JSON.parse(manifestRaw) as WorkspaceBundleV3Manifest;
+  const manifest = JSON.parse(manifestRaw) as WorkspaceBundleV3ManifestWithProvenance;
   if (!manifest || manifest.format_version !== 3 || !manifest.files || !manifest.record_counts) throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
   assertOpaqueId(manifest.workspace_id, "workspace_bundle_workspace_id_invalid");
   if (manifest.source?.hosting_mode !== "hosted" && manifest.source?.hosting_mode !== "self_host") throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
@@ -1196,12 +1330,23 @@ export async function verifyWorkspaceBundleV3(directory: string): Promise<{ dire
   if (manifest.schema_version !== undefined && (!Number.isSafeInteger(manifest.schema_version) || manifest.schema_version < 1)) {
     throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
   }
+  if (manifest.schema_revision !== undefined && (!Number.isSafeInteger(manifest.schema_revision) || manifest.schema_revision < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
+  if (manifest.schema_version !== undefined && manifest.schema_revision !== undefined
+    && manifest.schema_version !== manifest.schema_revision) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
+  const sourceOrganizationId = sourceManifestOrganizationId(manifest);
+  if (manifest.source_organization_id !== undefined && !sourceOrganizationId) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
   if (manifest.transfer_id !== undefined) assertOpaqueId(manifest.transfer_id, "workspace_transfer_id_invalid");
   if (Object.keys(manifest.files).length > WORKSPACE_BUNDLE_MAX_ENTRIES) throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 413);
   assertBundleUsage(await measureBundleUsage(root), "workspace_bundle_v3_transport_too_large");
   const actual = await hashBundleFiles(root, false);
   if (canonicalJson(actual) !== canonicalJson(manifest.files)) throw new WorkspaceServerError("workspace_bundle_v3_hash_mismatch", 400);
-  if (manifest.integrity_hash !== hashText(canonicalJson({ files: manifest.files, record_counts: manifest.record_counts }))) {
+  if (manifest.integrity_hash !== hashText(canonicalJson(bundleV3IntegrityPayload(manifest)))) {
     throw new WorkspaceServerError("workspace_bundle_v3_integrity_hash_mismatch", 400);
   }
   const expected = new Set([workspaceFile, ...coreJsonlFiles]);
@@ -1288,6 +1433,7 @@ async function importSnapshot(sql: WorkspaceSql, input: {
   targetWorkspaceName?: string;
   ownerAccountId: string;
   mode: WorkspaceServerMode;
+  targetOrganizationId: string;
 }): Promise<void> {
   for (const row of await readJsonl(path.join(input.sourceDirectory, "accounts.jsonl"))) {
     const accountId = String(row.id);
@@ -1364,7 +1510,7 @@ async function importSnapshot(sql: WorkspaceSql, input: {
       await sql.query(`INSERT INTO ${table}(${sqlColumns}) VALUES ($1, ${placeholders})`, [input.targetWorkspaceId, ...values]);
     }
   }
-  await importWorkspaceEvents(sql, input.targetWorkspaceId, await readJsonl(path.join(input.sourceDirectory, "events.jsonl")));
+  await importWorkspaceEvents(sql, input.targetWorkspaceId, input.targetOrganizationId, await readJsonl(path.join(input.sourceDirectory, "events.jsonl")));
   // Learning data is part of the Workspace's portable history.  It is kept
   // separate from generic records so Restore cannot accidentally turn a
   // historical note into executable state.  A running job has no portable
@@ -1517,6 +1663,7 @@ const workspaceEventPublicColumns = [
 async function importWorkspaceEvents(
   sql: WorkspaceSql,
   targetWorkspaceId: string,
+  targetOrganizationId: string,
   rows: Record<string, unknown>[]
 ): Promise<void> {
   for (const row of rows) {
@@ -1526,6 +1673,14 @@ async function importWorkspaceEvents(
     const columns = [...workspaceEventBaseColumns] as string[];
     const values = workspaceEventBaseColumns.map((column) => jsonColumnValue(row[column]));
     for (const column of workspaceEventPublicColumns) {
+      // Event scope follows the restored Workspace's target Organization.
+      // A source value is provenance only and must never carry source-tenant
+      // visibility into the target.
+      if (column === "organization_id") {
+        columns.push(column);
+        values.push(targetOrganizationId);
+        continue;
+      }
       if (!(column in row)) continue;
       columns.push(column);
       values.push(jsonColumnValue(row[column]));
@@ -1727,6 +1882,11 @@ function assertPortableEventFields(row: Record<string, unknown>): void {
 function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rowsByFile: Map<string, Record<string, unknown>[]>): void {
   const workspace = rowsByFile.get(workspaceFile)?.[0];
   if (workspace?.id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+  const workspaceOrganizationId = optionalOpaqueId(workspace?.organization_id, "workspace_bundle_v3_schema_invalid");
+  const manifestOrganizationId = sourceManifestOrganizationId(manifest);
+  if (workspaceOrganizationId && manifestOrganizationId && workspaceOrganizationId !== manifestOrganizationId) {
+    throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+  }
   const sourceOwnerAccountId = opaquePortableValue(workspace?.created_by, "workspace_bundle_v3_schema_invalid");
   const accountIds = new Set<string>();
   const accountStates = new Map<string, "active" | "disabled">();
@@ -2140,6 +2300,71 @@ function jsonColumnValue(value: unknown): unknown {
   return value;
 }
 
+export function assertWorkspaceBundleTargetOrganizationId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new WorkspaceServerError("workspace_bundle_target_organization_required", 400);
+  }
+  return assertOpaqueId(value.trim(), "organization_id_invalid");
+}
+
+interface WorkspaceImportStartInput {
+  targetWorkspaceId: string;
+  workspaceName: string;
+  mode: WorkspaceServerMode;
+  databasePlacement: "shared" | "dedicated";
+  importId: string;
+  sourceWorkspaceVersion: number;
+  targetOrganizationId: string;
+}
+
+/**
+ * The Organization migration extends the import function without making old
+ * V3 bundles unreadable. Resolve the installed function signature first so a
+ * server upgraded before the migration can still report the normal schema
+ * readiness error instead of guessing an Organization or bypassing RLS.
+ */
+async function startWorkspaceImport(sql: WorkspaceSql, input: WorkspaceImportStartInput): Promise<void> {
+  const functions = await sql.query<{ pronargs: number | string; proargnames: string[] | null }>(
+    `SELECT p.pronargs, p.proargnames
+       FROM pg_proc AS p
+       JOIN pg_namespace AS n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'samurai_start_workspace_import'
+      ORDER BY p.pronargs DESC
+      LIMIT 1`
+  );
+  const functionRow = functions.rows[0];
+  const argumentCount = Number(functionRow?.pronargs ?? 0);
+  const legacyValues = [
+    input.targetWorkspaceId,
+    input.workspaceName,
+    input.mode,
+    input.databasePlacement,
+    input.importId,
+    input.sourceWorkspaceVersion
+  ];
+  if (argumentCount >= 7) {
+    const names = Array.isArray(functionRow?.proargnames) ? functionRow.proargnames : [];
+    const fallbackValues = [...legacyValues, input.targetOrganizationId];
+    const values = Array.from({ length: argumentCount }, (_, index) => {
+      const name = names[index]?.toLowerCase() ?? "";
+      if (name.includes("organization")) return input.targetOrganizationId;
+      if (name.includes("version")) return input.sourceWorkspaceVersion;
+      if (name.includes("workspace") && name.includes("name")) return input.workspaceName;
+      if (name.includes("workspace")) return input.targetWorkspaceId;
+      if (name.includes("hosting") || name.includes("mode")) return input.mode;
+      if (name.includes("placement")) return input.databasePlacement;
+      if (name.includes("import") || name.includes("session")) return input.importId;
+      return fallbackValues[index];
+    });
+    await sql.query(
+      `SELECT samurai_start_workspace_import(${values.map((_, index) => `$${index + 1}`).join(", ")})`,
+      values
+    );
+    return;
+  }
+  await sql.query("SELECT samurai_start_workspace_import($1, $2, $3, $4, $5, $6)", legacyValues);
+}
+
 async function pathExists(target: string): Promise<boolean> {
   return lstat(target).then(() => true).catch(() => false);
 }
@@ -2191,6 +2416,20 @@ function assertBundleManifestCandidate(manifest: WorkspaceBundleV3Manifest): voi
   assertOpaqueId(manifest.workspace_id, "workspace_bundle_workspace_id_invalid");
   if (manifest.source.hosting_mode !== "hosted" && manifest.source.hosting_mode !== "self_host") throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
   if (manifest.source.database_placement !== "shared" && manifest.source.database_placement !== "dedicated") throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  const candidate = manifest as WorkspaceBundleV3ManifestWithProvenance;
+  sourceManifestOrganizationId(manifest);
+  if (manifest.schema_version !== undefined
+    && (!Number.isSafeInteger(manifest.schema_version) || manifest.schema_version < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
+  if (candidate.schema_revision !== undefined
+    && (!Number.isSafeInteger(candidate.schema_revision) || candidate.schema_revision < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
+  if (manifest.schema_version !== undefined && candidate.schema_revision !== undefined
+    && manifest.schema_version !== candidate.schema_revision) {
+    throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
+  }
   if (!/^[a-f0-9]{64}$/.test(manifest.integrity_hash)) throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
   for (const [relativePath, hash] of Object.entries(manifest.files)) {
     assertSafeRelativePath(relativePath);

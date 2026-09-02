@@ -143,9 +143,11 @@ export function isPostgresExternalIntegrationPath(pathname: string): boolean {
 
 export function externalIntegrationRequestWorkspaceId(
   request: { query?: Record<string, unknown>; body?: unknown; headers?: Record<string, unknown> },
-  config: Pick<WorkspaceServerConfig, "mode" | "selfHostWorkspaceId">
+  _config: Pick<WorkspaceServerConfig, "mode" | "selfHostWorkspaceId">
 ): string | undefined {
-  if (config.mode === "self_host") return config.selfHostWorkspaceId;
+  // Self-host is a deployment mode, not a tenant selector.  Resolve the
+  // requested Workspace through the same authenticated authorization path as
+  // Hosted; a legacy configured Workspace ID is never a request fallback.
   const header = request.headers?.["x-samurai-workspace-id"];
   if (typeof header === "string" && header.trim()) return header.trim();
   const query = request.query?.workspace_id;

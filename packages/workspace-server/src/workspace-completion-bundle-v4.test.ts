@@ -107,11 +107,33 @@ describe("Workspace Bundle v4 HTTP transport", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("carries source Organization provenance from the embedded v3 Bundle", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-provenance-"));
+    try {
+      const source = path.join(root, "source");
+      await writeMinimalV4Bundle(source, {
+        provenance: { sourceOrganizationId: "organization_source", schemaRevision: 78 }
+      });
+
+      const verified = await verifyWorkspaceBundleV4(source);
+      expect(verified.manifest).toMatchObject({
+        source_organization_id: "organization_source",
+        schema_revision: 78,
+        schema_version: 78
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function writeMinimalV4Bundle(
   root: string,
-  input: { migrationReceipts?: readonly Record<string, unknown>[] } = {}
+  input: {
+    migrationReceipts?: readonly Record<string, unknown>[];
+    provenance?: { sourceOrganizationId: string; schemaRevision: number };
+  } = {}
 ): Promise<void> {
   const base = path.join(root, "base-v3");
   await mkdir(base, { recursive: true, mode: 0o700 });
@@ -150,16 +172,40 @@ async function writeMinimalV4Bundle(
   };
   const baseHashes = Object.fromEntries(Object.entries(baseFiles).map(([name, content]) => [name, hash(content)]));
   for (const [name, content] of Object.entries(baseFiles)) await writeFile(path.join(base, name), content, "utf8");
-  const baseIntegrityHash = hash(canonicalJson({ files: baseHashes, record_counts: { rooms: 0, memberships: 1, room_memberships: 0, records: 0, events: 0, jobs: 0, operations: 0, invitations: 0, audits: 0, files: 0 } }));
+  const baseRecordCounts = { rooms: 0, memberships: 1, room_memberships: 0, records: 0, events: 0, jobs: 0, operations: 0, invitations: 0, audits: 0, files: 0 };
+  const baseProvenance = input.provenance;
+  const baseIntegrityPayload = baseProvenance
+    ? {
+      files: baseHashes,
+      record_counts: baseRecordCounts,
+      source: {
+        hosting_mode: "self_host",
+        database_placement: "dedicated",
+        organization_id: baseProvenance.sourceOrganizationId
+      },
+      schema_version: baseProvenance.schemaRevision,
+      schema_revision: baseProvenance.schemaRevision,
+      transfer_id: transferId
+    }
+    : { files: baseHashes, record_counts: baseRecordCounts };
+  const baseIntegrityHash = hash(canonicalJson(baseIntegrityPayload));
   await writeFile(path.join(base, "manifest.json"), canonicalJson({
     format_version: 3,
     workspace_id: workspaceId,
     exported_at: timestamp,
-    source: { hosting_mode: "self_host", database_placement: "dedicated" },
-    schema_version: 26,
+    source: {
+      hosting_mode: "self_host",
+      database_placement: "dedicated",
+      ...(baseProvenance ? { organization_id: baseProvenance.sourceOrganizationId } : {})
+    },
+    schema_version: baseProvenance?.schemaRevision ?? 26,
+    ...(baseProvenance ? {
+      source_organization_id: baseProvenance.sourceOrganizationId,
+      schema_revision: baseProvenance.schemaRevision
+    } : {}),
     transfer_id: transferId,
     files: baseHashes,
-    record_counts: { rooms: 0, memberships: 1, room_memberships: 0, records: 0, events: 0, jobs: 0, operations: 0, invitations: 0, audits: 0, files: 0 },
+    record_counts: baseRecordCounts,
     integrity_hash: baseIntegrityHash
   }), "utf8");
 
@@ -177,17 +223,43 @@ async function writeMinimalV4Bundle(
     key,
     key === "migration_receipts" ? migrationReceipts.length : 0
   ]));
-  await writeFile(path.join(root, "manifest.json"), canonicalJson({
+  const v4RecordCounts = recordCounts;
+  const v4ManifestBase = {
     format_version: 4,
     workspace_id: workspaceId,
     exported_at: timestamp,
     transfer_id: transferId,
+    ...(baseProvenance ? {
+      source_organization_id: baseProvenance.sourceOrganizationId,
+      schema_revision: baseProvenance.schemaRevision,
+      schema_version: baseProvenance.schemaRevision
+    } : {}),
     base_v3_integrity_hash: baseIntegrityHash,
     excluded_maintenance_account_ids: [],
     files,
-    record_counts: recordCounts,
-    integrity_hash: hash(canonicalJson({ files, record_counts: recordCounts, transfer_id: transferId, base_v3_integrity_hash: baseIntegrityHash, excluded_maintenance_account_ids: [] }))
-  }), "utf8");
+    record_counts: v4RecordCounts,
+    integrity_hash: ""
+  } as Record<string, unknown>;
+  const v4IntegrityPayload = baseProvenance
+    ? {
+      files,
+      record_counts: v4RecordCounts,
+      transfer_id: transferId,
+      base_v3_integrity_hash: baseIntegrityHash,
+      excluded_maintenance_account_ids: [],
+      source_organization_id: baseProvenance.sourceOrganizationId,
+      schema_revision: baseProvenance.schemaRevision,
+      schema_version: baseProvenance.schemaRevision
+    }
+    : {
+      files,
+      record_counts: v4RecordCounts,
+      transfer_id: transferId,
+      base_v3_integrity_hash: baseIntegrityHash,
+      excluded_maintenance_account_ids: []
+    };
+  v4ManifestBase.integrity_hash = hash(canonicalJson(v4IntegrityPayload));
+  await writeFile(path.join(root, "manifest.json"), canonicalJson(v4ManifestBase), "utf8");
 }
 
 async function hashFiles(root: string, prefix = ""): Promise<Record<string, string>> {

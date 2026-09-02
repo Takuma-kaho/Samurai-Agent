@@ -4727,6 +4727,13 @@ export class AgentRuntime {
       }
       return;
     }
+    // Organization administration is an Account/Organization boundary owned
+    // by Workspace Server. It must never fall through to the Room permission
+    // service: an Organization role does not imply Workspace or Room content
+    // access. The dedicated HTTP/API adapter resolves this scope instead.
+    if (entry.access.scope === "organization_control") {
+      throw new RuntimeRequestError("unavailable", `organization_operation_requires_account_boundary:${entry.id}`);
+    }
     if (!principal) throw new RuntimeRequestError("forbidden", "room_participant_required");
     // Collaboration has explicit target checks in RoomAgentDomainService. It
     // is deliberately not inferred from a command name here.

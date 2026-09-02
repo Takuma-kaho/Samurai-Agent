@@ -6,6 +6,7 @@
  * adding an operation without putting it here fails during definition setup.
  */
 export type RoomContentAction = "read" | "edit" | "execute";
+export type OrganizationControlAction = "read" | "manage" | "owner";
 
 export type DomainResourceTarget =
   | { kind: "artifact" | "memory" | "wiki" | "skill" | "file" | "generated_surface"; idField: string; onlyIfExisting?: boolean }
@@ -24,6 +25,9 @@ export type DomainAccessClassification =
   // to the internal scheduler ingress; the handler must resolve the Job's
   // persisted authority after it acquires the Job lock.
   | { scope: "automation_execution" }
+  // Organization administration is a separate boundary from Workspace/Room
+  // content. The Server resolves the Organization role for each action.
+  | { scope: "organization_control"; action: OrganizationControlAction }
   | { scope: "workspace_control" }
   | { scope: "legacy_owner" }
   | { scope: "room_content"; action: RoomContentAction; target?: DomainResourceTarget | readonly DomainResourceTarget[] };
@@ -53,6 +57,22 @@ register({ scope: "room_collaboration" },
 register({ scope: "gateway_admission" }, "gateway.inbound.route");
 
 register({ scope: "automation_execution" }, "automation.job.run");
+
+// Organization metadata and membership never imply Workspace/Room content
+// access. Owner-only operations are kept distinct so the Server can enforce
+// the last-Owner and cross-Organization transfer invariants.
+register({ scope: "organization_control", action: "read" },
+  "organization.list", "organization.view", "organization.member.list", "organization.invitation.list",
+  "organization.workspace.list", "workspace.organization.move.preflight", "workspace.organization.move.status");
+register({ scope: "organization_control", action: "manage" },
+  "organization.create", "organization.patch", "organization.member.invite", "organization.member.accept",
+  "organization.member.role.change", "organization.member.remove", "organization.member.leave",
+  "organization.invitation.revoke", "organization.invitation.reissue", "organization.invitation.extend",
+  "organization.workspace.create", "organization.workspace.member.grant", "organization.workspace.member.revoke",
+  "organization.workspace.archive", "organization.workspace.restore", "organization.workspace.delete",
+  "workspace.bundle.export", "workspace.bundle.restore");
+register({ scope: "organization_control", action: "owner" },
+  "organization.delete", "workspace.organization.move.commit");
 
 // These controls intentionally concern Workspace-wide operational state, not
 // Room content. They remain an explicit Workspace-admin path.

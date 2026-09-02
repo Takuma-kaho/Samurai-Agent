@@ -8722,6 +8722,1532 @@ const migrations: readonly WorkspaceServerMigration[] = [
         )
       )`
     ]
+  },
+  {
+    // Phase 2 Organization boundary.  This migration is deliberately
+    // additive: all previous migration rows remain immutable and every
+    // statement is safe to re-run if a deployment failed before the ledger
+    // row was committed.
+    version: 78,
+    name: "workspace_server_organization_boundary_and_workspace_backfill",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS organizations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL CHECK (btrim(name) <> ''),
+        icon TEXT,
+        description TEXT,
+        created_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        deleted_at TIMESTAMPTZ
+      )`,
+      `CREATE TABLE IF NOT EXISTS organization_members (
+        organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'guest')),
+        state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'removed')),
+        version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+        joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        removed_at TIMESTAMPTZ,
+        created_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        updated_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        PRIMARY KEY (organization_id, account_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS organization_invitations (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+        target_account_id TEXT REFERENCES accounts(id) ON DELETE RESTRICT,
+        token_hash TEXT NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+        role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'guest')),
+        version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+        expires_at TIMESTAMPTZ NOT NULL,
+        issued_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        revoked_at TIMESTAMPTZ,
+        accepted_by TEXT REFERENCES accounts(id) ON DELETE RESTRICT,
+        accepted_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`,
+      `CREATE TABLE IF NOT EXISTS organization_invitation_workspace_grants (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        invitation_id TEXT NOT NULL REFERENCES organization_invitations(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL,
+        workspace_role TEXT NOT NULL CHECK (workspace_role IN ('owner', 'admin', 'member', 'guest')),
+        room_id TEXT,
+        room_role TEXT CHECK (room_role IN ('owner', 'admin', 'member', 'guest')),
+        FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT,
+        UNIQUE (organization_id, invitation_id, id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS organization_operations (
+        actor_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        organization_id TEXT REFERENCES organizations(id) ON DELETE RESTRICT,
+        idempotency_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+        result JSONB,
+        error_code TEXT,
+        consumed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (actor_account_id, id),
+        UNIQUE (actor_account_id, idempotency_key)
+      )`,
+      `CREATE TABLE IF NOT EXISTS organization_events (
+        id BIGSERIAL PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind ~ '^[a-z][a-z0-9._-]{0,127}$'),
+        operation_id TEXT NOT NULL,
+        actor_account_id TEXT REFERENCES accounts(id) ON DELETE RESTRICT,
+        payload JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (jsonb_typeof(payload) = 'object'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (organization_id, kind, operation_id)
+      )`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS organization_members_active_unique ON organization_members(organization_id, account_id) WHERE state = 'active'",
+      "CREATE INDEX IF NOT EXISTS organization_members_account_index ON organization_members(account_id, state, joined_at)",
+      "CREATE INDEX IF NOT EXISTS organization_invitations_lookup_index ON organization_invitations(organization_id, expires_at) WHERE revoked_at IS NULL AND accepted_at IS NULL",
+      "CREATE INDEX IF NOT EXISTS organization_invitation_grants_lookup_index ON organization_invitation_workspace_grants(organization_id, invitation_id)",
+      "CREATE INDEX IF NOT EXISTS organization_operations_organization_index ON organization_operations(organization_id, updated_at DESC)",
+      "CREATE INDEX IF NOT EXISTS organization_events_replay_index ON organization_events(organization_id, id)",
+      "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS organization_id TEXT",
+      "ALTER TABLE workspace_events ADD COLUMN IF NOT EXISTS organization_id TEXT",
+      "ALTER TABLE organization_operations ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ",
+      "ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS workspaces_state_check",
+      "ALTER TABLE workspaces ADD CONSTRAINT workspaces_state_check CHECK (state IN ('active', 'read_only', 'archived', 'deleted'))",
+      `DO $organization_account_backfill$
+      DECLARE account_row RECORD;
+      DECLARE generated_organization_id TEXT;
+      DECLARE existing_creator TEXT;
+      BEGIN
+        FOR account_row IN SELECT id, display_name FROM accounts ORDER BY id LOOP
+          IF NOT EXISTS (
+            SELECT 1 FROM organization_members member
+            WHERE member.account_id = account_row.id AND member.state = 'active'
+          ) THEN
+            generated_organization_id := 'org_' || md5('samurai.legacy.organization|' || account_row.id);
+            SELECT organization.created_by INTO existing_creator
+            FROM organizations organization
+            WHERE organization.id = generated_organization_id
+            FOR UPDATE;
+            IF existing_creator IS NOT NULL AND existing_creator IS DISTINCT FROM account_row.id THEN
+              RAISE EXCEPTION 'organization_migration_id_conflict:%', account_row.id;
+            END IF;
+            INSERT INTO organizations(id, name, created_by)
+            VALUES (
+              generated_organization_id,
+              COALESCE(NULLIF(btrim(account_row.display_name), ''), 'Account') || ' Organization',
+              account_row.id
+            ) ON CONFLICT (id) DO NOTHING;
+            INSERT INTO organization_members(
+              organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+            ) VALUES (
+              generated_organization_id, account_row.id, 'owner', 'active', 1, NOW(), account_row.id, account_row.id
+            ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+              role = 'owner', state = 'active', removed_at = NULL,
+              updated_by = EXCLUDED.updated_by, version = organization_members.version + 1;
+          END IF;
+        END LOOP;
+      END
+      $organization_account_backfill$`,
+      `DO $organization_workspace_backfill$
+      DECLARE workspace_row RECORD;
+      DECLARE owner_count INTEGER;
+      DECLARE owner_account_id TEXT;
+      DECLARE owner_organization_count INTEGER;
+      DECLARE owner_organization_id TEXT;
+      BEGIN
+        FOR workspace_row IN
+          SELECT id, organization_id FROM workspaces ORDER BY id
+        LOOP
+          SELECT COUNT(*)::INTEGER, MIN(member.account_id)
+          INTO owner_count, owner_account_id
+          FROM workspace_members member
+          WHERE member.workspace_id = workspace_row.id
+            AND member.role = 'owner'
+            AND member.state = 'active';
+          IF owner_count <> 1 OR owner_account_id IS NULL THEN
+            RAISE EXCEPTION 'organization_migration_workspace_owner_unresolved:%', workspace_row.id;
+          END IF;
+          IF NOT EXISTS (
+            SELECT 1 FROM accounts account
+            WHERE account.id = owner_account_id
+          ) THEN
+            RAISE EXCEPTION 'organization_migration_owner_account_unresolved:%:%', workspace_row.id, owner_account_id;
+          END IF;
+          SELECT COUNT(*)::INTEGER, MIN(member.organization_id)
+          INTO owner_organization_count, owner_organization_id
+          FROM organization_members member
+          WHERE member.account_id = owner_account_id
+            AND member.role = 'owner'
+            AND member.state = 'active';
+          IF owner_organization_count <> 1 OR owner_organization_id IS NULL THEN
+            RAISE EXCEPTION 'organization_migration_owner_organization_unresolved:%:%', workspace_row.id, owner_account_id;
+          END IF;
+          IF workspace_row.organization_id IS NOT NULL
+             AND workspace_row.organization_id IS DISTINCT FROM owner_organization_id THEN
+            RAISE EXCEPTION 'organization_migration_workspace_organization_conflict:%', workspace_row.id;
+          END IF;
+          UPDATE workspaces
+          SET organization_id = owner_organization_id, updated_at = COALESCE(updated_at, NOW())
+          WHERE id = workspace_row.id AND organization_id IS NULL;
+        END LOOP;
+      END
+      $organization_workspace_backfill$`,
+      `DO $organization_member_backfill$
+      DECLARE member_row RECORD;
+      BEGIN
+        FOR member_row IN
+          SELECT workspace.organization_id, member.account_id, member.role, member.state, workspace.id AS workspace_id
+          FROM workspace_members member
+          JOIN workspaces workspace ON workspace.id = member.workspace_id
+          ORDER BY workspace.id, member.account_id
+        LOOP
+          IF NOT EXISTS (SELECT 1 FROM accounts account WHERE account.id = member_row.account_id) THEN
+            RAISE EXCEPTION 'organization_migration_member_account_unresolved:%:%', member_row.workspace_id, member_row.account_id;
+          END IF;
+          INSERT INTO organization_members(
+            organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by
+          ) VALUES (
+            member_row.organization_id,
+            member_row.account_id,
+            CASE WHEN member_row.role = 'owner' AND member_row.state = 'active' THEN 'owner' ELSE 'member' END,
+            CASE WHEN member_row.state = 'active' THEN 'active' ELSE 'removed' END,
+            1, NOW(), CASE WHEN member_row.state = 'active' THEN NULL ELSE NOW() END,
+            member_row.account_id, member_row.account_id
+          ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+            role = CASE
+              WHEN EXCLUDED.role = 'owner' THEN 'owner'
+              ELSE organization_members.role
+            END,
+            state = CASE
+              WHEN organization_members.state = 'active' OR EXCLUDED.state = 'active' THEN 'active'
+              ELSE 'removed'
+            END,
+            removed_at = CASE
+              WHEN organization_members.state = 'active' OR EXCLUDED.state = 'active' THEN NULL
+              ELSE COALESCE(organization_members.removed_at, EXCLUDED.removed_at)
+            END,
+            updated_by = EXCLUDED.updated_by,
+            version = organization_members.version + 1;
+        END LOOP;
+      END
+      $organization_member_backfill$`,
+      `DO $organization_invitation_backfill$
+      DECLARE invitation_row RECORD;
+      DECLARE organization_invitation_id TEXT;
+      DECLARE organization_grant_id TEXT;
+      DECLARE organization_role TEXT;
+      BEGIN
+        FOR invitation_row IN
+          SELECT invitation.workspace_id, invitation.id, invitation.room_id, invitation.token_hash,
+                 invitation.workspace_role, invitation.room_role, invitation.created_by,
+                 workspace.organization_id
+          FROM workspace_invitations invitation
+          JOIN workspaces workspace ON workspace.id = invitation.workspace_id
+          ORDER BY invitation.workspace_id, invitation.id
+        LOOP
+          IF NOT EXISTS (SELECT 1 FROM accounts account WHERE account.id = invitation_row.created_by) THEN
+            RAISE EXCEPTION 'organization_migration_invitation_issuer_unresolved:%:%', invitation_row.workspace_id, invitation_row.id;
+          END IF;
+          organization_invitation_id := 'orginv_' || md5('samurai.workspace.invitation|' || invitation_row.workspace_id || '|' || invitation_row.id);
+          organization_role := CASE
+            WHEN invitation_row.workspace_role IN ('owner', 'admin') THEN 'member'
+            ELSE invitation_row.workspace_role
+          END;
+          INSERT INTO organization_invitations(
+            id, organization_id, token_hash, role, version, expires_at, issued_by,
+            revoked_at, accepted_by, accepted_at, created_at, updated_at
+          )
+          SELECT organization_invitation_id, invitation_row.organization_id, invitation_row.token_hash,
+                 organization_role, 1, invitation.expires_at, invitation.created_by,
+                 invitation.revoked_at, invitation.accepted_by, invitation.accepted_at,
+                 invitation.created_at, invitation.created_at
+          FROM workspace_invitations invitation
+          WHERE invitation.workspace_id = invitation_row.workspace_id AND invitation.id = invitation_row.id
+          ON CONFLICT (id) DO NOTHING;
+          organization_grant_id := 'orggrant_' || md5('samurai.workspace.invitation.grant|' || invitation_row.workspace_id || '|' || invitation_row.id);
+          INSERT INTO organization_invitation_workspace_grants(
+            id, organization_id, invitation_id, workspace_id, workspace_role, room_id, room_role
+          ) VALUES (
+            organization_grant_id, invitation_row.organization_id, organization_invitation_id,
+            invitation_row.workspace_id, invitation_row.workspace_role, invitation_row.room_id, invitation_row.room_role
+          ) ON CONFLICT (id) DO NOTHING;
+        END LOOP;
+      END
+      $organization_invitation_backfill$`,
+      `DO $organization_event_backfill$
+      DECLARE conflicting_event RECORD;
+      BEGIN
+        SELECT event.id, event.organization_id AS event_organization_id, workspace.organization_id AS workspace_organization_id
+        INTO conflicting_event
+        FROM workspace_events event
+        JOIN workspaces workspace ON workspace.id = event.workspace_id
+        WHERE event.organization_id IS NOT NULL
+          AND event.organization_id IS DISTINCT FROM workspace.organization_id
+        LIMIT 1;
+        IF FOUND THEN
+          RAISE EXCEPTION 'workspace_event_organization_conflict:%:%:%', conflicting_event.id,
+            conflicting_event.event_organization_id, conflicting_event.workspace_organization_id;
+        END IF;
+        UPDATE workspace_events event
+        SET organization_id = workspace.organization_id
+        FROM workspaces workspace
+        WHERE workspace.id = event.workspace_id AND event.organization_id IS NULL;
+      END
+      $organization_event_backfill$`,
+      `DO $organization_constraint_backfill$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM workspaces WHERE organization_id IS NULL) THEN
+          RAISE EXCEPTION 'organization_migration_workspace_organization_null';
+        END IF;
+        IF EXISTS (SELECT 1 FROM workspace_events WHERE organization_id IS NULL) THEN
+          RAISE EXCEPTION 'organization_migration_event_organization_null';
+        END IF;
+      END
+      $organization_constraint_backfill$`,
+      "ALTER TABLE workspaces ALTER COLUMN organization_id SET NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN organization_id SET NOT NULL",
+      "CREATE UNIQUE INDEX IF NOT EXISTS workspaces_organization_id_id_unique ON workspaces(organization_id, id)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS workspaces_id_organization_id_unique ON workspaces(id, organization_id)",
+      "ALTER TABLE workspace_events DROP CONSTRAINT IF EXISTS workspace_events_workspace_organization_fkey",
+      `DO $organization_foreign_keys$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspaces_organization_id_fkey') THEN
+          ALTER TABLE workspaces ADD CONSTRAINT workspaces_organization_id_fkey
+            FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_events_organization_id_fkey') THEN
+          ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_organization_id_fkey
+            FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organization_invitation_grant_workspace_fkey') THEN
+          ALTER TABLE organization_invitation_workspace_grants ADD CONSTRAINT organization_invitation_grant_workspace_fkey
+            FOREIGN KEY (organization_id, workspace_id) REFERENCES workspaces(organization_id, id) ON DELETE RESTRICT;
+        END IF;
+      END
+      $organization_foreign_keys$`,
+      `CREATE OR REPLACE FUNCTION samurai_default_organization_id(target_account_id TEXT)
+      RETURNS TEXT
+      LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
+        SELECT member.organization_id
+        FROM organization_members member
+        JOIN organizations organization ON organization.id = member.organization_id
+        WHERE member.account_id = target_account_id
+          AND member.role = 'owner'
+          AND member.state = 'active'
+          AND organization.deleted_at IS NULL
+        ORDER BY member.joined_at, member.organization_id
+        LIMIT 1
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_organization_role(target_organization_id TEXT)
+      RETURNS TEXT
+      LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
+        SELECT member.role
+        FROM organization_members member
+        JOIN organizations organization ON organization.id = member.organization_id
+        WHERE member.organization_id = target_organization_id
+          AND member.account_id = samurai_current_account_id()
+          AND member.state = 'active'
+          AND organization.deleted_at IS NULL
+        LIMIT 1
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_can_organization(target_organization_id TEXT, required_role TEXT)
+      RETURNS BOOLEAN
+      LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
+        SELECT samurai_role_rank(samurai_organization_role(target_organization_id)) >= samurai_role_rank(required_role)
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_list_active_workspace_ids()
+      RETURNS TABLE(workspace_id TEXT, account_id TEXT, hosting_mode TEXT)
+      LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
+        SELECT DISTINCT ON (workspace.id)
+          workspace.id, owner.account_id, workspace.hosting_mode
+        FROM workspaces workspace
+        JOIN workspace_members owner
+          ON owner.workspace_id = workspace.id
+         AND owner.role = 'owner'
+         AND owner.state = 'active'
+        WHERE workspace.state = 'active'
+          AND samurai_context_value('samurai.worker') = '1'
+        ORDER BY workspace.id, owner.account_id
+      $$`,
+      // The seven-argument overload is the explicit Organization-scoped
+      // creation path. The six-argument compatibility function below keeps
+      // old callers working by resolving the caller's deterministic default
+      // Organization; it never guesses from a Workspace member.
+      `CREATE OR REPLACE FUNCTION samurai_create_workspace(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        default_room_id TEXT,
+        default_room_name TEXT,
+        target_organization_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL
+          OR target_organization_id IS NULL THEN
+          RAISE EXCEPTION 'workspace_creation_context_invalid';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = samurai_current_account_id() AND status = 'active') THEN
+          RAISE EXCEPTION 'account_not_found';
+        END IF;
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_hosting_mode NOT IN ('hosted', 'self_host') OR target_database_placement NOT IN ('shared', 'dedicated') THEN
+          RAISE EXCEPTION 'workspace_creation_invalid';
+        END IF;
+        IF EXISTS (SELECT 1 FROM workspaces WHERE id = target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_id_conflict';
+        END IF;
+        INSERT INTO workspaces(id, organization_id, name, state, hosting_mode, storage_namespace, database_placement, created_by)
+        VALUES (target_workspace_id, target_organization_id, workspace_name, 'active', target_hosting_mode,
+          'workspaces/' || target_workspace_id, target_database_placement, samurai_current_account_id());
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version)
+        VALUES (target_workspace_id, samurai_current_account_id(), 'owner', 'active', 1);
+        INSERT INTO rooms(workspace_id, id, name, created_by)
+        VALUES (target_workspace_id, default_room_id, default_room_name, samurai_current_account_id());
+        INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version)
+        VALUES (target_workspace_id, default_room_id, samurai_current_account_id(), 'owner', 'active', 1);
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_workspace(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        default_room_id TEXT,
+        default_room_name TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF samurai_default_organization_id(samurai_current_account_id()) IS NULL THEN
+          RAISE EXCEPTION 'organization_required';
+        END IF;
+        PERFORM samurai_create_workspace(
+          target_workspace_id, workspace_name, target_hosting_mode,
+          target_database_placement, default_room_id, default_room_name,
+          samurai_default_organization_id(samurai_current_account_id())
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_start_workspace_import(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        import_session_id TEXT,
+        target_initial_version BIGINT,
+        target_organization_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL
+          OR target_organization_id IS NULL THEN
+          RAISE EXCEPTION 'workspace_import_context_invalid';
+        END IF;
+        IF target_initial_version < 1 THEN RAISE EXCEPTION 'workspace_import_invalid'; END IF;
+        IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = samurai_current_account_id() AND status = 'active') THEN
+          RAISE EXCEPTION 'account_not_found';
+        END IF;
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_hosting_mode NOT IN ('hosted', 'self_host') OR target_database_placement NOT IN ('shared', 'dedicated') THEN
+          RAISE EXCEPTION 'workspace_import_invalid';
+        END IF;
+        IF EXISTS (SELECT 1 FROM workspaces WHERE id = target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_target_exists';
+        END IF;
+        INSERT INTO workspaces(id, organization_id, name, state, hosting_mode, storage_namespace, database_placement, created_by, version)
+        VALUES (target_workspace_id, target_organization_id, workspace_name, 'read_only', target_hosting_mode,
+          'workspaces/' || target_workspace_id, target_database_placement, samurai_current_account_id(), target_initial_version);
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version)
+        VALUES (target_workspace_id, samurai_current_account_id(), 'owner', 'active', 1);
+        INSERT INTO workspace_import_sessions(workspace_id, id, account_id, state, expires_at)
+        VALUES (target_workspace_id, import_session_id, samurai_current_account_id(), 'writing', NOW() + INTERVAL '1 hour');
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_start_workspace_import(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        import_session_id TEXT,
+        target_initial_version BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF samurai_default_organization_id(samurai_current_account_id()) IS NULL THEN
+          RAISE EXCEPTION 'organization_required';
+        END IF;
+        PERFORM samurai_start_workspace_import(
+          target_workspace_id, workspace_name, target_hosting_mode,
+          target_database_placement, import_session_id, target_initial_version,
+          samurai_default_organization_id(samurai_current_account_id())
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_organization(
+        target_organization_id TEXT,
+        target_name TEXT,
+        target_icon TEXT,
+        target_description TEXT,
+        target_operation_id TEXT
+      ) RETURNS TEXT
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_organization organizations%ROWTYPE;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF samurai_current_account_id() IS NULL
+          OR target_organization_id !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+          OR target_operation_id IS NULL OR btrim(target_operation_id) = ''
+          OR target_name IS NULL OR btrim(target_name) = '' THEN
+          RAISE EXCEPTION 'organization_input_invalid';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM accounts account
+          WHERE account.id = samurai_current_account_id() AND account.status = 'active'
+        ) THEN RAISE EXCEPTION 'account_not_found'; END IF;
+        SELECT * INTO existing_organization
+        FROM organizations organization
+        WHERE organization.id = target_organization_id
+        FOR UPDATE;
+        IF FOUND THEN
+          IF existing_organization.created_by IS DISTINCT FROM samurai_current_account_id()
+            OR existing_organization.deleted_at IS NOT NULL THEN
+            RAISE EXCEPTION 'organization_id_conflict';
+          END IF;
+          RETURN target_organization_id;
+        END IF;
+        INSERT INTO organizations(id, name, icon, description, created_by)
+        VALUES (
+          target_organization_id, btrim(target_name), NULLIF(btrim(target_icon), ''),
+          NULLIF(btrim(target_description), ''), samurai_current_account_id()
+        );
+        INSERT INTO organization_members(
+          organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+        ) VALUES (
+          target_organization_id, samurai_current_account_id(), 'owner', 'active', 1, NOW(),
+          samurai_current_account_id(), samurai_current_account_id()
+        ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+          role = 'owner', state = 'active', removed_at = NULL,
+          updated_by = samurai_current_account_id(), version = organization_members.version + 1;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.created', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('organization_id', target_organization_id));
+        RETURN target_organization_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_patch_organization(
+        target_organization_id TEXT,
+        target_name TEXT,
+        target_icon TEXT,
+        target_description TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_name IS NULL OR btrim(target_name) = '' OR target_expected_version < 1 THEN
+          RAISE EXCEPTION 'organization_input_invalid';
+        END IF;
+        UPDATE organizations
+        SET name = btrim(target_name),
+            icon = CASE WHEN target_icon IS NULL THEN icon ELSE NULLIF(btrim(target_icon), '') END,
+            description = CASE WHEN target_description IS NULL THEN description ELSE NULLIF(btrim(target_description), '') END,
+            version = version + 1, updated_at = NOW()
+        WHERE id = target_organization_id AND deleted_at IS NULL AND version = target_expected_version;
+        IF NOT FOUND THEN
+          IF NOT EXISTS (SELECT 1 FROM organizations WHERE id = target_organization_id AND deleted_at IS NULL) THEN
+            RAISE EXCEPTION 'organization_not_found';
+          END IF;
+          RAISE EXCEPTION 'organization_version_conflict';
+        END IF;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.updated', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('organization_id', target_organization_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_delete_organization(
+        target_organization_id TEXT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_organization organizations%ROWTYPE;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        PERFORM set_config('samurai.organization_delete', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'owner') THEN
+          RAISE EXCEPTION 'organization_owner_permission_required';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        SELECT * INTO current_organization FROM organizations
+        WHERE id = target_organization_id AND deleted_at IS NULL FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_not_found'; END IF;
+        IF EXISTS (SELECT 1 FROM workspaces WHERE organization_id = target_organization_id) THEN
+          RAISE EXCEPTION 'organization_workspaces_remaining';
+        END IF;
+        UPDATE organizations SET deleted_at = NOW(), version = version + 1, updated_at = NOW()
+        WHERE id = target_organization_id;
+        UPDATE organization_members
+        SET state = 'removed', removed_at = COALESCE(removed_at, NOW()),
+            version = version + 1, updated_by = samurai_current_account_id()
+        WHERE organization_id = target_organization_id AND state = 'active';
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.deleted', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('organization_id', target_organization_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_organization_member(
+        target_organization_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_member organization_members%ROWTYPE;
+      DECLARE current_actor_role TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        current_actor_role := samurai_organization_role(target_organization_id);
+        IF (current_actor_role IS NULL OR samurai_role_rank(current_actor_role) < samurai_role_rank('admin'))
+          AND NOT (target_account_id = samurai_current_account_id() AND target_state = 'removed') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR target_state NOT IN ('active', 'removed')
+          OR target_expected_version < 0
+          OR NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_account_id AND status = 'active') THEN
+          RAISE EXCEPTION 'organization_membership_invalid';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        IF NOT EXISTS (SELECT 1 FROM organizations WHERE id = target_organization_id AND deleted_at IS NULL) THEN
+          RAISE EXCEPTION 'organization_not_found';
+        END IF;
+        SELECT * INTO current_member FROM organization_members member
+        WHERE member.organization_id = target_organization_id AND member.account_id = target_account_id FOR UPDATE;
+        IF COALESCE(current_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'organization_membership_version_conflict';
+        END IF;
+        IF target_role = 'owner' AND current_actor_role <> 'owner' THEN
+          RAISE EXCEPTION 'organization_owner_permission_required';
+        END IF;
+        IF current_member.role = 'owner' AND current_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active') THEN
+          IF current_actor_role <> 'owner' THEN RAISE EXCEPTION 'organization_owner_permission_required'; END IF;
+          IF (
+            SELECT COUNT(*) FROM organization_members member
+            WHERE member.organization_id = target_organization_id
+              AND member.role = 'owner' AND member.state = 'active'
+          ) <= 1 THEN RAISE EXCEPTION 'organization_last_owner_cannot_be_changed'; END IF;
+        END IF;
+        INSERT INTO organization_members(
+          organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by
+        ) VALUES (
+          target_organization_id, target_account_id, target_role, target_state, 1, NOW(),
+          CASE WHEN target_state = 'removed' THEN NOW() ELSE NULL END,
+          samurai_current_account_id(), samurai_current_account_id()
+        ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+          role = EXCLUDED.role, state = EXCLUDED.state, version = organization_members.version + 1,
+          removed_at = EXCLUDED.removed_at, updated_by = EXCLUDED.updated_by;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (
+          target_organization_id,
+          CASE WHEN target_state = 'removed' THEN 'organization.member.removed' ELSE 'organization.member.role_changed' END,
+          target_operation_id, samurai_current_account_id(),
+          jsonb_build_object('account_id', target_account_id, 'role', target_role, 'state', target_state)
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_organization_invitation(
+        target_organization_id TEXT,
+        target_invitation_id TEXT,
+        target_account_id TEXT,
+        target_token_hash TEXT,
+        target_role TEXT,
+        target_expires_at TIMESTAMPTZ,
+        target_operation_id TEXT,
+        target_grants JSONB
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE grant_row RECORD;
+      DECLARE grant_workspace_id TEXT;
+      DECLARE grant_room_id TEXT;
+      DECLARE grant_workspace_role TEXT;
+      DECLARE grant_room_role TEXT;
+      DECLARE grant_id TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR (target_role = 'owner' AND samurai_organization_role(target_organization_id) <> 'owner')
+          OR target_token_hash !~ '^[0-9a-f]{64}$'
+          OR target_invitation_id !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+          OR target_operation_id IS NULL OR btrim(target_operation_id) = ''
+          OR target_expires_at <= NOW()
+          OR jsonb_typeof(COALESCE(target_grants, '[]'::JSONB)) <> 'array' THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        IF target_account_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = target_account_id AND status = 'active'
+        ) THEN RAISE EXCEPTION 'organization_invitation_target_not_found'; END IF;
+        INSERT INTO organization_invitations(
+          id, organization_id, target_account_id, token_hash, role, expires_at, issued_by
+        ) VALUES (
+          target_invitation_id, target_organization_id, target_account_id, target_token_hash,
+          target_role, target_expires_at, samurai_current_account_id()
+        );
+        FOR grant_row IN SELECT value AS item FROM jsonb_array_elements(COALESCE(target_grants, '[]'::JSONB)) LOOP
+          grant_workspace_id := grant_row.item->>'workspace_id';
+          grant_workspace_role := grant_row.item->>'workspace_role';
+          grant_room_id := NULLIF(grant_row.item->>'room_id', '');
+          grant_room_role := NULLIF(grant_row.item->>'room_role', '');
+          IF grant_workspace_id IS NULL OR grant_workspace_role NOT IN ('owner', 'admin', 'member', 'guest')
+            OR (grant_workspace_role = 'owner' AND NOT samurai_can_workspace(grant_workspace_id, 'owner'))
+            OR (grant_room_role IS NOT NULL AND grant_room_role NOT IN ('owner', 'admin', 'member', 'guest'))
+            OR NOT EXISTS (
+              SELECT 1 FROM workspaces workspace
+              WHERE workspace.id = grant_workspace_id AND workspace.organization_id = target_organization_id
+            )
+            OR (grant_room_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM rooms room
+              WHERE room.workspace_id = grant_workspace_id AND room.id = grant_room_id
+            )) THEN
+            RAISE EXCEPTION 'organization_invitation_workspace_grant_invalid';
+          END IF;
+          grant_id := 'orggrant_' || md5(target_invitation_id || '|' || grant_workspace_id || '|' || COALESCE(grant_room_id, ''));
+          INSERT INTO organization_invitation_workspace_grants(
+            id, organization_id, invitation_id, workspace_id, workspace_role, room_id, room_role
+          ) VALUES (
+            grant_id, target_organization_id, target_invitation_id, grant_workspace_id,
+            grant_workspace_role, grant_room_id, grant_room_role
+          ) ON CONFLICT (id) DO UPDATE SET
+            workspace_role = EXCLUDED.workspace_role, room_id = EXCLUDED.room_id, room_role = EXCLUDED.room_role;
+        END LOOP;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.member.invited', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('invitation_id', target_invitation_id, 'target_account_id', target_account_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_revoke_organization_invitation(
+        target_organization_id TEXT,
+        target_invitation_id TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_version BIGINT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        SELECT version INTO current_version FROM organization_invitations
+        WHERE organization_id = target_organization_id AND id = target_invitation_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_invitation_not_found'; END IF;
+        IF current_version <> target_expected_version THEN RAISE EXCEPTION 'organization_invitation_version_conflict'; END IF;
+        UPDATE organization_invitations
+        SET revoked_at = NOW(), version = version + 1, updated_at = NOW()
+        WHERE organization_id = target_organization_id AND id = target_invitation_id
+          AND revoked_at IS NULL AND accepted_at IS NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_invitation_not_available'; END IF;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.member.invitation_revoked', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('invitation_id', target_invitation_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_extend_organization_invitation(
+        target_organization_id TEXT,
+        target_invitation_id TEXT,
+        target_expires_at TIMESTAMPTZ,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'admin') OR target_expires_at <= NOW() THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        UPDATE organization_invitations
+        SET expires_at = target_expires_at, version = version + 1, updated_at = NOW()
+        WHERE organization_id = target_organization_id AND id = target_invitation_id
+          AND version = target_expected_version AND revoked_at IS NULL AND accepted_at IS NULL;
+        IF NOT FOUND THEN
+          IF NOT EXISTS (SELECT 1 FROM organization_invitations WHERE organization_id = target_organization_id AND id = target_invitation_id) THEN
+            RAISE EXCEPTION 'organization_invitation_not_found';
+          END IF;
+          RAISE EXCEPTION 'organization_invitation_version_conflict';
+        END IF;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.member.invitation_extended', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('invitation_id', target_invitation_id, 'expires_at', target_expires_at));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_reissue_organization_invitation(
+        target_organization_id TEXT,
+        target_invitation_id TEXT,
+        replacement_invitation_id TEXT,
+        replacement_token_hash TEXT,
+        replacement_expires_at TIMESTAMPTZ,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE invitation organization_invitations%ROWTYPE;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        SELECT * INTO invitation FROM organization_invitations
+        WHERE organization_id = target_organization_id AND id = target_invitation_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_invitation_not_found'; END IF;
+        IF invitation.version <> target_expected_version THEN RAISE EXCEPTION 'organization_invitation_version_conflict'; END IF;
+        IF replacement_expires_at <= NOW() OR replacement_token_hash !~ '^[0-9a-f]{64}$' THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        UPDATE organization_invitations
+        SET revoked_at = COALESCE(revoked_at, NOW()), version = version + 1, updated_at = NOW()
+        WHERE organization_id = target_organization_id AND id = target_invitation_id;
+        INSERT INTO organization_invitations(
+          id, organization_id, target_account_id, token_hash, role, expires_at, issued_by
+        ) VALUES (
+          replacement_invitation_id, target_organization_id, invitation.target_account_id,
+          replacement_token_hash, invitation.role, replacement_expires_at, samurai_current_account_id()
+        );
+        INSERT INTO organization_invitation_workspace_grants(
+          id, organization_id, invitation_id, workspace_id, workspace_role, room_id, room_role
+        )
+        SELECT 'orggrant_' || md5(replacement_invitation_id || '|' || grant.workspace_id || '|' || COALESCE(grant.room_id, '')),
+          grant.organization_id, replacement_invitation_id, grant.workspace_id, grant.workspace_role, grant.room_id, grant.room_role
+        FROM organization_invitation_workspace_grants grant
+        WHERE grant.invitation_id = target_invitation_id;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.member.invitation_reissued', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('invitation_id', target_invitation_id, 'replacement_invitation_id', replacement_invitation_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_accept_organization_invitation(
+        target_organization_id TEXT,
+        supplied_token_hash TEXT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE invitation organization_invitations%ROWTYPE;
+      DECLARE current_member organization_members%ROWTYPE;
+      DECLARE grant_row RECORD;
+      DECLARE grants JSONB := '[]'::JSONB;
+      DECLARE grant_workspace_role TEXT;
+      DECLARE grant_room_role TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF samurai_current_account_id() IS NULL OR target_operation_id IS NULL OR btrim(target_operation_id) = '' THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        SELECT * INTO invitation FROM organization_invitations
+        WHERE organization_id = target_organization_id
+          AND token_hash = supplied_token_hash
+          AND revoked_at IS NULL AND accepted_at IS NULL AND expires_at > NOW()
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_invitation_invalid'; END IF;
+        IF invitation.target_account_id IS NOT NULL AND invitation.target_account_id IS DISTINCT FROM samurai_current_account_id() THEN
+          RAISE EXCEPTION 'organization_invitation_target_mismatch';
+        END IF;
+        SELECT * INTO current_member FROM organization_members member
+        WHERE member.organization_id = target_organization_id AND member.account_id = samurai_current_account_id() FOR UPDATE;
+        IF FOUND THEN
+          IF current_member.state = 'active' AND samurai_role_rank(current_member.role) >= samurai_role_rank(invitation.role) THEN
+            NULL;
+          ELSE
+            UPDATE organization_members
+            SET role = CASE WHEN samurai_role_rank(invitation.role) > samurai_role_rank(current_member.role) THEN invitation.role ELSE current_member.role END,
+                state = 'active', removed_at = NULL, version = current_member.version + 1,
+                updated_by = samurai_current_account_id()
+            WHERE organization_id = target_organization_id AND account_id = samurai_current_account_id();
+          END IF;
+        ELSE
+          INSERT INTO organization_members(
+            organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+          ) VALUES (
+            target_organization_id, samurai_current_account_id(), invitation.role, 'active', 1, NOW(),
+            samurai_current_account_id(), samurai_current_account_id()
+          );
+        END IF;
+        FOR grant_row IN
+          SELECT grant_record.* FROM organization_invitation_workspace_grants grant_record
+          WHERE grant_record.organization_id = target_organization_id AND grant_record.invitation_id = invitation.id
+          ORDER BY grant_record.id
+        LOOP
+          grant_workspace_role := grant_row.workspace_role;
+          grant_room_role := COALESCE(grant_row.room_role, grant_workspace_role);
+          IF NOT EXISTS (
+            SELECT 1 FROM workspaces workspace
+            WHERE workspace.id = grant_row.workspace_id AND workspace.organization_id = target_organization_id
+          ) THEN RAISE EXCEPTION 'organization_invitation_workspace_grant_invalid'; END IF;
+          INSERT INTO workspace_members(workspace_id, account_id, role, state, version, revoked_at, updated_at)
+          VALUES (grant_row.workspace_id, samurai_current_account_id(), grant_workspace_role, 'active', 1, NULL, NOW())
+          ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+            role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(workspace_members.role) THEN EXCLUDED.role ELSE workspace_members.role END,
+            state = 'active', revoked_at = NULL, version = workspace_members.version + 1, updated_at = NOW();
+          IF grant_row.room_id IS NOT NULL THEN
+            IF NOT EXISTS (SELECT 1 FROM rooms room WHERE room.workspace_id = grant_row.workspace_id AND room.id = grant_row.room_id) THEN
+              RAISE EXCEPTION 'organization_invitation_workspace_grant_invalid';
+            END IF;
+            INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version, revoked_at, updated_at)
+            VALUES (grant_row.workspace_id, grant_row.room_id, samurai_current_account_id(), grant_room_role, 'active', 1, NULL, NOW())
+            ON CONFLICT ON CONSTRAINT room_members_pkey DO UPDATE SET
+              role = CASE WHEN samurai_role_rank(EXCLUDED.role) > samurai_role_rank(room_members.role) THEN EXCLUDED.role ELSE room_members.role END,
+              state = 'active', revoked_at = NULL, version = room_members.version + 1, updated_at = NOW();
+          END IF;
+          grants := grants || jsonb_build_array(jsonb_build_object(
+            'id', grant_row.id, 'organization_id', grant_row.organization_id, 'invitation_id', grant_row.invitation_id,
+            'workspace_id', grant_row.workspace_id, 'workspace_role', grant_row.workspace_role,
+            'room_id', grant_row.room_id, 'room_role', grant_row.room_role
+          ));
+        END LOOP;
+        UPDATE organization_invitations
+        SET accepted_by = samurai_current_account_id(), accepted_at = NOW(), version = version + 1, updated_at = NOW()
+        WHERE id = invitation.id;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.member.accepted', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('invitation_id', invitation.id, 'account_id', samurai_current_account_id()));
+        RETURN jsonb_build_object(
+          'organization_id', target_organization_id, 'account_id', samurai_current_account_id(),
+          'role', invitation.role, 'workspace_grants', grants
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_adopt_workspace_membership(
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_organization_id TEXT;
+      DECLARE workspace_role TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF target_account_id IS DISTINCT FROM samurai_current_account_id() THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        SELECT workspace.organization_id, member.role INTO workspace_organization_id, workspace_role
+        FROM workspaces workspace
+        JOIN workspace_members member ON member.workspace_id = workspace.id AND member.account_id = target_account_id
+        WHERE workspace.id = target_workspace_id AND member.state = 'active';
+        IF workspace_organization_id IS NULL THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        INSERT INTO organization_members(
+          organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+        ) VALUES (
+          workspace_organization_id, target_account_id,
+          CASE WHEN workspace_role = 'owner' THEN 'owner' ELSE 'member' END,
+          'active', 1, NOW(), target_account_id, target_account_id
+        ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+          role = CASE WHEN EXCLUDED.role = 'owner' THEN 'owner' ELSE organization_members.role END,
+          state = 'active', removed_at = NULL, version = organization_members.version + 1,
+          updated_by = target_account_id;
+      END
+     $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_organization_workspace_member(
+        target_organization_id TEXT,
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE current_member workspace_members%ROWTYPE;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_role NOT IN ('admin', 'member', 'guest', 'owner') OR (target_role = 'owner' AND target_state <> 'revoked')
+          OR target_state NOT IN ('active', 'revoked')
+          OR target_expected_version < 0 THEN
+          RAISE EXCEPTION 'workspace_membership_invalid';
+        END IF;
+        SELECT * INTO workspace_row FROM workspaces
+        WHERE id = target_workspace_id AND organization_id = target_organization_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_not_found'; END IF;
+        IF workspace_row.state <> 'active' THEN RAISE EXCEPTION 'workspace_read_only'; END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM organization_members member
+          WHERE member.organization_id = target_organization_id
+            AND member.account_id = target_account_id AND member.state = 'active'
+        ) THEN RAISE EXCEPTION 'organization_membership_required'; END IF;
+        SELECT * INTO current_member FROM workspace_members member
+        WHERE member.workspace_id = target_workspace_id AND member.account_id = target_account_id FOR UPDATE;
+        IF COALESCE(current_member.version, 0) <> target_expected_version THEN
+          RAISE EXCEPTION 'workspace_membership_version_conflict';
+        END IF;
+        IF current_member.role = 'owner' AND current_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active')
+          AND NOT samurai_can_organization(target_organization_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF current_member.role = 'owner' AND current_member.state = 'active' AND target_state <> 'active' THEN
+          IF (SELECT COUNT(*) FROM workspace_members member WHERE member.workspace_id = target_workspace_id AND member.role = 'owner' AND member.state = 'active') <= 1 THEN
+            RAISE EXCEPTION 'workspace_last_owner_cannot_be_changed';
+          END IF;
+        END IF;
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version, revoked_at, updated_at)
+        VALUES (target_workspace_id, target_account_id, target_role, target_state, 1,
+          CASE WHEN target_state = 'revoked' THEN NOW() ELSE NULL END, NOW())
+        ON CONFLICT (workspace_id, account_id) DO UPDATE SET
+          role = EXCLUDED.role, state = EXCLUDED.state, version = workspace_members.version + 1,
+          revoked_at = EXCLUDED.revoked_at, updated_at = NOW();
+        INSERT INTO workspace_events(workspace_id, organization_id, room_id, kind, operation_id, payload)
+        VALUES (target_workspace_id, target_organization_id, NULL,
+          CASE WHEN target_state = 'active' THEN 'workspace.member.granted' ELSE 'workspace.member.revoked' END,
+          target_operation_id, jsonb_build_object('account_id', target_account_id, 'role', target_role, 'state', target_state));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_organization_workspace_lifecycle(
+        target_organization_id TEXT,
+        target_workspace_id TEXT,
+        target_state TEXT,
+        target_expected_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE event_kind TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF target_state NOT IN ('active', 'archived', 'deleted') OR target_expected_version < 1 THEN
+          RAISE EXCEPTION 'workspace_lifecycle_invalid';
+        END IF;
+        IF target_state = 'deleted' THEN
+          IF NOT samurai_can_organization(target_organization_id, 'owner') THEN
+            RAISE EXCEPTION 'organization_owner_permission_required';
+          END IF;
+        ELSIF NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        SELECT * INTO workspace_row FROM workspaces
+        WHERE id = target_workspace_id AND organization_id = target_organization_id FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_not_found'; END IF;
+        IF workspace_row.version <> target_expected_version THEN RAISE EXCEPTION 'workspace_version_conflict'; END IF;
+        IF target_state = 'archived' AND workspace_row.state <> 'active' THEN RAISE EXCEPTION 'workspace_lifecycle_invalid'; END IF;
+        IF target_state = 'active' AND workspace_row.state <> 'archived' THEN RAISE EXCEPTION 'workspace_lifecycle_invalid'; END IF;
+        IF target_state = 'deleted' AND workspace_row.state = 'read_only' THEN RAISE EXCEPTION 'workspace_lifecycle_invalid'; END IF;
+        event_kind := CASE target_state WHEN 'archived' THEN 'workspace.archived' WHEN 'active' THEN 'workspace.restored' ELSE 'workspace.deleted' END;
+        UPDATE workspaces SET state = target_state, version = version + 1, updated_at = NOW()
+        WHERE id = target_workspace_id;
+        INSERT INTO workspace_events(workspace_id, organization_id, room_id, kind, operation_id, payload)
+        VALUES (target_workspace_id, target_organization_id, NULL, event_kind, target_operation_id,
+          jsonb_build_object('workspace_id', target_workspace_id, 'organization_id', target_organization_id));
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, event_kind, target_operation_id, samurai_current_account_id(),
+          jsonb_build_object('workspace_id', target_workspace_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_move_workspace_organization(
+        source_organization_id TEXT,
+        target_organization_id TEXT,
+        target_workspace_id TEXT,
+        target_expected_workspace_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE member_row RECORD;
+      DECLARE added_guest_account_ids TEXT[] := ARRAY[]::TEXT[];
+      DECLARE move_event_id BIGINT;
+      DECLARE move_event_key TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF source_organization_id IS NULL OR target_organization_id IS NULL
+          OR source_organization_id = target_organization_id THEN
+          RAISE EXCEPTION 'workspace_organization_move_invalid';
+        END IF;
+        IF NOT samurai_can_organization(source_organization_id, 'owner')
+          OR NOT samurai_can_organization(target_organization_id, 'owner') THEN
+          RAISE EXCEPTION 'organization_owner_permission_required';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization:' || source_organization_id, 0));
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization:' || target_organization_id, 0));
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace:' || target_workspace_id, 0));
+        SELECT * INTO workspace_row FROM workspaces workspace
+        WHERE workspace.id = target_workspace_id FOR UPDATE;
+        IF NOT FOUND OR workspace_row.organization_id IS DISTINCT FROM source_organization_id THEN
+          RAISE EXCEPTION 'workspace_organization_move_source_mismatch';
+        END IF;
+        IF workspace_row.version <> target_expected_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        IF workspace_row.state NOT IN ('active', 'archived') THEN
+          RAISE EXCEPTION 'workspace_organization_move_state_invalid';
+        END IF;
+        FOR member_row IN
+          SELECT member.account_id, member.role, member.state
+          FROM workspace_members member
+          WHERE member.workspace_id = target_workspace_id AND member.state = 'active'
+          ORDER BY member.account_id
+        LOOP
+          IF NOT EXISTS (
+            SELECT 1 FROM organization_members organization_member
+            WHERE organization_member.organization_id = target_organization_id
+              AND organization_member.account_id = member_row.account_id
+              AND organization_member.state = 'active'
+          ) THEN
+            INSERT INTO organization_members(
+              organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+            ) VALUES (
+              target_organization_id, member_row.account_id, 'guest', 'active', 1, NOW(),
+              samurai_current_account_id(), samurai_current_account_id()
+            ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+              role = CASE WHEN organization_members.role = 'owner' THEN 'owner' ELSE 'guest' END,
+              state = 'active', removed_at = NULL, version = organization_members.version + 1,
+              updated_by = samurai_current_account_id();
+            added_guest_account_ids := array_append(added_guest_account_ids, member_row.account_id);
+          END IF;
+        END LOOP;
+        -- Pending grants are scoped to the source Organization.  They cannot
+        -- be carried across a move without also moving the invitation, so
+        -- invalidate those grants atomically before changing the Workspace
+        -- ownership.  The invitation metadata remains auditable in source.
+        DELETE FROM organization_invitation_workspace_grants grant
+        WHERE grant.workspace_id = target_workspace_id;
+        PERFORM set_config('samurai.organization_move', '1', true);
+        PERFORM set_config('samurai.workspace_id', target_workspace_id, true);
+        UPDATE workspaces
+        SET organization_id = target_organization_id, version = version + 1, updated_at = NOW()
+        WHERE id = target_workspace_id;
+        move_event_key := 'event_' || md5('samurai.workspace.organization.moved|' || target_workspace_id || '|' || target_operation_id);
+        INSERT INTO workspace_events(
+          workspace_id, room_id, kind, operation_id, payload,
+          event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+        ) VALUES (
+          target_workspace_id, NULL, 'workspace.organization.moved', target_operation_id,
+          jsonb_build_object('source_organization_id', source_organization_id, 'target_organization_id', target_organization_id,
+            'workspace_id', target_workspace_id, 'added_guest_account_ids', to_jsonb(added_guest_account_ids)),
+          move_event_key, '1.0', 'human', samurai_current_account_id(), target_organization_id,
+          'cursor_' || md5(move_event_key), target_operation_id, '[]'::JSONB
+        ) ON CONFLICT (workspace_id, event_id) DO NOTHING
+        RETURNING id INTO move_event_id;
+        IF move_event_id IS NULL THEN
+          SELECT id INTO move_event_id FROM workspace_events WHERE workspace_id = target_workspace_id AND event_id = move_event_key;
+        END IF;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (source_organization_id, 'workspace.organization.moved', target_operation_id, samurai_current_account_id(),
+          jsonb_build_object('workspace_id', target_workspace_id, 'source_organization_id', source_organization_id, 'target_organization_id', target_organization_id));
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'workspace.organization.moved', target_operation_id, samurai_current_account_id(),
+          jsonb_build_object('workspace_id', target_workspace_id, 'source_organization_id', source_organization_id, 'target_organization_id', target_organization_id));
+        RETURN jsonb_build_object(
+          'workspace_id', target_workspace_id, 'source_organization_id', source_organization_id,
+          'target_organization_id', target_organization_id, 'added_guest_account_ids', to_jsonb(added_guest_account_ids),
+          'event_id', move_event_id, 'workspace_version', workspace_row.version + 1
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_event_organization() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_organization_id TEXT;
+      BEGIN
+        SELECT workspace.organization_id INTO current_organization_id
+        FROM workspaces workspace WHERE workspace.id = NEW.workspace_id;
+        IF current_organization_id IS NULL THEN RAISE EXCEPTION 'workspace_event_workspace_not_found'; END IF;
+        IF NEW.organization_id IS NULL THEN NEW.organization_id := current_organization_id;
+        ELSIF NEW.organization_id IS DISTINCT FROM current_organization_id THEN
+          RAISE EXCEPTION 'workspace_event_organization_mismatch';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_events_organization_guard ON workspace_events",
+      "CREATE TRIGGER workspace_events_organization_guard BEFORE INSERT OR UPDATE OF workspace_id, organization_id ON workspace_events FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_event_organization()",
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_organization_change() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF TG_OP = 'UPDATE' AND NEW.organization_id IS DISTINCT FROM OLD.organization_id
+          AND current_setting('samurai.organization_move', true) IS DISTINCT FROM '1' THEN
+          RAISE EXCEPTION 'workspace_organization_change_requires_move_operation';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspaces_organization_change_guard ON workspaces",
+      "CREATE TRIGGER workspaces_organization_change_guard BEFORE UPDATE OF organization_id ON workspaces FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_organization_change()",
+      `CREATE OR REPLACE FUNCTION samurai_guard_organization_last_owner() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE active_owner_count INTEGER;
+      BEGIN
+        IF current_setting('samurai.organization_delete', true) = '1' THEN
+          IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+          IF OLD.role = 'owner' AND OLD.state = 'active' THEN
+            SELECT COUNT(*)::INTEGER INTO active_owner_count
+            FROM organization_members member
+            WHERE member.organization_id = OLD.organization_id
+              AND member.role = 'owner' AND member.state = 'active';
+            IF active_owner_count <= 1 THEN
+              RAISE EXCEPTION 'organization_last_owner_cannot_be_changed';
+            END IF;
+          END IF;
+          RETURN OLD;
+        END IF;
+        IF OLD.role = 'owner' AND OLD.state = 'active'
+          AND (NEW.role <> 'owner' OR NEW.state <> 'active') THEN
+          SELECT COUNT(*)::INTEGER INTO active_owner_count
+          FROM organization_members member
+          WHERE member.organization_id = OLD.organization_id
+            AND member.role = 'owner' AND member.state = 'active';
+          IF active_owner_count <= 1 THEN
+            RAISE EXCEPTION 'organization_last_owner_cannot_be_changed';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS organization_members_last_owner_guard ON organization_members",
+      "CREATE TRIGGER organization_members_last_owner_guard BEFORE DELETE OR UPDATE OF role, state ON organization_members FOR EACH ROW EXECUTE FUNCTION samurai_guard_organization_last_owner()",
+      "ALTER TABLE organizations ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_members ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_invitations ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_invitation_workspace_grants ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_operations ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_events ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE organizations FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_members FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_invitations FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_invitation_workspace_grants FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_operations FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE organization_events FORCE ROW LEVEL SECURITY",
+      "DROP POLICY IF EXISTS organizations_read ON organizations",
+      "DROP POLICY IF EXISTS organizations_insert ON organizations",
+      "DROP POLICY IF EXISTS organizations_update ON organizations",
+      "DROP POLICY IF EXISTS organizations_delete ON organizations",
+      `CREATE POLICY organizations_read ON organizations FOR SELECT USING (
+        deleted_at IS NULL AND samurai_can_organization(id, 'guest')
+      )`,
+      `CREATE POLICY organizations_insert ON organizations FOR INSERT WITH CHECK (
+        created_by = samurai_current_account_id()
+      )`,
+      `CREATE POLICY organizations_update ON organizations FOR UPDATE USING (
+        samurai_can_organization(id, 'admin')
+      ) WITH CHECK (
+        id = id AND samurai_can_organization(id, 'admin')
+      )`,
+      `CREATE POLICY organizations_delete ON organizations FOR DELETE USING (false)`,
+      "DROP POLICY IF EXISTS organization_members_read ON organization_members",
+      "DROP POLICY IF EXISTS organization_members_write ON organization_members",
+      `CREATE POLICY organization_members_read ON organization_members FOR SELECT USING (
+        (state = 'active' OR samurai_can_organization(organization_id, 'admin'))
+        AND samurai_can_organization(organization_id, 'guest')
+      )`,
+      `CREATE POLICY organization_members_write ON organization_members FOR ALL USING (
+        current_setting('samurai.organization_mutation', true) = '1'
+      ) WITH CHECK (
+        current_setting('samurai.organization_mutation', true) = '1'
+      )`,
+      "DROP POLICY IF EXISTS organization_invitations_read ON organization_invitations",
+      "DROP POLICY IF EXISTS organization_invitations_write ON organization_invitations",
+      `CREATE POLICY organization_invitations_read ON organization_invitations FOR SELECT USING (
+        samurai_can_organization(organization_id, 'admin') OR target_account_id = samurai_current_account_id()
+      )`,
+      `CREATE POLICY organization_invitations_write ON organization_invitations FOR ALL USING (
+        current_setting('samurai.organization_mutation', true) = '1'
+      ) WITH CHECK (
+        current_setting('samurai.organization_mutation', true) = '1'
+      )`,
+      "DROP POLICY IF EXISTS organization_invitation_grants_read ON organization_invitation_workspace_grants",
+      "DROP POLICY IF EXISTS organization_invitation_grants_write ON organization_invitation_workspace_grants",
+      `CREATE POLICY organization_invitation_grants_read ON organization_invitation_workspace_grants FOR SELECT USING (
+        samurai_can_organization(organization_id, 'admin')
+      )`,
+      `CREATE POLICY organization_invitation_grants_write ON organization_invitation_workspace_grants FOR ALL USING (
+        current_setting('samurai.organization_mutation', true) = '1'
+      ) WITH CHECK (
+        current_setting('samurai.organization_mutation', true) = '1'
+      )`,
+      "DROP POLICY IF EXISTS organization_operations_access ON organization_operations",
+      `CREATE POLICY organization_operations_access ON organization_operations FOR ALL USING (
+        actor_account_id = samurai_current_account_id()
+        OR (organization_id IS NOT NULL AND samurai_can_organization(organization_id, 'admin'))
+      ) WITH CHECK (actor_account_id = samurai_current_account_id())`,
+      "DROP POLICY IF EXISTS organization_events_read ON organization_events",
+      "DROP POLICY IF EXISTS organization_events_write ON organization_events",
+      `CREATE POLICY organization_events_read ON organization_events FOR SELECT USING (
+        samurai_can_organization(organization_id, 'guest')
+      )`,
+      `CREATE POLICY organization_events_write ON organization_events FOR ALL USING (
+        current_setting('samurai.organization_mutation', true) = '1'
+      ) WITH CHECK (
+        current_setting('samurai.organization_mutation', true) = '1'
+      )`,
+      "DROP POLICY IF EXISTS workspaces_read ON workspaces",
+      `CREATE POLICY workspaces_read ON workspaces FOR SELECT USING (
+        (samurai_current_workspace_id() IS NULL OR id = samurai_current_workspace_id())
+        AND (samurai_can_workspace(id, 'guest') OR samurai_can_organization(organization_id, 'guest'))
+      )`,
+      "DROP POLICY IF EXISTS workspace_members_read ON workspace_members",
+      `CREATE POLICY workspace_members_read ON workspace_members FOR SELECT USING (
+        (samurai_current_workspace_id() IS NULL OR workspace_id = samurai_current_workspace_id())
+        AND (account_id = samurai_current_account_id() OR samurai_can_workspace(workspace_id, 'admin')
+          OR EXISTS (SELECT 1 FROM workspaces workspace WHERE workspace.id = workspace_members.workspace_id
+            AND samurai_can_organization(workspace.organization_id, 'owner')))
+      )`,
+      "REVOKE INSERT, UPDATE, DELETE ON organization_members, organization_invitations, organization_invitation_workspace_grants, organization_events FROM PUBLIC",
+      "REVOKE INSERT, UPDATE, DELETE ON organization_operations FROM PUBLIC",
+      "REVOKE INSERT, UPDATE, DELETE ON organizations FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_create_organization(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_patch_organization(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_delete_organization(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_organization_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_create_organization_invitation(TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_revoke_organization_invitation(TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_extend_organization_invitation(TEXT, TEXT, TIMESTAMPTZ, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_reissue_organization_invitation(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_accept_organization_invitation(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_adopt_workspace_membership(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_organization_workspace_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_set_organization_workspace_lifecycle(TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_move_workspace_organization(TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_default_organization_id(TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_organization_role(TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_can_organization(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_list_active_workspace_ids() FROM PUBLIC"
+    ]
+  },
+  {
+    // Organization invitation and move hardening.  Keep this as a new
+    // migration so the already-published Organization boundary migration is
+    // immutable; every statement is safe to re-run after a failed deploy.
+    version: 79,
+    name: "workspace_server_organization_invitation_and_move_hardening",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_resolve_organization_invitation(
+        supplied_token_hash TEXT
+      ) RETURNS TEXT
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE resolved_organization_id TEXT;
+      BEGIN
+        IF samurai_current_account_id() IS NULL
+          OR supplied_token_hash IS NULL
+          OR supplied_token_hash !~ '^[0-9a-f]{64}$'
+          OR NOT EXISTS (
+            SELECT 1 FROM accounts account
+            WHERE account.id = samurai_current_account_id() AND account.status = 'active'
+          ) THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        -- Resolve a candidate without taking the invitation row lock first.
+        -- Organization deletion takes the Organization lock before it updates
+        -- pending invitations, so this order prevents the inverse wait edge.
+        SELECT invitation.organization_id
+        INTO resolved_organization_id
+        FROM organization_invitations invitation
+        JOIN organizations organization ON organization.id = invitation.organization_id
+        WHERE invitation.token_hash = supplied_token_hash
+          AND invitation.revoked_at IS NULL
+          AND invitation.accepted_at IS NULL
+          AND invitation.expires_at > NOW()
+          AND (invitation.target_account_id IS NULL
+            OR invitation.target_account_id = samurai_current_account_id())
+          AND organization.deleted_at IS NULL
+        ORDER BY invitation.id
+        LIMIT 1;
+        IF resolved_organization_id IS NULL THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || resolved_organization_id, 0));
+        -- Re-read under the Organization lock and lock the invitation only
+        -- after the candidate's Organization lock is held. This revalidation
+        -- covers target account, pending state, expiry, and soft deletion.
+        SELECT invitation.organization_id
+        INTO resolved_organization_id
+        FROM organization_invitations invitation
+        JOIN organizations organization ON organization.id = invitation.organization_id
+        WHERE invitation.token_hash = supplied_token_hash
+          AND invitation.revoked_at IS NULL
+          AND invitation.accepted_at IS NULL
+          AND invitation.expires_at > NOW()
+          AND (invitation.target_account_id IS NULL
+            OR invitation.target_account_id = samurai_current_account_id())
+          AND organization.deleted_at IS NULL
+          AND invitation.organization_id = resolved_organization_id
+        ORDER BY invitation.id
+        LIMIT 1
+        FOR UPDATE;
+        IF resolved_organization_id IS NULL THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        RETURN resolved_organization_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_accept_organization_invitation(
+        supplied_token_hash TEXT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE resolved_organization_id TEXT;
+      BEGIN
+        resolved_organization_id := samurai_resolve_organization_invitation(supplied_token_hash);
+        RETURN samurai_accept_organization_invitation(
+          resolved_organization_id, supplied_token_hash, target_operation_id
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_revoke_organization_pending_invitations() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL THEN
+          UPDATE organization_invitations
+          SET revoked_at = COALESCE(revoked_at, NOW()),
+              version = version + 1,
+              updated_at = NOW()
+          WHERE organization_id = OLD.id
+            AND revoked_at IS NULL
+            AND accepted_at IS NULL;
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS organizations_pending_invitation_revoke ON organizations",
+      "CREATE TRIGGER organizations_pending_invitation_revoke BEFORE UPDATE OF deleted_at ON organizations FOR EACH ROW EXECUTE FUNCTION samurai_revoke_organization_pending_invitations()",
+      `CREATE OR REPLACE FUNCTION samurai_guard_organization_invitation_accept() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF OLD.accepted_at IS NULL AND NEW.accepted_at IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM organizations organization
+            WHERE organization.id = NEW.organization_id AND organization.deleted_at IS NOT NULL
+          ) THEN
+          RAISE EXCEPTION 'organization_invitation_invalid';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS organization_invitation_accept_guard ON organization_invitations",
+      "CREATE TRIGGER organization_invitation_accept_guard BEFORE UPDATE OF accepted_at ON organization_invitations FOR EACH ROW EXECUTE FUNCTION samurai_guard_organization_invitation_accept()",
+      // Both directions of a move must acquire the same Organization locks in
+      // lexical ID order.  The Workspace lock remains last.
+      `CREATE OR REPLACE FUNCTION samurai_move_workspace_organization(
+        source_organization_id TEXT,
+        target_organization_id TEXT,
+        target_workspace_id TEXT,
+        target_expected_workspace_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE member_row RECORD;
+      DECLARE added_guest_account_ids TEXT[] := ARRAY[]::TEXT[];
+      DECLARE move_event_id BIGINT;
+      DECLARE move_event_key TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF source_organization_id IS NULL OR target_organization_id IS NULL
+          OR source_organization_id = target_organization_id THEN
+          RAISE EXCEPTION 'workspace_organization_move_invalid';
+        END IF;
+        IF NOT samurai_can_organization(source_organization_id, 'owner')
+          OR NOT samurai_can_organization(target_organization_id, 'owner') THEN
+          RAISE EXCEPTION 'organization_owner_permission_required';
+        END IF;
+        IF source_organization_id < target_organization_id THEN
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization:' || source_organization_id, 0));
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization:' || target_organization_id, 0));
+        ELSE
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization:' || target_organization_id, 0));
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization:' || source_organization_id, 0));
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace:' || target_workspace_id, 0));
+        SELECT * INTO workspace_row FROM workspaces workspace
+        WHERE workspace.id = target_workspace_id FOR UPDATE;
+        IF NOT FOUND OR workspace_row.organization_id IS DISTINCT FROM source_organization_id THEN
+          RAISE EXCEPTION 'workspace_organization_move_source_mismatch';
+        END IF;
+        IF workspace_row.version <> target_expected_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        IF workspace_row.state NOT IN ('active', 'archived') THEN
+          RAISE EXCEPTION 'workspace_organization_move_state_invalid';
+        END IF;
+        FOR member_row IN
+          SELECT member.account_id, member.role, member.state
+          FROM workspace_members member
+          WHERE member.workspace_id = target_workspace_id AND member.state = 'active'
+          ORDER BY member.account_id
+        LOOP
+          IF NOT EXISTS (
+            SELECT 1 FROM organization_members organization_member
+            WHERE organization_member.organization_id = target_organization_id
+              AND organization_member.account_id = member_row.account_id
+              AND organization_member.state = 'active'
+          ) THEN
+            INSERT INTO organization_members(
+              organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+            ) VALUES (
+              target_organization_id, member_row.account_id, 'guest', 'active', 1, NOW(),
+              samurai_current_account_id(), samurai_current_account_id()
+            ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+              role = CASE WHEN organization_members.role = 'owner' THEN 'owner' ELSE 'guest' END,
+              state = 'active', removed_at = NULL, version = organization_members.version + 1,
+              updated_by = samurai_current_account_id();
+            added_guest_account_ids := array_append(added_guest_account_ids, member_row.account_id);
+          END IF;
+        END LOOP;
+        DELETE FROM organization_invitation_workspace_grants grant
+        WHERE grant.workspace_id = target_workspace_id;
+        PERFORM set_config('samurai.organization_move', '1', true);
+        PERFORM set_config('samurai.workspace_id', target_workspace_id, true);
+        UPDATE workspaces
+        SET organization_id = target_organization_id, version = version + 1, updated_at = NOW()
+        WHERE id = target_workspace_id;
+        move_event_key := 'event_' || md5('samurai.workspace.organization.moved|' || target_workspace_id || '|' || target_operation_id);
+        INSERT INTO workspace_events(
+          workspace_id, room_id, kind, operation_id, payload,
+          event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+        ) VALUES (
+          target_workspace_id, NULL, 'workspace.organization.moved', target_operation_id,
+          jsonb_build_object('source_organization_id', source_organization_id, 'target_organization_id', target_organization_id,
+            'workspace_id', target_workspace_id, 'added_guest_account_ids', to_jsonb(added_guest_account_ids)),
+          move_event_key, '1.0', 'human', samurai_current_account_id(), target_organization_id,
+          'cursor_' || md5(move_event_key), target_operation_id, '[]'::JSONB
+        ) ON CONFLICT (workspace_id, event_id) DO NOTHING
+        RETURNING id INTO move_event_id;
+        IF move_event_id IS NULL THEN
+          SELECT id INTO move_event_id FROM workspace_events WHERE workspace_id = target_workspace_id AND event_id = move_event_key;
+        END IF;
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (source_organization_id, 'workspace.organization.moved', target_operation_id, samurai_current_account_id(),
+          jsonb_build_object('workspace_id', target_workspace_id, 'source_organization_id', source_organization_id, 'target_organization_id', target_organization_id));
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'workspace.organization.moved', target_operation_id, samurai_current_account_id(),
+          jsonb_build_object('workspace_id', target_workspace_id, 'source_organization_id', source_organization_id, 'target_organization_id', target_organization_id));
+        RETURN jsonb_build_object(
+          'workspace_id', target_workspace_id, 'source_organization_id', source_organization_id,
+          'target_organization_id', target_organization_id, 'added_guest_account_ids', to_jsonb(added_guest_account_ids),
+          'event_id', move_event_id, 'workspace_version', workspace_row.version + 1
+        );
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_resolve_organization_invitation(TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_accept_organization_invitation(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_revoke_organization_pending_invitations() FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_organization_invitation_accept() FROM PUBLIC"
+    ]
   }
 ];
 
@@ -9168,6 +10694,12 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
   const role = `"${roleName.replaceAll('"', '""')}"`;
   const tables = [
     "accounts",
+    "organizations",
+    "organization_members",
+    "organization_invitations",
+    "organization_invitation_workspace_grants",
+    "organization_operations",
+    "organization_events",
     "workspaces",
     "workspace_members",
     "rooms",
@@ -9265,7 +10797,9 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
   // retain the same short-lived import-session check.
   const guardedMutationTables = [
     "workspace_members", "rooms", "room_members", "workspace_agents",
-    "workspace_agent_room_permissions", "workspace_connection_descriptors"
+    "workspace_agent_room_permissions", "workspace_connection_descriptors",
+    "organizations", "organization_members", "organization_invitations",
+    "organization_invitation_workspace_grants", "organization_events"
   ];
   const writableTables = tables.filter((table) => !guardedMutationTables.includes(table));
   const functions = [
@@ -9286,7 +10820,9 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_adjust_workspace_learning_usage(TEXT, TEXT, NUMERIC, BIGINT, NUMERIC, BIGINT)",
     "samurai_lock_workspace_learning_settings(TEXT, TEXT)",
     "samurai_create_workspace(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_create_workspace(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_start_workspace_import(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_start_workspace_import(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_complete_workspace_import(TEXT, TEXT, TEXT)",
     "samurai_abort_workspace_import(TEXT, TEXT)",
     "samurai_create_room(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
@@ -9305,6 +10841,25 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_preview_room_member_change(TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_accept_invitation(TEXT, TEXT, TEXT)",
     "samurai_revoke_invitation(TEXT, TEXT, BIGINT)",
+      "samurai_default_organization_id(TEXT)",
+      "samurai_organization_role(TEXT)",
+      "samurai_can_organization(TEXT, TEXT)",
+      "samurai_list_active_workspace_ids()",
+      "samurai_resolve_organization_invitation(TEXT)",
+      "samurai_create_organization(TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_patch_organization(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_delete_organization(TEXT, TEXT)",
+    "samurai_set_organization_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_create_organization_invitation(TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB)",
+    "samurai_revoke_organization_invitation(TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_extend_organization_invitation(TEXT, TEXT, TIMESTAMPTZ, BIGINT, TEXT)",
+    "samurai_reissue_organization_invitation(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, BIGINT, TEXT)",
+    "samurai_accept_organization_invitation(TEXT, TEXT, TEXT)",
+    "samurai_accept_organization_invitation(TEXT, TEXT)",
+    "samurai_adopt_workspace_membership(TEXT, TEXT, TEXT)",
+    "samurai_set_organization_workspace_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_set_organization_workspace_lifecycle(TEXT, TEXT, TEXT, BIGINT, TEXT)",
+    "samurai_move_workspace_organization(TEXT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_append_workspace_audit(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, JSONB)",
     "samurai_create_workspace_invitation(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, BIGINT)",
     "samurai_list_workspace_account_identities(TEXT)",
@@ -9366,6 +10921,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
   await sql.query(`REVOKE INSERT ON TABLE workspace_completion_migration_runs FROM ${role}`);
   await sql.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE ${guardedMutationTables.join(", ")} FROM ${role}`);
   await sql.query(`GRANT USAGE ON SEQUENCE workspace_events_id_seq TO ${role}`);
+  await sql.query(`GRANT USAGE ON SEQUENCE organization_events_id_seq TO ${role}`);
   await sql.query(`GRANT EXECUTE ON FUNCTION ${functions.join(", ")} TO ${role}`);
   for (const legacyFunction of legacyFunctions) {
     await sql.query(`REVOKE EXECUTE ON FUNCTION ${legacyFunction} FROM ${role}`).catch(() => undefined);

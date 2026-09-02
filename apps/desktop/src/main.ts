@@ -74,6 +74,38 @@ import {
   workspaceChatSessionRequest,
   workspaceChatTurnRequest
 } from "./workspace-chat-requests.js";
+import { workspaceChatReconnectRequest, workspaceChatRunControlRequest } from "./workspace-chat-control-requests.js";
+import {
+  workspaceEvidenceRequest,
+  workspaceOrganizationBundleExportRequest,
+  workspaceOrganizationBundleRestoreRequest,
+  workspaceOrganizationCreateRequest,
+  workspaceOrganizationDeleteRequest,
+  workspaceOrganizationInvitationAcceptRequest,
+  workspaceOrganizationInvitationCreateRequest,
+  workspaceOrganizationInvitationExtendRequest,
+  workspaceOrganizationInvitationReissueRequest,
+  workspaceOrganizationInvitationRevokeRequest,
+  workspaceOrganizationInvitationsRequest,
+  workspaceOrganizationMemberLeaveRequest,
+  workspaceOrganizationMemberRemoveRequest,
+  workspaceOrganizationMemberRoleRequest,
+  workspaceOrganizationMembersRequest,
+  workspaceOrganizationPatchRequest,
+  workspaceOrganizationViewRequest,
+  workspaceOrganizationWorkspaceCreateRequest,
+  workspaceOrganizationWorkspaceLifecycleRequest,
+  workspaceOrganizationWorkspaceMemberGrantRequest,
+  workspaceOrganizationWorkspaceMemberRevokeRequest,
+  workspaceOrganizationWorkspaceMovePreviewRequest,
+  workspaceOrganizationWorkspaceMoveStatusRequest,
+  workspaceOrganizationWorkspaceMoveRequest,
+  workspaceOrganizationWorkspacePatchRequest,
+  workspaceOrganizationWorkspacesRequest,
+  workspaceOrganizationListRequest,
+  workspaceSelectionRoomsRequest,
+  workspaceSelectionWorkspaceViewRequest
+} from "./workspace-organization-requests.js";
 import { workspaceAttachmentRequest } from "./workspace-attachment-requests.js";
 import {
   workspaceMemoryArchiveRequest,
@@ -190,9 +222,15 @@ let latestHealth: HealthState = {
 };
 let pendingDeepLink: string | undefined;
 let mainWindowLoadToken = 0;
-let workspaceConnectionRegistry: WorkspaceConnectionRegistry = { version: 1, connections: [] };
+let workspaceConnectionRegistry: WorkspaceConnectionRegistry = { version: 2, connections: [] };
 let workspaceConnectionRegistryPath = "";
 let workspaceIdentityStore: WorkspaceIdentityStore | undefined;
+// Workspace and Room are navigation selections, not connection authority.
+// They are populated only after a Server-authorized selection (or as a
+// restart candidate until that re-authorization succeeds).
+let activeWorkspaceId: string | undefined;
+let activeOrganizationId: string | undefined;
+let activeRoomId: string | undefined;
 let workspaceRealtimeSocket: Socket | undefined;
 let workspaceRealtimeGeneration = 0;
 let workspaceRealtimeLastCursor: string | undefined;
@@ -457,7 +495,7 @@ function registerIpcHandlers(): void {
       apiBaseUrl: config.apiBaseUrl,
       webDevUrl: config.webDevUrl,
       workspaceServerUrl: config.workspaceServerUrl,
-      workspaceId: config.workspaceId,
+      workspaceId: activeWorkspaceId,
       accountId: config.accountId
     },
     workspaceConnections: publicWorkspaceConnections(),
@@ -474,6 +512,7 @@ function registerIpcHandlers(): void {
     workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, workspaceConnectionSubmission(input));
     await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
     applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+    await reauthorizeActiveWorkspaceCandidate();
     void reconnectActiveWorkspaceRealtime();
     return publicWorkspaceConnections();
   });
@@ -482,6 +521,7 @@ function registerIpcHandlers(): void {
     workspaceConnectionRegistry = selectWorkspaceConnection(workspaceConnectionRegistry, connectionId);
     await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
     applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+    await reauthorizeActiveWorkspaceCandidate();
     void reconnectActiveWorkspaceRealtime();
     return publicWorkspaceConnections();
   });
@@ -496,6 +536,7 @@ function registerIpcHandlers(): void {
     const credentialRef = await requireWorkspaceIdentityStore().save(connection.accountId, privateKey);
     workspaceConnectionRegistry = upsertWorkspaceConnection(workspaceConnectionRegistry, { ...connection, credentialRef });
     await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+    await reauthorizeActiveWorkspaceCandidate();
     void reconnectActiveWorkspaceRealtime();
     return publicWorkspaceConnections();
   });
@@ -517,11 +558,212 @@ function registerIpcHandlers(): void {
     if (result.status < 200 || result.status >= 300) throw new Error(`workspace_account_registration_failed:${result.status}`);
     return result.body;
   });
+  // Organization navigation and management use Account-scoped signed
+  // requests.  They deliberately do not inherit the active Workspace header;
+  // the Server applies Organization membership before returning a projection.
+  ipcMain.handle("samurai:workspace-server:organization:list", async () => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationListRequest()));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:get", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationViewRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:create", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationCreateRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:patch", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationPatchRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:delete", async (_event, input: unknown) => {
+    const request = workspaceOrganizationDeleteRequest(input);
+    const result = await activeOrganizationServerRequest(request);
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    if (value.organizationId === activeOrganizationId) await persistActiveWorkspaceSelection({});
+    return sanitizeOrganizationPayload(result);
+  });
+  ipcMain.handle("samurai:workspace-server:organization:members:list", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationMembersRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:member:role", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationMemberRoleRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:member:remove", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationMemberRemoveRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:member:leave", async (_event, input: unknown) => {
+    const request = workspaceOrganizationMemberLeaveRequest(input);
+    const result = await activeOrganizationServerRequest(request);
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    if (value.organizationId === activeOrganizationId) await persistActiveWorkspaceSelection({});
+    return sanitizeOrganizationPayload(result);
+  });
+  ipcMain.handle("samurai:workspace-server:organization:invitations:list", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationInvitationsRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:invitation:create", async (_event, input: unknown) => {
+    // A token is only returned from this explicit create operation so the
+    // renderer can show the one-time invitation dialog.  Credentials and
+    // unrestricted Server records remain excluded by the sanitizer.
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationInvitationCreateRequest(input)), { includeInvitationToken: true });
+  });
+  ipcMain.handle("samurai:workspace-server:organization:invitation:accept", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationInvitationAcceptRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:invitation:revoke", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationInvitationRevokeRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:invitation:reissue", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationInvitationReissueRequest(input)), { includeInvitationToken: true });
+  });
+  ipcMain.handle("samurai:workspace-server:organization:invitation:extend", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationInvitationExtendRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspaces:list", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspacesRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:create", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspaceCreateRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:patch", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspacePatchRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:member:grant", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspaceMemberGrantRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:member:revoke", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspaceMemberRevokeRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:lifecycle", async (_event, input: unknown) => {
+    const request = workspaceOrganizationWorkspaceLifecycleRequest(input);
+    const result = await activeOrganizationServerRequest(request);
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    if (request.path.includes("/archive") && value.workspaceId === activeWorkspaceId) {
+      await persistActiveWorkspaceSelection({ organizationId: activeOrganizationId, workspaceId: activeWorkspaceId });
+    }
+    if (value.lifecycle === "delete" && value.workspaceId === activeWorkspaceId) {
+      await persistActiveWorkspaceSelection({ organizationId: activeOrganizationId, workspaceId: undefined });
+    }
+    return sanitizeOrganizationPayload(result);
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:move-preview", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspaceMovePreviewRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:move", async (_event, input: unknown) => {
+    const request = workspaceOrganizationWorkspaceMoveRequest(input);
+    const result = await activeOrganizationServerRequest(request);
+    const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    if (value.workspaceId === activeWorkspaceId && typeof value.targetOrganizationId === "string") {
+      await persistActiveWorkspaceSelection({ organizationId: value.targetOrganizationId, workspaceId: activeWorkspaceId, roomId: undefined });
+    }
+    return sanitizeOrganizationPayload(result);
+  });
+  ipcMain.handle("samurai:workspace-server:organization:workspace:move-status", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationWorkspaceMoveStatusRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:bundle:restore", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationBundleRestoreRequest(input)));
+  });
+  ipcMain.handle("samurai:workspace-server:organization:bundle:export", async (_event, input: unknown) => {
+    return sanitizeOrganizationPayload(await activeOrganizationServerRequest(workspaceOrganizationBundleExportRequest(input)));
+  });
+  // Selection is always a Server-authorized operation.  The values written to
+  // the local registry below are only restart candidates, never grants.
+  ipcMain.handle("samurai:workspace-server:selection:organization", async (_event, input: unknown) => {
+    const organizationId = requiredSelectionId(input, "organizationId");
+    await activeOrganizationServerRequest(workspaceOrganizationViewRequest({ organizationId }));
+    await persistActiveWorkspaceSelection({ organizationId, workspaceId: undefined, roomId: undefined });
+    return publicWorkspaceConnections();
+  });
+  ipcMain.handle("samurai:workspace-server:selection:workspace", async (_event, input: unknown) => {
+    const selection = workspaceSelectionInput(input);
+    const connection = requireActiveWorkspaceConnection();
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    const workspaceResponse = await signedWorkspaceServerRequest(connection, privateKey, workspaceSelectionWorkspaceViewRequest({ workspaceId: selection.workspaceId }));
+    assertWorkspaceServerSuccess(workspaceResponse, "workspace_selection_failed");
+    const organizationId = selection.organizationId
+      ?? responseString(workspaceResponse.body, "organization_id")
+      ?? responseString(workspaceResponse.body, "organizationId")
+      ?? activeOrganizationId;
+    if (selection.organizationId) {
+      const organizationWorkspaces = await activeOrganizationServerRequest(workspaceOrganizationWorkspacesRequest({ organizationId: selection.organizationId }));
+      if (!extractArray(organizationWorkspaces, ["workspaces"]).some((workspace) => responseString(workspace, "id") === selection.workspaceId || responseString(workspace, "workspace_id") === selection.workspaceId)) {
+        throw new Error("workspace_selection_denied");
+      }
+    }
+    await persistActiveWorkspaceSelection({ organizationId, workspaceId: selection.workspaceId, roomId: undefined });
+    if (selection.roomId) {
+      await authorizeAndPersistRoomSelection(selection.workspaceId, selection.roomId);
+    }
+    return publicWorkspaceConnections();
+  });
+  ipcMain.handle("samurai:workspace-server:selection:room", async (_event, input: unknown) => {
+    const selection = workspaceSelectionInput(input);
+    if (!selection.roomId) throw new Error("roomId_invalid");
+    await authorizeAndPersistRoomSelection(selection.workspaceId, selection.roomId);
+    return publicWorkspaceConnections();
+  });
+  // Browser bridge compatibility uses the compact Workspace-only form.
+  ipcMain.handle("samurai:workspace-server:selection:set", async (_event, input: unknown) => {
+    const selection = workspaceSelectionInput(input);
+    const connection = requireActiveWorkspaceConnection();
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    const response = await signedWorkspaceServerRequest(connection, privateKey, workspaceSelectionWorkspaceViewRequest({ workspaceId: selection.workspaceId }));
+    assertWorkspaceServerSuccess(response, "workspace_selection_failed");
+    await persistActiveWorkspaceSelection({
+      organizationId: selection.organizationId
+        ?? responseString(response.body, "organization_id")
+        ?? responseString(response.body, "organizationId")
+        ?? activeOrganizationId,
+      workspaceId: selection.workspaceId,
+      roomId: undefined
+    });
+    return publicWorkspaceConnections();
+  });
+  ipcMain.handle("samurai:workspace-server:chat:run:cancel", async (_event, input: unknown) => {
+    const request = workspaceChatRunControlRequest(input, "cancel");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceChatPath()}/runs/${encodeURIComponent(request.runId)}/cancel`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:run:stop", async (_event, input: unknown) => {
+    const request = workspaceChatRunControlRequest(input, "cancel");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceChatPath()}/runs/${encodeURIComponent(request.runId)}/cancel`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:chat:run:retry", async (_event, input: unknown) => {
+    const request = workspaceChatRunControlRequest(input, "retry");
+    return activeWorkspaceServerRequest({
+      method: "POST",
+      path: `${activeWorkspaceChatPath()}/runs/${encodeURIComponent(request.runId)}/retry`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      body: request.body
+    });
+  });
+  ipcMain.handle("samurai:workspace-server:reconnect", async (_event, input: unknown) => {
+    workspaceChatReconnectRequest(input);
+    reconnectActiveWorkspaceRealtime();
+    return await workspaceServerStatus();
+  });
+  ipcMain.handle("samurai:workspace-server:evidence:read", async (_event, input: unknown) => {
+    return await readWorkspaceEvidence(input);
+  });
   // These are deliberate, purpose-specific signed operations.  The renderer
   // never receives a generic signed-request capability or this private key.
   ipcMain.handle("samurai:workspace-server:rooms:list", async () => {
     const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeQuery<PublicRoomRecord[]>(connection.workspaceId, "room.list", { context: {}, input: {} });
+    const response = await activeWorkspaceDomainApiClient().executeQuery<PublicRoomRecord[]>(requireActiveWorkspaceId(), "room.list", { context: {}, input: {} });
     return { rooms: response.result.map(toDesktopWorkspaceRoom) };
   });
   ipcMain.handle("samurai:workspace-server:settings:get", async () => {
@@ -567,7 +809,7 @@ function registerIpcHandlers(): void {
     const request = workspaceChatSessionRequest(input);
     const connection = requireActiveWorkspaceConnection();
     const { room_id: _roomId, ...operationInput } = request.body;
-    const response = await activeWorkspaceDomainApiClient().executeOperation(connection.workspaceId, "session.create", {
+    const response = await activeWorkspaceDomainApiClient().executeOperation(requireActiveWorkspaceId(), "session.create", {
       context: { room_id: request.roomId },
       input: operationInput
     }, { operationId: request.operationId, idempotencyKey: request.operationId });
@@ -584,7 +826,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("samurai:workspace-server:chat:message:send", async (_event, input: unknown) => {
     const request = workspaceChatTurnRequest(input);
     const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeOperation(connection.workspaceId, "chat.turn.run", {
+    const response = await activeWorkspaceDomainApiClient().executeOperation(requireActiveWorkspaceId(), "chat.turn.run", {
       context: { session_id: request.sessionId },
       input: request.body
     }, { operationId: request.idempotencyKey, idempotencyKey: request.idempotencyKey });
@@ -947,13 +1189,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle("samurai:workspace-server:artifacts:list", async (_event, input: unknown) => {
     const request = workspaceArtifactListRequest(input);
     const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeQuery(connection.workspaceId, "artifact.list", { context: { room_id: request.roomId }, input: {} });
+    const response = await activeWorkspaceDomainApiClient().executeQuery(requireActiveWorkspaceId(), "artifact.list", { context: { room_id: request.roomId }, input: {} });
     return { artifacts: response.result };
   });
   ipcMain.handle("samurai:workspace-server:artifact:get", async (_event, input: unknown) => {
     const request = workspaceArtifactIdRequest(input);
     const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeQuery<{ artifact: unknown; content: string }>(connection.workspaceId, "artifact.view", { context: { room_id: request.roomId }, input: { id: request.artifactId } });
+    const response = await activeWorkspaceDomainApiClient().executeQuery<{ artifact: unknown; content: string }>(requireActiveWorkspaceId(), "artifact.view", { context: { room_id: request.roomId }, input: { id: request.artifactId } });
     return { ...response.result, auditRecords: [] };
   });
   ipcMain.handle("samurai:workspace-server:artifact:create", async (_event, input: unknown) => {
@@ -972,7 +1214,7 @@ function registerIpcHandlers(): void {
       });
     }
     const { room_id: roomId, locale, source_locales: sourceLocales, ...baseInput } = request.body;
-    const response = await activeWorkspaceDomainApiClient().executeOperation(connection.workspaceId, "artifact.create", {
+    const response = await activeWorkspaceDomainApiClient().executeOperation(requireActiveWorkspaceId(), "artifact.create", {
       context: { room_id: String(roomId) },
       input: {
         ...baseInput,
@@ -1020,7 +1262,7 @@ function registerIpcHandlers(): void {
     const request = workspaceRoomCreateRequest(input);
     if (!request.body.parent_room_id) {
       const connection = requireActiveWorkspaceConnection();
-      const response = await activeWorkspaceDomainApiClient().executeOperation<PublicRoomRecord>(connection.workspaceId, "room.create", {
+      const response = await activeWorkspaceDomainApiClient().executeOperation<PublicRoomRecord>(requireActiveWorkspaceId(), "room.create", {
         context: {},
         input: { name: request.body.name }
       }, { operationId: request.operationId, idempotencyKey: request.operationId });
@@ -1115,16 +1357,19 @@ async function initializeWorkspaceConnections(): Promise<void> {
   workspaceConnectionRegistryPath = path.join(app.getPath("userData"), "workspace-connections.json");
   workspaceIdentityStore = createWorkspaceIdentityStore(path.join(app.getPath("userData"), "workspace-identities.json"), safeStorage);
   workspaceConnectionRegistry = await loadWorkspaceConnectionRegistry(workspaceConnectionRegistryPath);
-  if (config.workspaceServerUrl && config.workspaceId && config.accountId) {
+  // Persist the normalized v2 shape immediately so a legacy workspaceId
+  // entry and duplicate Server+Account rows are migrated even when no new
+  // connection is added during this launch.
+  await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+  if (config.workspaceServerUrl && config.accountId) {
     const environmentConnection: WorkspaceConnectionInput = {
       label: "Environment",
       serverUrl: config.workspaceServerUrl,
-      workspaceId: config.workspaceId,
-      accountId: config.accountId
+      accountId: config.accountId,
+      ...(config.workspaceId ? { lastWorkspaceId: config.workspaceId } : {})
     };
     const hasEnvironmentConnection = workspaceConnectionRegistry.connections.some((connection) =>
       connection.serverUrl === config.workspaceServerUrl
-      && connection.workspaceId === config.workspaceId
       && connection.accountId === config.accountId
     );
     if (!hasEnvironmentConnection) {
@@ -1133,7 +1378,114 @@ async function initializeWorkspaceConnections(): Promise<void> {
     }
   }
   applyWorkspaceConnection(activeWorkspaceConnection(workspaceConnectionRegistry));
+  void reauthorizeActiveWorkspaceCandidate();
   void reconnectActiveWorkspaceRealtime();
+}
+
+/**
+ * A persisted navigation value is only a restart hint.  Re-check each level
+ * against the Server before a protected Workspace/Room becomes usable.  A
+ * transient network failure leaves the hint intact for a later reconnect;
+ * an explicit 403/404 drops the invalid level and everything below it.
+ */
+async function reauthorizeActiveWorkspaceCandidate(): Promise<void> {
+  const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
+  if (!connection?.credentialRef) return;
+  let privateKey: string;
+  try {
+    privateKey = await requireActiveWorkspacePrivateKey(connection);
+  } catch {
+    return;
+  }
+  const organizationId = connection.lastOrganizationId;
+  const workspaceId = connection.lastWorkspaceId;
+  const roomId = connection.lastRoomId;
+  let validOrganizationId = organizationId;
+  let validWorkspaceId = workspaceId;
+  let validRoomId = roomId;
+  if (organizationId) {
+    try {
+      const result = await signedWorkspaceServerRequest(connection, privateKey, workspaceOrganizationViewRequest({ organizationId }));
+      if (isSelectionAuthorizationDenied(result.status)) validOrganizationId = undefined;
+      else if (result.status < 200 || result.status >= 300) return;
+    } catch {
+      return;
+    }
+  }
+  if (organizationId && validOrganizationId === undefined) {
+    validWorkspaceId = undefined;
+    validRoomId = undefined;
+  }
+  if (validWorkspaceId) {
+    try {
+      if (validOrganizationId) {
+        const organizationWorkspaces = await signedWorkspaceServerRequest(connection, privateKey, workspaceOrganizationWorkspacesRequest({ organizationId: validOrganizationId }));
+        const workspaces = extractArray(organizationWorkspaces.body, ["workspaces"]);
+        if (isSelectionAuthorizationDenied(organizationWorkspaces.status)) {
+          validWorkspaceId = undefined;
+          validRoomId = undefined;
+        } else if (organizationWorkspaces.status < 200 || organizationWorkspaces.status >= 300) return;
+        else if (!workspaces.some((workspace) =>
+          responseString(workspace, "id") === validWorkspaceId || responseString(workspace, "workspace_id") === validWorkspaceId
+        )) {
+          validWorkspaceId = undefined;
+          validRoomId = undefined;
+        }
+      }
+      if (!validWorkspaceId) {
+        // The persisted Workspace no longer belongs to the selected
+        // Organization. Keep the Organization candidate for safe recovery.
+        if (validOrganizationId) {
+          validRoomId = undefined;
+          await persistActiveWorkspaceSelection({ organizationId: validOrganizationId });
+        }
+        return;
+      }
+      const result = await signedWorkspaceServerRequest(connection, privateKey, workspaceSelectionWorkspaceViewRequest({ workspaceId: validWorkspaceId }));
+      if (isSelectionAuthorizationDenied(result.status)) {
+        validWorkspaceId = undefined;
+        validRoomId = undefined;
+      } else if (result.status < 200 || result.status >= 300) {
+        return;
+      } else if (!validOrganizationId) {
+        validOrganizationId = responseString(result.body, "organization_id") ?? responseString(result.body, "organizationId");
+      }
+    } catch {
+      return;
+    }
+  }
+  if (validWorkspaceId && validRoomId) {
+    try {
+      const result = await signedWorkspaceServerRequest(connection, privateKey, workspaceSelectionRoomsRequest({ workspaceId: validWorkspaceId }));
+      const rooms = result.body && typeof result.body === "object" && !Array.isArray(result.body)
+        ? (result.body as { rooms?: unknown }).rooms
+        : undefined;
+      if (isSelectionAuthorizationDenied(result.status)) validRoomId = undefined;
+      else if (result.status < 200 || result.status >= 300 || !Array.isArray(rooms)) return;
+      else if (!rooms.some((room) =>
+        room && typeof room === "object" && !Array.isArray(room) && (room as { id?: unknown }).id === validRoomId
+      )) validRoomId = undefined;
+    } catch {
+      return;
+    }
+  }
+  if (validOrganizationId !== organizationId || validWorkspaceId !== workspaceId || validRoomId !== roomId) {
+    if (validWorkspaceId) {
+      await persistActiveWorkspaceSelection({
+        ...(validOrganizationId ? { organizationId: validOrganizationId } : {}),
+        workspaceId: validWorkspaceId,
+        ...(validRoomId ? { roomId: validRoomId } : {})
+      });
+    } else if (validOrganizationId) {
+      await persistActiveWorkspaceSelection({ organizationId: validOrganizationId });
+    } else {
+      await persistActiveWorkspaceSelection({});
+    }
+  }
+}
+
+function isSelectionAuthorizationDenied(status: number): boolean {
+  return status === 401 || status === 403 || status === 404;
 }
 
 function publicWorkspaceConnections(): {
@@ -1144,6 +1496,11 @@ function publicWorkspaceConnections(): {
     ...(workspaceConnectionRegistry.activeConnectionId ? { activeConnectionId: workspaceConnectionRegistry.activeConnectionId } : {}),
     connections: workspaceConnectionRegistry.connections.map(({ credentialRef: _credentialRef, ...connection }) => connection)
   };
+}
+
+function publicConnectionWithoutCredential(connection: WorkspaceConnection): Omit<WorkspaceConnection, "credentialRef"> {
+  const { credentialRef: _credentialRef, ...publicConnection } = connection;
+  return publicConnection;
 }
 
 function workspaceConnectionSubmission(value: unknown): WorkspaceConnectionInput {
@@ -1164,18 +1521,34 @@ function workspaceConnectionSubmission(value: unknown): WorkspaceConnectionInput
     ...(optional("id") ? { id: optional("id") } : {}),
     label: required("label"),
     serverUrl: required("serverUrl"),
-    workspaceId: required("workspaceId"),
-    accountId: required("accountId")
+    accountId: required("accountId"),
+    // Kept as a compatibility input only. workspace-connections.ts migrates
+    // it into lastWorkspaceId and never persists it as connection authority.
+    ...(optional("workspaceId") ? { workspaceId: optional("workspaceId") } : {}),
+    ...(optional("lastOrganizationId") ? { lastOrganizationId: optional("lastOrganizationId") } : {}),
+    ...(optional("lastWorkspaceId") ? { lastWorkspaceId: optional("lastWorkspaceId") } : {}),
+    ...(optional("lastRoomId") ? { lastRoomId: optional("lastRoomId") } : {})
   };
 }
 
 function applyWorkspaceConnection(connection: WorkspaceConnection | undefined): void {
-  if (!connection) return;
+  if (!connection) {
+    activeOrganizationId = undefined;
+    activeWorkspaceId = undefined;
+    activeRoomId = undefined;
+    config.workspaceServerUrl = undefined;
+    config.workspaceId = undefined;
+    config.accountId = undefined;
+    return;
+  }
   // Workspace Server is a separate boundary from the legacy Chat/Core API.
   // Selecting it must never silently redirect the Chat UI to an incompatible
   // endpoint; Server 02-specific clients consume these explicit values.
   config.workspaceServerUrl = connection.serverUrl;
-  config.workspaceId = connection.workspaceId;
+  activeOrganizationId = connection.lastOrganizationId;
+  activeWorkspaceId = connection.lastWorkspaceId;
+  activeRoomId = connection.lastRoomId;
+  config.workspaceId = activeWorkspaceId;
   config.accountId = connection.accountId;
 }
 
@@ -1186,6 +1559,8 @@ interface WorkspaceServerRequestInput {
   operationId?: string;
   idempotencyKey?: string;
   workspaceScoped: boolean;
+  /** Explicit only for realtime requests bound to a non-active snapshot. */
+  workspaceId?: string;
 }
 
 type WorkspaceRealtimeNotice = {
@@ -1206,6 +1581,19 @@ function requireActiveWorkspaceConnection(): WorkspaceConnection {
   const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
   if (!connection) throw new Error("workspace_connection_not_selected");
   return connection;
+}
+
+function workspaceIdForConnection(connection: WorkspaceConnection): string | undefined {
+  const active = activeWorkspaceConnection(workspaceConnectionRegistry);
+  if (active?.id === connection.id) return activeWorkspaceId ?? connection.lastWorkspaceId;
+  return connection.lastWorkspaceId;
+}
+
+function requireActiveWorkspaceId(): string {
+  const connection = requireActiveWorkspaceConnection();
+  const workspaceId = workspaceIdForConnection(connection);
+  if (!workspaceId) throw new Error("workspace_selection_required");
+  return workspaceId;
 }
 
 async function requireActiveWorkspacePrivateKey(connection: WorkspaceConnection): Promise<string> {
@@ -1236,13 +1624,15 @@ async function signedWorkspaceServerRequest(
   const url = new URL(input.path, `${connection.serverUrl}/`);
   const base = new URL(connection.serverUrl);
   if (url.origin !== base.origin || !url.pathname.startsWith("/api/")) throw new Error("workspace_server_request_origin_invalid");
+  const workspaceId = input.workspaceScoped ? (input.workspaceId ?? workspaceIdForConnection(connection)) : undefined;
+  if (input.workspaceScoped && !workspaceId) throw new Error("workspace_selection_required");
   const requestId = `request_${randomUUID()}`;
   const timestamp = String(Date.now());
   const body = input.body ?? {};
   const signaturePayload = createWorkspaceAccountSignaturePayload({
     method: input.method,
     path: url.pathname,
-    ...(input.workspaceScoped ? { workspaceId: connection.workspaceId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
     ...(input.operationId ? { operationId: input.operationId } : {}),
     ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     requestId,
@@ -1260,7 +1650,7 @@ async function signedWorkspaceServerRequest(
       "x-samurai-request-id": requestId,
       "x-samurai-timestamp": timestamp,
       "x-samurai-signature": signature,
-      ...(input.workspaceScoped ? { "x-samurai-workspace-id": connection.workspaceId } : {}),
+      ...(workspaceId ? { "x-samurai-workspace-id": workspaceId } : {}),
       ...(input.operationId ? { "x-samurai-operation-id": input.operationId } : {}),
       ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {})
     },
@@ -1295,6 +1685,206 @@ async function activeWorkspaceServerRequest(input: WorkspaceServerRequestInput):
     throw new Error(`${code}:${result.status}${latestVersion === undefined ? "" : `:latest_version=${latestVersion}`}`);
   }
   return result.body;
+}
+
+async function activeOrganizationServerRequest(
+  input: import("./workspace-organization-requests.js").OrganizationRequestDescriptor
+): Promise<unknown> {
+  const connection = requireActiveWorkspaceConnection();
+  const privateKey = await requireActiveWorkspacePrivateKey(connection);
+  const result = await signedWorkspaceServerRequest(connection, privateKey, {
+    method: input.method,
+    path: input.path,
+    workspaceScoped: false,
+    ...(input.body === undefined ? {} : { body: input.body }),
+    ...(input.operationId ? { operationId: input.operationId } : {}),
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+  });
+  assertWorkspaceServerSuccess(result, "organization_request_failed");
+  return result.body;
+}
+
+function assertWorkspaceServerSuccess(result: { status: number; body: unknown }, fallback: string): void {
+  if (result.status >= 200 && result.status < 300) return;
+  const body = result.body;
+  const errorValue = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+  const code = typeof errorValue === "string"
+    ? errorValue
+    : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
+      ? (errorValue as { code: string }).code
+      : fallback;
+  throw new Error(`${code}:${result.status}`);
+}
+
+function responseString(body: unknown, key: string): string | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const record = body as Record<string, unknown>;
+  const direct = record[key];
+  if (typeof direct === "string" && isWorkspaceOpaqueId(direct)) return direct;
+  for (const nestedKey of ["workspace", "organization", "result"]) {
+    const nested = record[nestedKey];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const value = (nested as Record<string, unknown>)[key];
+      if (typeof value === "string" && isWorkspaceOpaqueId(value)) return value;
+    }
+  }
+  return undefined;
+}
+
+function requiredSelectionId(input: unknown, key: string): string {
+  const value = typeof input === "string"
+    ? input
+    : input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)[key]
+      : undefined;
+  if (typeof value !== "string" || !isWorkspaceOpaqueId(value)) throw new Error(`${key}_invalid`);
+  return value;
+}
+
+function workspaceSelectionInput(input: unknown): {
+  organizationId?: string;
+  workspaceId: string;
+  roomId?: string;
+} {
+  if (typeof input === "string") return { workspaceId: requiredSelectionId(input, "workspaceId") };
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_selection_invalid");
+  const value = input as Record<string, unknown>;
+  const workspaceId = requiredSelectionId(value, "workspaceId");
+  const organizationId = value.organizationId === undefined || value.organizationId === null || value.organizationId === ""
+    ? undefined
+    : requiredSelectionId(value, "organizationId");
+  const roomId = value.roomId === undefined || value.roomId === null || value.roomId === ""
+    ? undefined
+    : requiredSelectionId(value, "roomId");
+  return { workspaceId, ...(organizationId ? { organizationId } : {}), ...(roomId ? { roomId } : {}) };
+}
+
+async function authorizeAndPersistRoomSelection(workspaceId: string, roomId: string): Promise<void> {
+  const connection = requireActiveWorkspaceConnection();
+  const privateKey = await requireActiveWorkspacePrivateKey(connection);
+  const response = await signedWorkspaceServerRequest(connection, privateKey, workspaceSelectionRoomsRequest({ workspaceId }));
+  assertWorkspaceServerSuccess(response, "room_selection_failed");
+  const body = response.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray((body as { rooms?: unknown }).rooms)) {
+    throw new Error("workspace_rooms_response_invalid");
+  }
+  const room = (body as { rooms: unknown[] }).rooms.find((candidate) =>
+    candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      && (candidate as { id?: unknown }).id === roomId
+  );
+  if (!room) throw new Error("room_selection_denied");
+  await persistActiveWorkspaceSelection({ organizationId: activeOrganizationId, workspaceId, roomId });
+}
+
+async function persistActiveWorkspaceSelection(selection: {
+  organizationId?: string;
+  workspaceId?: string;
+  roomId?: string;
+}): Promise<void> {
+  const connection = requireActiveWorkspaceConnection();
+  const updatedAt = new Date().toISOString();
+  const updatedConnection: WorkspaceConnection = {
+    ...connection,
+    ...(selection.organizationId ? { lastOrganizationId: selection.organizationId } : {}),
+    ...(selection.workspaceId ? { lastWorkspaceId: selection.workspaceId } : {}),
+    ...(selection.roomId ? { lastRoomId: selection.roomId } : {}),
+    updatedAt
+  };
+  if (selection.organizationId === undefined) delete updatedConnection.lastOrganizationId;
+  if (selection.workspaceId === undefined) delete updatedConnection.lastWorkspaceId;
+  if (selection.roomId === undefined) delete updatedConnection.lastRoomId;
+  workspaceConnectionRegistry = {
+    version: 2,
+    ...(workspaceConnectionRegistry.activeConnectionId ? { activeConnectionId: workspaceConnectionRegistry.activeConnectionId } : {}),
+    connections: workspaceConnectionRegistry.connections.map((candidate) => candidate.id === connection.id ? updatedConnection : candidate)
+  };
+  await saveWorkspaceConnectionRegistry(workspaceConnectionRegistryPath, workspaceConnectionRegistry);
+  // A slow authorization response must not switch the user back to a
+  // connection selected while this request was in flight. The candidate is
+  // still saved for that connection, but only the current one updates Main's
+  // active navigation/realtime state.
+  if (workspaceConnectionRegistry.activeConnectionId !== connection.id) return;
+  applyWorkspaceConnection(updatedConnection);
+  void reconnectActiveWorkspaceRealtime();
+}
+
+async function readWorkspaceEvidence(input: unknown): Promise<unknown> {
+  const request = workspaceEvidenceRequest(input);
+  if (request.workspaceId !== requireActiveWorkspaceId()) throw new Error("workspace_selection_required");
+  const connection = requireActiveWorkspaceConnection();
+  const privateKey = await requireActiveWorkspacePrivateKey(connection);
+  const [activityResponse, runResponse, artifactResponse, memoryResponse] = await Promise.all([
+    request.activityPath
+      ? signedWorkspaceServerRequest(connection, privateKey, { method: "GET", path: request.activityPath, workspaceScoped: true, workspaceId: request.workspaceId })
+      : Promise.resolve({ status: 200, body: { activities: [] } }),
+    signedWorkspaceServerRequest(connection, privateKey, { method: "GET", path: request.runsPath, workspaceScoped: true, workspaceId: request.workspaceId }),
+    request.artifactsPath
+      ? signedWorkspaceServerRequest(connection, privateKey, { method: "GET", path: request.artifactsPath, workspaceScoped: true, workspaceId: request.workspaceId })
+      : Promise.resolve({ status: 200, body: { artifacts: [] } }),
+    request.memoriesPath
+      ? signedWorkspaceServerRequest(connection, privateKey, { method: "GET", path: request.memoriesPath, workspaceScoped: true, workspaceId: request.workspaceId })
+      : Promise.resolve({ status: 200, body: { memories: [] } })
+  ]);
+  for (const response of [activityResponse, runResponse, artifactResponse, memoryResponse]) {
+    assertWorkspaceServerSuccess(response, "workspace_evidence_read_failed");
+  }
+  return sanitizeEvidencePayload({
+    activity: extractArray(activityResponse.body, ["activity", "activities", "entries"]),
+    backendRuns: extractArray(runResponse.body, ["runs", "backend_runs"]),
+    artifacts: extractArray(artifactResponse.body, ["artifacts"]),
+    memories: extractArray(memoryResponse.body, ["memories"])
+  });
+}
+
+function extractArray(body: unknown, keys: string[]): unknown[] {
+  if (Array.isArray(body)) return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  for (const key of keys) {
+    const value = (body as Record<string, unknown>)[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+const publicOrganizationPayloadKeys = new Set([
+  "id", "organization_id", "workspace_id", "room_id", "account_id", "invitation_id", "source_organization_id", "target_organization_id",
+  "name", "description", "icon", "state", "status", "role", "membership_role", "access", "permission", "can_access", "has_access",
+  "can_execute", "can_manage", "version", "workspace_count", "created_at", "updated_at", "joined_at", "removed_at", "expires_at",
+  "accepted_at", "revoked_at", "recipient_account_id", "display_name", "created_by", "updated_by", "issued_by", "deleted_at", "lifecycle", "replayed", "organizations", "organization",
+  "workspaces", "workspace", "members", "member", "membership", "organization_membership", "workspace_membership", "invitations", "invitation", "workspace_grants", "room_ids", "rooms", "preview", "result",
+  "impact", "impacts", "blocking_conditions", "blocking_owner_room_ids", "affected_room_ids", "manifest", "receipt", "error", "code",
+  "message", "details", "reason", "source_reference", "schema_revision", "schema_version", "bundle_revision", "workspace_id", "workspace_version", "workspace_state", "file_count", "byte_size", "entry_count", "bundle_id", "integrity_hash", "record_counts", "restored_at",
+  "operation_id", "guest_membership_account_ids", "committed_at", "failure_code", "existing_members", "missing_members", "failure_conditions", "requires_guest_confirmation", "write_blocked", "will_add_as_guest", "workspace_role", "current_workspace_role", "target_organization_role",
+  "activity", "activities", "entries", "runs", "backend_runs", "backendRuns", "artifacts", "memories", "resources", "kind", "title", "summary", "severity", "activity_type", "operation_id", "approval_request_id", "audit_record_id", "rollback_point_id", "topic", "content_hash",
+  "path", "file_ref", "sha256", "size", "mime_type", "selected", "reused", "evidence", "event_id", "event_type", "cursor",
+  "activity_id", "run_id", "session_id", "artifact_id", "memory_id", "resource_id", "backend_id", "backend_kind", "backend_session_id", "agent_id", "input_message_id", "output_message_id", "started_at", "completed_at", "phase", "current_attempt", "error_code", "input_summary", "output_summary", "workspace_membership_id", "organization_membership_id",
+  "organizationId", "workspaceId", "roomId", "accountId", "invitationId", "targetAccountId", "sourceOrganizationId", "targetOrganizationId",
+  "createdAt", "updatedAt", "expiresAt", "displayName", "workspaceCount", "canExecute", "canManage", "includeArchived", "operationId", "workspaceVersion", "workspaceState", "guestMembershipAccountIds", "committedAt", "failureCode", "existingMembers", "missingMembers", "failureConditions", "requiresGuestConfirmation", "writeBlocked", "willAddAsGuest", "workspaceRole", "currentWorkspaceRole", "targetOrganizationRole", "bundleId", "schemaVersion", "integrityHash", "recordCounts", "restoredAt", "state"
+]);
+
+function sanitizeOrganizationPayload(value: unknown, options: { includeInvitationToken?: boolean } = {}): unknown {
+  return sanitizePublicValue(value, options, 0);
+}
+
+function sanitizeEvidencePayload(value: unknown): unknown {
+  return sanitizePublicValue(value, {}, 0);
+}
+
+function sanitizePublicValue(value: unknown, options: { includeInvitationToken?: boolean }, depth: number): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return value.slice(0, 20_000);
+  if (depth > 8) return undefined;
+  if (Array.isArray(value)) return value.slice(0, 1_000).map((item) => sanitizePublicValue(item, options, depth + 1)).filter((item) => item !== undefined);
+  if (!value || typeof value !== "object") return undefined;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (/(?:private|secret|credential|password|raw[_-]?token)/i.test(key)) continue;
+    if (key === "token" && !options.includeInvitationToken) continue;
+    if (key !== "token" && !publicOrganizationPayloadKeys.has(key)) continue;
+    const sanitized = sanitizePublicValue(item, options, depth + 1);
+    if (sanitized !== undefined) output[key] = sanitized;
+  }
+  return output;
 }
 
 function activeWorkspaceDomainApiClient(): DomainApiClient {
@@ -1383,39 +1973,57 @@ function reconnectActiveWorkspaceRealtime(): void {
       if (!isCurrent()) return;
       forwardWorkspaceRealtimeNotice("access_changed", connection, event);
       void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+      void reauthorizeActiveWorkspaceCandidate();
     });
     socket.on("workspace:room-access-changed", (event: unknown) => {
       if (!isCurrent()) return;
       forwardWorkspaceRealtimeNotice("room_access_changed", connection, event);
       void refreshWorkspaceRealtimeRooms(socket, connection, privateKey, isCurrent);
+      void reauthorizeActiveWorkspaceCandidate();
     });
     socket.on("workspace:room-access-revoked", (event: unknown) => {
       if (!isCurrent()) return;
       forwardWorkspaceRealtimeNotice("room_access_revoked", connection, event);
+      const roomId = realtimeEventRoomId(event);
+      if (roomId && roomId === (activeRoomId ?? connection.lastRoomId)) {
+        void persistActiveWorkspaceSelection({ organizationId: activeOrganizationId, workspaceId: activeWorkspaceId });
+      }
     });
     socket.on("workspace:access-revoked", (event: unknown) => {
       if (!isCurrent()) return;
       forwardWorkspaceRealtimeNotice("access_revoked", connection, event);
       socket.disconnect();
+      if (connection.id === activeWorkspaceConnection(workspaceConnectionRegistry)?.id) {
+        void persistActiveWorkspaceSelection({ organizationId: activeOrganizationId });
+      }
     });
     socket.connect();
   })();
 }
 
+function realtimeEventRoomId(event: unknown): string | undefined {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return undefined;
+  const value = event as { roomId?: unknown; room_id?: unknown; scope?: { room_id?: unknown } };
+  const roomId = value.roomId ?? value.room_id ?? value.scope?.room_id;
+  return typeof roomId === "string" && isWorkspaceOpaqueId(roomId) ? roomId : undefined;
+}
+
 function workspaceSocketAuth(connection: WorkspaceConnection, privateKey: string): Record<string, string> {
+  const workspaceId = workspaceIdForConnection(connection);
+  if (!workspaceId) throw new Error("workspace_selection_required");
   const requestId = `socket_${randomUUID()}`;
   const timestamp = String(Date.now());
   const payload = createWorkspaceAccountSignaturePayload({
     method: "SOCKET",
     path: "/socket.io",
-    workspaceId: connection.workspaceId,
+    workspaceId,
     requestId,
     timestamp,
     body: {}
   });
   return {
     account_id: connection.accountId,
-    workspace_id: connection.workspaceId,
+    workspace_id: workspaceId,
     request_id: requestId,
     timestamp,
     signature: sign(null, Buffer.from(payload), createPrivateKey(privateKey)).toString("base64url")
@@ -1431,8 +2039,9 @@ async function refreshWorkspaceRealtimeRooms(
   try {
     const response = await signedWorkspaceServerRequest(connection, privateKey, {
       method: "GET",
-      path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/rooms`,
-      workspaceScoped: true
+      path: `/api/workspaces/${encodeURIComponent(workspaceIdForConnection(connection) ?? "")}/rooms`,
+      workspaceScoped: true,
+      workspaceId: workspaceIdForConnection(connection)
     });
     if (!isCurrent() || response.status < 200 || response.status >= 300 || !response.body || typeof response.body !== "object") return;
     const rooms = (response.body as { rooms?: unknown }).rooms;
@@ -1460,8 +2069,9 @@ async function syncWorkspaceRealtime(
       const query = afterCursor ? `?after_cursor=${encodeURIComponent(afterCursor)}&limit=500` : "?limit=500";
       const response = await signedWorkspaceServerRequest(connection, privateKey, {
         method: "GET",
-        path: `/api/v1/workspaces/${encodeURIComponent(connection.workspaceId)}/events${query}`,
-        workspaceScoped: true
+        path: `/api/v1/workspaces/${encodeURIComponent(workspaceIdForConnection(connection) ?? "")}/events${query}`,
+        workspaceScoped: true,
+        workspaceId: workspaceIdForConnection(connection)
       });
       if (!isCurrent() || response.status < 200 || response.status >= 300 || !response.body || typeof response.body !== "object") break;
       const body = response.body as { events?: unknown; next_cursor?: unknown; has_more?: unknown };
@@ -1511,8 +2121,9 @@ function forwardWorkspaceRealtimeNotice(type: WorkspaceRealtimeNotice["type"], c
     scope?: { workspace_id?: unknown; room_id?: unknown };
   };
   const workspaceId = value.workspaceId ?? value.scope?.workspace_id;
-  if (workspaceId !== connection.workspaceId) return;
-  const notice: WorkspaceRealtimeNotice = { type, workspaceId: connection.workspaceId };
+  const connectionWorkspaceId = workspaceIdForConnection(connection);
+  if (!connectionWorkspaceId || workspaceId !== connectionWorkspaceId) return;
+  const notice: WorkspaceRealtimeNotice = { type, workspaceId: connectionWorkspaceId };
   const roomId = value.roomId ?? value.scope?.room_id;
   if (typeof roomId === "string" && isWorkspaceOpaqueId(roomId)) notice.roomId = roomId;
   const kind = value.kind ?? value.event_type;
@@ -1527,59 +2138,59 @@ function isWorkspaceOpaqueId(value: string): boolean {
 }
 
 function activeWorkspaceRoomsPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/rooms`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/rooms`;
 }
 
 function activeWorkspaceLearningPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/learning`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/learning`;
 }
 
 function activeWorkspaceCompletionPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/completion`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/completion`;
 }
 
 function activeWorkspaceSkillsPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/skills`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/skills`;
 }
 
 function activeWorkspaceSkillOptimizationPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/skill-optimizations`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/skill-optimizations`;
 }
 
 function activeWorkspaceKnowledgeWikiPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/knowledge-wiki`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/knowledge-wiki`;
 }
 
 function activeWorkspaceKnowledgeMemoryPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/knowledge-memory`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/knowledge-memory`;
 }
 
 function activeWorkspaceCollectionsPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/collections`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/collections`;
 }
 
 function activeWorkspaceAutomationPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/automation`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/automation`;
 }
 
 function activeWorkspaceArtifactsPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/artifacts`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/artifacts`;
 }
 
 function activeWorkspaceGeneratedSurfacesPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/generated-surfaces`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/generated-surfaces`;
 }
 
 function activeWorkspaceClientEventsPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/client-events`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/client-events`;
 }
 
 function activeWorkspaceChatPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/chat`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/chat`;
 }
 
 function activeWorkspaceFilesPath(): string {
-  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceConnection().workspaceId)}/files`;
+  return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/files`;
 }
 
 async function activeWorkspaceExecutableRoomId(): Promise<string> {
@@ -1636,28 +2247,29 @@ async function workspaceServerStatus(): Promise<{
   }
   const identityAvailable = Boolean(connection.credentialRef && await requireWorkspaceIdentityStore().has(connection.accountId));
   if (!identityAvailable) {
-    const { credentialRef: _credentialRef, ...publicConnection } = connection;
-    return { connection: publicConnection, identityAvailable, health };
+    return { connection: publicConnectionWithoutCredential(connection), identityAvailable, health };
   }
   try {
     const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    const workspaceId = workspaceIdForConnection(connection);
+    if (!workspaceId) return { connection: publicConnectionWithoutCredential(connection), identityAvailable, health };
     const workspace = await signedWorkspaceServerRequest(connection, privateKey, {
       method: "GET",
-      path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}`,
-      workspaceScoped: true
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}`,
+      workspaceScoped: true,
+      workspaceId
     });
     const rooms = workspace.status >= 200 && workspace.status < 300
       ? await signedWorkspaceServerRequest(connection, privateKey, {
         method: "GET",
-        path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/rooms`,
-        workspaceScoped: true
+        path: `/api/workspaces/${encodeURIComponent(workspaceId)}/rooms`,
+        workspaceScoped: true,
+        workspaceId
       })
       : undefined;
-    const { credentialRef: _credentialRef, ...publicConnection } = connection;
-    return { connection: publicConnection, identityAvailable, health, workspace, ...(rooms ? { rooms } : {}) };
+    return { connection: publicConnectionWithoutCredential(connection), identityAvailable, health, workspace, ...(rooms ? { rooms } : {}) };
   } catch (error) {
-    const { credentialRef: _credentialRef, ...publicConnection } = connection;
-    return { connection: publicConnection, identityAvailable, health, workspace: { status: 0, body: { error: error instanceof Error ? error.message : "workspace_server_request_failed" } } };
+    return { connection: publicConnectionWithoutCredential(connection), identityAvailable, health, workspace: { status: 0, body: { error: error instanceof Error ? error.message : "workspace_server_request_failed" } } };
   }
 }
 
@@ -2084,12 +2696,12 @@ async function acceptWorkspaceInvitation(target: Extract<DeepLinkTarget, { kind:
     const proposed = upsertWorkspaceConnection(workspaceConnectionRegistry, {
       label: `招待: ${target.workspaceId}`,
       serverUrl: target.serverUrl,
-      workspaceId: target.workspaceId,
       accountId: active.accountId,
+      lastWorkspaceId: target.workspaceId,
       ...(active.credentialRef ? { credentialRef: active.credentialRef } : {})
     });
     const connection = proposed.connections.find((item) =>
-      item.serverUrl === target.serverUrl && item.workspaceId === target.workspaceId && item.accountId === active.accountId
+      item.serverUrl === target.serverUrl && item.accountId === active.accountId
     );
     if (!connection) throw new Error("workspace_invitation_connection_invalid");
     const registered = await signedWorkspaceServerRequest(connection, privateKey, {
@@ -2101,11 +2713,12 @@ async function acceptWorkspaceInvitation(target: Extract<DeepLinkTarget, { kind:
     if (registered.status < 200 || registered.status >= 300) throw new Error(`workspace_account_registration_failed:${registered.status}`);
     const accepted = await signedWorkspaceServerRequest(connection, privateKey, {
       method: "POST",
-      path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/invitations/accept`,
+      path: `/api/workspaces/${encodeURIComponent(target.workspaceId)}/invitations/accept`,
       workspaceScoped: true,
+      workspaceId: target.workspaceId,
       // The same link retried by the same Account must replay its original
       // acceptance result if the network failed after the server committed.
-      operationId: invitationAcceptanceOperationId(connection, target.token),
+      operationId: invitationAcceptanceOperationId({ ...connection, workspaceId: target.workspaceId }, target.token),
       body: { invite_token: target.token }
     });
     if (accepted.status < 200 || accepted.status >= 300) throw new Error(`workspace_invitation_acceptance_failed:${accepted.status}`);
@@ -2131,7 +2744,7 @@ async function acceptWorkspaceInvitation(target: Extract<DeepLinkTarget, { kind:
   }
 }
 
-function invitationAcceptanceOperationId(connection: Pick<WorkspaceConnection, "serverUrl" | "workspaceId" | "accountId">, token: string): string {
+function invitationAcceptanceOperationId(connection: Pick<WorkspaceConnection, "serverUrl" | "accountId"> & { workspaceId: string }, token: string): string {
   const fingerprint = createHash("sha256")
     .update(`${connection.serverUrl}\n${connection.workspaceId}\n${connection.accountId}\n${token}`)
     .digest("hex");

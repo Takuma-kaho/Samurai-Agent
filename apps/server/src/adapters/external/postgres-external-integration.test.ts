@@ -17,7 +17,10 @@ describe("PostgreSQL external integration boundary", () => {
     expect(externalIntegrationRequestWorkspaceId({ body: { room_id: "room-only" } }, { mode: "hosted" })).toBeUndefined();
   });
 
-  it("pins self-host requests regardless of client-supplied tenant fields", () => {
-    expect(externalIntegrationRequestWorkspaceId({ headers: { "x-samurai-workspace-id": "spoofed" }, body: { workspace_id: "spoofed-body" } }, { mode: "self_host", selfHostWorkspaceId: "workspace-pinned" })).toBe("workspace-pinned");
+  it("uses explicit Workspace data for Self-host requests instead of a deployment-wide pin", () => {
+    const config = { mode: "self_host" as const, selfHostWorkspaceId: "workspace-legacy" };
+    expect(externalIntegrationRequestWorkspaceId({ headers: { "x-samurai-workspace-id": "workspace-requested" }, body: { workspace_id: "workspace-body" } }, config)).toBe("workspace-requested");
+    expect(externalIntegrationRequestWorkspaceId({ body: { workspace_id: "workspace-body" } }, config)).toBe("workspace-body");
+    expect(externalIntegrationRequestWorkspaceId({ body: { room_id: "room-only" } }, config)).toBeUndefined();
   });
 });

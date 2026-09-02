@@ -59,6 +59,28 @@ export async function loadBrowserWorkspaceConnection(): Promise<BrowserWorkspace
   return connection ? publicConnection(connection) : undefined;
 }
 
+/**
+ * Transitional workspace selection for the browser bridge. The value is only
+ * a routing candidate; the caller must obtain the Organization-scoped list
+ * first and then re-authorize the selected Workspace before opening content.
+ */
+export async function selectBrowserWorkspaceCandidate(workspaceId: string): Promise<BrowserWorkspaceConnection> {
+  const normalizedWorkspaceId = requiredOpaqueId(workspaceId, "workspace_id_invalid");
+  const connection = await loadStoredConnection();
+  if (!connection) throw new Error("workspace_connection_required");
+  const updated: StoredBrowserWorkspaceConnection = {
+    ...connection,
+    workspaceId: normalizedWorkspaceId,
+    updatedAt: new Date().toISOString()
+  };
+  await writeStoredConnection(updated);
+  cachedConnection = updated;
+  browserRealtimeLastCursor = undefined;
+  browserRealtimeSeenEventIds.clear();
+  restartBrowserWorkspaceRealtime();
+  return publicConnection(updated);
+}
+
 export async function configureBrowserWorkspaceConnection(input: BrowserWorkspaceConnectionInput): Promise<BrowserWorkspaceConnection> {
   if (typeof window === "undefined" || !window.crypto?.subtle || !window.indexedDB) {
     throw new Error("browser_workspace_secure_storage_unavailable");

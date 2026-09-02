@@ -27,6 +27,7 @@ describe("Workspace Bundle v3 credential boundary", () => {
               rows: [{
                 id: workspaceId,
                 name: "Date bundle test",
+                organization_id: "organization_source",
                 hosting_mode: "self_host",
                 database_placement: "dedicated",
                 storage_namespace: `workspaces/${workspaceId}`,
@@ -69,6 +70,14 @@ describe("Workspace Bundle v3 credential boundary", () => {
         operationId: "operation_bundle_date_test"
       }, { destination: path.join(root, "bundle") });
       expect(exported.manifest.workspace_id).toBe(workspaceId);
+      expect(exported.manifest).toMatchObject({
+        source_organization_id: "organization_source",
+        source: { organization_id: "organization_source" },
+        schema_revision: 26
+      });
+      await expect(verifyWorkspaceBundleV3(path.join(root, "bundle"))).resolves.toMatchObject({
+        manifest: { source_organization_id: "organization_source" }
+      });
 
       const membership = JSON.parse((await readFile(path.join(root, "bundle", "memberships.jsonl"), "utf8")).trim()) as {
         created_at: unknown;
@@ -76,6 +85,52 @@ describe("Workspace Bundle v3 credential boundary", () => {
       };
       expect(membership.created_at).toBe(timestamp.toISOString());
       expect(membership.updated_at).toBe(timestamp.toISOString());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains source Organization provenance and schema revision in a new Bundle", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-provenance-"));
+    try {
+      await writeHierarchyBundle(root, {
+        sourceOrganizationId: "organization_source",
+        schemaVersion: 78,
+        schemaRevision: 78,
+        rooms: [],
+        roomMemberships: []
+      });
+
+      const verified = await verifyWorkspaceBundleV3(root);
+      expect(verified.manifest).toMatchObject({
+        source_organization_id: "organization_source",
+        schema_version: 78,
+        schema_revision: 78,
+        source: { organization_id: "organization_source" }
+      });
+
+      const manifestPath = path.join(root, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+      manifest.schema_revision = 79;
+      await writeFile(manifestPath, canonicalJson(manifest), "utf8");
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_v3_manifest_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires an explicit target Organization before staging a Bundle", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-target-"));
+    try {
+      const store = { storageRoot: root } as unknown as WorkspaceServerStore;
+      const service = new WorkspaceBundleV3Service(store);
+      await expect(service.stageIncomingBundle({
+        accountId: accountId,
+        operationId: "operation_bundle_target_test"
+      }, {
+        targetWorkspaceId: workspaceId,
+        manifest: {} as never
+      })).rejects.toThrow("workspace_bundle_target_organization_required");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -473,6 +528,8 @@ async function writeHierarchyBundle(
   root: string,
   input: {
     schemaVersion?: number;
+    schemaRevision?: number;
+    sourceOrganizationId?: string;
     rooms: Record<string, unknown>[];
     roomMemberships: Record<string, unknown>[];
     events?: Record<string, unknown>[];
@@ -550,16 +607,40 @@ async function writeHierarchyBundle(
   for (const { path: filePath, content } of workspaceFiles) {
     await writeFile(path.join(root, "files", filePath), content);
   }
-  await writeFile(path.join(root, "manifest.json"), canonicalJson({
+  const schemaVersion = input.schemaVersion ?? (input.learning ? 27 : 22);
+  const sourceOrganizationId = input.sourceOrganizationId;
+  const schemaRevision = input.schemaRevision;
+  const manifest = {
     format_version: 3,
     workspace_id: workspaceId,
     exported_at: timestamp,
-    source: { hosting_mode: "self_host", database_placement: "dedicated" },
-    schema_version: input.schemaVersion ?? (input.learning ? 27 : 22),
+    source: {
+      hosting_mode: "self_host",
+      database_placement: "dedicated",
+      ...(sourceOrganizationId ? { organization_id: sourceOrganizationId } : {})
+    },
+    schema_version: schemaVersion,
+    ...(sourceOrganizationId ? { source_organization_id: sourceOrganizationId } : {}),
+    ...(schemaRevision !== undefined ? { schema_revision: schemaRevision } : {}),
     files: hashes,
     record_counts: recordCounts,
-    integrity_hash: hash(canonicalJson({ files: hashes, record_counts: recordCounts }))
-  }), "utf8");
+    integrity_hash: ""
+  } as Record<string, unknown>;
+  const integrityPayload = sourceOrganizationId || schemaRevision !== undefined
+    ? {
+      files: hashes,
+      record_counts: recordCounts,
+      source: {
+        hosting_mode: "self_host",
+        database_placement: "dedicated",
+        ...(sourceOrganizationId ? { organization_id: sourceOrganizationId } : {})
+      },
+      schema_version: schemaVersion,
+      ...(schemaRevision !== undefined ? { schema_revision: schemaRevision } : {})
+    }
+    : { files: hashes, record_counts: recordCounts };
+  manifest.integrity_hash = hash(canonicalJson(integrityPayload));
+  await writeFile(path.join(root, "manifest.json"), canonicalJson(manifest), "utf8");
 }
 
 const learningFiles = [

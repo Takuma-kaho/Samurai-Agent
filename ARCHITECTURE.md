@@ -12,15 +12,17 @@ Backend、Gateway、Adapterは外部のAgentやAI提供元との接続を担当�
 
 ## 基本構造
 
-Organization → Workspace → Room → Session、Activity、Knowledge、Skill
+Workspace → Room → Session、Activity、Knowledge、Skill
 
-OrganizationはメンバーとWorkspaceを管理する。
+ServerはWorkspace Coreを配置・運用する境界であり、製品上の必須階層ではない。利用者は接続したServer上にWorkspaceを作成・選択する。
 
-WorkspaceはRoom、Agent、Knowledgeを所有する。
+Workspaceは単体で成立する基本単位である。Room、Agent、Knowledge、メンバー、招待、実行結果、export / restoreを所有する。
 
 Roomは会話、作業、Knowledge、権限の範囲を決める。
 
 SessionはRoom内の実行を継続・復旧するために内部管理する。
+
+Organizationは、同一Server上の複数Workspaceを任意でまとめる管理層である。OrganizationがなくてもWorkspaceは利用でき、Organizationへの所属だけではWorkspaceやRoomの内容を読めない。
 
 ## 操作の入口
 
@@ -46,6 +48,8 @@ ClientはEvent履歴とリアルタイム通知を組み合わせ、切断後も
 
 Knowledgeの参照・学習範囲はRoomごとに管理し、共有は明示操作で行う。
 
+Workspaceは一つのホームServerに配置する。別Serverへの移転はexport / restoreで行い、同一Server内のOrganization追加・解除はWorkspaceのデータIDや履歴を変更しない。
+
 ## 責務境界
 
 - Clientは表示と利用者操作を担当する
@@ -54,6 +58,7 @@ Knowledgeの参照・学習範囲はRoomごとに管理し、共有は明示操�
 - Knowledge Hostは学習処理を担当する
 - Gateway、Adapter、BackendはWorkspace Coreへ結果を返す
 - Native Appと外部アプリは同じCoreを利用する
+- OrganizationはWorkspaceの一覧、Membership管理、共通ポリシーを扱うが、Workspace / Room contentの認可根拠にはならない
 
 ## 検証原則
 

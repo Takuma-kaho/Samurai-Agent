@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   ActivityIngestRequestSchema,
   DomainApiRequestSchema,
   PublicEventEnvelopeSchema,
+  eventCatalog,
   eventPayloadSchemaFor,
   isApiVersionCompatible,
   isEventVersionCompatible,
   parsePublicEventPayload,
+  publicDomainOperationIds,
+  publicOperationOutputSchemaFor,
   runControlRequestSchemaFor
 } from "./index";
 
@@ -74,6 +78,74 @@ describe("public Domain API contract", () => {
       resources: [],
       payload: { room_id: "room_1", action: "created" }
     }).success).toBe(true);
+    expect(PublicEventEnvelopeSchema.safeParse({
+      event_id: "event_organization_1",
+      event_type: "organization.created",
+      event_version: "1.0",
+      cursor: "cursor_organization_1",
+      occurred_at: "2026-08-30T00:00:00.000Z",
+      actor: { kind: "human", id: "account_1" },
+      scope: { organization_id: "organization_1" },
+      resources: [],
+      payload: { organization_id: "organization_1", name: "Acme" }
+    }).success).toBe(true);
+  });
+
+  it("publishes Organization events and keeps sensitive fields outside payloads", () => {
+    const eventTypes = [
+      "organization.created",
+      "organization.member.invited",
+      "organization.member.accepted",
+      "organization.member.role_changed",
+      "organization.member.removed",
+      "workspace.organization.moved",
+      "workspace.archived",
+      "workspace.restored",
+      "workspace.deleted"
+    ];
+    expect(eventCatalog.map((entry) => entry.event_type)).toEqual(expect.arrayContaining(eventTypes));
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
+      "organization.list",
+      "organization.member.invite",
+      "organization.workspace.list",
+      "workspace.organization.move.commit",
+      "workspace.bundle.restore"
+    ]));
+    expect(publicOperationOutputSchemaFor("organization.invitation.list", z.any()).safeParse([{
+      id: "invitation_1",
+      organization_id: "organization_1",
+      role: "member",
+      status: "pending",
+      expires_at: "2026-09-01T00:00:00.000Z",
+      issued_by: "account_1",
+      version: 1,
+      created_at: "2026-08-31T00:00:00.000Z",
+      updated_at: "2026-08-31T00:00:00.000Z"
+    }]).success).toBe(true);
+
+    expect(eventPayloadSchemaFor("organization.member.invited").safeParse({
+      organization_id: "organization_1",
+      invitation_id: "invitation_1",
+      role: "member",
+      token: "raw-token"
+    }).success).toBe(false);
+    expect(eventPayloadSchemaFor("organization.member.accepted").safeParse({
+      organization_id: "organization_1",
+      membership_id: "membership_1",
+      email: "member@example.test",
+      room_content: "private"
+    }).success).toBe(false);
+    expect(parsePublicEventPayload("workspace.organization.moved", {
+      workspace_id: "workspace_1",
+      source_organization_id: "organization_1",
+      target_organization_id: "organization_2",
+      operation_id: "move_1"
+    })).toEqual({
+      workspace_id: "workspace_1",
+      source_organization_id: "organization_1",
+      target_organization_id: "organization_2",
+      operation_id: "move_1"
+    });
   });
 
   it("keeps API and Event version compatibility independent", () => {

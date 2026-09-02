@@ -1993,7 +1993,11 @@ export class WorkspaceCompletionService {
   }
 
   private async assertSelfHostPhysicalOwner(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<void> {
-    if (this.store.mode !== "self_host" || this.store.selfHostWorkspaceId !== context.workspaceId) {
+    // Physical edits are a Self-host-only operator capability, but the
+    // deployment may contain multiple Workspaces.  The requested Workspace
+    // is authorized below; a legacy configured Workspace ID is not a tenant
+    // boundary.
+    if (this.store.mode !== "self_host") {
       throw new WorkspaceServerError("workspace_completion_physical_import_self_host_required", 403);
     }
     await this.store.database.withContext(context, async (sql) => {

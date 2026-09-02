@@ -484,9 +484,40 @@ declare global {
         accountId: string;
       }) => Promise<DesktopWorkspaceConnectionState>;
       selectWorkspaceConnection?: (connectionId: string) => Promise<DesktopWorkspaceConnectionState>;
+      /** Transitional selector. Server authorization still runs on the next Workspace query. */
+      selectWorkspaceCandidate?: (workspaceId: string) => Promise<DesktopWorkspaceConnectionState>;
       importActiveWorkspaceIdentityFromClipboard?: () => Promise<DesktopWorkspaceConnectionState>;
       registerWorkspaceServerAccount?: (displayName?: string) => Promise<unknown>;
       getWorkspaceServerStatus?: () => Promise<DesktopWorkspaceServerStatus>;
+      // Account-scoped Organization control-plane bridge. These methods only
+      // carry sanitized projections; the preload keeps signing credentials in
+      // the main process.
+      selectOrganizationCandidate?: (input: { organizationId: string }) => Promise<unknown>;
+      listOrganizations?: () => Promise<unknown>;
+      getOrganization?: (input: { organizationId: string }) => Promise<unknown>;
+      createOrganization?: (input: Record<string, unknown>) => Promise<unknown>;
+      patchOrganization?: (input: Record<string, unknown>) => Promise<unknown>;
+      deleteOrganization?: (input: Record<string, unknown>) => Promise<unknown>;
+      listOrganizationMembers?: (input: { organizationId: string }) => Promise<unknown>;
+      changeOrganizationMemberRole?: (input: Record<string, unknown>) => Promise<unknown>;
+      removeOrganizationMember?: (input: Record<string, unknown>) => Promise<unknown>;
+      leaveOrganization?: (input: Record<string, unknown>) => Promise<unknown>;
+      listOrganizationInvitations?: (input: { organizationId: string }) => Promise<unknown>;
+      createOrganizationInvitation?: (input: Record<string, unknown>) => Promise<unknown>;
+      acceptOrganizationInvitation?: (input: Record<string, unknown>) => Promise<unknown>;
+      revokeOrganizationInvitation?: (input: Record<string, unknown>) => Promise<unknown>;
+      reissueOrganizationInvitation?: (input: Record<string, unknown>) => Promise<unknown>;
+      extendOrganizationInvitation?: (input: Record<string, unknown>) => Promise<unknown>;
+      listOrganizationWorkspaces?: (input: { organizationId: string }) => Promise<unknown>;
+      createOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
+      patchOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
+      grantOrganizationWorkspaceMember?: (input: Record<string, unknown>) => Promise<unknown>;
+      revokeOrganizationWorkspaceMember?: (input: Record<string, unknown>) => Promise<unknown>;
+      setOrganizationWorkspaceLifecycle?: (input: Record<string, unknown>) => Promise<unknown>;
+      previewOrganizationWorkspaceMove?: (input: Record<string, unknown>) => Promise<unknown>;
+      moveOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
+      exportOrganizationWorkspaceBundle?: (input: Record<string, unknown>) => Promise<unknown>;
+      restoreOrganizationBundle?: (input: Record<string, unknown>) => Promise<unknown>;
       getWorkspaceSettings?: () => Promise<SettingsRecord>;
       patchWorkspaceSettings?: (input: { patch: Partial<Omit<SettingsRecord, "updated_at">>; operationId: string }) => Promise<{ settings: SettingsRecord; replayed?: boolean }>;
       listWorkspaceRooms?: () => Promise<{ rooms: DesktopWorkspaceRoom[] }>;
@@ -660,6 +691,8 @@ declare global {
       listWorkspaceBackendRuns?: (input: { sessionId?: string }) => Promise<BackendRunRecord[]>;
       getWorkspaceBackendRun?: (input: { runId: string }) => Promise<BackendRunRecord>;
       listWorkspaceBackendEvents?: (input: { runId: string }) => Promise<BackendEventRecord[]>;
+      cancelWorkspaceBackendRun?: (input: { runId: string; operationId: string }) => Promise<BackendRunRecord>;
+      retryWorkspaceBackendRun?: (input: { runId: string; operationId: string }) => Promise<ChatSurfaceOperationResult>;
       listWorkspaceChanges?: (input: { sessionId?: string }) => Promise<WorkspaceChangeRecord[]>;
       onWorkspaceServerEvent?: (listener: (event: DesktopWorkspaceRealtimeEvent | undefined) => void) => () => void;
     };
@@ -949,6 +982,16 @@ export const api = {
     const bridge = activeWorkspaceBridge();
     if (bridge?.getWorkspaceBackendRun) return bridge.getWorkspaceBackendRun({ runId });
     return workspaceRequestRequired<BackendRunRecord>("runtime.run.get");
+  },
+  cancelBackendRun(runId: string) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.cancelWorkspaceBackendRun) return bridge.cancelWorkspaceBackendRun({ runId, operationId: createIdempotencyKey() });
+    return workspaceRequestRequired<BackendRunRecord>("runtime.run.cancel");
+  },
+  retryBackendRun(runId: string) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.retryWorkspaceBackendRun) return bridge.retryWorkspaceBackendRun({ runId, operationId: createIdempotencyKey() });
+    return workspaceRequestRequired<BackendRunRecord>("runtime.run.retry");
   },
   listBackendEvents(runId: string) {
     const bridge = activeWorkspaceBridge();

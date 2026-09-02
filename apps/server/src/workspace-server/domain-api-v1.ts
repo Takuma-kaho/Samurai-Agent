@@ -41,6 +41,7 @@ import {
 } from "@samurai-agent/domain-operations";
 import {
   WorkspaceServerError,
+  type OrganizationRequestContext,
   type WorkspaceRequestContext,
   type WorkspaceServerCommandService,
   type WorkspacePublicEvent,
@@ -57,6 +58,38 @@ import { RunControlService } from "./run-control-service";
 const v1OperationIds = new Set<string>(publicDomainOperationIds);
 const runControlService = new RunControlService();
 
+/** Organization control-plane requests are Account-scoped.  They deliberately
+ * do not reuse WorkspaceRequestContext: Organization membership can reveal
+ * Workspace metadata, but it never grants Room/Message access. */
+export type OrganizationApiRequestContext = OrganizationRequestContext;
+
+const organizationOperationIds = new Set<string>([
+  "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
+  "organization.member.list", "organization.member.invite", "organization.member.accept",
+  "organization.member.role.change", "organization.member.remove", "organization.member.leave",
+  "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue",
+  "organization.invitation.extend",
+  "organization.workspace.list", "organization.workspace.create", "organization.workspace.member.grant",
+  "organization.workspace.member.revoke", "organization.workspace.archive", "organization.workspace.restore",
+  "organization.workspace.delete", "workspace.organization.move.preflight", "workspace.organization.move.commit",
+  "workspace.organization.move.status", "workspace.bundle.export", "workspace.bundle.restore"
+]);
+
+const organizationCommandIds = new Set<string>([
+  "organization.create", "organization.patch", "organization.delete", "organization.member.invite",
+  "organization.member.accept", "organization.member.role.change", "organization.member.remove",
+  "organization.member.leave", "organization.invitation.revoke", "organization.invitation.reissue",
+  "organization.invitation.extend", "organization.workspace.create", "organization.workspace.member.grant",
+  "organization.workspace.member.revoke", "organization.workspace.archive", "organization.workspace.restore",
+  "organization.workspace.delete", "workspace.organization.move.commit", "workspace.bundle.export",
+  "workspace.bundle.restore"
+]);
+
+const organizationQueryIds = new Set<string>([
+  "organization.list", "organization.view", "organization.member.list", "organization.invitation.list",
+  "organization.workspace.list", "workspace.organization.move.preflight", "workspace.organization.move.status"
+]);
+
 type V1Dependencies = {
   app: Express;
   io: SocketServer;
@@ -65,9 +98,11 @@ type V1Dependencies = {
   artifacts: PostgresArtifact;
   realtimeGate: WorkspaceRealtimeGate;
   authenticateWorkspace: RequestHandler;
+  authenticateAccount: RequestHandler;
   asyncRoute: (handler: (req: Request, res: Response, next: NextFunction) => Promise<void>) => RequestHandler;
   workspaceContext: (req: Request) => Pick<WorkspaceRequestContext, "workspaceId" | "accountId">;
   operationContext: (req: Request) => WorkspaceRequestContext;
+  organizationContext: (req: Request, organizationId?: string, options?: { mutation?: boolean }) => OrganizationApiRequestContext;
   requestId: (req: Request) => string;
   runtimeFor: (req: Request) => PostgresRuntimeCommandService;
 };
@@ -78,12 +113,13 @@ type V1Dependencies = {
 export function mountDomainApiV1(dependencies: V1Dependencies): void {
   const {
     app, io, store, commands, artifacts, realtimeGate,
-    authenticateWorkspace, asyncRoute, workspaceContext, operationContext, requestId, runtimeFor
+    authenticateWorkspace, authenticateAccount, asyncRoute, workspaceContext, operationContext,
+    organizationContext, requestId, runtimeFor
   } = dependencies;
 
   app.get("/api/v1/workspaces/:workspaceId/domain/catalog", authenticateWorkspace, asyncRoute(async (_req, res) => {
     const contracts = operationDefinitions
-      .filter((definition) => v1OperationIds.has(definition.id) && definition.sources.includes("runtime_api"))
+      .filter((definition) => v1OperationIds.has(definition.id) && !organizationOperationIds.has(definition.id) && definition.sources.includes("runtime_api"))
       .map((definition) => ({
         id: definition.id,
         kind: definition.kind,
@@ -101,6 +137,8 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     res.json(DomainApiCatalogSchema.parse({ api_version: "1", contracts, events: eventCatalog, run_controls: runControlCatalog }));
   }));
 
+  mountOrganizationDomainRoutes(dependencies);
+
   app.post("/api/v1/workspaces/:workspaceId/domain/operations/:operationId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const operationId = pathParam(req, "operationId");
     const request = parseDomainRequest(req.body);
@@ -112,7 +150,7 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     const operation = operationContext(req);
     const context = trustedContext(operation, request.context, operationId);
     const result = await executeCommand({ operationId, input, requestContext: request.context, context, req, operation, dependencies });
-    const response = apiResponse(req, publicOperationResult(operationId, result.value), result.replayed);
+    const response = apiResponse(req, publicOperationResult(operationId, result.value, operation.accountId), result.replayed);
     res.status(result.replayed ? 200 : 201).json(response);
   }));
 
@@ -228,6 +266,162 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
   io.on("connection", (socket) => {
     attachV1SocketHandlers(socket, store, realtimeGate);
   });
+}
+
+/**
+ * Account-authenticated Organization control-plane API.
+ *
+ * The Workspace API keeps its existing `/api/v1/workspaces/:workspaceId`
+ * boundary. Organization operations are mounted separately so an
+ * Organization Owner/Admin cannot accidentally become a Workspace content
+ * reader merely by using this API.
+ */
+function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
+  const { app, authenticateAccount, asyncRoute } = dependencies;
+
+  const catalog = (_req: Request, res: Response): void => {
+    const contracts = operationDefinitions
+      .filter((definition) => organizationOperationIds.has(definition.id) && v1OperationIds.has(definition.id) && definition.sources.includes("runtime_api"))
+      .map((definition) => ({
+        id: definition.id,
+        kind: definition.kind,
+        version: definition.version,
+        availability: definition.availability,
+        input_schema: schemaForPublicContract(definition.input, `${definition.id}.input`),
+        output_schema: schemaForPublicContract(
+          publicOperationOutputSchemaFor(definition.id, definition.output),
+          `${definition.id}.output`
+        ),
+        idempotency: definition.idempotency,
+        concurrency: definition.concurrency,
+        sources: [...definition.sources]
+      }));
+    res.json(DomainApiCatalogSchema.parse({ api_version: "1", contracts, events: eventCatalog, run_controls: runControlCatalog }));
+  };
+
+  app.get("/api/v1/domain/catalog", authenticateAccount, asyncRoute(async (req, res) => {
+    catalog(req, res);
+  }));
+  app.get("/api/v1/organizations/:organizationId/domain/catalog", authenticateAccount, asyncRoute(async (req, res) => {
+    catalog(req, res);
+  }));
+
+  const operationRoute = (withOrganizationIdPath = false) => asyncRoute(async (req, res) => {
+    const operationId = pathParam(req, "operationId");
+    if (!organizationOperationIds.has(operationId) || !organizationCommandIds.has(operationId)) {
+      throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+    }
+    const definition = operationDefinitions.find((candidate) => candidate.id === operationId);
+    if (!definition || definition.kind !== "command" || !definition.sources.includes("runtime_api")) {
+      throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+    }
+    const request = parseDomainRequest(req.body);
+    const input = parseOperationInput(definition, request.input, operationId);
+    const organizationIdFromPath = withOrganizationIdPath ? pathParam(req, "organizationId") : undefined;
+    const inputOrganizationId = optionalStringField(input, "organization_id");
+    if (organizationIdFromPath && inputOrganizationId && inputOrganizationId !== organizationIdFromPath) {
+      throw new WorkspaceServerError("organization_id_mismatch", 400);
+    }
+    const organizationId = organizationIdFromPath ?? inputOrganizationId;
+    const operation = dependencies.organizationContext(req, organizationId, { mutation: true });
+    const result = await executeOrganizationCommandOperation({ operationId, input, operation, commands: dependencies.commands });
+    const response = apiResponse(req, publicOperationResult(operationId, result.value, operation.accountId), result.replayed);
+    res.status(result.replayed ? 200 : 201).json(response);
+  });
+
+  app.post("/api/v1/domain/operations/:operationId", authenticateAccount, operationRoute());
+  app.post("/api/v1/organizations/:organizationId/domain/operations/:operationId", authenticateAccount, operationRoute(true));
+
+  const queryRoute = (withOrganizationIdPath = false) => asyncRoute(async (req, res) => {
+    const queryId = pathParam(req, "queryId");
+    if (!organizationOperationIds.has(queryId) || !organizationQueryIds.has(queryId)) {
+      throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
+    }
+    const definition = operationDefinitions.find((candidate) => candidate.id === queryId);
+    if (!definition || definition.kind !== "query" || !definition.sources.includes("runtime_api")) {
+      throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
+    }
+    const request = parseDomainRequest(req.body);
+    const input = parseOperationInput(definition, request.input, queryId);
+    const organizationIdFromPath = withOrganizationIdPath ? pathParam(req, "organizationId") : undefined;
+    const inputOrganizationId = optionalStringField(input, "organization_id");
+    if (organizationIdFromPath && inputOrganizationId && inputOrganizationId !== organizationIdFromPath) {
+      throw new WorkspaceServerError("organization_id_mismatch", 400);
+    }
+    const organizationId = organizationIdFromPath ?? inputOrganizationId;
+    const operation = dependencies.organizationContext(req, organizationId, { mutation: false });
+    const result = await executeOrganizationQueryOperation({ queryId, input, operation, commands: dependencies.commands });
+    res.json(apiResponse(req, publicOperationResult(queryId, result, operation.accountId), false));
+  });
+
+  app.post("/api/v1/domain/queries/:queryId", authenticateAccount, queryRoute());
+  app.post("/api/v1/organizations/:organizationId/domain/queries/:queryId", authenticateAccount, queryRoute(true));
+}
+
+/** The REST and Domain API v1 routes share this command dispatch. */
+export async function executeOrganizationCommandOperation(input: {
+  operationId: string;
+  input: Record<string, unknown>;
+  operation: OrganizationApiRequestContext;
+  commands: WorkspaceServerCommandService;
+}): Promise<{ value: unknown; replayed: boolean }> {
+  const { operationId, input: value, operation, commands } = input;
+  if (!organizationCommandIds.has(operationId)) {
+    throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+  }
+  switch (operationId) {
+    case "organization.create": return normalizeOrganizationCommandResult(await commands.createOrganization(operation, value as Parameters<WorkspaceServerCommandService["createOrganization"]>[1]), "organization");
+    case "organization.patch": return normalizeOrganizationCommandResult(await commands.patchOrganization(operation, value as unknown as Parameters<WorkspaceServerCommandService["patchOrganization"]>[1]), "organization");
+    case "organization.delete": return normalizeOrganizationCommandResult(await commands.deleteOrganization(operation, value as Parameters<WorkspaceServerCommandService["deleteOrganization"]>[1]), "organization");
+    case "organization.member.invite": return normalizeOrganizationCommandResult(await commands.inviteOrganizationMember(operation, value as unknown as Parameters<WorkspaceServerCommandService["inviteOrganizationMember"]>[1]));
+    case "organization.member.accept": return normalizeOrganizationCommandResult(await commands.acceptOrganizationInvitation(operation, value as Parameters<WorkspaceServerCommandService["acceptOrganizationInvitation"]>[1]));
+    case "organization.member.role.change": return normalizeOrganizationCommandResult(await commands.changeOrganizationMemberRole(operation, value as unknown as Parameters<WorkspaceServerCommandService["changeOrganizationMemberRole"]>[1]), "membership");
+    case "organization.member.remove": return normalizeOrganizationCommandResult(await commands.removeOrganizationMember(operation, value as Parameters<WorkspaceServerCommandService["removeOrganizationMember"]>[1]), "membership");
+    case "organization.member.leave": return normalizeOrganizationCommandResult(await commands.leaveOrganization(operation, value as Parameters<WorkspaceServerCommandService["leaveOrganization"]>[1]), "membership");
+    case "organization.invitation.revoke": return normalizeOrganizationCommandResult(await commands.revokeOrganizationInvitation(operation, value as Parameters<WorkspaceServerCommandService["revokeOrganizationInvitation"]>[1]), "invitation");
+    case "organization.invitation.reissue": return normalizeOrganizationCommandResult(await commands.reissueOrganizationInvitation(operation, value as Parameters<WorkspaceServerCommandService["reissueOrganizationInvitation"]>[1]));
+    case "organization.invitation.extend": return normalizeOrganizationCommandResult(await commands.extendOrganizationInvitation(operation, value as Parameters<WorkspaceServerCommandService["extendOrganizationInvitation"]>[1]), "invitation");
+    case "organization.workspace.create": return normalizeOrganizationCommandResult(await commands.createOrganizationWorkspace(operation, value as Parameters<WorkspaceServerCommandService["createOrganizationWorkspace"]>[1]), "workspace");
+    case "organization.workspace.member.grant": return normalizeOrganizationCommandResult(await commands.grantOrganizationWorkspaceMembership(operation, value as Parameters<WorkspaceServerCommandService["grantOrganizationWorkspaceMembership"]>[1]), "membership");
+    case "organization.workspace.member.revoke": return normalizeOrganizationCommandResult(await commands.revokeOrganizationWorkspaceMembership(operation, value as Parameters<WorkspaceServerCommandService["revokeOrganizationWorkspaceMembership"]>[1]), "membership");
+    case "organization.workspace.archive": return normalizeOrganizationCommandResult(await commands.archiveOrganizationWorkspace(operation, value as Parameters<WorkspaceServerCommandService["archiveOrganizationWorkspace"]>[1]), "workspace");
+    case "organization.workspace.restore": return normalizeOrganizationCommandResult(await commands.restoreOrganizationWorkspace(operation, value as Parameters<WorkspaceServerCommandService["restoreOrganizationWorkspace"]>[1]), "workspace");
+    case "organization.workspace.delete": return normalizeOrganizationCommandResult(await commands.deleteOrganizationWorkspace(operation, value as Parameters<WorkspaceServerCommandService["deleteOrganizationWorkspace"]>[1]), "workspace");
+    case "workspace.organization.move.commit": return normalizeOrganizationCommandResult(await commands.commitWorkspaceOrganizationMove(operation, value as unknown as Parameters<WorkspaceServerCommandService["commitWorkspaceOrganizationMove"]>[1]));
+    case "workspace.bundle.export": return normalizeOrganizationCommandResult(await commands.exportWorkspaceBundle(operation, value as Parameters<WorkspaceServerCommandService["exportWorkspaceBundle"]>[1]));
+    case "workspace.bundle.restore": return normalizeOrganizationCommandResult(await commands.restoreWorkspaceBundle(operation, value as Parameters<WorkspaceServerCommandService["restoreWorkspaceBundle"]>[1]));
+    default: throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+  }
+}
+
+export async function executeOrganizationQueryOperation(input: {
+  queryId: string;
+  input: Record<string, unknown>;
+  operation: OrganizationApiRequestContext;
+  commands: WorkspaceServerCommandService;
+}): Promise<unknown> {
+  const { queryId, input: value, operation, commands } = input;
+  if (!organizationQueryIds.has(queryId)) {
+    throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
+  }
+  switch (queryId) {
+    case "organization.list": return commands.listOrganizations(operation, value as Parameters<WorkspaceServerCommandService["listOrganizations"]>[1]);
+    case "organization.view": return commands.viewOrganization(operation, stringField(value, "organization_id"));
+    case "organization.member.list": return commands.listOrganizationMembers(operation, value as Parameters<WorkspaceServerCommandService["listOrganizationMembers"]>[1]);
+    case "organization.invitation.list": return commands.listOrganizationInvitations(operation, value as Parameters<WorkspaceServerCommandService["listOrganizationInvitations"]>[1]);
+    case "organization.workspace.list": return commands.listOrganizationWorkspaces(operation, value as Parameters<WorkspaceServerCommandService["listOrganizationWorkspaces"]>[1]);
+    case "workspace.organization.move.preflight": return commands.preflightWorkspaceOrganizationMove(operation, value as unknown as Parameters<WorkspaceServerCommandService["preflightWorkspaceOrganizationMove"]>[1]);
+    case "workspace.organization.move.status": return commands.getWorkspaceOrganizationMoveStatus(operation, stringField(value, "operation_id"));
+    default: throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
+  }
+}
+
+function normalizeOrganizationCommandResult(raw: unknown, envelopeKey?: string): { value: unknown; replayed: boolean } {
+  const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
+  const replayed = body?.replayed === true;
+  if (body && envelopeKey && body[envelopeKey] !== undefined) return { value: body[envelopeKey], replayed };
+  if (body && body.result !== undefined) return { value: body.result, replayed };
+  return { value: raw, replayed };
 }
 
 async function executeCommand(input: {
@@ -509,10 +703,334 @@ function apiResponse(req: Request, result: JsonValue, replayed: boolean): Domain
   return DomainApiResponseSchema.parse({ api_version: "1", request_id: requestIdFromRequest(req), result, replayed });
 }
 
-function publicOperationResult(operationId: string, result: JsonValue): JsonValue {
+export function publicOperationResult(operationId: string, result: unknown, accountId?: string): JsonValue {
   const definition = operationDefinitions.find((candidate) => candidate.id === operationId);
   if (!definition) throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
-  return publicOperationOutputSchemaFor(operationId, definition.output).parse(result) as JsonValue;
+  const outputSchema = publicOperationOutputSchemaFor(operationId, definition.output);
+  const alreadyPublic = outputSchema.safeParse(result);
+  if (alreadyPublic.success) return alreadyPublic.data as JsonValue;
+  const projected = organizationOperationIds.has(operationId)
+    ? normalizeOrganizationValue(operationId, result, accountId)
+    : result;
+  return outputSchema.parse(projected) as JsonValue;
+}
+
+/**
+ * Convert the internal camelCase Core projection to the snake_case public
+ * contract.  The adapter accepts an already-public value too; this keeps the
+ * transport stable while Core implementations migrate from internal records.
+ */
+function normalizeOrganizationValue(operationId: string, value: unknown, accountId?: string): unknown {
+  switch (operationId) {
+    case "organization.list": return listValue(value, "organizations").map((entry) => organizationRecord(entry));
+    case "organization.view": return organizationRecord(value);
+    case "organization.create":
+    case "organization.patch":
+    case "organization.delete": return organizationRecord(value);
+    case "organization.member.list": return listValue(value, "members").map((entry) => membershipRecord(entry));
+    case "organization.member.invite":
+    case "organization.invitation.reissue": return invitationIssueResult(value);
+    case "organization.member.accept": {
+      const body = recordValue(value);
+      const organizationId = valueString(body, "organization_id", "organizationId");
+      const acceptedAccountId = valueString(body, "account_id", "accountId") || accountId;
+      return {
+        membership: membershipRecord(body.membership ?? {
+          id: valueString(body, "membership_id", "membershipId") || `${valueString(body, "organization_id", "organizationId")}:${valueString(body, "account_id", "accountId")}`,
+          organization_id: organizationId,
+          account_id: acceptedAccountId,
+          role: valueString(body, "role") || "member",
+          state: "active",
+          version: numberValue(body, "version") ?? 1,
+          joined_at: valueString(body, "joined_at", "joinedAt") || new Date().toISOString(),
+          created_by: valueString(body, "created_by", "createdBy") || acceptedAccountId,
+          updated_by: valueString(body, "updated_by", "updatedBy") || acceptedAccountId,
+          updated_at: valueString(body, "updated_at", "updatedAt") || new Date().toISOString()
+        }),
+        workspace_grants: listValue(body.workspace_grants ?? body.workspaceGrants, "workspace_grants").map((entry) => workspaceMembershipRecord({
+          ...recordValue(entry),
+          organization_id: valueString(recordValue(entry), "organization_id", "organizationId") || organizationId,
+          account_id: valueString(recordValue(entry), "account_id", "accountId") || acceptedAccountId,
+          version: numberValue(recordValue(entry), "version") ?? 1
+        }, { organizationId, accountId: acceptedAccountId }))
+      };
+    }
+    case "organization.member.role.change":
+    case "organization.member.remove":
+    case "organization.member.leave": return membershipRecord(value);
+    case "organization.invitation.list": return listValue(value, "invitations").map(invitationRecord);
+    case "organization.invitation.revoke":
+    case "organization.invitation.extend": return invitationRecord(value);
+    case "organization.workspace.list": return listValue(value, "workspaces").map((entry) => workspaceRecord(entry, accountId));
+    case "organization.workspace.create":
+    case "organization.workspace.archive":
+    case "organization.workspace.restore":
+    case "organization.workspace.delete": return workspaceRecord(value, accountId);
+    case "organization.workspace.member.grant":
+    case "organization.workspace.member.revoke": return workspaceMembershipRecord(value);
+    case "workspace.organization.move.preflight": return workspaceMovePreflight(value);
+    case "workspace.organization.move.commit": return workspaceMoveResult(value);
+    case "workspace.organization.move.status": return workspaceMoveStatus(value);
+    case "workspace.bundle.export": return workspaceBundleExportResult(value);
+    case "workspace.bundle.restore": return workspaceBundleRestoreResult(value);
+    default: return value;
+  }
+}
+
+function organizationRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "organization");
+  const deletedAt = optionalValue(body, "deleted_at", "deletedAt");
+  const state = stringValue(body, "status", "state");
+  return compactRecord({
+    id: valueString(body, "id", "organization_id", "organizationId"),
+    name: valueString(body, "name"),
+    icon: optionalValue(body, "icon"),
+    description: optionalValue(body, "description"),
+    status: state === "deleted" || deletedAt ? "deleted" : "active",
+    version: numberValue(body, "version"),
+    created_by: valueString(body, "created_by", "createdBy"),
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt"),
+    deleted_at: deletedAt
+  });
+}
+
+function membershipRecord(value: unknown, fallback: { organizationId?: string; accountId?: string } = {}): Record<string, unknown> {
+  const body = nestedRecord(value, "membership", "member");
+  const organizationId = valueString(body, "organization_id", "organizationId") || fallback.organizationId || "";
+  const accountId = valueString(body, "account_id", "accountId") || fallback.accountId || "";
+  const state = stringValue(body, "state");
+  const joinedAt = valueString(body, "joined_at", "joinedAt");
+  const updatedAt = valueString(body, "updated_at", "updatedAt", "removed_at", "removedAt") || joinedAt || new Date().toISOString();
+  return compactRecord({
+    id: valueString(body, "id") || `${organizationId}:${accountId}`,
+    organization_id: organizationId,
+    account_id: accountId,
+    role: valueString(body, "role") || "member",
+    state: state === "removed" || state === "revoked" ? "removed" : "active",
+    version: numberValue(body, "version") ?? 1,
+    joined_at: joinedAt || updatedAt,
+    removed_at: optionalValue(body, "removed_at", "removedAt"),
+    created_by: valueString(body, "created_by", "createdBy") || accountId,
+    updated_by: optionalValue(body, "updated_by", "updatedBy"),
+    display_name: optionalValue(body, "display_name", "displayName"),
+    updated_at: updatedAt
+  });
+}
+
+function invitationIssueResult(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  return compactRecord({
+    invitation: invitationRecord(body.invitation ?? value),
+    one_time_token: optionalValue(body, "one_time_token", "oneTimeToken", "token")
+  });
+}
+
+function invitationRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "invitation");
+  const revokedAt = optionalValue(body, "revoked_at", "revokedAt");
+  const acceptedAt = optionalValue(body, "accepted_at", "acceptedAt");
+  const explicitStatus = stringValue(body, "status", "state");
+  const expiresAt = valueString(body, "expires_at", "expiresAt");
+  const status = explicitStatus === "accepted" || explicitStatus === "revoked" || explicitStatus === "expired"
+    ? explicitStatus
+    : acceptedAt ? "accepted" : revokedAt ? "revoked" : (expiresAt && Date.parse(expiresAt) <= Date.now() ? "expired" : "pending");
+  return compactRecord({
+    id: valueString(body, "id", "invitation_id", "invitationId"),
+    organization_id: valueString(body, "organization_id", "organizationId"),
+    target_account_id: optionalValue(body, "target_account_id", "targetAccountId", "recipient_account_id"),
+    role: valueString(body, "role") || "member",
+    status,
+    expires_at: expiresAt,
+    accepted_at: acceptedAt,
+    revoked_at: revokedAt,
+    issued_by: valueString(body, "issued_by", "issuedBy"),
+    version: numberValue(body, "version"),
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+function workspaceRecord(value: unknown, accountId?: string): Record<string, unknown> {
+  const body = nestedRecord(value, "workspace");
+  const state = stringValue(body, "state");
+  return compactRecord({
+    id: valueString(body, "id", "workspace_id", "workspaceId"),
+    organization_id: valueString(body, "organization_id", "organizationId"),
+    name: valueString(body, "name"),
+    state: state === "archived" || state === "deleted" ? state : "active",
+    version: numberValue(body, "version"),
+    created_by: valueString(body, "created_by", "createdBy", "owner_account_id", "ownerAccountId") || accountId,
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt"),
+    deleted_at: optionalValue(body, "deleted_at", "deletedAt"),
+    can_access: booleanValue(body, "can_access", "canAccess", "has_access", "hasAccess"),
+    role: optionalValue(body, "role", "workspace_role", "workspaceRole")
+  });
+}
+
+function workspaceMembershipRecord(value: unknown, fallback: { organizationId?: string; accountId?: string } = {}): Record<string, unknown> {
+  const body = nestedRecord(value, "membership", "workspaceMembership");
+  const organizationId = valueString(body, "organization_id", "organizationId") || fallback.organizationId || "";
+  const workspaceId = valueString(body, "workspace_id", "workspaceId");
+  const accountId = valueString(body, "account_id", "accountId") || fallback.accountId || "";
+  const joinedAt = valueString(body, "joined_at", "joinedAt") || new Date().toISOString();
+  return compactRecord({
+    id: valueString(body, "id") || `${workspaceId}:${accountId}`,
+    organization_id: organizationId,
+    workspace_id: workspaceId,
+    account_id: accountId,
+    role: valueString(body, "role", "workspace_role", "workspaceRole") || "guest",
+    state: stringValue(body, "state") === "revoked" ? "revoked" : "active",
+    version: numberValue(body, "version") ?? 1,
+    joined_at: joinedAt,
+    revoked_at: optionalValue(body, "revoked_at", "revokedAt"),
+    created_by: valueString(body, "created_by", "createdBy") || accountId,
+    updated_by: optionalValue(body, "updated_by", "updatedBy"),
+    updated_at: valueString(body, "updated_at", "updatedAt") || joinedAt
+  });
+}
+
+function workspaceMovePreflight(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  const members = listValue(body.members ?? body.existing_members, "members");
+  const missingIds = new Set(listValue(body.missing_target_memberships ?? body.missingTargetMemberships, "missing_target_memberships").map((entry) => typeof entry === "string" ? entry : valueString(recordValue(entry), "account_id", "accountId")));
+  const mapMember = (entry: unknown, forceGuest: boolean): Record<string, unknown> => {
+    const member = recordValue(entry);
+    const accountId = valueString(member, "account_id", "accountId");
+    return compactRecord({
+      account_id: accountId,
+      workspace_role: valueString(member, "workspace_role", "current_workspace_role", "currentWorkspaceRole", "role") || "guest",
+      target_organization_role: optionalValue(member, "target_organization_role", "targetOrganizationRole"),
+      will_add_as_guest: forceGuest || missingIds.has(accountId)
+    });
+  };
+  const existing = members.filter((entry) => !missingIds.has(valueString(recordValue(entry), "account_id", "accountId"))).map((entry) => mapMember(entry, false));
+  const missing = members.filter((entry) => missingIds.has(valueString(recordValue(entry), "account_id", "accountId"))).map((entry) => mapMember(entry, true));
+  for (const accountId of missingIds) if (!missing.some((entry) => entry.account_id === accountId)) missing.push({ account_id: accountId, workspace_role: "guest", will_add_as_guest: true });
+  return compactRecord({
+    operation_id: valueString(body, "operation_id", "operationId"),
+    source_organization_id: valueString(body, "source_organization_id", "sourceOrganizationId"),
+    target_organization_id: valueString(body, "target_organization_id", "targetOrganizationId"),
+    workspace_id: valueString(body, "workspace_id", "workspaceId"),
+    workspace_version: numberValue(body, "workspace_version", "workspaceVersion", "expected_workspace_version", "expectedWorkspaceVersion"),
+    workspace_state: valueString(body, "workspace_state", "workspaceState", "state") || "active",
+    existing_members: existing,
+    missing_members: missing,
+    requires_guest_confirmation: booleanValue(body, "requires_guest_confirmation", "requiresGuestConfirmation"),
+    write_blocked: typeof body.write_blocked === "boolean"
+      ? body.write_blocked
+      : typeof body.writeBlocked === "boolean" ? body.writeBlocked : body.allowed === false,
+    failure_conditions: listValue(body.failure_conditions ?? body.failureConditions, "failure_conditions").filter((entry): entry is string => typeof entry === "string"),
+    expires_at: valueString(body, "expires_at", "expiresAt"),
+    created_at: valueString(body, "created_at", "createdAt")
+  });
+}
+
+function workspaceMoveResult(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  const workspace = recordValue(body.workspace);
+  return compactRecord({
+    operation_id: valueString(body, "operation_id", "operationId"),
+    workspace_id: valueString(body, "workspace_id", "workspaceId") || valueString(workspace, "id", "workspace_id", "workspaceId"),
+    source_organization_id: valueString(body, "source_organization_id", "sourceOrganizationId"),
+    target_organization_id: valueString(body, "target_organization_id", "targetOrganizationId") || valueString(workspace, "organization_id", "organizationId"),
+    status: valueString(body, "status") || "committed",
+    guest_membership_account_ids: listValue(body.guest_membership_account_ids ?? body.added_guest_account_ids ?? body.addedGuestAccountIds, "guest_membership_account_ids").filter((entry): entry is string => typeof entry === "string"),
+    event_id: optionalValue(body, "event_id", "eventId"),
+    committed_at: optionalValue(body, "committed_at", "committedAt"),
+    failure_code: optionalValue(body, "failure_code", "failureCode")
+  });
+}
+
+function workspaceMoveStatus(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  return { ...workspaceMoveResult(body), updated_at: valueString(body, "updated_at", "updatedAt") };
+}
+
+function workspaceBundleExportResult(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  const manifest = recordValue(body.manifest);
+  return compactRecord({
+    bundle_id: valueString(body, "bundle_id", "bundleId", "id"),
+    workspace_id: valueString(body, "workspace_id", "workspaceId"),
+    source_organization_id: valueString(body, "source_organization_id", "sourceOrganizationId"),
+    schema_version: numberValue(body, "schema_version", "schemaVersion", "format_version"),
+    integrity_hash: valueString(body, "integrity_hash", "integrityHash", "sha256"),
+    file_count: numberValue(body, "file_count", "fileCount"),
+    byte_size: numberValue(body, "byte_size", "byteSize"),
+    manifest: compactRecord({
+      schema_version: numberValue(manifest, "schema_version", "schemaVersion"),
+      workspace_id: valueString(manifest, "workspace_id", "workspaceId"),
+      source_organization_id: valueString(manifest, "source_organization_id", "sourceOrganizationId"),
+      integrity_hash: valueString(manifest, "integrity_hash", "integrityHash", "sha256"),
+      record_counts: recordValue(manifest.record_counts ?? manifest.recordCounts)
+    }),
+    created_at: valueString(body, "created_at", "createdAt")
+  });
+}
+
+function workspaceBundleRestoreResult(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  return compactRecord({
+    bundle_id: valueString(body, "bundle_id", "bundleId", "id"),
+    workspace_id: valueString(body, "workspace_id", "workspaceId"),
+    source_organization_id: optionalValue(body, "source_organization_id", "sourceOrganizationId"),
+    target_organization_id: valueString(body, "target_organization_id", "targetOrganizationId"),
+    schema_version: numberValue(body, "schema_version", "schemaVersion", "format_version"),
+    integrity_hash: valueString(body, "integrity_hash", "integrityHash", "sha256"),
+    status: valueString(body, "status") || "restored",
+    restored_at: valueString(body, "restored_at", "restoredAt", "created_at", "createdAt"),
+    event_id: optionalValue(body, "event_id", "eventId"),
+    failure_code: optionalValue(body, "failure_code", "failureCode")
+  });
+}
+
+function listValue(value: unknown, key: string): unknown[] {
+  if (Array.isArray(value)) return value;
+  const body = recordValue(value);
+  return Array.isArray(body[key]) ? body[key] : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function nestedRecord(value: unknown, ...keys: string[]): Record<string, unknown> {
+  const body = recordValue(value);
+  for (const key of keys) {
+    const nested = body[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested as Record<string, unknown>;
+  }
+  return body;
+}
+
+function valueString(body: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) if (typeof body[key] === "string" && body[key].trim()) return body[key] as string;
+  return "";
+}
+
+function optionalValue(body: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) if (body[key] !== undefined && body[key] !== null && body[key] !== "") return body[key];
+  return undefined;
+}
+
+function numberValue(body: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const key of keys) if (typeof body[key] === "number" && Number.isFinite(body[key])) return body[key] as number;
+  return undefined;
+}
+
+function booleanValue(body: Record<string, unknown>, ...keys: string[]): boolean {
+  for (const key of keys) if (typeof body[key] === "boolean") return body[key] as boolean;
+  return false;
+}
+
+function stringValue(body: Record<string, unknown>, ...keys: string[]): string {
+  return valueString(body, ...keys);
+}
+
+function compactRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 function toEventReplayPage(page: WorkspacePublicEventPage): EventReplayPage {
@@ -623,6 +1141,12 @@ function isReplayResult(value: unknown): boolean {
 
 function stringField(value: Record<string, unknown>, name: string): string {
   if (typeof value[name] !== "string" || !value[name].trim()) throw new WorkspaceServerError(`${name}_required`, 400);
+  return value[name] as string;
+}
+
+function optionalStringField(value: Record<string, unknown>, name: string): string | undefined {
+  if (value[name] === undefined || value[name] === null) return undefined;
+  if (typeof value[name] !== "string" || !value[name].trim()) throw new WorkspaceServerError(`${name}_invalid`, 400);
   return value[name] as string;
 }
 

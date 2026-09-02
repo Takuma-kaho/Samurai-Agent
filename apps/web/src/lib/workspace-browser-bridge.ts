@@ -4,6 +4,7 @@ import {
   createBrowserConnectionState,
   loadBrowserWorkspaceConnection,
   registerBrowserWorkspaceAccount,
+  selectBrowserWorkspaceCandidate,
   subscribeBrowserWorkspaceRealtime
 } from "./workspace-browser-auth";
 import { DomainApiClient, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
@@ -12,6 +13,7 @@ import type {
   ArtifactDetail,
   AuditPayload,
   ChatTurnResult,
+  ChatSurfaceOperationResult,
   DesktopRoomMemberPreview,
   DesktopRoomMovePreview,
   DesktopWorkspaceConnection,
@@ -74,6 +76,10 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       if (!connection || connection.id !== connectionId) throw new Error("workspace_connection_not_found");
       return browserConnectionState();
     },
+    selectWorkspaceCandidate: async (workspaceId) => {
+      await selectBrowserWorkspaceCandidate(workspaceId);
+      return browserConnectionState();
+    },
     registerWorkspaceServerAccount: (displayName) => registerBrowserWorkspaceAccount(displayName),
     getWorkspaceServerStatus: browserWorkspaceServerStatus,
     getWorkspaceSettings: () => workspaceRequest<SettingsRecord>("GET", "/settings"),
@@ -131,6 +137,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     listWorkspaceBackendRuns: (input) => workspaceRequest<BackendRunRecord[]>("GET", `/chat/runs${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
     getWorkspaceBackendRun: (input) => workspaceRequest<BackendRunRecord>("GET", `/chat/runs/${encodeURIComponent(input.runId)}`),
     listWorkspaceBackendEvents: (input) => workspaceRequest<BackendEventRecord[]>("GET", `/chat/runs/${encodeURIComponent(input.runId)}/events`),
+    cancelWorkspaceBackendRun: (input) => workspaceRequest<BackendRunRecord>("POST", `/chat/runs/${encodeURIComponent(input.runId)}/cancel`, {}, input.operationId),
+    retryWorkspaceBackendRun: (input) => workspaceRequest<ChatSurfaceOperationResult>("POST", `/chat/runs/${encodeURIComponent(input.runId)}/retry`, {}, input.operationId),
     listWorkspaceChanges: (input) => workspaceRequest("GET", `/chat/changes${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
     listWorkspaceActivity: (input) => workspaceRequest<ActivityInboxItem[]>("GET", `/chat/activity?room_id=${encodeURIComponent(input.roomId)}`),
     getWorkspaceAudit: async () => {

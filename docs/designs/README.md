@@ -10,8 +10,8 @@
 
 ## 現在の設計書
 
-- `organization.md`：Phase 2 の合意済み Organization 設計。Membership、権限、招待、Workspace 所属、移行を扱う。
-- `native-app.md`：Phase 2 の合意済み Native App 設計。React、Chat、Electron、実機確認を扱う。
+- `organization.md`：任意のOrganization設計。Workspaceとの責務分離、Membership、招待、追加・解除、移行を扱う。
+- `native-app.md`：Workspace-firstのNative App設計。React、Chat、Electron、実機確認を扱う。
 
 ## 作成候補
 

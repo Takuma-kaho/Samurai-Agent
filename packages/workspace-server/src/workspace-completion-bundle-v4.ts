@@ -10,6 +10,7 @@ import {
   readWorkspaceTransfer,
   runExclusiveWorkspaceBundleStaging,
   runExclusiveWorkspaceTransferExport,
+  assertWorkspaceBundleTargetOrganizationId,
   verifyWorkspaceBundleV3,
   WORKSPACE_BUNDLE_INCOMING_TTL_MS,
   WORKSPACE_BUNDLE_MAX_BYTES,
@@ -81,6 +82,12 @@ export interface WorkspaceBundleV4Manifest {
   format_version: 4;
   workspace_id: string;
   exported_at: string;
+  /** Public Organization provenance for the embedded V3 snapshot. */
+  source_organization_id?: string;
+  /** DB/schema revision used by the embedded portable snapshot. */
+  schema_revision?: number;
+  /** Compatibility spelling consumed by the public domain contract. */
+  schema_version?: number;
   transfer_id?: string;
   base_v3_integrity_hash: string;
   /** Public Account identities may remain in audit history, but these IDs
@@ -90,6 +97,13 @@ export interface WorkspaceBundleV4Manifest {
   record_counts: Record<string, number>;
   integrity_hash: string;
 }
+
+type WorkspaceBundleV3Provenance = {
+  source?: { organization_id?: string };
+  source_organization_id?: string;
+  schema_revision?: number;
+  schema_version?: number;
+};
 
 export interface ExportWorkspaceBundleV4Result {
   directory: string;
@@ -105,6 +119,8 @@ export interface WorkspaceBundleV4Transport {
 export interface StageWorkspaceBundleV4Input {
   targetWorkspaceId: string;
   targetWorkspaceName?: string;
+  /** Restore must explicitly select the target Organization. */
+  targetOrganizationId?: string;
   manifest: WorkspaceBundleV4Manifest;
 }
 
@@ -115,6 +131,7 @@ interface IncomingV4BundleMetadata {
   operation_id: string;
   target_workspace_id: string;
   target_workspace_name?: string;
+  target_organization_id?: string;
   manifest: WorkspaceBundleV4Manifest;
   created_at: string;
   expires_at: string;
@@ -197,23 +214,27 @@ export class WorkspaceBundleV4Service {
         ...tableFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
         ...workspaceIdentityFiles.map(([table]) => [portableCountKey(table), (identityRows[table] ?? []).length] as const)
       ]);
-      const manifest: WorkspaceBundleV4Manifest = {
+      const baseProvenance = base.manifest as typeof base.manifest & WorkspaceBundleV3Provenance;
+      const sourceOrganizationId = baseProvenance.source_organization_id ?? baseProvenance.source?.organization_id;
+      // A legacy V3 manifest's schema_version is only a compatibility label;
+      // promote it to the new revision field when the source also carries the
+      // new Organization provenance. Otherwise keep the old V4 shape.
+      const schemaRevision = baseProvenance.schema_revision
+        ?? (sourceOrganizationId !== undefined ? baseProvenance.schema_version : undefined);
+      const manifest = {
         format_version: 4,
         workspace_id: context.workspaceId,
         exported_at: new Date().toISOString(),
+        ...(sourceOrganizationId ? { source_organization_id: sourceOrganizationId } : {}),
+        ...(schemaRevision !== undefined ? { schema_revision: schemaRevision, schema_version: schemaRevision } : {}),
         ...(input.transferId ? { transfer_id: input.transferId } : {}),
         base_v3_integrity_hash: base.manifest.integrity_hash,
         excluded_maintenance_account_ids: maintenanceAccountIds.sort(),
         files,
         record_counts: recordCounts,
-        integrity_hash: hashText(canonicalJson({
-          files,
-          record_counts: recordCounts,
-          ...(input.transferId ? { transfer_id: input.transferId } : {}),
-          base_v3_integrity_hash: base.manifest.integrity_hash,
-          excluded_maintenance_account_ids: maintenanceAccountIds.sort()
-        }))
-      };
+        integrity_hash: ""
+      } satisfies WorkspaceBundleV4Manifest;
+      manifest.integrity_hash = hashText(canonicalJson(bundleV4IntegrityPayload(manifest)));
       await writeFile(path.join(staging, manifestName), canonicalJson(manifest), { flag: "wx", mode: 0o600 });
       await rename(staging, destination);
       const verified = await verifyWorkspaceBundleV4(destination);
@@ -360,12 +381,14 @@ export class WorkspaceBundleV4Service {
   /** Restores the v3 core first, then imports the verified completion rows and
    * their staged file batches. PostgreSQL constraints validate every relation
    * before any completion body is renamed into the active file tree. */
-  async importNew(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">, input: { sourceDirectory: string; targetWorkspaceId: string; targetWorkspaceName?: string }): Promise<{ workspaceId: string; manifest: WorkspaceBundleV4Manifest; receipt?: WorkspaceTransferReceipt }> {
+  async importNew(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">, input: { sourceDirectory: string; targetWorkspaceId: string; targetWorkspaceName?: string; targetOrganizationId?: string }): Promise<{ workspaceId: string; manifest: WorkspaceBundleV4Manifest; receipt?: WorkspaceTransferReceipt }> {
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
+    const targetOrganizationId = assertWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
     const source = await verifyWorkspaceBundleV4(input.sourceDirectory);
     const imported = await this.v3.importNew(context, {
       sourceDirectory: path.join(source.directory, baseV3Directory), targetWorkspaceId: input.targetWorkspaceId,
       ...(input.targetWorkspaceName ? { targetWorkspaceName: input.targetWorkspaceName } : {}),
+      targetOrganizationId,
       beforeActivate: async (targetContext) => this.importCompletionExtension(targetContext, source)
     });
     // v3 can idempotently return an already-active Workspace. That is only a
@@ -431,6 +454,7 @@ export class WorkspaceBundleV4Service {
       operation_id: context.operationId,
       target_workspace_id: input.targetWorkspaceId,
       ...(input.targetWorkspaceName?.trim() ? { target_workspace_name: input.targetWorkspaceName.trim().slice(0, 500) } : {}),
+      target_organization_id: assertWorkspaceBundleTargetOrganizationId(input.targetOrganizationId),
       manifest: input.manifest,
       created_at: createdAt.toISOString(),
       expires_at: new Date(createdAt.getTime() + WORKSPACE_BUNDLE_INCOMING_TTL_MS).toISOString(),
@@ -529,7 +553,8 @@ export class WorkspaceBundleV4Service {
     const imported = await this.importNew(context, {
       sourceDirectory: root,
       targetWorkspaceId: metadata.target_workspace_id,
-      ...(metadata.target_workspace_name ? { targetWorkspaceName: metadata.target_workspace_name } : {})
+      ...(metadata.target_workspace_name ? { targetWorkspaceName: metadata.target_workspace_name } : {}),
+      targetOrganizationId: metadata.target_organization_id
     });
     await this.writeIncomingMetadata(context, {
       ...metadata,
@@ -568,6 +593,9 @@ export class WorkspaceBundleV4Service {
       throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
     }
     assertOpaqueId(metadata.target_workspace_id, "workspace_id_invalid");
+    if (metadata.target_organization_id !== undefined) {
+      assertWorkspaceBundleTargetOrganizationId(metadata.target_organization_id);
+    }
     assertWorkspaceBundleV4ManifestCandidate(metadata.manifest);
     if (metadata.created_at !== undefined && !isValidTimestamp(metadata.created_at)) throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
     if (metadata.expires_at !== undefined && !isValidTimestamp(metadata.expires_at)) throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
@@ -1075,19 +1103,31 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   const manifest = JSON.parse(raw) as unknown;
   assertWorkspaceBundleV4ManifestCandidate(manifest);
   const v3 = await verifyWorkspaceBundleV3(resolveBundlePath(root, baseV3Directory));
+  if (v3.manifest.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
   if (v3.manifest.integrity_hash !== manifest.base_v3_integrity_hash) throw new WorkspaceServerError("workspace_bundle_v4_base_mismatch", 400);
   if (v3.manifest.transfer_id !== manifest.transfer_id) throw new WorkspaceServerError("workspace_transfer_bundle_mismatch", 409);
+  const baseProvenance = v3.manifest as typeof v3.manifest & WorkspaceBundleV3Provenance;
+  const baseOrganizationId = baseProvenance.source_organization_id ?? baseProvenance.source?.organization_id;
+  const baseSchemaRevision = baseProvenance.schema_revision
+    ?? (baseOrganizationId !== undefined ? baseProvenance.schema_version : undefined);
+  const baseHasNewProvenance = baseOrganizationId !== undefined || baseProvenance.schema_revision !== undefined;
+  if (baseHasNewProvenance && (manifest.source_organization_id === undefined || manifest.schema_revision === undefined)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_missing", 400);
+  }
+  if (manifest.source_organization_id !== undefined && manifest.source_organization_id !== baseOrganizationId) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_mismatch", 400);
+  }
+  if (manifest.schema_revision !== undefined && manifest.schema_revision !== baseSchemaRevision) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_mismatch", 400);
+  }
+  if (manifest.schema_version !== undefined && manifest.schema_version !== (baseSchemaRevision ?? baseProvenance.schema_version)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_mismatch", 400);
+  }
   assertBundleUsage(await measureBundleUsage(root), "workspace_bundle_v4_transport_too_large");
   const actual = await hashBundleFiles(root);
   if (canonicalJson(actual) !== canonicalJson(manifest.files)) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
   for (const accountId of manifest.excluded_maintenance_account_ids) assertOpaqueId(accountId, "workspace_bundle_v4_maintenance_account_invalid");
-  const expected = hashText(canonicalJson({
-    files: manifest.files,
-    record_counts: manifest.record_counts,
-    ...(manifest.transfer_id ? { transfer_id: manifest.transfer_id } : {}),
-    base_v3_integrity_hash: manifest.base_v3_integrity_hash,
-    excluded_maintenance_account_ids: [...manifest.excluded_maintenance_account_ids].sort()
-  }));
+  const expected = hashText(canonicalJson(bundleV4IntegrityPayload(manifest)));
   if (expected !== manifest.integrity_hash) throw new WorkspaceServerError("workspace_bundle_v4_integrity_invalid", 400);
   for (const relative of Object.keys(actual)) {
     const content = await readFile(resolveBundlePath(root, relative));
@@ -1482,6 +1522,21 @@ function assertWorkspaceBundleV4ManifestCandidate(value: unknown): asserts value
     throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
   assertOpaqueId(manifest.workspace_id, "workspace_bundle_workspace_id_invalid");
+  if (manifest.source_organization_id !== undefined) {
+    assertWorkspaceBundleTargetOrganizationId(manifest.source_organization_id);
+  }
+  if (manifest.schema_revision !== undefined
+    && (!Number.isSafeInteger(manifest.schema_revision) || manifest.schema_revision < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+  }
+  if (manifest.schema_version !== undefined
+    && (!Number.isSafeInteger(manifest.schema_version) || manifest.schema_version < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+  }
+  if (manifest.schema_revision !== undefined && manifest.schema_version !== undefined
+    && manifest.schema_revision !== manifest.schema_version) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+  }
   if (!/^[a-f0-9]{64}$/.test(manifest.base_v3_integrity_hash) || !/^[a-f0-9]{64}$/.test(manifest.integrity_hash)) {
     throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
@@ -1562,7 +1617,29 @@ function incomingV4Request(metadata: IncomingV4BundleMetadata): Record<string, u
     operation_id: metadata.operation_id,
     target_workspace_id: metadata.target_workspace_id,
     ...(metadata.target_workspace_name ? { target_workspace_name: metadata.target_workspace_name } : {}),
+    ...(metadata.target_organization_id ? { target_organization_id: metadata.target_organization_id } : {}),
     manifest: metadata.manifest
+  };
+}
+
+function bundleV4IntegrityPayload(manifest: WorkspaceBundleV4Manifest): Record<string, unknown> {
+  const base = {
+    files: manifest.files,
+    record_counts: manifest.record_counts,
+    ...(manifest.transfer_id ? { transfer_id: manifest.transfer_id } : {}),
+    base_v3_integrity_hash: manifest.base_v3_integrity_hash,
+    excluded_maintenance_account_ids: [...manifest.excluded_maintenance_account_ids].sort()
+  };
+  if (manifest.source_organization_id === undefined
+    && manifest.schema_revision === undefined
+    && manifest.schema_version === undefined) {
+    return base;
+  }
+  return {
+    ...base,
+    ...(manifest.source_organization_id ? { source_organization_id: manifest.source_organization_id } : {}),
+    ...(manifest.schema_revision !== undefined ? { schema_revision: manifest.schema_revision } : {}),
+    ...(manifest.schema_version !== undefined ? { schema_version: manifest.schema_version } : {})
   };
 }
 
