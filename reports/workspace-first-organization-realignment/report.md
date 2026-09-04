@@ -75,4 +75,6 @@
 
 ## Git操作
 
-commit、push、PRは、この報告更新と最終secret scan後に実施する。
+- `2dec491 実行結果保存の信頼性を改善` を `codex/native-app-productization` へcommitし、GitHubへpushした。
+- PR #35を作成した。マージは実施していない。
+- GitHub ActionsのCIは監視中。実Artifact作成を含む最後の隔離E2Eは、外部送信の明示承認後に実行する。
