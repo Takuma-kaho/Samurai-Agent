@@ -25,12 +25,14 @@
 - 左サイドナビゲーションを縦スクロール可能にした。
 - 旧Organization必須DBをOrganization任意DBへ移行する互換Migrationと、旧形式のChat操作履歴を読める互換投影を追加した。
 - Runtimeの完了記録は、同じ実行を二重保存せず、内容・主体が異なる衝突は明示的に失敗させる。callback失敗後は、Providerを再実行せず、保存済みRuntime結果だけを安全に再投影できるようにした。
+- 完了済みRuntime Run、Event、Change、Activity、Resource UsageをV4 Bundleへ追加した。Provider固有のsession/thread/conversation ID、live reservation、実行用idempotency ledgerは移送せず、復元後に外部会話を再開できないようにした。
+- Runtime履歴を含む復元失敗時は、依存順（usage → change → event → activity → run → message → session）で削除するMigrationを追加した。
 
 ## 実行済み検証
 
 | 分類 | command / 条件 | 結果 |
 | --- | --- | --- |
-| 全体回帰 | `pnpm test` | 成功: 154 files / 844 tests |
+| 全体回帰 | `pnpm test` | 成功: 154 files / 848 tests |
 | 全体型 | `pnpm typecheck` | 成功: 24 workspace projects |
 | リリース統合 | `pnpm run backend:release:verify` | 成功（型、全体テスト、i18n、Web/Desktop build、Architecture、Doctorを含む） |
 | Provider | focused Vitest | 成功: 39 tests（Gemini SSE、安全block、空応答、通信断、timeoutを含む） |
@@ -48,13 +50,15 @@
 
 - このPCのDocker Desktopに、リポジトリ外の隔離Self-host Server A（`127.0.0.1:4317`）とB（`127.0.0.1:4318`）を用意した。検証DB・Storageは`~/.samurai-e2e`と専用Docker volumeにのみ置き、既存データ・リポジトリ・Git履歴は操作していない。volume削除もしていない。
 - 旧v79のOrganization必須DBをv80〜v86へ実Migrationした。移行前はOrganization 2件、WorkspaceのOrganization紐付けあり、Room 1・Membership 2・Record 1・File 1・Event 1。移行後はOrganization 0件、Organization Membership 0件、WorkspaceのOrganization紐付けなしで、Room/Membership/Record/File/Eventは同数保持された。
-- 現在のv87 MigrationをA/B両方の隔離PostgreSQLへ適用し、両Serverを最新コンテナで再起動後、health、PostgreSQL接続、RLS必須設定を確認した。
+- 現在のv88 MigrationをA/B両方の隔離PostgreSQLへ適用し、両Serverを最新コンテナで再起動後、health、PostgreSQL接続、RLS必須設定を確認した。
 - この隔離環境にはmaintenance identityをあえて設定していないため、定期的な再投影workerはdisabledである。通常の直接保存は有効で、保存callbackが失敗した場合は成功応答にせず、同じ操作の再実行でProviderを動かさず保存だけ再試行する。運用環境で自動回復も使う場合は、別途maintenance identityを設定する。
 - OrganizationなしのWorkspace、direct invite、revoke、Organization membershipと内容閲覧の分離、attach/detach/delete後の本文保持を実PostgreSQLで確認した。
 - A→B移転で、Room、Chat session、Activity、Episode、Evidence、Knowledge、Skill本文と補助ファイル、Agent設定、Room権限、実ファイルを移転した。BでWorkspace active、General Room、Chat session、実ファイルhash一致を確認した。
 - B再起動後も移転済みWorkspace、Chat、実ファイルhashを確認した。Aは削除せずarchive、transferはcommittedのまま保持された。
 - 壊れたBundle・B側同ID衝突は拒否され、Bに残骸を作らず、Aをactiveのまま保つことを確認した。
 - 旧Gemini検証Run 4件は、外部実行開始の可能性があるため`outcome_unknown`として終端した。安全な再実行扱いにはしていない。旧session-create履歴の投影がHTTP 500を返す不具合を発見し、互換変換とcancel→投影の回帰テストを追加した。更新後、終端済みRunのcancel APIは`outcome_unknown`を正常に返した。
+- 実Gemini成果物を含む初回A→B転送で、Chat/Artifact本文は届くが`artifact_created` Eventが届かない欠陥を再現した。V4 BundleへRuntime履歴を追加して修正後、同じ隔離データをA→Bの別Workspace IDへ再転送し、session・Artifact・本文・`artifact_created` Eventがすべて存在することを確認した。
+- 修正後のBを再起動して同じ4項目を再確認した。復元失敗時のcleanupも、maintenance membership検査で意図的に409へ失敗させ、A側に対象Workspaceが0件、B側送信元がrollback後activeであることを実PostgreSQLで確認した。
 
 ### 実Electron・UI確認
 
@@ -64,17 +68,12 @@
 
 ## 実Gemini検証の状態
 
-- 隔離Aで実Geminiへの会話を1回実行し、完了Run、22件の保存済み`text_delta`、完了Activity/Evidenceを確認した。したがって「実AIとの会話・回答の逐次表示」の技術E2Eは確認済みである。
-- Gemini APIへの不要なretryは実行していない。無料枠で429/5xxが起きた場合は、同じ検証を連打しない方針である。
-- 実Artifact作成を依頼する残り1回は、既存の隔離テスト会話本文をGeminiへ送る操作であるため、外部送信の明示承認待ちで未実行である。拒否・失敗・429/5xx時の自動retryは行わない。
-- よって「実AIが作ったArtifact保存」と「その実AI WorkspaceのA→B移転・B再起動後のArtifact確認」は未検証であり、成功扱いにしない。
-
-## 残る手動1作業
-
-ドパガキくんが「隔離E2Eの既存テスト会話本文をGeminiへ送って、成果物作成の残り1回を実行してよい」と明示承認する。その後、最大1回だけ実行し、成功時はA再起動→A→B移転→B再起動までを確認する。秘密鍵・APIキーはリポジトリ、報告書、チャット出力へ保存しない。
+- ドパガキくんの明示承認後、隔離Aの既存テスト会話をGeminiへ最大1回だけ送信した。完了Run、逐次`text_delta`、正規の`create_artifact` Tool、Artifact保存、本文保存を確認した。
+- Gemini APIへの不要なretryは実行していない。無料枠で429/5xxが起きた場合も、同じ検証を連打しない方針である。
+- この実成果物を含む修正後のA→B転送、B再起動後の再読込まで確認済みである。秘密鍵・APIキー・会話本文はリポジトリ、報告書、チャット出力に保存していない。
 
 ## Git操作
 
 - `2dec491 実行結果保存の信頼性を改善` を `codex/native-app-productization` へcommitし、GitHubへpushした。
 - PR #35を作成した。マージは実施していない。
-- GitHub ActionsのCIは監視中。実Artifact作成を含む最後の隔離E2Eは、外部送信の明示承認後に実行する。
+- GitHub ActionsのCIは監視中。今回のRuntime履歴移送修正は、全体検証後に追加commit/pushする。

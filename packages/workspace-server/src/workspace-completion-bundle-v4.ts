@@ -57,10 +57,6 @@ const tableFiles = [
   ["workspace_completion_search_projection", "search-projection.jsonl"],
   ["workspace_completion_migration_receipts", "migration-receipts.jsonl"],
   ["workspace_completion_workspace_documents", "workspace-documents.jsonl"],
-  // Runtime Activity is portable evidence. Process leases and backend-run
-  // foreign keys are normalized below before export; the next host reclaims
-  // due Automation through its normal Worker lane.
-  ["workspace_runtime_activities", "runtime-activities.jsonl"],
   ["workspace_runtime_automation_jobs", "automation-jobs.jsonl"],
   ["workspace_runtime_automation_runs", "automation-runs.jsonl"],
   // Raw model exchanges are deliberately omitted: their hash/error evidence
@@ -76,6 +72,19 @@ const tableFiles = [
 const workspaceChatFiles = [
   ["workspace_runtime_sessions", "runtime-sessions.jsonl"],
   ["workspace_runtime_messages", "runtime-messages.jsonl"]
+] as const;
+
+// Completed Runtime history is Workspace-owned evidence. Keep the process
+// state out of a Bundle: reservations, live leases, client notifications and
+// provider-native sessions are deployment-local and are intentionally absent.
+// `workspace_runtime_operations` is also intentionally excluded: its
+// idempotency ledger may contain deployment-local tokens.
+const workspaceRuntimeHistoryFiles = [
+  ["workspace_runtime_runs", "runtime-runs.jsonl"],
+  ["workspace_runtime_events", "runtime-events.jsonl"],
+  ["workspace_runtime_changes", "runtime-changes.jsonl"],
+  ["workspace_runtime_activities", "runtime-activities.jsonl"],
+  ["workspace_runtime_resource_usage", "runtime-resource-usage.jsonl"]
 ] as const;
 
 // Authorization and external-connection state is part of the Workspace
@@ -239,6 +248,9 @@ export class WorkspaceBundleV4Service {
       for (const [table, filename] of workspaceChatFiles) {
         await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
       }
+      for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+        await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
+      }
       for (const [table, filename] of workspaceIdentityFiles) {
         await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), identityRows[table] ?? []);
       }
@@ -249,6 +261,7 @@ export class WorkspaceBundleV4Service {
       const recordCounts = Object.fromEntries([
         ...tableFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
         ...workspaceChatFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
+        ...workspaceRuntimeHistoryFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
         ...workspaceIdentityFiles.map(([table]) => [portableCountKey(table), (identityRows[table] ?? []).length] as const)
       ]);
       const baseProvenance = base.manifest as typeof base.manifest & WorkspaceBundleV3Provenance;
@@ -682,6 +695,10 @@ export class WorkspaceBundleV4Service {
         values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
       }
       for (const [table] of workspaceChatFiles) {
+        const result = await sql.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE workspace_id = $1`, [context.workspaceId]);
+        values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
+      }
+      for (const [table] of workspaceRuntimeHistoryFiles) {
         const result = await sql.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE workspace_id = $1`, [context.workspaceId]);
         values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
       }
@@ -1194,7 +1211,13 @@ const importTableOrder = [
   "workspace_completion_redactions",
   "workspace_runtime_sessions",
   "workspace_runtime_messages",
+  // Runtime history follows its foreign-key graph: runs own events and
+  // changes, activities retain their run link, and usage refers to both.
+  "workspace_runtime_runs",
+  "workspace_runtime_events",
+  "workspace_runtime_changes",
   "workspace_runtime_activities",
+  "workspace_runtime_resource_usage",
   "workspace_runtime_automation_jobs",
   "workspace_runtime_automation_runs"
 ] as const;
@@ -1243,6 +1266,22 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   for (const [table, filename] of workspaceChatFiles) {
     rows[table] = await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
   }
+  for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+    // Activities were already part of the first V4 implementation and remain
+    // required. The other history files are additive and optional for older
+    // V4 Bundles; new exports include all of them and bind their counts.
+    const required = table === "workspace_runtime_activities";
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if ((required || hasManifestCount) && !hasBundleFile) {
+      throw new WorkspaceServerError("workspace_bundle_v4_required_file_missing", 400);
+    }
+    rows[table] = required || hasManifestCount || hasBundleFile
+      ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
+      : [];
+  }
+  assertPortableRuntimeHistory(rows);
   const connections = await readJsonl(resolveBundlePath(root, `${completionDirectory}/connection-descriptors.jsonl`));
   if (connections.some((row) => row.status === "active")) {
     throw new WorkspaceServerError("workspace_bundle_v4_active_connection_forbidden", 400);
@@ -1260,6 +1299,14 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
       throw new WorkspaceServerError("workspace_bundle_v4_required_file_missing", 400);
     }
     if (hasManifestCount || hasBundleFile) {
+      countByKey.set(key, rows[table]?.length ?? 0);
+    }
+  }
+  for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if (hasManifestCount || hasBundleFile || table === "workspace_runtime_activities") {
       countByKey.set(key, rows[table]?.length ?? 0);
     }
   }
@@ -1332,7 +1379,16 @@ async function readCompletionBundleRows(root: string): Promise<Record<string, Re
   for (const [table, filename] of workspaceChatFiles) {
     rows[table] = await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
   }
+  for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+    rows[table] = table === "workspace_runtime_activities"
+      ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
+      : await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  }
   for (const [table, filename] of workspaceIdentityFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  // Keep the import path defensive even if a future caller bypasses the
+  // public verifier. The source row `session_ref` remains untouched; only
+  // provider-shaped identifiers in Runtime metadata/payload are rejected.
+  assertPortableRuntimeHistory(rows);
   return rows;
 }
 
@@ -1524,10 +1580,31 @@ function portableRuntimeRow(table: string, row: Record<string, unknown>): Record
     // matched secret detection.  Keep a count as portable audit evidence.
     return { ...portable, counts: portableMigrationReceiptCounts(portable.counts) };
   }
-  if (table === "workspace_runtime_activities") {
-    // Runtime runs are intentionally not part of V4's process state. Keep the
-    // Activity record, but remove the foreign key to a non-portable run.
-    return { ...portable, backend_run_id: null };
+  if (table === "workspace_runtime_runs") {
+    assertPortableRuntimeRun(portable);
+    // A provider-native session ID can make a restored Run look resumable.
+    // Keep the settled outcome and request idempotency, but force a fresh
+    // provider session if the target later starts a new operation. The
+    // top-level `session_ref` is a Workspace-owned app/session reference and
+    // remains portable; only provider-shaped IDs inside Runtime metadata are
+    // removed.
+    return {
+      ...portable,
+      metadata: stripPortableRuntimeProviderIdentifiers(portable.metadata),
+      backend_session_id: null
+    };
+  }
+  if (table === "workspace_runtime_events") {
+    // Event payloads are historical evidence; provider-native session state is
+    // deployment-local and must never be used as a restore credential. Keep
+    // artifact evidence and Workspace row `session_id` intact while removing
+    // provider/backend/native session, thread, and conversation identifiers
+    // from the opaque payload.
+    return {
+      ...portable,
+      payload: stripPortableRuntimeProviderIdentifiers(portable.payload),
+      backend_session_id: null
+    };
   }
   if (table === "workspace_runtime_automation_jobs") {
     // A bundle never transports a live worker lease or lock owner.
@@ -1544,6 +1621,94 @@ function portableRuntimeRow(table: string, row: Record<string, unknown>): Record
     };
   }
   return portable;
+}
+
+const portableRuntimeTerminalStatuses = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
+
+function assertPortableRuntimeRun(row: Record<string, unknown>, requireBackendSessionAbsent = false): void {
+  const settled = row.phase === "settled"
+    || (typeof row.status === "string" && portableRuntimeTerminalStatuses.has(row.status));
+  if (!settled) throw new WorkspaceServerError("workspace_bundle_v4_runtime_run_unsettled", 409);
+  if (requireBackendSessionAbsent && row.backend_session_id !== null && row.backend_session_id !== undefined) {
+    throw new WorkspaceServerError("workspace_bundle_v4_backend_session_forbidden", 400);
+  }
+}
+
+function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknown>[]>): void {
+  const runs = rows.workspace_runtime_runs ?? [];
+  const runIds = new Set(runs.map((row) => row.id).filter((id): id is string => typeof id === "string"));
+  for (const run of runs) {
+    assertPortableRuntimeRun(run, true);
+    assertPortableRuntimeProviderIdentifiersAbsent(run.metadata);
+  }
+  for (const event of rows.workspace_runtime_events ?? []) {
+    if (event.backend_session_id !== null && event.backend_session_id !== undefined) {
+      throw new WorkspaceServerError("workspace_bundle_v4_backend_session_forbidden", 400);
+    }
+    assertPortableRuntimeProviderIdentifiersAbsent(event.payload);
+    if (typeof event.run_id !== "string" || !runIds.has(event.run_id)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+  for (const change of rows.workspace_runtime_changes ?? []) {
+    if (typeof change.run_id === "string" && !runIds.has(change.run_id)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+  const activityIds = new Set((rows.workspace_runtime_activities ?? [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string"));
+  for (const activity of rows.workspace_runtime_activities ?? []) {
+    if (typeof activity.backend_run_id === "string" && !runIds.has(activity.backend_run_id)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+  const changeIds = new Set((rows.workspace_runtime_changes ?? [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string"));
+  for (const usage of rows.workspace_runtime_resource_usage ?? []) {
+    if (typeof usage.activity_id !== "string" || !activityIds.has(usage.activity_id)
+      || (typeof usage.workspace_change_id === "string" && !changeIds.has(usage.workspace_change_id))) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+}
+
+/**
+ * Opaque provider payloads must never decide whether a restored Runtime can
+ * resume an external conversation. Normalize only the established provider
+ * key shapes, so provider handles are excluded without deleting unrelated
+ * Workspace-specific metadata. Canonical Workspace `session_id` /
+ * `session_ref` columns are handled separately and remain portable.
+ */
+function isPortableRuntimeProviderIdentifierKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (normalized === "sessionid" || normalized === "threadid" || normalized === "conversationid") return true;
+  return /^(?:(?:provider|backend|native|codex|claude|gemini|openai|anthropic|google|vertex|azure|ollama|external|remote))+(?:session|thread|conversation)(?:id|ref)?$/.test(normalized);
+}
+
+function stripPortableRuntimeProviderIdentifiers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripPortableRuntimeProviderIdentifiers);
+  if (!value || typeof value !== "object" || value instanceof Date) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isPortableRuntimeProviderIdentifierKey(key))
+      .map(([key, nested]) => [key, stripPortableRuntimeProviderIdentifiers(nested)])
+  );
+}
+
+function assertPortableRuntimeProviderIdentifiersAbsent(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertPortableRuntimeProviderIdentifiersAbsent(item);
+    return;
+  }
+  if (!value || typeof value !== "object" || value instanceof Date) return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (isPortableRuntimeProviderIdentifierKey(key)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_provider_identifier_forbidden", 400);
+    }
+    assertPortableRuntimeProviderIdentifiersAbsent(nested);
+  }
 }
 
 function portableMigrationReceiptCounts(value: unknown): unknown {

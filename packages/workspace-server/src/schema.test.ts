@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -330,6 +330,28 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).not.toContain("api_key TEXT");
     expect(schema).not.toContain("access_token TEXT");
     expect(schema).not.toContain("secret TEXT");
+
+    const runtimeHistoryAbortCleanup = migrations.find((migration) => migration.version === 88)?.statements.join("\n") ?? "";
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_bundle_import_abort_runtime_history_dependency_order");
+    for (const table of [
+      "workspace_runtime_resource_usage", "workspace_runtime_changes", "workspace_runtime_events",
+      "workspace_runtime_activities", "workspace_runtime_runs", "workspace_runtime_messages", "workspace_runtime_sessions"
+    ]) {
+      expect(runtimeHistoryAbortCleanup).toContain(`DELETE FROM ${table} WHERE workspace_id = workspace_key`);
+    }
+    const runtimeHistoryCleanupOrder = [
+      "workspace_runtime_resource_usage", "workspace_runtime_changes", "workspace_runtime_events",
+      "workspace_runtime_activities", "workspace_runtime_runs", "workspace_runtime_messages", "workspace_runtime_sessions"
+    ].map((table) => runtimeHistoryAbortCleanup.indexOf(`DELETE FROM ${table} WHERE workspace_id = workspace_key`));
+    expect(runtimeHistoryCleanupOrder.every((index) => index >= 0)).toBe(true);
+    for (let index = 1; index < runtimeHistoryCleanupOrder.length; index += 1) {
+      expect(runtimeHistoryCleanupOrder[index - 1]).toBeLessThan(runtimeHistoryCleanupOrder[index]);
+    }
+    expect(runtimeHistoryAbortCleanup).toContain("DELETE FROM workspace_runtime_automation_runs WHERE workspace_id = workspace_key");
+    expect(runtimeHistoryAbortCleanup).toContain("DELETE FROM workspace_runtime_automation_jobs WHERE workspace_id = workspace_key");
+    expect(runtimeHistoryAbortCleanup.indexOf("DELETE FROM workspace_runtime_automation_runs")).toBeLessThan(
+      runtimeHistoryAbortCleanup.indexOf("DELETE FROM rooms")
+    );
   });
 
   it("makes Organization optional without changing Workspace-content RLS", () => {

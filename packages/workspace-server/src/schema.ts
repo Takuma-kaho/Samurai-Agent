@@ -11772,6 +11772,96 @@ const migrations: readonly WorkspaceServerMigration[] = [
          )
        ))`
     ]
+  },
+  {
+    // V4 imports Runtime history rows after the original abort cleanup was
+    // introduced. Keep the prior cleanup intact and remove the newly portable
+    // Runtime graph in foreign-key order before deleting Rooms/Workspace rows.
+    // Runtime reservations and operations are intentionally not imported by
+    // V4, so this migration does not broaden their existing cleanup contract.
+    version: 88,
+    name: "workspace_server_bundle_import_abort_runtime_history_dependency_order",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_abort_workspace_import(
+        target_workspace_id TEXT,
+        import_session_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_key TEXT := target_workspace_id;
+      DECLARE import_key TEXT := import_session_id;
+      BEGIN
+        IF workspace_key IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(workspace_key) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        DELETE FROM workspace_runtime_resource_usage WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_changes WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_events WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_runs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_messages WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_sessions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_automation_runs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_runtime_automation_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_connection_descriptors WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_agent_room_permissions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_agents WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_search_projection WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_policy_rules WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_policy_change_requests WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_policy_approvals WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_uses WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_evaluations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_evidence WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_attestations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_resource_links WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_redactions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_skill_files WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_workspace_documents WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_job_raw_outputs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_resource_versions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_resources WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_file_batch_entries WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_file_batches WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_episode_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_episodes WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_job_attempts WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_curator_snapshots WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_curator_state WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_configurations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_migration_receipts WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_migration_runs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_completion_maintenance_identities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resource_uses WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resource_links WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_evidence WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resource_versions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_resources WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_job_attempts WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_activities WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_learning_settings WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_audit_entries WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_bundles WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_transfers WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_invitations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_jobs WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_events WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_operations WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_file_transactions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_files WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_records WHERE workspace_id = workspace_key;
+        DELETE FROM room_members WHERE workspace_id = workspace_key;
+        DELETE FROM rooms WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_members WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_import_sessions WHERE workspace_id = workspace_key AND id = import_key;
+        DELETE FROM workspaces WHERE id = workspace_key AND state = 'read_only';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_import_target_invalid'; END IF;
+      END
+      $$`
+    ]
   }
 ];
 
