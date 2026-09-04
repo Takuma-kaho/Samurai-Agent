@@ -34,6 +34,7 @@
 | --- | --- | --- |
 | 全体回帰 | `pnpm test` | 成功: 154 files / 848 tests |
 | 全体型 | `pnpm typecheck` | 成功: 24 workspace projects |
+| 依存解決 | `pnpm why fast-uri` / `pnpm why qs` | 成功: `fast-uri 3.1.7` / `qs 6.16.0` |
 | リリース統合 | `pnpm run backend:release:verify` | 成功（型、全体テスト、i18n、Web/Desktop build、Architecture、Doctorを含む） |
 | Provider | focused Vitest | 成功: 39 tests（Gemini SSE、安全block、空応答、通信断、timeoutを含む） |
 | Runtime終端互換 | focused Vitest | 成功: 10 tests（旧session-create履歴を含むcancel→投影→完了通知） |
@@ -45,6 +46,7 @@
 | PostgreSQL runtime scope | `pnpm run verify:postgres-runtime-scope` | 成功: scanned 535、issue 0 |
 | 書式・lint | `pnpm run format:check` | 成功: format 906、lint 787、issue 0 |
 | 差分 | `git diff --check` | 成功 |
+| GitHub CI | PR #35 | 成功: 8/8（security audit、Linux全体、macOS / Ubuntu / Windows契約、PostgreSQL 2件、release readiness） |
 
 ### 実PostgreSQL・二つの実Server検証
 
@@ -74,6 +76,6 @@
 
 ## Git操作
 
-- `2dec491 実行結果保存の信頼性を改善` を `codex/native-app-productization` へcommitし、GitHubへpushした。
-- PR #35を作成した。マージは実施していない。
-- GitHub ActionsのCIは監視中。今回のRuntime履歴移送修正は、全体検証後に追加commit/pushする。
+- `5e2fc85 Runtime履歴の移転を補完` と `2ffebd1 依存脆弱性を修正` を `codex/native-app-productization` へcommitし、GitHubへpushした。
+- `fast-uri` は`3.1.7`、`qs` は`6.16.0`へ更新した。前者はAJV、後者はExpress / body-parserの間接依存であり、既存のSemVer範囲内であることを確認した。
+- PR #35のGitHub Actionsは最新の依存修正を含めて8/8成功した。マージは実施していない。
