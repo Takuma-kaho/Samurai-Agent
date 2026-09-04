@@ -74,7 +74,7 @@
     "@samurai-agent/workspace-server": "workspace:*",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/node": "^22.19.21",
+    "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "4.1.10",
     "ajv": "8.18.0",
     "fast-check": "4.9.0",
