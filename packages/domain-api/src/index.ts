@@ -79,6 +79,38 @@ export const PublicAgentRecordSchema = z.object({
 }).strict();
 export type PublicAgentRecord = z.infer<typeof PublicAgentRecordSchema>;
 
+/**
+ * Account-scoped Workspace metadata.  Organization membership is deliberately
+ * not part of the access contract: a missing organization_id means that the
+ * Workspace is standalone on this Server.
+ */
+export const PublicWorkspaceSummarySchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  organization_id: z.string().trim().min(1).max(512).optional(),
+  name: z.string().trim().min(1).max(200),
+  state: z.enum(["active", "archived", "deleted", "read_only"]),
+  version: z.number().int().nonnegative(),
+  hosting_mode: z.enum(["hosted", "self_host"]).optional(),
+  database_placement: z.enum(["shared", "dedicated"]).optional(),
+  role: z.enum(["owner", "admin", "member", "guest"]).optional(),
+  access: z.enum(["granted", "none"]).optional(),
+  created_by: z.string().trim().min(1).max(512).optional(),
+  created_at: z.string().datetime().optional(),
+  updated_at: z.string().datetime().optional()
+}).strict();
+export type PublicWorkspaceSummary = z.infer<typeof PublicWorkspaceSummarySchema>;
+
+/** A stable account directory envelope used by Native and Browser clients. */
+export const PublicWorkspaceDirectorySchema = z.object({
+  workspaces: z.array(PublicWorkspaceSummarySchema).max(10_000),
+  errors: z.array(z.object({
+    connection_id: z.string().trim().min(1).max(512),
+    code: z.string().trim().min(1).max(256),
+    message: z.string().trim().min(1).max(2_000)
+  }).strict()).max(256).optional()
+}).strict();
+export type PublicWorkspaceDirectory = z.infer<typeof PublicWorkspaceDirectorySchema>;
+
 /** Organization projections expose tenant metadata, not Workspace/Room content. */
 export const PublicOrganizationRecordSchema = z.object({
   id: z.string().trim().min(1).max(512),
@@ -138,7 +170,8 @@ export type PublicOrganizationInvitationIssueResult = z.infer<typeof PublicOrgan
 /** Workspace list results are metadata-only and contain no Room or message data. */
 export const PublicOrganizationWorkspaceRecordSchema = z.object({
   id: z.string().trim().min(1).max(512),
-  organization_id: z.string().trim().min(1).max(512),
+  /** Omitted for a standalone Workspace projection. */
+  organization_id: z.string().trim().min(1).max(512).optional(),
   name: z.string().trim().min(1).max(200),
   state: z.enum(["active", "archived", "deleted"]),
   version: z.number().int().positive(),
@@ -153,7 +186,8 @@ export type PublicOrganizationWorkspaceRecord = z.infer<typeof PublicOrganizatio
 
 export const PublicOrganizationWorkspaceMembershipRecordSchema = z.object({
   id: z.string().trim().min(1).max(512),
-  organization_id: z.string().trim().min(1).max(512),
+  /** Organization provenance is optional for direct Workspace membership. */
+  organization_id: z.string().trim().min(1).max(512).optional(),
   workspace_id: z.string().trim().min(1).max(512),
   account_id: z.string().trim().min(1).max(512),
   role: z.enum(["owner", "admin", "member", "guest"]),
@@ -167,6 +201,16 @@ export const PublicOrganizationWorkspaceMembershipRecordSchema = z.object({
 }).strict();
 export type PublicOrganizationWorkspaceMembershipRecord = z.infer<typeof PublicOrganizationWorkspaceMembershipRecordSchema>;
 
+/** Result of the explicit optional Organization association commands. */
+export const PublicWorkspaceOrganizationAssociationResultSchema = z.object({
+  workspace: PublicOrganizationWorkspaceRecordSchema,
+  organization_id: z.string().trim().min(1).max(512).optional(),
+  previous_organization_id: z.string().trim().min(1).max(512).optional(),
+  added_guest_account_ids: z.array(z.string().trim().min(1).max(512)).max(10_000),
+  event_id: z.string().trim().min(1).max(512).optional()
+}).strict();
+export type PublicWorkspaceOrganizationAssociationResult = z.infer<typeof PublicWorkspaceOrganizationAssociationResultSchema>;
+
 export const PublicWorkspaceMoveMemberSummarySchema = z.object({
   account_id: z.string().trim().min(1).max(512),
   workspace_role: z.enum(["owner", "admin", "member", "guest"]),
@@ -177,8 +221,9 @@ export type PublicWorkspaceMoveMemberSummary = z.infer<typeof PublicWorkspaceMov
 
 export const PublicWorkspaceMovePreflightSchema = z.object({
   operation_id: z.string().trim().min(1).max(512),
-  source_organization_id: z.string().trim().min(1).max(512),
-  target_organization_id: z.string().trim().min(1).max(512),
+  /** One side is omitted when attaching from or detaching to standalone. */
+  source_organization_id: z.string().trim().min(1).max(512).optional(),
+  target_organization_id: z.string().trim().min(1).max(512).optional(),
   workspace_id: z.string().trim().min(1).max(512),
   workspace_version: z.number().int().positive(),
   workspace_state: z.enum(["active", "archived", "deleted"]),
@@ -195,8 +240,8 @@ export type PublicWorkspaceMovePreflight = z.infer<typeof PublicWorkspaceMovePre
 export const PublicWorkspaceMoveResultSchema = z.object({
   operation_id: z.string().trim().min(1).max(512),
   workspace_id: z.string().trim().min(1).max(512),
-  source_organization_id: z.string().trim().min(1).max(512),
-  target_organization_id: z.string().trim().min(1).max(512),
+  source_organization_id: z.string().trim().min(1).max(512).optional(),
+  target_organization_id: z.string().trim().min(1).max(512).optional(),
   status: z.enum(["preflight", "queued", "running", "committed", "failed", "rolled_back"]),
   guest_membership_account_ids: z.array(z.string().trim().min(1).max(512)).max(10_000),
   event_id: z.string().trim().min(1).max(512).optional(),
@@ -211,7 +256,8 @@ export type PublicWorkspaceMoveStatusRecord = z.infer<typeof PublicWorkspaceMove
 export const PublicWorkspaceBundleManifestSchema = z.object({
   schema_version: z.number().int().positive(),
   workspace_id: z.string().trim().min(1).max(512),
-  source_organization_id: z.string().trim().min(1).max(512),
+  /** Organization provenance is not imported into a standalone Workspace. */
+  source_organization_id: z.string().trim().min(1).max(512).optional(),
   integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
   record_counts: z.record(z.number().int().nonnegative())
 }).strict();
@@ -220,7 +266,7 @@ export type PublicWorkspaceBundleManifest = z.infer<typeof PublicWorkspaceBundle
 export const PublicWorkspaceBundleExportResultSchema = z.object({
   bundle_id: z.string().trim().min(1).max(512),
   workspace_id: z.string().trim().min(1).max(512),
-  source_organization_id: z.string().trim().min(1).max(512),
+  source_organization_id: z.string().trim().min(1).max(512).optional(),
   schema_version: z.number().int().positive(),
   integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
   file_count: z.number().int().nonnegative(),
@@ -234,7 +280,8 @@ export const PublicWorkspaceBundleRestoreResultSchema = z.object({
   bundle_id: z.string().trim().min(1).max(512),
   workspace_id: z.string().trim().min(1).max(512),
   source_organization_id: z.string().trim().min(1).max(512).optional(),
-  target_organization_id: z.string().trim().min(1).max(512),
+  /** Restore defaults to standalone; attaching is a separate operation. */
+  target_organization_id: z.string().trim().min(1).max(512).optional(),
   schema_version: z.number().int().positive(),
   integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
   status: z.enum(["restored", "failed"]),
@@ -243,6 +290,50 @@ export const PublicWorkspaceBundleRestoreResultSchema = z.object({
   failure_code: z.string().trim().min(1).max(256).optional()
 }).strict();
 export type PublicWorkspaceBundleRestoreResult = z.infer<typeof PublicWorkspaceBundleRestoreResultSchema>;
+
+/** Portable transfer metadata is safe to expose: file names are relative,
+ * hashes are integrity evidence, and Organization provenance is optional. */
+export const PublicWorkspaceTransferManifestSchema = z.object({
+  format_version: z.literal(4),
+  workspace_id: z.string().trim().min(1).max(512),
+  exported_at: z.string().datetime(),
+  source_organization_id: z.string().trim().min(1).max(512).optional(),
+  schema_revision: z.number().int().positive().optional(),
+  schema_version: z.number().int().positive().optional(),
+  transfer_id: z.string().trim().min(1).max(512),
+  base_v3_integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
+  excluded_maintenance_account_ids: z.array(z.string().trim().min(1).max(512)).max(10_000),
+  files: z.record(z.string().regex(/^[a-f0-9]{64}$/i)),
+  record_counts: z.record(z.number().int().nonnegative()),
+  integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i)
+}).strict();
+export type PublicWorkspaceTransferManifest = z.infer<typeof PublicWorkspaceTransferManifestSchema>;
+
+export const PublicWorkspaceTransferStartResultSchema = z.object({
+  transfer_id: z.string().trim().min(1).max(512),
+  manifest: PublicWorkspaceTransferManifestSchema,
+  bundle_download_path: z.string().trim().min(1).max(2_048)
+}).strict();
+export type PublicWorkspaceTransferStartResult = z.infer<typeof PublicWorkspaceTransferStartResultSchema>;
+
+export const PublicWorkspaceTransferManifestResultSchema = z.object({
+  manifest: PublicWorkspaceTransferManifestSchema
+}).strict();
+export type PublicWorkspaceTransferManifestResult = z.infer<typeof PublicWorkspaceTransferManifestResultSchema>;
+
+/** Receipt is the only target-side proof accepted before source cutover. */
+export const PublicWorkspaceTransferReceiptSchema = z.object({
+  format_version: z.literal(1),
+  transfer_id: z.string().trim().min(1).max(512),
+  source_workspace_id: z.string().trim().min(1).max(512),
+  source_integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
+  target_workspace_id: z.string().trim().min(1).max(512),
+  imported_at: z.string().datetime(),
+  target_integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i)
+}).strict().refine((value) => value.source_integrity_hash === value.target_integrity_hash, {
+  message: "workspace_transfer_integrity_hash_mismatch"
+});
+export type PublicWorkspaceTransferReceipt = z.infer<typeof PublicWorkspaceTransferReceiptSchema>;
 
 /** The first public product slice. Keep this list in the shared contract
  * package so the Server catalog and generated documentation cannot drift. */
@@ -254,7 +345,7 @@ export const publicDomainOperationIds = Object.freeze([
   "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
   "organization.member.list", "organization.member.invite", "organization.member.accept", "organization.member.role.change", "organization.member.remove", "organization.member.leave",
   "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue", "organization.invitation.extend",
-  "organization.workspace.list", "organization.workspace.create", "organization.workspace.member.grant", "organization.workspace.member.revoke", "organization.workspace.archive", "organization.workspace.restore", "organization.workspace.delete",
+  "organization.workspace.member.grant", "organization.workspace.member.revoke",
   "workspace.organization.move.preflight", "workspace.organization.move.commit", "workspace.organization.move.status",
   "workspace.bundle.export", "workspace.bundle.restore"
 ] as const);
@@ -567,6 +658,138 @@ export type DomainApiTransport = <T>(request: DomainApiTransportRequest) => Prom
 /** Typed transport client. Signing and private-key handling stay in the caller's Main/Browser boundary. */
 export class DomainApiClient {
   constructor(private readonly transport: DomainApiTransport) {}
+
+  /** Account-scoped directory; no Organization or Workspace path is needed. */
+  listAccountWorkspaces<T = PublicWorkspaceDirectory>(): Promise<T> {
+    return this.transport<T>({ method: "GET", path: "/api/account/workspaces" });
+  }
+
+  /** Create a standalone Workspace through the same account command path used by HTTP. */
+  createWorkspace<T = JsonValue>(input: { workspace_id: string; name: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: "/api/workspaces",
+      body: input,
+      operationId: options.operationId,
+      ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {})
+    });
+  }
+
+  /** Restore a portable Workspace as standalone; attach to an Organization separately. */
+  importWorkspaceBundle<T = JsonValue>(input: {
+    target_workspace_id: string;
+    bundle: JsonValue;
+    target_workspace_name?: string;
+  }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: "/api/workspaces/imports",
+      body: input,
+      operationId: options.operationId,
+      ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {})
+    });
+  }
+
+  /** Restore a server-managed export as a standalone Workspace. */
+  restoreWorkspaceBundle<T = PublicWorkspaceBundleRestoreResult>(input: {
+    bundle_id: string;
+    workspace_id?: string;
+    target_workspace_id?: string;
+    confirm: true;
+  }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: "/api/workspaces/bundles/restore",
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Export a Workspace without requiring an Organization route segment. */
+  exportWorkspaceBundle<T = PublicWorkspaceBundleExportResult>(workspaceId: string, options: { operationId: string; idempotencyKey?: string; expectedWorkspaceVersion?: number }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}/bundle/export`,
+      body: options.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: options.expectedWorkspaceVersion },
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Explicitly attach a standalone Workspace to a same-Server Organization. */
+  attachWorkspaceToOrganization<T = PublicWorkspaceOrganizationAssociationResult>(organizationId: string, workspaceId: string, options: { operationId: string; idempotencyKey?: string; expectedWorkspaceVersion?: number; confirmGuestMemberships?: boolean }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/attach`,
+      body: {
+        ...(options.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: options.expectedWorkspaceVersion }),
+        ...(options.confirmGuestMemberships === undefined ? {} : { confirm_guest_memberships: options.confirmGuestMemberships })
+      },
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Explicitly detach a Workspace while preserving its content and members. */
+  detachWorkspaceFromOrganization<T = PublicWorkspaceOrganizationAssociationResult>(organizationId: string, workspaceId: string, options: { operationId: string; idempotencyKey?: string; expectedWorkspaceVersion?: number }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/detach`,
+      body: options.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: options.expectedWorkspaceVersion },
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Begin a resumable, read-only transfer from this Workspace. */
+  beginWorkspaceTransfer<T = PublicWorkspaceTransferStartResult>(workspaceId: string, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}/transfers`,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Read the verified transfer manifest before sending it to the target. */
+  getWorkspaceTransferManifest<T = PublicWorkspaceTransferManifestResult>(workspaceId: string, transferId: string): Promise<T> {
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}/transfers/${encodeURIComponent(transferId)}/manifest`
+    });
+  }
+
+  /** Record target integrity proof; source remains active until complete. */
+  recordWorkspaceTransferReceipt<T = void>(workspaceId: string, transferId: string, input: { target_workspace_id: string; receipt: PublicWorkspaceTransferReceipt }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}/transfers/${encodeURIComponent(transferId)}/receipt`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Cancel a transfer and release the source read-only state. */
+  rollbackWorkspaceTransfer<T = void>(workspaceId: string, transferId: string, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}/transfers/${encodeURIComponent(transferId)}/rollback`,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  /** Cut over only after receipt verification; the source is archived by Core. */
+  completeWorkspaceTransfer<T = void>(workspaceId: string, transferId: string, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/workspaces/${encodeURIComponent(workspaceId)}/transfers/${encodeURIComponent(transferId)}/complete`,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
 
   getCatalog<T = DomainApiCatalog>(workspaceId: string): Promise<T> {
     return this.transport<T>({ method: "GET", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/domain/catalog` });

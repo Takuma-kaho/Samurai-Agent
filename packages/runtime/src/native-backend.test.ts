@@ -66,6 +66,191 @@ describe("SamuraiNativeBackend components", () => {
     });
   });
 
+  it("forwards real provider stream increments as separate text events", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/stream-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { content: "先頭" };
+        yield { content: " と続き", finishReason: "STOP", usage: { total_tokens: 3 } };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "text_delta", "run_completed"]);
+    expect(events.filter((event) => event.event_type === "text_delta").map((event) => event.payload.text)).toEqual(["先頭", " と続き"]);
+    expect(events.at(-1)?.payload).toMatchObject({ output_summary: "先頭 と続き", finish_reason: "STOP", usage: { total_tokens: 3 } });
+  });
+
+  it("stabilizes Gemini tool IDs and keeps duplicate calls distinct", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/tool-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { toolCalls: [
+          { name: "create_artifact", arguments: { title: "same" } },
+          { name: "create_artifact", arguments: { title: "same" } }
+        ], finishReason: "STOP" };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+    const toolEvents = events.filter((event) => event.event_type === "tool_call_started");
+    const ids = toolEvents.map((event) => event.tool_call_id);
+
+    expect(toolEvents).toHaveLength(2);
+    expect(ids.every((id) => Boolean(id))).toBe(true);
+    expect(new Set(ids).size).toBe(2);
+    expect(toolEvents.map((event) => event.payload.tool_call_id)).toEqual(ids);
+  });
+
+  it("does not render a thoughtSignature-only provider chunk as text", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/thought-signature-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { ignored: true, finishReason: "STOP" };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_completed"]);
+    expect(events.some((event) => event.event_type === "text_delta")).toBe(false);
+    expect(events.at(-1)?.payload).toMatchObject({ output_summary: "Backend run completed.", finish_reason: "STOP" });
+  });
+
+  it("does not treat Gemini safety termination as a completed run", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/safety-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { finishReason: "SAFETY" };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_failed"]);
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
+      payload: { cause_category: "provider", reason: "invalid_response" }
+    });
+    expect(JSON.stringify(events)).toContain("safety policy");
+  });
+
+  it("does not treat a non-stream provider safety result as a completed run", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/non-stream-safety-test",
+      async generate() {
+        return { content: "blocked content", toolCalls: [], finishReason: "SAFETY" };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_failed"]);
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
+      payload: { cause_category: "provider", reason: "invalid_response" }
+    });
+    expect(JSON.stringify(events)).toContain("safety policy");
+  });
+
+  it("does not complete an empty non-stream provider response", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/non-stream-empty-test",
+      async generate() {
+        return { content: "", toolCalls: [] };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_failed"]);
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
+      payload: { reason: "invalid_response" }
+    });
+  });
+
+  it("does not complete an empty terminated stream unless it carries ignored provider metadata", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/empty-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { finishReason: "STOP" };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_failed"]);
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
+      payload: { reason: "invalid_response" }
+    });
+  });
+
+  it("marks a provider stream that reaches EOF without a terminator indeterminate", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/eof-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { content: "partial" };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_failed"]);
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "indeterminate", reason: "transport_lost", providerStarted: true, mayHaveSideEffects: true }
+    });
+  });
+
+  it("marks an interrupted provider stream indeterminate after partial output", async () => {
+    const provider: ProviderAdapter = {
+      id: "gemini",
+      model: "gemini/disconnect-test",
+      async generate() {
+        throw new Error("stream path expected");
+      },
+      async *stream() {
+        yield { content: "partial" };
+        throw new Error("socket closed");
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+    expect(events.map((event) => event.event_type)).toEqual(["run_started", "text_delta", "run_failed"]);
+    expect(events.at(-1)).toMatchObject({
+      terminal_evidence: { kind: "indeterminate", reason: "transport_lost", providerStarted: true, mayHaveSideEffects: true }
+    });
+  });
+
   it("plans native provider tool calls as host-runtime executions", () => {
     const plan = new NativeToolExecutor().planToolCall({
       id: "tool_2",

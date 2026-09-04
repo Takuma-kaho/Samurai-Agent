@@ -173,7 +173,7 @@ async function recoverActiveSelfHostedWorkspaces(
   }
 }
 
-async function activeWorkspaces(store: WorkspaceServerStore, fallbackAccountId?: string): Promise<RecoveryWorkspace[]> {
+export async function activeWorkspaces(store: WorkspaceServerStore, fallbackAccountId?: string): Promise<RecoveryWorkspace[]> {
   const recoveryStore = store as WorkspaceStoreRecoveryApi;
   const listActiveWorkspaceIds = recoveryStore.listActiveWorkspaceIds;
   const workerListing = typeof listActiveWorkspaceIds === "function";
@@ -181,7 +181,7 @@ async function activeWorkspaces(store: WorkspaceServerStore, fallbackAccountId?:
     // The worker API must enumerate tenants without a client-provided scope.
     // Its optional argument remains for compatibility with an early store
     // implementation that accepted the bootstrap Account as a hint.
-    ? await listActiveWorkspaceIds!()
+    ? await recoveryStore.listActiveWorkspaceIds!()
     : fallbackAccountId ? await store.listWorkspaces(fallbackAccountId) : [];
   const rows: unknown[] = Array.isArray(listed) ? listed as unknown[] : [];
   const workspaces = rows.map((value): RecoveryWorkspace | undefined => {

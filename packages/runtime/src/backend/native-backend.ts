@@ -1,6 +1,6 @@
 import type { AgentBackend, BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
 import type { BackendSessionPolicy, JsonValue } from "@samurai-agent/core-schemas";
-import { ProviderRequestError, type ProviderAdapter, type ProviderInput, type ProviderOutput, type ProviderToolCall } from "./provider";
+import { ensureProviderToolCallIds, ProviderRequestError, type ProviderAdapter, type ProviderInput, type ProviderOutput, type ProviderStreamChunk, type ProviderToolCall } from "./provider";
 
 export interface NativeToolExecutionPlan {
   tool_call_id: string;
@@ -57,9 +57,16 @@ export class SamuraiNativeBackend implements AgentBackend {
     }
 
     try {
-      const output = await this.provider.generate(this.contextBuilder.build(input));
-      for (const event of this.toolLoop.eventsForOutput(output)) {
-        yield event;
+      const providerInput = this.contextBuilder.build(input);
+      if (this.provider.stream) {
+        for await (const event of this.toolLoop.eventsForStream(this.provider.stream(providerInput), input.abort_signal)) {
+          yield event;
+        }
+      } else {
+        const output = await this.provider.generate(providerInput);
+        for (const event of this.toolLoop.eventsForOutput(output)) {
+          yield event;
+        }
       }
     } catch (error) {
       yield this.promptBuilder.providerFailureEvent(error, this.provider, input.abort_signal?.aborted === true);
@@ -225,19 +232,130 @@ export class NativeToolLoop {
 
   eventsForOutput(output: ProviderOutput): BackendOutputEvent[] {
     const events: BackendOutputEvent[] = [];
+    const toolCalls = ensureProviderToolCallIds(output.toolCalls);
+    const finishFailure = providerStreamFinishFailure(output.finishReason);
+    if (finishFailure) throw finishFailure;
+    if (!output.content.trim() && toolCalls.length === 0) {
+      throw new ProviderRequestError("provider_failed", "Provider response was missing content.", {
+        reason: "invalid_response",
+        retryable: false,
+        message: "Provider response was missing content."
+      }, "provider_terminal_response");
+    }
     if (output.content.trim()) {
       events.push({
         event_type: "text_delta",
         payload: { text: output.content }
       });
     }
-    for (const toolCall of output.toolCalls) {
+    for (const toolCall of toolCalls) {
       events.push(this.toolExecutor.toolCallStartedEvent(toolCall));
     }
     events.push(this.promptBuilder.runCompletedEvent(output));
     return events;
   }
+
+  async *eventsForStream(stream: AsyncIterable<ProviderStreamChunk>, signal?: AbortSignal): AsyncIterable<BackendOutputEvent> {
+    const contentParts: string[] = [];
+    const toolCalls: ProviderToolCall[] = [];
+    let finishReason: string | undefined;
+    let usage: Record<string, unknown> | undefined;
+    let sawTerminal = false;
+    let sawIgnored = false;
+
+    for await (const chunk of stream) {
+      if (signal?.aborted) {
+        throw providerStreamCancellationError();
+      }
+      const finishFailure = providerStreamFinishFailure(chunk.finishReason);
+      if (finishFailure) throw finishFailure;
+      if (chunk.ignored === true) sawIgnored = true;
+      if (typeof chunk.content === "string") {
+        if (chunk.content) {
+          contentParts.push(chunk.content);
+          yield {
+            event_type: "text_delta",
+            payload: { text: chunk.content }
+          };
+        }
+      }
+      if (chunk.toolCalls?.length) toolCalls.push(...chunk.toolCalls);
+      if (chunk.finishReason !== undefined) finishReason = chunk.finishReason;
+      if (chunk.usage) usage = chunk.usage;
+      if (chunk.finishReason !== undefined || chunk.terminal === true) {
+        sawTerminal = true;
+        // A provider finish reason is authoritative. Do not turn a later
+        // socket close while waiting for optional trailing metadata into a
+        // false indeterminate run.
+        break;
+      }
+    }
+
+    if (!sawTerminal) {
+      throw new ProviderRequestError("provider_failed", "Provider stream ended before a terminal response.", {
+        reason: "network",
+        retryable: false,
+        message: "Provider stream ended before a terminal response."
+      }, "transport_lost");
+    }
+
+    const output: ProviderOutput = {
+      content: contentParts.join(""),
+      toolCalls: ensureProviderToolCallIds(toolCalls),
+      ...(finishReason !== undefined ? { finishReason } : {}),
+      ...(usage ? { usage } : {})
+    };
+    if (!output.content.trim() && output.toolCalls.length === 0 && !sawIgnored) {
+      throw new ProviderRequestError("provider_failed", "Provider stream response was missing content.", {
+        reason: "invalid_response",
+        retryable: false,
+        message: "Provider stream response was missing content."
+      }, "provider_terminal_response");
+    }
+    for (const toolCall of output.toolCalls) {
+      yield this.toolExecutor.toolCallStartedEvent(toolCall);
+    }
+    yield this.promptBuilder.runCompletedEvent(output);
+  }
 }
+
+function providerStreamCancellationError(): ProviderRequestError {
+  return new ProviderRequestError("provider_failed", "Provider stream cancellation was not confirmed.", {
+    reason: "network",
+    retryable: false,
+    message: "Provider stream cancellation was not confirmed."
+  }, "cancel_unconfirmed");
+}
+
+function providerStreamFinishFailure(finishReason: string | undefined): ProviderRequestError | undefined {
+  if (!finishReason) return undefined;
+  const normalized = finishReason.trim().toUpperCase();
+  if (!PROVIDER_STREAM_FAILURE_FINISH_REASONS.has(normalized)) return undefined;
+  const message = normalized === "SAFETY" || normalized.includes("PROHIBITED") || normalized === "BLOCKLIST" || normalized === "SPII"
+    ? "Provider response was blocked by its safety policy."
+    : `Provider response could not be completed (${normalized}).`;
+  return new ProviderRequestError("provider_failed", message, {
+    reason: "invalid_response",
+    retryable: false,
+    message
+  }, "provider_terminal_response");
+}
+
+const PROVIDER_STREAM_FAILURE_FINISH_REASONS = new Set([
+  "FINISH_REASON_UNSPECIFIED",
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "MALFORMED_FUNCTION_CALL",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "IMAGE_RECITATION",
+  "IMAGE_OTHER",
+  "NO_IMAGE",
+  "OTHER"
+]);
 
 export class NativeToolExecutor {
   planToolCall(toolCall: ProviderToolCall): NativeToolExecutionPlan {

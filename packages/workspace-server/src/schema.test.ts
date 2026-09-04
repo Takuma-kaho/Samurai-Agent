@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]);
+    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86]);
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -330,5 +330,234 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).not.toContain("api_key TEXT");
     expect(schema).not.toContain("access_token TEXT");
     expect(schema).not.toContain("secret TEXT");
+  });
+
+  it("makes Organization optional without changing Workspace-content RLS", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 80);
+    expect(migration?.name).toBe("workspace_server_workspace_first_organization_optional");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("ALTER TABLE workspaces ALTER COLUMN organization_id DROP NOT NULL");
+    expect(sql).toContain("ALTER TABLE workspace_events ALTER COLUMN organization_id DROP NOT NULL");
+    expect(sql).toContain("FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL");
+    expect(sql).toContain("workspace_first_generated_organization_cleanup");
+    expect(sql).toContain("samurai.legacy.organization|");
+    expect(sql).toContain("ALTER TABLE organizations ADD COLUMN IF NOT EXISTS legacy_backfill_marker TEXT");
+    expect(sql).toContain("workspace_server_v78_account_backfill");
+    expect(sql).toContain("FROM samurai_server_schema_migrations");
+    expect(sql).toContain("organization.created_at = backfill_applied_at");
+    expect(sql).toContain("WHERE organization.legacy_backfill_marker = 'workspace_server_v78_account_backfill'");
+    expect(sql.indexOf("SET legacy_backfill_marker = 'workspace_server_v78_account_backfill'")).toBeLessThan(
+      sql.indexOf("DELETE FROM organizations")
+    );
+    expect(sql).toContain("DELETE FROM organization_invitation_workspace_grants");
+    expect(sql).toContain("DELETE FROM organization_invitations");
+    expect(sql).toContain("DELETE FROM organization_members");
+    expect(sql).toContain("DELETE FROM organization_operations");
+    expect(sql).toContain("DELETE FROM organizations");
+    expect(sql).toContain("RETURN;");
+    expect(sql.indexOf("DROP TRIGGER IF EXISTS workspace_events_organization_guard ON workspace_events")).toBeLessThan(
+      sql.indexOf("DO $workspace_first_generated_organization_cleanup$")
+    );
+    expect(sql).not.toContain("organization_required");
+    expect(sql).not.toContain("target_organization_id IS NULL THEN\n          RAISE EXCEPTION 'workspace_creation_context_invalid'");
+
+    const workspacePolicyStart = sql.lastIndexOf("CREATE POLICY workspaces_read ON workspaces");
+    const workspacePolicyEnd = sql.indexOf("DROP POLICY IF EXISTS workspace_members_read ON workspace_members", workspacePolicyStart);
+    expect(workspacePolicyStart).toBeGreaterThanOrEqual(0);
+    const workspacePolicy = sql.slice(workspacePolicyStart, workspacePolicyEnd);
+    expect(workspacePolicy).toContain("organization_id IS NOT NULL AND samurai_can_organization(organization_id, 'admin')");
+    expect(workspacePolicy).not.toContain("samurai_can_organization(organization_id, 'member')");
+    expect(workspacePolicy).not.toContain("samurai_can_organization(organization_id, 'guest')");
+    const memberPolicyStart = sql.lastIndexOf("CREATE POLICY workspace_members_read ON workspace_members");
+    expect(memberPolicyStart).toBeGreaterThanOrEqual(0);
+    const memberPolicyEnd = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_create_workspace(", memberPolicyStart);
+    const memberPolicy = sql.slice(memberPolicyStart, memberPolicyEnd);
+    expect(memberPolicy).toContain("workspace.organization_id IS NOT NULL");
+    expect(memberPolicy).toContain("samurai_can_organization(workspace.organization_id, 'admin')");
+    expect(memberPolicy).not.toContain("samurai_can_organization(workspace.organization_id, 'member')");
+    expect(memberPolicy).not.toContain("samurai_can_organization(workspace.organization_id, 'guest')");
+
+    for (const contentTable of ["rooms", "room_members", "workspace_records", "workspace_files", "workspace_events"]) {
+      expect(sql).not.toMatch(new RegExp(`(?:DROP|CREATE) POLICY[^\\n]* ON ${contentTable}\\b`));
+    }
+
+    expect(sql).toContain("source_workspace_id");
+    expect(sql).toContain("idempotency_key");
+    expect(sql).toContain("verified_at");
+    expect(sql).toContain("cutover_at");
+    expect(sql).toContain("source_archived_at");
+    expect(sql).toContain("source_deleted_at");
+    for (const transferState of [
+      "preparing", "exported", "imported", "committed", "rolled_back", "failed",
+      "restoring", "verified", "cutover", "source_retained", "source_deleted"
+    ]) {
+      expect(sql).toContain(`'${transferState}'`);
+    }
+    expect(sql).toContain("workspace_transfers_state_check");
+    expect(sql).toContain("DROP CONSTRAINT IF EXISTS workspace_transfers_state_check");
+    expect(sql).toContain("transfer_metadata");
+    expect(sql).toContain("workspace_transfers_metadata_defaults");
+    expect(sql).toContain("portable restore runs under an import session");
+    expect(sql).toContain("NEW.payload := NEW.payload - ARRAY[");
+    expect(sql).toContain("'source_organization_id', 'target_organization_id'");
+    expect(sql).toContain("workspace.organization.attached");
+    expect(sql).toContain("workspace.organization.detached");
+    expect(sql).toContain("COALESCE(target_organization_id, source_organization_id)");
+    expect(sql).toContain("organization_id, cursor, correlation_id, resources");
+    const moveStart = sql.lastIndexOf("CREATE OR REPLACE FUNCTION samurai_move_workspace_organization(");
+    expect(moveStart).toBeGreaterThanOrEqual(0);
+    const moveSql = sql.slice(moveStart);
+    expect(moveSql).toContain("samurai_can_organization(source_organization_id, 'admin')");
+    expect(moveSql).toContain("samurai_can_organization(target_organization_id, 'admin')");
+    expect(moveSql).toContain("target_organization_id IS NULL");
+    expect(moveSql).toContain("samurai_can_workspace(target_workspace_id, 'owner')");
+    expect(moveSql).toContain("samurai_role_rank(organization_members.role)");
+    expect(moveSql).not.toContain("samurai_can_organization(source_organization_id, 'owner')");
+    expect(moveSql).not.toContain("samurai_can_organization(target_organization_id, 'owner')");
+    expect(moveSql).toContain("samurai.organization.owner:");
+
+    const allSql = workspaceServerMigrationDefinitions().flatMap((entry) => entry.statements).join("\n");
+    const transferFunctionStart = allSql.indexOf("CREATE OR REPLACE FUNCTION samurai_begin_workspace_transfer(");
+    const transferFunctionEnd = allSql.indexOf("CREATE OR REPLACE FUNCTION samurai_record_import_bundle(", transferFunctionStart);
+    expect(transferFunctionStart).toBeGreaterThanOrEqual(0);
+    expect(transferFunctionEnd).toBeGreaterThan(transferFunctionStart);
+    const transferSql = allSql.slice(transferFunctionStart, transferFunctionEnd);
+    expect(transferSql).not.toContain("INSERT INTO workspace_events");
+    expect(transferSql).not.toContain("organization_id");
+
+    const membershipFunctionStart = allSql.lastIndexOf("CREATE OR REPLACE FUNCTION samurai_set_organization_workspace_member(");
+    const membershipFunctionEnd = allSql.indexOf("CREATE OR REPLACE FUNCTION samurai_set_organization_workspace_lifecycle(", membershipFunctionStart);
+    expect(membershipFunctionStart).toBeGreaterThanOrEqual(0);
+    expect(allSql.slice(membershipFunctionStart, membershipFunctionEnd)).toContain("SECURITY DEFINER");
+    expect(allSql.slice(membershipFunctionStart, membershipFunctionEnd)).toContain("samurai_can_organization(target_organization_id, 'admin')");
+  });
+
+  it("round-trips V4 Agent role, instructions, and enabled fields", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 81);
+    expect(migration?.name).toBe("workspace_server_bundle_v4_agent_import_contract");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    const signature = `CREATE OR REPLACE FUNCTION samurai_import_workspace_agent(
+        target_workspace_id TEXT,
+        target_agent_id TEXT,
+        target_display_name TEXT,
+        target_description TEXT,
+        target_role TEXT,
+        target_instructions TEXT,
+        target_backend_id TEXT,
+        target_enabled BOOLEAN,
+        target_status TEXT,
+        target_version BIGINT,
+        target_created_by TEXT,
+        target_created_at TIMESTAMPTZ,
+        target_updated_at TIMESTAMPTZ`;
+    expect(sql).toContain(signature);
+    expect(sql).toContain("workspace_id, id, display_name, description, role, instructions,");
+    expect(sql).toContain("backend_id, enabled, status, version, created_by, created_at, updated_at");
+    expect(sql).toContain("role = EXCLUDED.role");
+    expect(sql).toContain("instructions = EXCLUDED.instructions");
+    expect(sql).toContain("enabled = EXCLUDED.enabled");
+    expect(sql).toContain("target_enabled IS NULL");
+    expect(sql).toContain("samurai_is_import_session(target_workspace_id)");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_import_workspace_agent(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC");
+
+    const allSql = workspaceServerMigrationDefinitions().flatMap((entry) => entry.statements).join("\n");
+    const oldFunctionStart = allSql.indexOf("CREATE OR REPLACE FUNCTION samurai_import_workspace_agent(");
+    const newFunctionStart = allSql.indexOf(signature);
+    expect(oldFunctionStart).toBeGreaterThanOrEqual(0);
+    expect(newFunctionStart).toBeGreaterThan(oldFunctionStart);
+  });
+
+  it("qualifies transfer parameters that overlap transfer columns", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 83);
+    expect(migration?.name).toBe("workspace_server_transfer_parameter_function_qualification_fix");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    for (const functionName of [
+      "samurai_begin_workspace_transfer",
+      "samurai_record_workspace_bundle",
+      "samurai_fail_workspace_transfer",
+      "samurai_rollback_workspace_transfer",
+      "samurai_record_workspace_transfer_receipt",
+      "samurai_complete_workspace_transfer",
+      "samurai_record_workspace_bundle_v4_transfer"
+    ]) {
+      expect(sql).toContain(`CREATE OR REPLACE FUNCTION ${functionName}(`);
+    }
+    expect(sql).toContain("samurai_record_workspace_bundle.target_workspace_id");
+    expect(sql).toContain("transfer.workspace_id = samurai_record_workspace_bundle_v4_transfer.target_workspace_id");
+    expect(sql).toContain("samurai_record_workspace_transfer_receipt.target_receipt");
+    expect(sql).toContain("DECLARE transfer_state TEXT");
+    expect(sql).toContain("SELECT transfer.state, transfer.bundle_path, transfer.bundle_hash");
+    expect(sql).toContain("workspace_transfer_bundle_conflict");
+    expect(sql).not.toContain("<<workspace_");
+    expect(sql).not.toMatch(/WHERE workspace_id = target_workspace_id/);
+    expect(sql).not.toMatch(/UPDATE workspace_transfers SET/);
+    expect(sql).not.toMatch(/FROM workspace_transfers\s+WHERE/);
+  });
+
+  it("adds transfer retry semantics in a new migration without changing v80-v83", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 84);
+    expect(migration?.name).toBe("workspace_server_transfer_resume_and_receipt_replay");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("state IN ('failed', 'rolled_back')");
+    expect(sql).toContain("SET state = 'preparing'");
+    expect(sql).toContain("bundle_path = NULL");
+    expect(sql).toContain("target_receipt = NULL");
+    expect(sql).toContain("state = 'read_only'");
+    expect(sql).toContain("version = transfer.version + 1");
+    expect(sql).toContain("target_receipt IS DISTINCT FROM");
+    expect(sql).toContain("workspace_transfer_receipt_conflict");
+    expect(sql).toContain("IF transfer_row.state IN ('imported', 'committed')");
+  });
+
+  it("deletes Organizations by detaching Workspaces in a new migration", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 85);
+    expect(migration?.name).toBe("workspace_server_organization_delete_detaches_workspaces");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("target_expected_organization_version BIGINT");
+    expect(sql).toContain("LANGUAGE plpgsql SECURITY DEFINER");
+    expect(sql).toContain("FROM organizations AS organization");
+    expect(sql).toContain("FOR UPDATE;");
+    expect(sql).toContain("organization_owner_permission_required");
+    expect(sql).toContain("organization_version_conflict");
+    expect(sql).toContain("SET organization_id = NULL, version = workspace.version + 1");
+    expect(sql).toContain("workspace.organization.detached");
+    expect(sql).toContain("organization.deleted");
+    for (const table of ["workspaces", "workspace_members", "rooms", "room_members", "workspace_records", "workspace_files"]) {
+      expect(sql).not.toMatch(new RegExp(`DELETE FROM ${table}\\b`));
+    }
+    expect(sql).not.toContain("organization_workspaces_remaining");
+    expect(sql).toContain("samurai_delete_organization(target_organization_id, NULL::BIGINT, target_operation_id)");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_delete_organization(TEXT, BIGINT, TEXT) FROM PUBLIC");
+  });
+
+  it("returns the deleted Organization through a SECURITY DEFINER projection wrapper", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 86);
+    expect(migration?.name).toBe("workspace_server_organization_delete_returning_projection");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_delete_organization_and_return(");
+    expect(sql).toContain("target_expected_organization_version BIGINT");
+    expect(sql).toContain("target_operation_id TEXT");
+    expect(sql).toContain("RETURNS TABLE(");
+    for (const field of ["id TEXT", "name TEXT", "icon TEXT", "description TEXT", "created_by TEXT", "version BIGINT", "created_at TIMESTAMPTZ", "updated_at TIMESTAMPTZ", "deleted_at TIMESTAMPTZ"]) {
+      expect(sql).toContain(field);
+    }
+    expect(sql).toContain("LANGUAGE plpgsql SECURITY DEFINER");
+    expect(sql).toContain("PERFORM samurai_delete_organization(");
+    expect(sql).toContain("FROM organizations AS organization");
+    expect(sql).toContain("organization.deleted_at IS NOT NULL");
+    expect(sql).toContain("organization_delete_result_not_found");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_delete_organization_and_return(TEXT, BIGINT, TEXT) FROM PUBLIC");
+    expect(sql).not.toContain("CREATE OR REPLACE FUNCTION samurai_delete_organization(");
+
+    const allSql = workspaceServerMigrationDefinitions().flatMap((entry) => entry.statements).join("\n");
+    expect(allSql.indexOf("CREATE OR REPLACE FUNCTION samurai_delete_organization_and_return(")).toBeGreaterThan(
+      allSql.lastIndexOf("CREATE OR REPLACE FUNCTION samurai_delete_organization(")
+    );
   });
 });

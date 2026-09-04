@@ -169,7 +169,8 @@ export interface OrganizationInvitationAcceptResult {
 
 /** Safe Workspace metadata visible to an Organization member without content. */
 export interface OrganizationWorkspaceSummary {
-  organizationId: string;
+  /** Omitted when the Workspace is standalone. */
+  organizationId?: string;
   workspaceId: string;
   name: string;
   state: WorkspaceState;
@@ -191,8 +192,10 @@ export interface OrganizationWorkspaceMoveMember {
 export interface OrganizationWorkspaceMovePreview {
   allowed: boolean;
   reason?: string;
-  sourceOrganizationId: string;
-  targetOrganizationId: string;
+  /** Undefined represents the standalone side of the transition. */
+  sourceOrganizationId?: string;
+  /** Undefined represents the standalone side of the transition. */
+  targetOrganizationId?: string;
   workspaceId: string;
   workspaceName?: string;
   expectedWorkspaceVersion?: number;
@@ -222,6 +225,32 @@ export interface OrganizationWorkspaceMoveResult {
   guestMembershipAccountIds?: string[];
   committedAt?: string;
   failureCode?: string;
+}
+
+/** Result shared by the explicit standalone attach and detach commands. */
+export interface WorkspaceOrganizationAssociationResult {
+  workspace: OrganizationWorkspaceSummary;
+  organizationId?: string;
+  previousOrganizationId?: string;
+  addedGuestAccountIds: string[];
+  eventId?: string;
+  replayed: boolean;
+}
+
+/** Explicit standalone -> Organization association request. */
+export interface AttachWorkspaceToOrganizationInput {
+  organizationId: string;
+  workspaceId: string;
+  expectedWorkspaceVersion?: number;
+  confirmGuestMemberships?: boolean;
+}
+
+/** Explicit Organization -> standalone association removal request. */
+export interface DetachWorkspaceFromOrganizationInput {
+  organizationId: string;
+  workspaceId: string;
+  expectedWorkspaceVersion?: number;
+  confirm?: true;
 }
 
 export interface OrganizationWorkspaceMembership {
@@ -275,7 +304,7 @@ export interface WorkspaceAccount {
 
 export interface WorkspaceSummary {
   id: string;
-  /** Owning Organization. Set by PostgreSQL migration v78 and never nullable. */
+  /** Optional same-Server Organization association. */
   organizationId?: string;
   name: string;
   state: WorkspaceState;

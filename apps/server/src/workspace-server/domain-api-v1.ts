@@ -20,6 +20,8 @@ import {
   EventReplayPageSchema,
   PublicAgentRecordSchema,
   PublicEventEnvelopeSchema,
+  PublicWorkspaceDirectorySchema,
+  PublicWorkspaceOrganizationAssociationResultSchema,
   PublicRoomRecordSchema,
   RunControlActionSchema,
   RunControlInputSchema,
@@ -63,6 +65,12 @@ const runControlService = new RunControlService();
  * Workspace metadata, but it never grants Room/Message access. */
 export type OrganizationApiRequestContext = OrganizationRequestContext;
 
+/**
+ * Organization-owned compatibility operations.  Workspace bundle operations
+ * are deliberately kept out of this set so they are advertised and executed
+ * through the Workspace API.  The old Organization REST route remains a
+ * compatibility alias through `organizationRouteOperationIds` below.
+ */
 const organizationOperationIds = new Set<string>([
   "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
   "organization.member.list", "organization.member.invite", "organization.member.accept",
@@ -72,7 +80,31 @@ const organizationOperationIds = new Set<string>([
   "organization.workspace.list", "organization.workspace.create", "organization.workspace.member.grant",
   "organization.workspace.member.revoke", "organization.workspace.archive", "organization.workspace.restore",
   "organization.workspace.delete", "workspace.organization.move.preflight", "workspace.organization.move.commit",
-  "workspace.organization.move.status", "workspace.bundle.export", "workspace.bundle.restore"
+  "workspace.organization.move.status"
+]);
+
+/** Old `/api/v1/domain/...` and Organization REST callers may still use these
+ * IDs.  They share the same command facade, but are not Organization catalog
+ * entries and do not make Organization membership a Workspace capability. */
+const organizationCompatibilityOperationIds = new Set<string>([
+  "workspace.bundle.export", "workspace.bundle.restore"
+]);
+
+const organizationRouteOperationIds = new Set<string>([
+  ...organizationOperationIds,
+  ...organizationCompatibilityOperationIds
+]);
+
+/** The Organization catalog exposes only control-plane operations.  Legacy
+ * Organization Workspace CRUD routes remain callable, but are not the public
+ * Workspace-first contract. */
+const organizationCatalogOperationIds = new Set<string>([
+  "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
+  "organization.member.list", "organization.member.invite", "organization.member.accept",
+  "organization.member.role.change", "organization.member.remove", "organization.member.leave",
+  "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue",
+  "organization.invitation.extend", "organization.workspace.member.grant", "organization.workspace.member.revoke",
+  "workspace.organization.move.preflight", "workspace.organization.move.commit", "workspace.organization.move.status"
 ]);
 
 const organizationCommandIds = new Set<string>([
@@ -146,7 +178,14 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     if (!definition || definition.kind !== "command" || !v1OperationIds.has(operationId) || !definition.sources.includes("runtime_api")) {
       throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
     }
-    const input = parseOperationInput(definition, request.input, operationId);
+    const parsedInput = parseOperationInput(definition, request.input, operationId);
+    if (operationId === "workspace.bundle.restore") assertStandaloneBundleOperationInput(parsedInput);
+    // The path is the trusted Workspace selector.  Bundle export keeps the
+    // Workspace ID optional in the transport body so REST, Desktop, and
+    // Browser callers cannot disagree about the authority-bearing value.
+    const input = operationId === "workspace.bundle.export"
+      ? { ...parsedInput, workspace_id: parsedInput.workspace_id ?? pathParam(req, "workspaceId") }
+      : parsedInput;
     const operation = operationContext(req);
     const context = trustedContext(operation, request.context, operationId);
     const result = await executeCommand({ operationId, input, requestContext: request.context, context, req, operation, dependencies });
@@ -281,7 +320,7 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
 
   const catalog = (_req: Request, res: Response): void => {
     const contracts = operationDefinitions
-      .filter((definition) => organizationOperationIds.has(definition.id) && v1OperationIds.has(definition.id) && definition.sources.includes("runtime_api"))
+      .filter((definition) => organizationCatalogOperationIds.has(definition.id) && v1OperationIds.has(definition.id) && definition.sources.includes("runtime_api"))
       .map((definition) => ({
         id: definition.id,
         kind: definition.kind,
@@ -308,7 +347,7 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
 
   const operationRoute = (withOrganizationIdPath = false) => asyncRoute(async (req, res) => {
     const operationId = pathParam(req, "operationId");
-    if (!organizationOperationIds.has(operationId) || !organizationCommandIds.has(operationId)) {
+    if (!organizationRouteOperationIds.has(operationId) || !organizationCommandIds.has(operationId)) {
       throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
     }
     const definition = operationDefinitions.find((candidate) => candidate.id === operationId);
@@ -317,6 +356,7 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
     }
     const request = parseDomainRequest(req.body);
     const input = parseOperationInput(definition, request.input, operationId);
+    if (operationId === "workspace.bundle.restore" && !withOrganizationIdPath) assertStandaloneBundleOperationInput(input);
     const organizationIdFromPath = withOrganizationIdPath ? pathParam(req, "organizationId") : undefined;
     const inputOrganizationId = optionalStringField(input, "organization_id");
     if (organizationIdFromPath && inputOrganizationId && inputOrganizationId !== organizationIdFromPath) {
@@ -324,7 +364,17 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
     }
     const organizationId = organizationIdFromPath ?? inputOrganizationId;
     const operation = dependencies.organizationContext(req, organizationId, { mutation: true });
-    const result = await executeOrganizationCommandOperation({ operationId, input, operation, commands: dependencies.commands });
+    const result = operationId === "workspace.bundle.restore" && withOrganizationIdPath
+      ? await executeOrganizationBundleRestoreCompatibility({
+        organizationId: organizationIdFromPath!,
+        bundleId: stringField(input, "bundle_id"),
+        // `parseOperationInput` has already validated the literal `true`
+        // restore confirmation for this operation.
+        confirm: true,
+        operation,
+        commands: dependencies.commands
+      })
+      : await executeOrganizationCommandOperation({ operationId, input, operation, commands: dependencies.commands });
     const response = apiResponse(req, publicOperationResult(operationId, result.value, operation.accountId), result.replayed);
     res.status(result.replayed ? 200 : 201).json(response);
   });
@@ -334,7 +384,7 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
 
   const queryRoute = (withOrganizationIdPath = false) => asyncRoute(async (req, res) => {
     const queryId = pathParam(req, "queryId");
-    if (!organizationOperationIds.has(queryId) || !organizationQueryIds.has(queryId)) {
+    if (!organizationRouteOperationIds.has(queryId) || !organizationQueryIds.has(queryId)) {
       throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
     }
     const definition = operationDefinitions.find((candidate) => candidate.id === queryId);
@@ -392,6 +442,64 @@ export async function executeOrganizationCommandOperation(input: {
     case "workspace.bundle.restore": return normalizeOrganizationCommandResult(await commands.restoreWorkspaceBundle(operation, value as Parameters<WorkspaceServerCommandService["restoreWorkspaceBundle"]>[1]));
     default: throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
   }
+}
+
+/**
+ * Preserve the old Organization restore endpoint without restoring directly
+ * into that Organization. The first command creates a standalone Workspace;
+ * the second command performs the explicit association. A deterministic
+ * derived operation ID makes retries safe while keeping both ledger actions
+ * independently visible.
+ */
+export async function executeOrganizationBundleRestoreCompatibility(input: {
+  organizationId: string;
+  bundleId: string;
+  confirm: true;
+  operation: OrganizationApiRequestContext;
+  commands: WorkspaceServerCommandService;
+}): Promise<{ value: unknown; replayed: boolean }> {
+  const standaloneOperation: OrganizationApiRequestContext = {
+    accountId: input.operation.accountId,
+    operationId: input.operation.operationId,
+    requestId: input.operation.requestId
+  };
+  const restored = await executeOrganizationCommandOperation({
+    operationId: "workspace.bundle.restore",
+    input: { bundle_id: input.bundleId, confirm: input.confirm },
+    operation: standaloneOperation,
+    commands: input.commands
+  });
+  const restoredBody = restored.value && typeof restored.value === "object" && !Array.isArray(restored.value)
+    ? restored.value as Record<string, unknown>
+    : {};
+  const workspaceId = typeof restoredBody.workspace_id === "string" ? restoredBody.workspace_id : undefined;
+  if (!workspaceId) throw new WorkspaceServerError("workspace_bundle_restore_result_invalid", 500);
+
+  const attachOperation: OrganizationApiRequestContext = {
+    ...input.operation,
+    operationId: organizationBundleAttachOperationId(input.operation.operationId, input.organizationId, workspaceId),
+    organizationId: input.organizationId
+  };
+  const attached = await input.commands.attachWorkspaceToOrganization(attachOperation, {
+    organizationId: input.organizationId,
+    workspaceId,
+    confirmGuestMemberships: true
+  });
+  const value = {
+    ...restoredBody,
+    target_organization_id: input.organizationId
+  };
+  return { value, replayed: restored.replayed && attached.replayed };
+}
+
+function assertStandaloneBundleOperationInput(input: Record<string, unknown>): void {
+  if (Object.prototype.hasOwnProperty.call(input, "target_organization_id")) {
+    throw new WorkspaceServerError("workspace_bundle_restore_target_organization_requires_attach", 400);
+  }
+}
+
+function organizationBundleAttachOperationId(operationId: string, organizationId: string, workspaceId: string): string {
+  return `workspace_bundle_restore_attach_${createHash("sha256").update(`${operationId}|${organizationId}|${workspaceId}`).digest("hex").slice(0, 40)}`;
 }
 
 export async function executeOrganizationQueryOperation(input: {
@@ -534,6 +642,22 @@ async function executeCommand(input: {
     const result = await artifacts.repair(operation, { roomId, artifactId: stringField(value, "artifact_id") });
     if (!result.replayed && result.repair.repaired) await appendAndEmitPublicEvent(dependencies, operation, { eventType: "workspace.artifact.changed", roomId, resources: [resourceRef("artifact", result.artifact.id, result.artifact.title)], payload: { artifact_id: result.artifact.id, action: "repaired" } });
     return { value: result as unknown as JsonValue, replayed: result.replayed };
+  }
+  if (operationId === "workspace.bundle.export") {
+    const result = await commands.exportWorkspaceBundle(
+      operation as unknown as Parameters<WorkspaceServerCommandService["exportWorkspaceBundle"]>[0],
+      value as Parameters<WorkspaceServerCommandService["exportWorkspaceBundle"]>[1]
+    );
+    const normalized = normalizeOrganizationCommandResult(result);
+    return { value: normalized.value as JsonValue, replayed: normalized.replayed };
+  }
+  if (operationId === "workspace.bundle.restore") {
+    const result = await commands.restoreWorkspaceBundle(
+      operation as unknown as Parameters<WorkspaceServerCommandService["restoreWorkspaceBundle"]>[0],
+      value as Parameters<WorkspaceServerCommandService["restoreWorkspaceBundle"]>[1]
+    );
+    const normalized = normalizeOrganizationCommandResult(result);
+    return { value: normalized.value as JsonValue, replayed: normalized.replayed };
   }
   throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
 }
@@ -709,10 +833,76 @@ export function publicOperationResult(operationId: string, result: unknown, acco
   const outputSchema = publicOperationOutputSchemaFor(operationId, definition.output);
   const alreadyPublic = outputSchema.safeParse(result);
   if (alreadyPublic.success) return alreadyPublic.data as JsonValue;
-  const projected = organizationOperationIds.has(operationId)
+  const projected = organizationRouteOperationIds.has(operationId)
     ? normalizeOrganizationValue(operationId, result, accountId)
     : result;
   return outputSchema.parse(projected) as JsonValue;
+}
+
+/** Normalize the account directory once for every transport.  The Store uses
+ * camelCase internal records; this projection is the stable snake_case API
+ * contract and intentionally excludes storage paths and Room content. */
+export function publicWorkspaceDirectory(value: unknown, accountId?: string): JsonValue {
+  const body = recordValue(value);
+  const workspaces = listValue(value, "workspaces").map((entry) => workspaceSummaryRecord(entry, accountId));
+  const errors = Array.isArray(body.errors)
+    ? body.errors.map((entry) => {
+      const error = recordValue(entry);
+      return compactRecord({
+        connection_id: optionalValue(error, "connection_id", "connectionId"),
+        code: valueString(error, "code") || "workspace_directory_request_failed",
+        message: valueString(error, "message") || "Workspace directory request failed."
+      });
+    })
+    : undefined;
+  return PublicWorkspaceDirectorySchema.parse({
+    workspaces,
+    ...(errors ? { errors } : {})
+  }) as JsonValue;
+}
+
+/** Normalize the explicit Organization association result.  This helper is
+ * shared by REST and Domain API callers so attach/detach cannot drift in
+ * field naming or accidentally expose Workspace content. */
+export function publicWorkspaceOrganizationAssociationResult(value: unknown, accountId?: string): JsonValue {
+  const body = recordValue(value);
+  return PublicWorkspaceOrganizationAssociationResultSchema.parse(compactRecord({
+    workspace: workspaceRecord(body.workspace ?? value, accountId),
+    organization_id: optionalValue(body, "organization_id", "organizationId"),
+    previous_organization_id: optionalValue(body, "previous_organization_id", "previousOrganizationId"),
+    added_guest_account_ids: Array.isArray(body.added_guest_account_ids)
+      ? body.added_guest_account_ids
+      : Array.isArray(body.addedGuestAccountIds) ? body.addedGuestAccountIds : [],
+    event_id: optionalValue(body, "event_id", "eventId")
+  })) as JsonValue;
+}
+
+/** Project only the restart-safe transfer checkpoints.  Bundle paths, raw
+ * receipts, and any credential-shaped fields are intentionally not copied
+ * from the Store result into the public response. */
+export function publicWorkspaceTransferStatus(value: unknown): JsonValue {
+  const body = recordValue(value);
+  const transferId = valueString(body, "transfer_id", "transferId", "id");
+  const state = valueString(body, "state");
+  const sourceWorkspaceState = valueString(body, "source_workspace_state", "sourceWorkspaceState");
+  const transferStates = new Set([
+    "preparing", "exported", "imported", "committed", "rolled_back", "failed",
+    "restoring", "verified", "cutover", "source_retained", "source_deleted"
+  ]);
+  const workspaceStates = new Set(["active", "read_only", "archived", "deleted"]);
+  if (!transferId || !transferStates.has(state) || !workspaceStates.has(sourceWorkspaceState)) {
+    throw new WorkspaceServerError("workspace_transfer_status_invalid", 500);
+  }
+  return {
+    transfer_id: transferId,
+    state,
+    source_integrity_hash: nullableSha256(body, "source_integrity_hash", "sourceIntegrityHash", "bundle_hash", "bundleHash"),
+    target_integrity_hash: nullableSha256(body, "target_integrity_hash", "targetIntegrityHash"),
+    target_workspace_id: optionalValue(body, "target_workspace_id", "targetWorkspaceId") ?? null,
+    receipt_present: booleanValue(body, "receipt_present", "receiptPresent"),
+    source_workspace_state: sourceWorkspaceState,
+    source_archived: sourceWorkspaceState === "archived" || sourceWorkspaceState === "deleted"
+  } as JsonValue;
 }
 
 /**
@@ -856,7 +1046,7 @@ function workspaceRecord(value: unknown, accountId?: string): Record<string, unk
   const state = stringValue(body, "state");
   return compactRecord({
     id: valueString(body, "id", "workspace_id", "workspaceId"),
-    organization_id: valueString(body, "organization_id", "organizationId"),
+    organization_id: optionalValue(body, "organization_id", "organizationId"),
     name: valueString(body, "name"),
     state: state === "archived" || state === "deleted" ? state : "active",
     version: numberValue(body, "version"),
@@ -869,9 +1059,32 @@ function workspaceRecord(value: unknown, accountId?: string): Record<string, unk
   });
 }
 
+function workspaceSummaryRecord(value: unknown, accountId?: string): Record<string, unknown> {
+  const body = nestedRecord(value, "workspace");
+  const state = stringValue(body, "state");
+  const role = optionalValue(body, "role", "workspace_role", "workspaceRole");
+  const access = optionalValue(body, "access")
+    ?? (typeof body.can_access === "boolean" ? (body.can_access ? "granted" : "none") : undefined)
+    ?? (typeof body.hasAccess === "boolean" ? (body.hasAccess ? "granted" : "none") : role ? "granted" : undefined);
+  return compactRecord({
+    id: valueString(body, "id", "workspace_id", "workspaceId"),
+    organization_id: optionalValue(body, "organization_id", "organizationId"),
+    name: valueString(body, "name"),
+    state: state === "archived" || state === "deleted" || state === "read_only" ? state : "active",
+    version: numberValue(body, "version") ?? 0,
+    hosting_mode: optionalValue(body, "hosting_mode", "hostingMode"),
+    database_placement: optionalValue(body, "database_placement", "databasePlacement"),
+    role,
+    access,
+    created_by: optionalValue(body, "created_by", "createdBy", "owner_account_id", "ownerAccountId") ?? accountId,
+    created_at: optionalValue(body, "created_at", "createdAt"),
+    updated_at: optionalValue(body, "updated_at", "updatedAt")
+  });
+}
+
 function workspaceMembershipRecord(value: unknown, fallback: { organizationId?: string; accountId?: string } = {}): Record<string, unknown> {
   const body = nestedRecord(value, "membership", "workspaceMembership");
-  const organizationId = valueString(body, "organization_id", "organizationId") || fallback.organizationId || "";
+  const organizationId = optionalValue(body, "organization_id", "organizationId") ?? fallback.organizationId;
   const workspaceId = valueString(body, "workspace_id", "workspaceId");
   const accountId = valueString(body, "account_id", "accountId") || fallback.accountId || "";
   const joinedAt = valueString(body, "joined_at", "joinedAt") || new Date().toISOString();
@@ -910,8 +1123,8 @@ function workspaceMovePreflight(value: unknown): Record<string, unknown> {
   for (const accountId of missingIds) if (!missing.some((entry) => entry.account_id === accountId)) missing.push({ account_id: accountId, workspace_role: "guest", will_add_as_guest: true });
   return compactRecord({
     operation_id: valueString(body, "operation_id", "operationId"),
-    source_organization_id: valueString(body, "source_organization_id", "sourceOrganizationId"),
-    target_organization_id: valueString(body, "target_organization_id", "targetOrganizationId"),
+    source_organization_id: optionalValue(body, "source_organization_id", "sourceOrganizationId"),
+    target_organization_id: optionalValue(body, "target_organization_id", "targetOrganizationId"),
     workspace_id: valueString(body, "workspace_id", "workspaceId"),
     workspace_version: numberValue(body, "workspace_version", "workspaceVersion", "expected_workspace_version", "expectedWorkspaceVersion"),
     workspace_state: valueString(body, "workspace_state", "workspaceState", "state") || "active",
@@ -933,8 +1146,8 @@ function workspaceMoveResult(value: unknown): Record<string, unknown> {
   return compactRecord({
     operation_id: valueString(body, "operation_id", "operationId"),
     workspace_id: valueString(body, "workspace_id", "workspaceId") || valueString(workspace, "id", "workspace_id", "workspaceId"),
-    source_organization_id: valueString(body, "source_organization_id", "sourceOrganizationId"),
-    target_organization_id: valueString(body, "target_organization_id", "targetOrganizationId") || valueString(workspace, "organization_id", "organizationId"),
+    source_organization_id: optionalValue(body, "source_organization_id", "sourceOrganizationId"),
+    target_organization_id: optionalValue(body, "target_organization_id", "targetOrganizationId") ?? optionalValue(workspace, "organization_id", "organizationId"),
     status: valueString(body, "status") || "committed",
     guest_membership_account_ids: listValue(body.guest_membership_account_ids ?? body.added_guest_account_ids ?? body.addedGuestAccountIds, "guest_membership_account_ids").filter((entry): entry is string => typeof entry === "string"),
     event_id: optionalValue(body, "event_id", "eventId"),
@@ -954,7 +1167,7 @@ function workspaceBundleExportResult(value: unknown): Record<string, unknown> {
   return compactRecord({
     bundle_id: valueString(body, "bundle_id", "bundleId", "id"),
     workspace_id: valueString(body, "workspace_id", "workspaceId"),
-    source_organization_id: valueString(body, "source_organization_id", "sourceOrganizationId"),
+    source_organization_id: optionalValue(body, "source_organization_id", "sourceOrganizationId"),
     schema_version: numberValue(body, "schema_version", "schemaVersion", "format_version"),
     integrity_hash: valueString(body, "integrity_hash", "integrityHash", "sha256"),
     file_count: numberValue(body, "file_count", "fileCount"),
@@ -962,7 +1175,7 @@ function workspaceBundleExportResult(value: unknown): Record<string, unknown> {
     manifest: compactRecord({
       schema_version: numberValue(manifest, "schema_version", "schemaVersion"),
       workspace_id: valueString(manifest, "workspace_id", "workspaceId"),
-      source_organization_id: valueString(manifest, "source_organization_id", "sourceOrganizationId"),
+      source_organization_id: optionalValue(manifest, "source_organization_id", "sourceOrganizationId"),
       integrity_hash: valueString(manifest, "integrity_hash", "integrityHash", "sha256"),
       record_counts: recordValue(manifest.record_counts ?? manifest.recordCounts)
     }),
@@ -976,7 +1189,7 @@ function workspaceBundleRestoreResult(value: unknown): Record<string, unknown> {
     bundle_id: valueString(body, "bundle_id", "bundleId", "id"),
     workspace_id: valueString(body, "workspace_id", "workspaceId"),
     source_organization_id: optionalValue(body, "source_organization_id", "sourceOrganizationId"),
-    target_organization_id: valueString(body, "target_organization_id", "targetOrganizationId"),
+    target_organization_id: optionalValue(body, "target_organization_id", "targetOrganizationId"),
     schema_version: numberValue(body, "schema_version", "schemaVersion", "format_version"),
     integrity_hash: valueString(body, "integrity_hash", "integrityHash", "sha256"),
     status: valueString(body, "status") || "restored",
@@ -1018,6 +1231,11 @@ function optionalValue(body: Record<string, unknown>, ...keys: string[]): unknow
 function numberValue(body: Record<string, unknown>, ...keys: string[]): number | undefined {
   for (const key of keys) if (typeof body[key] === "number" && Number.isFinite(body[key])) return body[key] as number;
   return undefined;
+}
+
+function nullableSha256(body: Record<string, unknown>, ...keys: string[]): string | null {
+  const value = valueString(body, ...keys);
+  return /^[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
 function booleanValue(body: Record<string, unknown>, ...keys: string[]): boolean {

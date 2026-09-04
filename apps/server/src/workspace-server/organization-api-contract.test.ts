@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { publicOperationResult } from "./domain-api-v1";
+import { publicOperationResult, publicWorkspaceDirectory, publicWorkspaceOrganizationAssociationResult, publicWorkspaceTransferStatus } from "./domain-api-v1";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const httpSource = await readFile(path.join(here, "http-server.ts"), "utf8");
@@ -16,17 +16,61 @@ describe("Organization HTTP boundary", () => {
       '"/api/organizations/:organizationId/members"',
       '"/api/organizations/:organizationId/invitations"',
       '"/api/organizations/:organizationId/workspaces"',
+      '"/api/organizations/:organizationId/workspaces/:workspaceId/attach"',
+      '"/api/organizations/:organizationId/workspaces/:workspaceId/detach"',
       '"/api/organizations/:organizationId/workspaces/:workspaceId/move/preflight"',
       '"/api/organizations/:organizationId/workspaces/:workspaceId/move/commit"',
       '"/api/organizations/:organizationId/bundles/restore"'
     ]) expect(httpSource).toContain(route);
+    expect(httpSource).toContain('"/api/account/workspaces"');
+    expect(httpSource).toContain('"/api/workspaces/:workspaceId/bundle/export"');
+    expect(httpSource).toContain('"/api/workspaces/bundles/restore"');
+    expect(httpSource).toContain('"/api/workspaces/imports"');
     expect(httpSource).toContain("authenticateAccount: authenticate");
     expect(httpSource).toContain("organizationRequestContext");
     expect(httpSource).toContain("organization_operation_idempotency_mismatch");
   });
 
+  it("mounts an owner-only transfer status query without exposing bundle internals", () => {
+    expect(httpSource).toContain('app.get("/api/workspaces/:workspaceId/transfers/:transferId/status"');
+    const start = httpSource.indexOf('app.get("/api/workspaces/:workspaceId/transfers/:transferId/status"');
+    const end = httpSource.indexOf('app.get("/api/workspaces/:workspaceId/transfers/:transferId/bundle"', start);
+    const source = httpSource.slice(start, end);
+    expect(source).toContain("authenticateWorkspace");
+    expect(source).toContain("samurai_can_workspace($1, 'owner')");
+    expect(source).toContain("workspace_transfer_not_found");
+    expect(source).toContain("res.json(publicWorkspaceTransferStatus(status))");
+
+    const hash = "a".repeat(64);
+    const result = publicWorkspaceTransferStatus({
+      id: "transfer_1",
+      state: "imported",
+      source_integrity_hash: hash,
+      target_integrity_hash: hash,
+      target_workspace_id: "workspace_2",
+      receipt_present: true,
+      source_workspace_state: "read_only",
+      bundle_path: "/private/transfer/bundle",
+      target_receipt: { imported_at: "private" }
+    }) as Record<string, unknown>;
+    expect(result).toEqual({
+      transfer_id: "transfer_1",
+      state: "imported",
+      source_integrity_hash: hash,
+      target_integrity_hash: hash,
+      target_workspace_id: "workspace_2",
+      receipt_present: true,
+      source_workspace_state: "read_only",
+      source_archived: false
+    });
+    expect(result).not.toHaveProperty("bundle_path");
+    expect(result).not.toHaveProperty("target_receipt");
+  });
+
   it("keeps organization operations outside the workspace content catalog", () => {
     expect(domainSource).toContain("!organizationOperationIds.has(definition.id)");
+    expect(domainSource).toContain("organizationCatalogOperationIds.has(definition.id)");
+    expect(domainSource).toContain("organizationCompatibilityOperationIds");
     expect(domainSource).toContain("commands.createOrganization");
     expect(domainSource).toContain("commands.restoreWorkspaceBundle");
     expect(domainSource).not.toContain("commands as unknown as OrganizationCommandService");
@@ -48,13 +92,45 @@ describe("Organization HTTP boundary", () => {
     expect(workerSource).not.toContain("config.selfHostWorkspaceId");
   });
 
-  it("requires an explicit target Organization for one-shot and staged Bundle imports", () => {
+  it("allows standalone one-shot and staged Bundle imports", () => {
     const oneShotStart = httpSource.indexOf('app.post("/api/workspaces/imports"');
     const stagingStart = httpSource.indexOf('app.post("/api/workspaces/imports/staging"');
     const oneShotSource = httpSource.slice(oneShotStart, stagingStart);
     const stagingSource = httpSource.slice(stagingStart, httpSource.indexOf('app.put("/api/workspaces/imports/staging/:operationId/entries', stagingStart));
-    expect(oneShotSource).toContain('targetOrganizationId: stringField(body, "target_organization_id")');
-    expect(stagingSource).toContain('targetOrganizationId: stringField(body, "target_organization_id")');
+    expect(oneShotSource).toContain("assertStandaloneBundleTarget(body)");
+    expect(stagingSource).toContain("assertStandaloneBundleTarget(body)");
+    expect(oneShotSource).not.toContain("targetOrganizationId");
+    expect(stagingSource).not.toContain("targetOrganizationId");
+  });
+
+  it("keeps direct Workspace invitations and membership management Workspace-scoped", () => {
+    const inviteStart = httpSource.indexOf('app.post("/api/workspaces/:workspaceId/invitations"');
+    const inviteEnd = httpSource.indexOf('app.post("/api/workspaces/:workspaceId/invitations/accept"', inviteStart);
+    const inviteSource = httpSource.slice(inviteStart, inviteEnd);
+    expect(inviteSource).toContain("authenticateWorkspace");
+    expect(inviteSource).toContain("commands.createInvitation");
+    expect(inviteSource).not.toContain("organizationContext");
+
+    const membershipStart = httpSource.indexOf('app.put("/api/workspaces/:workspaceId/members/:accountId"');
+    const membershipEnd = httpSource.indexOf('app.put("/api/workspaces/:workspaceId/rooms/:roomId/members/:accountId"', membershipStart);
+    const membershipSource = httpSource.slice(membershipStart, membershipEnd);
+    expect(membershipSource).toContain("authenticateWorkspace");
+    expect(membershipSource).toContain("commands.setWorkspaceMember");
+    expect(membershipSource).not.toContain("organizationContext");
+  });
+
+  it("keeps Organization restore compatibility as restore-then-attach", () => {
+    const start = httpSource.indexOf('app.post("/api/organizations/:organizationId/bundles/restore"');
+    const source = httpSource.slice(start, httpSource.indexOf("  }));", start) + 6);
+    expect(source).toContain("executeOrganizationBundleRestoreCompatibility");
+    expect(source).not.toContain("target_organization_id: pathParam(req, \"organizationId\")");
+    expect(domainSource).toContain("organizationBundleAttachOperationId");
+    expect(domainSource).toContain("assertStandaloneBundleOperationInput");
+
+    const genericStart = httpSource.indexOf('app.post("/api/workspaces/bundles/restore"');
+    const genericSource = httpSource.slice(genericStart, httpSource.indexOf('app.get("/api/workspaces/:workspaceId"', genericStart));
+    expect(genericSource).toContain("assertStandaloneBundleTarget(body)");
+    expect(genericSource).not.toContain("targetOrganizationId");
   });
 
   it("does not treat the preflight write freeze requirement as a blocked move", () => {
@@ -185,5 +261,76 @@ describe("Organization HTTP boundary", () => {
       status: "restored",
       restored_at: "2026-08-31T00:00:00.000Z"
     })).not.toThrow();
+  });
+
+  it("keeps standalone directory and detach projections free of empty Organization IDs", () => {
+    expect(publicWorkspaceDirectory([{
+      id: "workspace_1",
+      name: "Personal",
+      state: "active",
+      hostingMode: "hosted",
+      databasePlacement: "shared",
+      storageNamespace: "must-not-leak",
+      version: 1,
+      role: "owner",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z"
+    }], "account_1")).toEqual({
+      workspaces: [{
+        id: "workspace_1",
+        name: "Personal",
+        state: "active",
+        version: 1,
+        hosting_mode: "hosted",
+        database_placement: "shared",
+        role: "owner",
+        access: "granted",
+        created_by: "account_1",
+        created_at: "2026-09-01T00:00:00.000Z",
+        updated_at: "2026-09-01T00:00:00.000Z"
+      }]
+    });
+
+    const detached = publicWorkspaceOrganizationAssociationResult({
+      workspace: {
+        id: "workspace_1",
+        name: "Personal",
+        state: "active",
+        version: 2,
+        createdBy: "account_1",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        updatedAt: "2026-09-01T00:00:00.000Z",
+        canAccess: true,
+        role: "owner"
+      },
+      previousOrganizationId: "organization_1",
+      addedGuestAccountIds: []
+    }, "account_1");
+    expect(detached).toMatchObject({
+      workspace: { id: "workspace_1" },
+      previous_organization_id: "organization_1",
+      added_guest_account_ids: []
+    });
+    expect(detached).not.toHaveProperty("organization_id", "");
+    expect((detached as Record<string, unknown>).workspace).not.toHaveProperty("organization_id", "");
+  });
+
+  it("exposes transfer stages through standalone Workspace routes", () => {
+    const start = httpSource.indexOf('app.post("/api/workspaces/:workspaceId/transfers"');
+    const end = httpSource.indexOf("const socketRateGuard", start);
+    const transferSource = httpSource.slice(start, end);
+    for (const marker of [
+      '"/api/workspaces/:workspaceId/transfers"',
+      '"/api/workspaces/:workspaceId/transfers/:transferId/bundle"',
+      '"/api/workspaces/:workspaceId/transfers/:transferId/manifest"',
+      '"/api/workspaces/:workspaceId/transfers/:transferId/receipt"',
+      '"/api/workspaces/:workspaceId/transfers/:transferId/rollback"',
+      '"/api/workspaces/:workspaceId/transfers/:transferId/complete"'
+    ]) expect(transferSource).toContain(marker);
+    expect(transferSource).toContain("getTransferBundle");
+    expect(transferSource).toContain("recordTransferReceipt");
+    expect(transferSource).toContain("completeTransfer");
+    expect(transferSource).toContain("PublicWorkspaceTransferManifestResultSchema");
+    expect(transferSource).toContain("PublicWorkspaceTransferStartResultSchema");
   });
 });

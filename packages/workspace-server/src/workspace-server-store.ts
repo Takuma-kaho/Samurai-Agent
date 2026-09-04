@@ -5,6 +5,7 @@ import { WorkspaceServerError } from "./errors";
 import { PostgresWorkspaceDatabase, type WorkspaceSql } from "./postgres";
 import type {
   WorkspaceAccount,
+  AttachWorkspaceToOrganizationInput,
   WorkspaceAgent,
   WorkspaceAgentRoomPermission,
   WorkspaceAuditEntry,
@@ -30,6 +31,8 @@ import type {
   OrganizationWorkspaceMoveResult,
   OrganizationWorkspaceMembership,
   OrganizationWorkspaceSummary,
+  DetachWorkspaceFromOrganizationInput,
+  WorkspaceOrganizationAssociationResult,
   WorkspaceRecord,
   WorkspaceRecordPayload,
   WorkspacePublicEvent,
@@ -69,7 +72,7 @@ export interface CreateWorkspaceInput {
   operationId: string;
   hostingMode?: WorkspaceServerMode;
   databasePlacement?: "shared" | "dedicated";
-  /** Organization that owns the new Workspace. Omit to use the caller's default Organization. */
+  /** Optional same-Server Organization association. Omit for a standalone Workspace. */
   organizationId?: string;
 }
 
@@ -113,8 +116,10 @@ export interface InviteOrganizationMemberInput {
 }
 
 export interface OrganizationWorkspaceMoveInput {
-  sourceOrganizationId: string;
-  targetOrganizationId: string;
+  /** Omit for an attach from the standalone state. */
+  sourceOrganizationId?: string;
+  /** Omit for a detach to the standalone state. */
+  targetOrganizationId?: string;
   workspaceId: string;
   expectedWorkspaceVersion?: number;
   /** A commit must explicitly acknowledge automatic Guest memberships. */
@@ -165,7 +170,29 @@ export interface IdempotentOperationResult<T> {
 
 type IdempotentOperationOptions = {
   lockRoomHierarchy?: boolean;
+  /** Internal transfer-only escape hatch for a failed operation replay. */
+  allowFailedTransferReplay?: boolean;
 };
+
+// Failed operation replay is deliberately narrower than the transfer action
+// namespace.  In particular, export is an implementation detail of begin and
+// must not become a second public replay lane with its own idempotency rules.
+const transferReplayActions = new Set([
+  "workspace.transfer.begin",
+  "workspace.transfer.receipt",
+  "workspace.transfer.complete",
+  "workspace.transfer.rollback"
+]);
+
+function isTransferReplayAction(action: string): boolean {
+  return transferReplayActions.has(action);
+}
+
+function transferIdFromInput(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const transferId = (input as Record<string, unknown>).transferId;
+  return typeof transferId === "string" && transferId.length > 0 ? transferId : undefined;
+}
 
 export interface CreateInvitationResult {
   invitation: WorkspaceInvitation;
@@ -277,25 +304,6 @@ export class WorkspaceServerStore {
         savedAccount = accountFromRow(updated.rows[0] ?? account);
       } else {
         savedAccount = accountFromRow(account);
-      }
-      // Keep the compatibility Organization only for Accounts that have no
-      // active Organization membership.  An invited member must not acquire a
-      // second implicit Organization merely by registering its Account.
-      const membership = await sql.query<{ has_membership: boolean }>(
-        `SELECT EXISTS(
-           SELECT 1 FROM organization_members
-           WHERE account_id = $1 AND state = 'active'
-         ) AS has_membership`, [input.id]
-      );
-      if (membership.rows[0]?.has_membership !== true) {
-        await sql.query(
-          `SELECT samurai_create_organization(
-            'org_' || md5('samurai.legacy.organization|' || $1),
-            COALESCE(NULLIF(btrim($2), ''), 'Account') || ' Organization',
-            NULL, NULL,
-            'organization_bootstrap_' || md5($1)
-          )`, [input.id, input.displayName.trim()]
-        );
       }
       return savedAccount;
     });
@@ -456,23 +464,28 @@ export class WorkspaceServerStore {
     if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "organization_expected_version_invalid", 1);
     const result = await this.runOrganizationIdempotentResult(context, id, { action: "organization.delete", input: { id, confirm: input.confirm ?? true, expectedVersion: suppliedExpectedVersion ?? null } }, async (sql) => {
       const current = (await sql.query<{ version: number | string }>(
-        "SELECT version FROM organizations WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [id]
+        // Organization RLS has a read policy but no general UPDATE policy.
+        // Keep this preflight read non-locking; the SECURITY DEFINER delete
+        // function owns the authoritative Organization row lock and version
+        // check in the same transaction.
+        "SELECT version FROM organizations WHERE id = $1 AND deleted_at IS NULL", [id]
       )).rows[0];
       if (!current) throw new WorkspaceServerError("organization_not_found", 404);
       if (suppliedExpectedVersion !== undefined && Number(current.version) !== suppliedExpectedVersion) {
         throw new WorkspaceServerError("organization_version_conflict", 409);
       }
+      const expectedVersion = suppliedExpectedVersion ?? Number(current.version);
       try {
-        await sql.query("SELECT samurai_delete_organization($1, $2)", [id, context.operationId]);
+        const deleted = (await sql.query<OrganizationRow>(
+          `SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at
+             FROM samurai_delete_organization_and_return($1, $2, $3)`,
+          [id, expectedVersion, context.operationId]
+        )).rows[0];
+        if (!deleted) throw new WorkspaceServerError("organization_delete_result_not_found", 500);
+        return organizationFromRow(deleted);
       } catch (error) {
         throw mapOrganizationPostgresError(error, "organization_delete_failed");
       }
-      const row = (await sql.query<OrganizationRow>(
-        "SELECT id, name, icon, description, created_by, version, created_at, updated_at, deleted_at FROM organizations WHERE id = $1",
-        [id]
-      )).rows[0];
-      if (!row) throw new WorkspaceServerError("organization_not_found", 404);
-      return organizationFromRow(row);
     });
     return { ...result.value, replayed: result.replayed };
   }
@@ -723,20 +736,40 @@ export class WorkspaceServerStore {
   }
 
   async preflightWorkspaceOrganizationMove(context: OrganizationRequestContext, input: OrganizationWorkspaceMoveInput & { source_organization_id?: string; target_organization_id?: string; workspace_id?: string; expected_workspace_version?: number }): Promise<OrganizationWorkspaceMovePreview> {
-    const sourceId = organizationIdFrom(context, input.sourceOrganizationId ?? input.source_organization_id);
-    const targetId = organizationIdFrom(context, input.targetOrganizationId ?? input.target_organization_id);
+    const sourceId = optionalOrganizationId(input.sourceOrganizationId ?? input.source_organization_id, "organization_id_invalid");
+    const targetId = optionalOrganizationId(input.targetOrganizationId ?? input.target_organization_id, "organization_id_invalid");
+    if (sourceId === undefined && targetId === undefined) throw new WorkspaceServerError("workspace_organization_move_invalid", 400);
     const workspaceId = input.workspaceId ?? input.workspace_id;
     assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
     const expectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
-    const result = await this.runOrganizationIdempotentResult(context, sourceId, {
+    const ledgerOrganizationId = sourceId ?? targetId;
+    const result = await this.runOrganizationIdempotentResult(context, ledgerOrganizationId, {
       action: "workspace.organization.move.preflight",
-      input: { sourceId, targetId, workspaceId, expectedVersion: expectedVersion ?? null }
+      input: { sourceId: sourceId ?? null, targetId: targetId ?? null, workspaceId, expectedVersion: expectedVersion ?? null }
     }, async (sql) => {
-      const capability = await sql.query<{ source_owner: boolean; target_owner: boolean }>(
-        "SELECT samurai_can_organization($1, 'owner') AS source_owner, samurai_can_organization($2, 'owner') AS target_owner", [sourceId, targetId]
+      const capability = await sql.query<{ workspace_owner: boolean; source_admin: boolean; target_admin: boolean }>(
+        `SELECT
+           samurai_can_workspace($3, 'owner') AS workspace_owner,
+           CASE WHEN $1::TEXT IS NULL THEN false
+                ELSE samurai_can_organization($1, 'admin') END AS source_admin,
+           CASE WHEN $2::TEXT IS NULL THEN true
+                ELSE samurai_can_organization($2, 'admin') END AS target_admin`,
+        [sourceId ?? null, targetId ?? null, workspaceId]
       );
-      const sourceOwner = capability.rows[0]?.source_owner === true;
-      const targetOwner = capability.rows[0]?.target_owner === true;
+      const workspaceOwner = capability.rows[0]?.workspace_owner === true;
+      const sourceAdmin = capability.rows[0]?.source_admin === true;
+      const targetAdmin = capability.rows[0]?.target_admin === true;
+      // Attach requires both sides to approve: the Workspace owner and the
+      // target Organization owner/admin. Detach is intentionally more
+      // permissive: either the Workspace owner or the source Organization
+      // owner/admin may release it. A same-Server Organization move keeps the
+      // two Organization-admin checks explicit.
+      const sourceAllowed = sourceId === undefined
+        ? workspaceOwner
+        : targetId === undefined
+          ? workspaceOwner || sourceAdmin
+          : sourceAdmin;
+      const targetAllowed = targetId === undefined ? true : targetAdmin;
       const workspace = (await sql.query<OrganizationWorkspaceRow>(
         `SELECT id, organization_id, name, state, version, created_at, updated_at
            FROM workspaces WHERE id = $1`, [workspaceId]
@@ -750,9 +783,11 @@ export class WorkspaceServerStore {
       const memberRows = await sql.query<OrganizationWorkspaceMoveMemberRow>(
         "SELECT account_id, role AS current_workspace_role, state FROM workspace_members WHERE workspace_id = $1 AND state = 'active' ORDER BY account_id", [workspaceId]
       );
-      const targetMembers = await sql.query<{ account_id: string; role: OrganizationRole }>(
-        "SELECT account_id, role FROM organization_members WHERE organization_id = $1 AND state = 'active' ORDER BY account_id", [targetId]
-      );
+      const targetMembers = targetId
+        ? await sql.query<{ account_id: string; role: OrganizationRole }>(
+          "SELECT account_id, role FROM organization_members WHERE organization_id = $1 AND state = 'active' ORDER BY account_id", [targetId]
+        )
+        : { rows: [] as Array<{ account_id: string; role: OrganizationRole }> };
       const targetRoles = new Map(targetMembers.rows.map((row) => [row.account_id, row.role]));
       const members = memberRows.rows.map((row) => ({
         accountId: row.account_id,
@@ -760,14 +795,22 @@ export class WorkspaceServerStore {
         state: row.state,
         ...(targetRoles.has(row.account_id) ? { targetOrganizationRole: targetRoles.get(row.account_id) } : {})
       }));
-      const missing = members.filter((member) => !targetRoles.has(member.accountId)).map((member) => member.accountId);
+      const missing = targetId
+        ? members.filter((member) => !targetRoles.has(member.accountId)).map((member) => member.accountId)
+        : [];
       const versionOk = expectedVersion === undefined || workspaceVersion === expectedVersion;
       const stateOk = workspaceState === "active" || workspaceState === "archived";
       const failureConditions: string[] = [];
-      if (!sourceOwner) failureConditions.push("organization_owner_permission_required");
-      if (!targetOwner) failureConditions.push("target_organization_owner_permission_required");
-      if (workspace.organization_id !== sourceId) failureConditions.push("workspace_organization_move_source_mismatch");
-      if (sourceId === targetId) failureConditions.push("workspace_organization_move_invalid");
+      if (!sourceAllowed) {
+        failureConditions.push(sourceId === undefined
+          ? "workspace_owner_permission_required"
+          : targetId === undefined
+            ? "workspace_owner_or_organization_admin_permission_required"
+            : "organization_admin_permission_required");
+      }
+      if (!targetAllowed) failureConditions.push("target_organization_admin_permission_required");
+      if (workspace.organization_id !== (sourceId ?? null)) failureConditions.push("workspace_organization_move_source_mismatch");
+      if (sourceId !== undefined && sourceId === targetId) failureConditions.push("workspace_organization_move_invalid");
       if (!versionOk) failureConditions.push("workspace_version_conflict");
       if (!stateOk) failureConditions.push("workspace_organization_move_state_invalid");
       const allowed = failureConditions.length === 0;
@@ -777,13 +820,13 @@ export class WorkspaceServerStore {
       return {
         allowed,
         ...(reason ? { reason } : {}),
-        sourceOrganizationId: sourceId,
-        targetOrganizationId: targetId,
+        ...(sourceId ? { sourceOrganizationId: sourceId } : {}),
+        ...(targetId ? { targetOrganizationId: targetId } : {}),
         workspaceId,
         workspaceName: workspace.name,
         expectedWorkspaceVersion: workspaceVersion,
-        sourceOwner,
-        targetOwner,
+        sourceOwner: sourceAllowed,
+        targetOwner: targetAllowed,
         members,
         missingTargetMemberships: missing,
         requiresGuestConfirmation: missing.length > 0,
@@ -799,8 +842,9 @@ export class WorkspaceServerStore {
   }
 
   async commitWorkspaceOrganizationMove(context: OrganizationRequestContext, input: OrganizationWorkspaceMoveInput & { source_organization_id?: string; target_organization_id?: string; workspace_id?: string; expected_workspace_version?: number; confirm_guest_membership?: boolean; preflight_id?: string }): Promise<OrganizationWorkspaceMoveResult> {
-    const sourceId = organizationIdFrom(context, input.sourceOrganizationId ?? input.source_organization_id);
-    const targetId = organizationIdFrom(context, input.targetOrganizationId ?? input.target_organization_id);
+    const sourceId = optionalOrganizationId(input.sourceOrganizationId ?? input.source_organization_id, "organization_id_invalid");
+    const targetId = optionalOrganizationId(input.targetOrganizationId ?? input.target_organization_id, "organization_id_invalid");
+    if (sourceId === undefined && targetId === undefined) throw new WorkspaceServerError("workspace_organization_move_invalid", 400);
     const workspaceId = input.workspaceId ?? input.workspace_id;
     assertOpaqueId(workspaceId ?? "", "workspace_id_invalid");
     const suppliedExpectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
@@ -808,14 +852,15 @@ export class WorkspaceServerStore {
     const preflightId = assertOpaqueId(input.preflight_id ?? "", "workspace_organization_move_preflight_id_invalid");
     const confirm = input.confirmGuestMemberships ?? input.confirm_guest_membership;
     if (confirm !== true) throw new WorkspaceServerError("workspace_organization_move_guest_confirmation_required", 400);
-    const result = await this.runOrganizationIdempotentResult(context, sourceId, { action: "workspace.organization.move.commit", input: { sourceId, targetId, workspaceId, expectedVersion: suppliedExpectedVersion ?? null, preflightId } }, async (sql) => {
+    const ledgerOrganizationId = sourceId ?? targetId;
+    const result = await this.runOrganizationIdempotentResult(context, ledgerOrganizationId, { action: "workspace.organization.move.commit", input: { sourceId: sourceId ?? null, targetId: targetId ?? null, workspaceId, expectedVersion: suppliedExpectedVersion ?? null, preflightId } }, async (sql) => {
       const preflightRow = (await sql.query<{ result: unknown; consumed_at: Date | string | null }>(
         `SELECT result, consumed_at
-           FROM organization_operations
+          FROM organization_operations
           WHERE actor_account_id = $1 AND idempotency_key = $2
             AND organization_id = $3 AND status = 'completed'
             AND consumed_at IS NULL AND result IS NOT NULL
-          FOR UPDATE`, [context.accountId, preflightId, sourceId]
+          FOR UPDATE`, [context.accountId, preflightId, ledgerOrganizationId]
       )).rows[0];
       if (!preflightRow) throw new WorkspaceServerError("workspace_organization_move_preflight_invalid", 409);
       const preflight = parseJsonObject(preflightRow.result);
@@ -825,7 +870,7 @@ export class WorkspaceServerStore {
       const previewWorkspace = String(preflight.workspaceId ?? preflight.workspace_id ?? "");
       const previewVersion = Number(preflight.expectedWorkspaceVersion ?? preflight.workspace_version);
       const previewExpiresAt = Date.parse(String(preflight.expiresAt ?? preflight.expires_at ?? ""));
-      if (previewSource !== sourceId || previewTarget !== targetId || previewWorkspace !== workspaceId || !Number.isInteger(previewVersion) || previewVersion < 1) {
+      if (previewSource !== (sourceId ?? "") || previewTarget !== (targetId ?? "") || previewWorkspace !== workspaceId || !Number.isInteger(previewVersion) || previewVersion < 1) {
         throw new WorkspaceServerError("workspace_organization_move_preflight_mismatch", 409);
       }
       if (!Number.isFinite(previewExpiresAt) || previewExpiresAt <= Date.now()) {
@@ -836,7 +881,7 @@ export class WorkspaceServerStore {
       }
       const expectedVersion = previewVersion;
       try {
-        const row = (await sql.query<{ result: unknown }>("SELECT samurai_move_workspace_organization($1, $2, $3, $4, $5) AS result", [sourceId, targetId, workspaceId, expectedVersion, context.operationId])).rows[0];
+        const row = (await sql.query<{ result: unknown }>("SELECT samurai_move_workspace_organization($1, $2, $3, $4, $5) AS result", [sourceId ?? null, targetId ?? null, workspaceId, expectedVersion, context.operationId])).rows[0];
         if (!row) throw new WorkspaceServerError("workspace_organization_move_failed", 500);
         const value = parseJsonObject(row.result);
         const added = Array.isArray(value.added_guest_account_ids) ? value.added_guest_account_ids.filter((item): item is string => typeof item === "string") : [];
@@ -845,12 +890,12 @@ export class WorkspaceServerStore {
         await sql.query(
           `UPDATE organization_operations SET consumed_at = NOW(), updated_at = NOW()
              WHERE actor_account_id = $1 AND idempotency_key = $2 AND organization_id = $3 AND consumed_at IS NULL`,
-          [context.accountId, preflightId, sourceId]
+          [context.accountId, preflightId, ledgerOrganizationId]
         );
         return {
           operationId: context.operationId,
-          sourceOrganizationId: sourceId,
-          targetOrganizationId: targetId,
+          ...(sourceId ? { sourceOrganizationId: sourceId } : {}),
+          ...(targetId ? { targetOrganizationId: targetId } : {}),
           workspaceId,
           status: "committed" as const,
           workspace: organizationWorkspaceFromRow(workspace),
@@ -861,6 +906,137 @@ export class WorkspaceServerStore {
           replayed: false
         };
       } catch (error) { throw mapOrganizationPostgresError(error, "workspace_organization_move_failed"); }
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  /**
+   * Attach a standalone Workspace to an explicit Organization.  This is a
+   * separate command from Workspace creation so the normal Workspace API
+   * remains usable without an Organization.  PostgreSQL owns the actual
+   * authorization, lock ordering, guest-member completion, and Event write.
+   */
+  async attachWorkspaceToOrganization(
+    context: OrganizationRequestContext,
+    input: AttachWorkspaceToOrganizationInput & { organization_id?: string; workspace_id?: string; expected_workspace_version?: number; confirm_guest_memberships?: boolean }
+  ): Promise<WorkspaceOrganizationAssociationResult> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const workspaceId = assertOpaqueId(input.workspaceId ?? input.workspace_id ?? "", "workspace_id_invalid");
+    const suppliedExpectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "workspace_expected_version_invalid", 1);
+    const result = await this.runOrganizationIdempotentResult(context, organizationId, {
+      action: "workspace.organization.attach",
+      input: { organizationId, workspaceId, expectedVersion: suppliedExpectedVersion ?? null }
+    }, async (sql) => {
+      await sql.query("SELECT set_config('samurai.workspace_id', $1, true)", [workspaceId]);
+      const before = (await sql.query<OrganizationWorkspaceRow>(
+        // RLS intentionally has no UPDATE policy for the preflight read. A
+        // row lock here can therefore turn a readable Workspace into an empty
+        // result; the SECURITY DEFINER move function owns the authoritative
+        // lock/version check below.
+        "SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1",
+        [workspaceId]
+      )).rows[0];
+      if (!before) throw new WorkspaceServerError("workspace_not_found", 404);
+      if (suppliedExpectedVersion !== undefined && Number(before.version) !== suppliedExpectedVersion) {
+        throw new WorkspaceServerError("workspace_version_conflict", 409);
+      }
+      if (before.organization_id === organizationId) {
+        const current = await this.organizationWorkspaceSummary(sql, context.accountId, before);
+        return { workspace: current, organizationId, addedGuestAccountIds: [], replayed: false };
+      }
+      if (before.organization_id !== null) throw new WorkspaceServerError("workspace_organization_already_attached", 409);
+      const owner = await sql.query<{ allowed: boolean }>(
+        "SELECT samurai_can_workspace($1, 'owner') AS allowed",
+        [workspaceId]
+      );
+      if (owner.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_owner_permission_required", 403);
+      const expectedVersion = suppliedExpectedVersion ?? Number(before.version);
+      try {
+        const changed = await sql.query<{ result: unknown }>(
+          "SELECT samurai_move_workspace_organization($1, $2, $3, $4, $5) AS result",
+          [null, organizationId, workspaceId, expectedVersion, context.operationId]
+        );
+        const changedRow = changed.rows[0];
+        if (!changedRow) throw new WorkspaceServerError("workspace_organization_attach_failed", 500);
+        const value = parseJsonObject(changedRow.result);
+        const after = (await sql.query<OrganizationWorkspaceRow>(
+          "SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1",
+          [workspaceId]
+        )).rows[0];
+        if (!after) throw new WorkspaceServerError("workspace_not_found", 404);
+        const summary = await this.organizationWorkspaceSummary(sql, context.accountId, after);
+        const added = arrayOfStrings(value.added_guest_account_ids);
+        return {
+          workspace: summary,
+          organizationId,
+          addedGuestAccountIds: added,
+          ...(value.event_id === undefined ? {} : { eventId: String(value.event_id) }),
+          replayed: false
+        };
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "workspace_organization_attach_failed");
+      }
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  /** Remove a Workspace from an Organization without changing its content or
+   * Workspace memberships.  The returned summary intentionally omits the
+   * Organization association once the transition is committed. */
+  async detachWorkspaceFromOrganization(
+    context: OrganizationRequestContext,
+    input: DetachWorkspaceFromOrganizationInput & { organization_id?: string; workspace_id?: string; expected_workspace_version?: number }
+  ): Promise<WorkspaceOrganizationAssociationResult> {
+    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const workspaceId = assertOpaqueId(input.workspaceId ?? input.workspace_id ?? "", "workspace_id_invalid");
+    const suppliedExpectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
+    if (suppliedExpectedVersion !== undefined) assertExpectedVersion(suppliedExpectedVersion, "workspace_expected_version_invalid", 1);
+    const result = await this.runOrganizationIdempotentResult(context, organizationId, {
+      action: "workspace.organization.detach",
+      input: { organizationId, workspaceId, expectedVersion: suppliedExpectedVersion ?? null }
+    }, async (sql) => {
+      await sql.query("SELECT set_config('samurai.workspace_id', $1, true)", [workspaceId]);
+      const before = (await sql.query<OrganizationWorkspaceRow>(
+        // See attachWorkspaceToOrganization: leave locking and version
+        // validation to the SECURITY DEFINER move function under RLS.
+        "SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1",
+        [workspaceId]
+      )).rows[0];
+      if (!before) throw new WorkspaceServerError("workspace_not_found", 404);
+      if (suppliedExpectedVersion !== undefined && Number(before.version) !== suppliedExpectedVersion) {
+        throw new WorkspaceServerError("workspace_version_conflict", 409);
+      }
+      if (before.organization_id === null) {
+        const current = await this.organizationWorkspaceSummary(sql, context.accountId, before);
+        return { workspace: current, addedGuestAccountIds: [], replayed: false };
+      }
+      if (before.organization_id !== organizationId) throw new WorkspaceServerError("workspace_organization_mismatch", 409);
+      const expectedVersion = suppliedExpectedVersion ?? Number(before.version);
+      try {
+        const changed = await sql.query<{ result: unknown }>(
+          "SELECT samurai_move_workspace_organization($1, $2, $3, $4, $5) AS result",
+          [organizationId, null, workspaceId, expectedVersion, context.operationId]
+        );
+        const changedRow = changed.rows[0];
+        if (!changedRow) throw new WorkspaceServerError("workspace_organization_detach_failed", 500);
+        const value = parseJsonObject(changedRow.result);
+        const after = (await sql.query<OrganizationWorkspaceRow>(
+          "SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1",
+          [workspaceId]
+        )).rows[0];
+        if (!after) throw new WorkspaceServerError("workspace_not_found", 404);
+        const summary = await this.organizationWorkspaceSummary(sql, context.accountId, after);
+        return {
+          workspace: summary,
+          previousOrganizationId: organizationId,
+          addedGuestAccountIds: [],
+          ...(value.event_id === undefined ? {} : { eventId: String(value.event_id) }),
+          replayed: false
+        };
+      } catch (error) {
+        throw mapOrganizationPostgresError(error, "workspace_organization_detach_failed");
+      }
     });
     return { ...result.value, replayed: result.replayed };
   }
@@ -884,11 +1060,14 @@ export class WorkspaceServerStore {
         : Array.isArray(result.addedGuestAccountIds)
           ? result.addedGuestAccountIds.filter((value): value is string => typeof value === "string")
           : [];
+      const workspaceId = optionalResultString(result.workspaceId ?? result.workspace_id ?? workspace.workspaceId ?? workspace.id);
+      const sourceOrganizationId = optionalResultString(result.sourceOrganizationId ?? result.source_organization_id);
+      const targetOrganizationId = optionalResultString(result.targetOrganizationId ?? result.target_organization_id ?? workspace.organizationId ?? workspace.organization_id);
       return {
         operationId,
-        workspaceId: String(result.workspaceId ?? result.workspace_id ?? workspace.workspaceId ?? workspace.id ?? "unknown"),
-        sourceOrganizationId: String(result.sourceOrganizationId ?? result.source_organization_id ?? row.organization_id ?? "unknown"),
-        targetOrganizationId: String(result.targetOrganizationId ?? result.target_organization_id ?? workspace.organizationId ?? workspace.organization_id ?? "unknown"),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(sourceOrganizationId ? { sourceOrganizationId } : {}),
+        ...(targetOrganizationId ? { targetOrganizationId } : {}),
         status,
         guestMembershipAccountIds,
         ...(result.eventId === undefined && result.event_id === undefined ? {} : { eventId: String(result.eventId ?? result.event_id) }),
@@ -905,15 +1084,26 @@ export class WorkspaceServerStore {
   ): Promise<OrganizationWorkspaceSummary> {
     const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
     const created = await this.createWorkspace({
-      id: operationScopedId("workspace", organizationId, context.operationId),
       name: input.name,
       ownerAccountId: context.accountId,
       operationId: context.operationId,
       hostingMode: this.mode,
-      databasePlacement: this.mode === "self_host" ? "dedicated" : "shared",
-      organizationId
+      databasePlacement: this.mode === "self_host" ? "dedicated" : "shared"
     });
-    return { ...organizationWorkspaceFromSummary(created.workspace, organizationId), replayed: created.replayed };
+    // Organization-scoped creation reuses the ordinary standalone Workspace
+    // operation first.  Association is an explicit second operation so the
+    // Workspace API never grows an implicit Organization default; the SQL
+    // move function then performs the normal Guest completion and association
+    // Event atomically.  Reusing the caller operation id in both ledgers makes
+    // retries replay both phases.  If the second phase fails, the created
+    // Workspace remains a safe standalone Workspace for a later explicit
+    // attach rather than leaving a partially-created Organization-owned row.
+    const attached = await this.attachWorkspaceToOrganization(context, {
+      organizationId,
+      workspaceId: created.workspace.id,
+      expectedWorkspaceVersion: created.workspace.version
+    });
+    return { ...attached.workspace, replayed: created.replayed === true || attached.replayed === true };
   }
 
   async grantOrganizationWorkspaceMembership(
@@ -946,33 +1136,53 @@ export class WorkspaceServerStore {
     return this.setOrganizationWorkspaceLifecycle(context, input, "deleted");
   }
 
-  /** Bundle bytes remain in the Bundle service; this metadata operation keeps
-   * Organization authorization and source ownership explicit for callers. */
+  /** Bundle bytes remain in the Bundle service.  Workspace ownership is the
+   * authorization boundary; an Organization is optional provenance and, when
+   * supplied, is only checked against the Workspace's current association. */
   async exportWorkspaceBundle(context: OrganizationRequestContext, input: { organizationId?: string; organization_id?: string; workspaceId?: string; workspace_id?: string; expectedWorkspaceVersion?: number; expected_workspace_version?: number }): Promise<Record<string, unknown>> {
-    const organizationId = organizationIdFrom(context, input.organizationId ?? input.organization_id);
+    const requestedOrganizationId = optionalOrganizationId(
+      input.organizationId ?? input.organization_id ?? context.organizationId,
+      "organization_id_invalid"
+    );
     const workspaceId = assertOpaqueId(input.workspaceId ?? input.workspace_id ?? "", "workspace_id_invalid");
     const workspace = await this.database.withContext({ accountId: context.accountId }, async (sql) => {
-      const row = (await sql.query<OrganizationWorkspaceRow>("SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1 AND organization_id = $2", [workspaceId, organizationId])).rows[0];
+      const row = (await sql.query<OrganizationWorkspaceRow>("SELECT id, organization_id, name, state, version, created_at, updated_at FROM workspaces WHERE id = $1", [workspaceId])).rows[0];
       if (!row) throw new WorkspaceServerError("workspace_not_found", 404);
+      if (requestedOrganizationId !== undefined && row.organization_id !== requestedOrganizationId) {
+        throw new WorkspaceServerError("workspace_bundle_source_organization_mismatch", 409);
+      }
       const expectedVersion = input.expectedWorkspaceVersion ?? input.expected_workspace_version;
       if (expectedVersion !== undefined && Number(row.version) !== expectedVersion) throw new WorkspaceServerError("workspace_version_conflict", 409);
       const owner = await sql.query<{ allowed: boolean }>("SELECT samurai_can_workspace($1, 'owner') AS allowed", [workspaceId]);
       if (owner.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_owner_permission_required", 403);
       return row;
     });
-    return { bundleId: `bundle_${context.operationId}`, workspaceId, sourceOrganizationId: organizationId, workspaceVersion: Number(workspace.version), state: workspace.state, createdAt: iso(workspace.created_at) };
+    return {
+      bundleId: `bundle_${context.operationId}`,
+      workspaceId,
+      ...(workspace.organization_id ? { sourceOrganizationId: workspace.organization_id } : {}),
+      workspaceVersion: Number(workspace.version),
+      state: workspace.state,
+      createdAt: iso(workspace.created_at)
+    };
   }
 
-  /** Restore is executed by the Bundle service; this method validates the
-   * selected target Organization before that service performs file/database work. */
+  /** Restore is executed by the Bundle service.  The default target is a
+   * standalone Workspace; an explicit target Organization is validated before
+   * that service performs file/database work. */
   async restoreWorkspaceBundle(context: OrganizationRequestContext, input: { bundleId?: string; bundle_id?: string; targetOrganizationId?: string; target_organization_id?: string; confirm?: true }): Promise<Record<string, unknown>> {
-    const targetOrganizationId = organizationIdFrom(context, input.targetOrganizationId ?? input.target_organization_id);
+    const targetOrganizationId = optionalOrganizationId(
+      input.targetOrganizationId ?? input.target_organization_id ?? context.organizationId,
+      "organization_id_invalid"
+    );
     const bundleId = assertOpaqueId(input.bundleId ?? input.bundle_id ?? "", "workspace_bundle_id_invalid");
-    await this.database.withContext({ accountId: context.accountId }, async (sql) => {
-      const allowed = await sql.query<{ allowed: boolean }>("SELECT samurai_can_organization($1, 'admin') AS allowed", [targetOrganizationId]);
-      if (allowed.rows[0]?.allowed !== true) throw new WorkspaceServerError("organization_admin_permission_required", 403);
-    });
-    return { bundleId, targetOrganizationId, status: "authorized" };
+    if (targetOrganizationId !== undefined) {
+      await this.database.withContext({ accountId: context.accountId }, async (sql) => {
+        const allowed = await sql.query<{ allowed: boolean }>("SELECT samurai_can_organization($1, 'admin') AS allowed", [targetOrganizationId]);
+        if (allowed.rows[0]?.allowed !== true) throw new WorkspaceServerError("organization_admin_permission_required", 403);
+      });
+    }
+    return { bundleId, ...(targetOrganizationId ? { targetOrganizationId } : {}), status: "authorized" };
   }
 
   async createWorkspace(input: CreateWorkspaceInput): Promise<{ workspace: WorkspaceSummary; defaultRoom: WorkspaceRoom; replayed?: boolean }> {
@@ -985,7 +1195,13 @@ export class WorkspaceServerStore {
     const roomId = operationScopedId("room", workspaceId, input.operationId);
     const result = await this.runAccountIdempotentResult(input.ownerAccountId, input.operationId, workspaceId, {
       action: "workspace.create",
-      input: { id: workspaceId, name: input.name.trim(), mode, databasePlacement: input.databasePlacement, organizationId: input.organizationId ?? null }
+      input: {
+        id: workspaceId,
+        name: input.name.trim(),
+        mode,
+        ...(input.databasePlacement ? { databasePlacement: input.databasePlacement } : {}),
+        organizationId: input.organizationId ?? null
+      }
     }, async (sql) => {
       try {
         const values = [
@@ -2107,14 +2323,16 @@ export class WorkspaceServerStore {
     assertOpaqueId(operationId, "operation_id_invalid");
     const resources = input.resources ?? [];
     return this.database.withContext(context, async (sql) => {
-      const workspaceScope = await sql.query<{ organization_id: string }>(
+      const workspaceScope = await sql.query<{ organization_id: string | null }>(
         "SELECT organization_id FROM workspaces WHERE id = $1", [context.workspaceId]
       );
-      const organizationId = workspaceScope.rows[0]?.organization_id;
-      if (!organizationId) throw new WorkspaceServerError("workspace_not_found", 404);
-      if (input.organizationId && input.organizationId !== organizationId) {
-        throw new WorkspaceServerError("workspace_event_organization_mismatch", 409);
-      }
+      if (!workspaceScope.rows[0]) throw new WorkspaceServerError("workspace_not_found", 404);
+      // Organization is only Event provenance. Workspace membership and Room
+      // authorization were checked above; a standalone Workspace therefore
+      // legitimately writes a NULL organization_id. An explicit provenance
+      // reference is preserved even after a Workspace is detached or moved;
+      // it never participates in the content authorization decision.
+      const organizationId = input.organizationId ?? workspaceScope.rows[0].organization_id;
       if (input.roomId) {
         const authorizationAction = input.authorizationAction ?? "edit";
         const allowed = await sql.query<{ allowed: boolean }>(
@@ -2383,6 +2601,30 @@ export class WorkspaceServerStore {
   }
 
   /**
+   * Replays a failed transfer phase only when the caller opts into this
+   * transfer-specific lane. Ordinary idempotent operations retain the
+   * terminal `workspace_operation_previously_failed` behavior.
+   */
+  async runTransferIdempotent<T>(
+    context: WorkspaceRequestContext,
+    request: { action: string; input: unknown },
+    action: (sql: WorkspaceSql) => Promise<T>
+  ): Promise<T> {
+    return (await this.runTransferIdempotentResult(context, request, action)).value;
+  }
+
+  async runTransferIdempotentResult<T>(
+    context: WorkspaceRequestContext,
+    request: { action: string; input: unknown },
+    action: (sql: WorkspaceSql) => Promise<T>
+  ): Promise<IdempotentOperationResult<T>> {
+    if (!isTransferReplayAction(request.action)) {
+      throw new WorkspaceServerError("workspace_transfer_replay_not_allowed", 400);
+    }
+    return this.runIdempotentResult(context, request, action, { allowFailedTransferReplay: true });
+  }
+
+  /**
    * Internal services that must decide whether to emit an external signal use
    * this instead of guessing from the returned value.  The result itself is
    * still stored exactly once in the operation ledger.
@@ -2419,14 +2661,57 @@ export class WorkspaceServerStore {
       );
       if (!inserted.rows[0]) {
         const existing = await sql.query<{ request_hash: string; status: string; result: unknown }>(
-          "SELECT request_hash, status, result FROM workspace_operations WHERE workspace_id = $1 AND idempotency_key = $2",
+          "SELECT request_hash, status, result FROM workspace_operations WHERE workspace_id = $1 AND idempotency_key = $2 FOR UPDATE",
           [context.workspaceId, context.operationId]
         );
         const operation = existing.rows[0];
         if (!operation || operation.request_hash !== requestHash) throw new WorkspaceServerError("workspace_operation_id_reused", 409);
-        if (operation.status === "failed") throw new WorkspaceServerError("workspace_operation_previously_failed", 409);
-        if (operation.status !== "completed" || operation.result === null) throw new WorkspaceServerError("workspace_operation_in_progress", 409);
-        return { value: operation.result as T, replayed: true };
+        if (operation.status === "failed") {
+          if (!options.allowFailedTransferReplay || !isTransferReplayAction(request.action)) {
+            throw new WorkspaceServerError("workspace_operation_previously_failed", 409);
+          }
+          const retried = await sql.query<{ id: string }>(
+            `UPDATE workspace_operations SET status = 'running', result = NULL, error_code = NULL, updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2 AND request_hash = $3 AND status = 'failed'
+             RETURNING id`,
+            [context.workspaceId, context.operationId, requestHash]
+          );
+          if (!retried.rows[0]) throw new WorkspaceServerError("workspace_operation_previously_failed", 409);
+        } else {
+          if (operation.status !== "completed" || operation.result === null) throw new WorkspaceServerError("workspace_operation_in_progress", 409);
+          // `begin` completes its operation ledger before the file export. If
+          // that later export fails, the transfer is returned to `active` and
+          // marked `failed`/`rolled_back` by the transfer SQL function. The
+          // same explicit begin operation is then allowed to reopen the
+          // ledger, but only while the durable transfer is terminal and the
+          // request hash is still identical. A successful transfer remains a
+          // normal idempotent replay and is never executed twice.
+          const transferId = options.allowFailedTransferReplay && request.action === "workspace.transfer.begin"
+            ? transferIdFromInput(request.input)
+            : undefined;
+          if (!transferId) return { value: operation.result as T, replayed: true };
+          const transfer = await sql.query<{ state: string }>(
+            // This is a read-only terminal-state probe.  The Workspace
+            // transfer table intentionally has no UPDATE policy for the
+            // caller, so SELECT ... FOR UPDATE would be filtered by RLS even
+            // when the owner can read the row.  The operation row is already
+            // locked above and the conditional operation UPDATE below keeps
+            // the reopen atomic; the transfer SQL functions remain the
+            // authority for their own row lock and state transition.
+            "SELECT state FROM workspace_transfers WHERE workspace_id = $1 AND id = $2",
+            [context.workspaceId, transferId]
+          );
+          if (transfer.rows[0]?.state !== "failed" && transfer.rows[0]?.state !== "rolled_back") {
+            return { value: operation.result as T, replayed: true };
+          }
+          const retried = await sql.query<{ id: string }>(
+            `UPDATE workspace_operations SET status = 'running', result = NULL, error_code = NULL, updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2 AND request_hash = $3 AND status = 'completed'
+             RETURNING id`,
+            [context.workspaceId, context.operationId, requestHash]
+          );
+          if (!retried.rows[0]) throw new WorkspaceServerError("workspace_operation_in_progress", 409);
+        }
       }
       // A rejected write can be a PostgreSQL error.  PostgreSQL marks the
       // surrounding transaction as failed in that case, so keep the business
@@ -2712,6 +2997,22 @@ export class WorkspaceServerStore {
     return { ...result.value, replayed: result.replayed };
   }
 
+  private async organizationWorkspaceSummary(
+    sql: WorkspaceSql,
+    accountId: string,
+    row: OrganizationWorkspaceRow
+  ): Promise<OrganizationWorkspaceSummary> {
+    const member = await sql.query<{ role: WorkspaceMembershipRole }>(
+      `SELECT role FROM workspace_members
+       WHERE workspace_id = $1 AND account_id = $2 AND state = 'active'`,
+      [row.id, accountId]
+    );
+    return organizationWorkspaceFromRow({
+      ...row,
+      workspace_role: member.rows[0]?.role ?? null
+    });
+  }
+
   private async assertWorkspaceWritable(sql: WorkspaceSql, workspaceId: string): Promise<void> {
     const result = await sql.query<{ state: WorkspaceState }>("SELECT state FROM workspaces WHERE id = $1", [workspaceId]);
     const state = result.rows[0]?.state;
@@ -2795,11 +3096,13 @@ export class WorkspaceServerStore {
     recordId?: string;
     payload: WorkspaceRecordPayload;
   }): Promise<WorkspaceEvent> {
-    const workspace = await sql.query<{ organization_id: string }>(
+    const workspace = await sql.query<{ organization_id: string | null }>(
       "SELECT organization_id FROM workspaces WHERE id = $1", [context.workspaceId]
     );
-    const organizationId = workspace.rows[0]?.organization_id;
-    if (!organizationId) throw new WorkspaceServerError("workspace_not_found", 404);
+    if (!workspace.rows[0]) throw new WorkspaceServerError("workspace_not_found", 404);
+    // Event provenance follows the current association when one exists; a
+    // standalone Workspace intentionally keeps this column NULL.
+    const organizationId = workspace.rows[0].organization_id;
     const saved = await sql.query<EventRow>(
       `INSERT INTO workspace_events(workspace_id, organization_id, room_id, kind, record_type, record_id, operation_id, payload)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::JSONB)
@@ -2871,7 +3174,7 @@ interface OrganizationInvitationGrantRow {
 
 interface OrganizationWorkspaceRow {
   id: string;
-  organization_id: string;
+  organization_id: string | null;
   name: string;
   state: WorkspaceState;
   version: number | string;
@@ -2888,7 +3191,7 @@ interface OrganizationWorkspaceMoveMemberRow {
 
 interface WorkspaceSummaryRow {
   id: string;
-  organization_id?: string;
+  organization_id: string | null;
   name: string;
   state: WorkspaceState;
   hosting_mode: WorkspaceServerMode;
@@ -3063,6 +3366,12 @@ function organizationIdFrom(context: OrganizationRequestContext, explicit: strin
   return id!;
 }
 
+function optionalOrganizationId(value: string | null | undefined, code: string): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  assertOpaqueId(value, code);
+  return value;
+}
+
 function assertOrganizationRole(value: string): asserts value is OrganizationRole {
   if (value !== "owner" && value !== "admin" && value !== "member" && value !== "guest") {
     throw new WorkspaceServerError("organization_role_invalid", 400);
@@ -3174,9 +3483,17 @@ function parseJsonObject(value: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function arrayOfStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function optionalResultString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 function organizationWorkspaceFromRow(row: OrganizationWorkspaceRow): OrganizationWorkspaceSummary {
   return {
-    organizationId: row.organization_id,
+    ...(row.organization_id ? { organizationId: row.organization_id } : {}),
     workspaceId: row.id,
     name: row.name,
     state: row.state,
@@ -3209,6 +3526,8 @@ function mapOrganizationPostgresError(error: unknown, _fallback: string): unknow
     ["organization_member_not_found", "organization_member_not_found", 404],
     ["organization_admin_permission_required", "organization_admin_permission_required", 403],
     ["organization_owner_permission_required", "organization_owner_permission_required", 403],
+    ["organization_expected_version_invalid", "organization_expected_version_invalid", 400],
+    ["organization_version_conflict", "organization_version_conflict", 409],
     ["organization_last_owner_cannot_be_changed", "organization_last_owner_cannot_be_changed", 409],
     ["organization_membership_version_conflict", "organization_membership_version_conflict", 409],
     ["organization_invitation_not_found", "organization_invitation_not_found", 404],
@@ -3252,16 +3571,22 @@ function organizationOperationFailureProjection(
   operationId: string,
   failureCode: string
 ): Record<string, unknown> | undefined {
-  if (request.action !== "workspace.organization.move.commit") return undefined;
+  if (![
+    "workspace.organization.move.commit",
+    "workspace.organization.attach",
+    "workspace.organization.detach"
+  ].includes(request.action)) return undefined;
   const input = request.input && typeof request.input === "object" && !Array.isArray(request.input)
     ? request.input as Record<string, unknown>
     : {};
   const value = (key: string): string | undefined => typeof input[key] === "string" ? input[key] as string : undefined;
+  const sourceId = value("sourceId") ?? (request.action === "workspace.organization.detach" ? value("organizationId") : undefined);
+  const targetId = value("targetId") ?? (request.action === "workspace.organization.attach" ? value("organizationId") : undefined);
   return {
     operationId,
-    workspaceId: value("workspaceId") ?? "unknown",
-    sourceOrganizationId: value("sourceId") ?? "unknown",
-    targetOrganizationId: value("targetId") ?? "unknown",
+    ...(value("workspaceId") ? { workspaceId: value("workspaceId") } : {}),
+    ...(sourceId ? { sourceOrganizationId: sourceId } : {}),
+    ...(targetId ? { targetOrganizationId: targetId } : {}),
     status: "failed",
     guestMembershipAccountIds: [],
     failureCode

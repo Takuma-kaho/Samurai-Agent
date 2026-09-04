@@ -333,14 +333,85 @@ export interface DesktopWorkspaceConnection {
   id: string;
   label: string;
   serverUrl: string;
-  workspaceId: string;
+  /** Legacy active Workspace mirror; target-aware registries may omit it. */
+  workspaceId?: string;
   accountId: string;
   createdAt: string;
   updatedAt: string;
 }
 
+/**
+ * Workspace IDs are server-local.  Every renderer-side navigation operation
+ * therefore carries the connection and Workspace together.
+ */
+export interface DesktopWorkspaceTarget {
+  connectionId: string;
+  workspaceId: string;
+}
+
+export type DesktopWorkspaceConnectionAvailability = "unknown" | "connected" | "reconnecting" | "offline";
+
+/** Sanitized account-scoped Workspace projection used by the unified switcher. */
+export interface DesktopWorkspaceDirectoryEntry {
+  connectionId: string;
+  workspaceId: string;
+  target?: DesktopWorkspaceTarget;
+  accountId?: string;
+  serverUrl?: string;
+  serverLabel?: string;
+  connectionLabel?: string;
+  organizationId?: string;
+  name: string;
+  state?: "active" | "archived" | "read_only";
+  role?: "owner" | "admin" | "member" | "guest";
+  access?: "granted" | "none";
+  version?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  availability?: DesktopWorkspaceConnectionAvailability;
+  error?: string;
+}
+
+export interface DesktopWorkspaceDirectoryError {
+  connectionId: string;
+  serverUrl?: string;
+  serverLabel?: string;
+  code: string;
+  message: string;
+}
+
+export interface DesktopWorkspaceDirectoryResult {
+  workspaces: DesktopWorkspaceDirectoryEntry[];
+  errors?: DesktopWorkspaceDirectoryError[];
+  connections?: DesktopWorkspaceConnectionState;
+}
+
+/** Renderer-safe contract for the long-running Server-to-Server transfer. */
+export interface DesktopWorkspaceTransferInput {
+  source: DesktopWorkspaceTarget;
+  destination: DesktopWorkspaceTarget;
+  operationId?: string;
+}
+
+export interface DesktopWorkspaceTransferStatusInput extends DesktopWorkspaceTransferInput {
+  transferId: string;
+}
+
+export interface DesktopWorkspaceBundleExportInput {
+  workspaceId: string;
+  expectedWorkspaceVersion?: number;
+  operationId?: string;
+}
+
+export interface DesktopWorkspaceBundleRestoreInput {
+  bundleId: string;
+  targetWorkspaceId?: string;
+  operationId?: string;
+}
+
 export interface DesktopWorkspaceConnectionState {
   activeConnectionId?: string;
+  activeTarget?: DesktopWorkspaceTarget;
   connections: DesktopWorkspaceConnection[];
 }
 
@@ -455,6 +526,7 @@ export interface DesktopRoomMemberPreview {
 export interface DesktopWorkspaceRealtimeEvent {
   type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
   workspaceId: string;
+  connectionId?: string;
   roomId?: string;
   kind?: string;
 }
@@ -477,18 +549,41 @@ declare global {
       workspaceId?: string;
       accountId?: string;
       listWorkspaceConnections?: () => Promise<DesktopWorkspaceConnectionState>;
+      /** Account-scoped, sanitized Workspace directory across connections. */
+      listWorkspaceDirectory?: () => Promise<DesktopWorkspaceDirectoryResult>;
+      /** Optional per-connection fallback for older Desktop builds. */
+      listWorkspaceAccountWorkspaces?: (input: { connectionId: string }) => Promise<DesktopWorkspaceDirectoryResult | unknown>;
+      /** Workspace-first account-scoped creation; Organization is optional. */
+      createWorkspace?: (input: { name: string; workspaceId?: string; operationId?: string }) => Promise<unknown>;
+      /** Standalone Bundle portability. Organization association is optional. */
+      exportWorkspaceBundle?: (input: DesktopWorkspaceBundleExportInput) => Promise<unknown>;
+      restoreWorkspaceBundle?: (input: DesktopWorkspaceBundleRestoreInput) => Promise<unknown>;
+      /** Server-to-Server transfer lifecycle. Browser fallback intentionally omits these. */
+      preflightWorkspaceTransfer?: (input: DesktopWorkspaceTransferInput) => Promise<unknown>;
+      executeWorkspaceTransfer?: (input: DesktopWorkspaceTransferStatusInput) => Promise<unknown>;
+      getWorkspaceTransferStatus?: (input: DesktopWorkspaceTransferStatusInput) => Promise<unknown>;
+      /** Restart-safe, credential-free transfer checkpoints from Desktop. */
+      listWorkspaceTransfers?: () => Promise<unknown>;
+      /** Commit the already verified transfer target in the Desktop registry. */
+      cutoverWorkspaceTarget?: (input: DesktopWorkspaceTransferInput & { lastRoomId?: string }) => Promise<unknown>;
       upsertWorkspaceConnection?: (input: {
         label: string;
         serverUrl: string;
-        workspaceId: string;
+        workspaceId?: string;
         accountId: string;
+        targets?: DesktopWorkspaceTarget[];
       }) => Promise<DesktopWorkspaceConnectionState>;
       selectWorkspaceConnection?: (connectionId: string) => Promise<DesktopWorkspaceConnectionState>;
-      /** Transitional selector. Server authorization still runs on the next Workspace query. */
-      selectWorkspaceCandidate?: (workspaceId: string) => Promise<DesktopWorkspaceConnectionState>;
+      /**
+       * Target-aware selector.  The string form remains accepted by old
+       * preload builds and is only safe after selecting the matching
+       * connection separately.
+       */
+      selectWorkspaceCandidate?: (input: string | DesktopWorkspaceTarget) => Promise<DesktopWorkspaceConnectionState | unknown>;
+      selectWorkspaceTarget?: (target: DesktopWorkspaceTarget) => Promise<DesktopWorkspaceConnectionState | unknown>;
       importActiveWorkspaceIdentityFromClipboard?: () => Promise<DesktopWorkspaceConnectionState>;
       registerWorkspaceServerAccount?: (displayName?: string) => Promise<unknown>;
-      getWorkspaceServerStatus?: () => Promise<DesktopWorkspaceServerStatus>;
+      getWorkspaceServerStatus?: (target?: Partial<DesktopWorkspaceTarget>) => Promise<DesktopWorkspaceServerStatus | unknown>;
       // Account-scoped Organization control-plane bridge. These methods only
       // carry sanitized projections; the preload keeps signing credentials in
       // the main process.
@@ -510,6 +605,11 @@ declare global {
       extendOrganizationInvitation?: (input: Record<string, unknown>) => Promise<unknown>;
       listOrganizationWorkspaces?: (input: { organizationId: string }) => Promise<unknown>;
       createOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
+      attachOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
+      detachOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
+      /** Alias used by the first target-aware Desktop preload. */
+      attachWorkspaceToOrganization?: (input: Record<string, unknown>) => Promise<unknown>;
+      detachWorkspaceFromOrganization?: (input: Record<string, unknown>) => Promise<unknown>;
       patchOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
       grantOrganizationWorkspaceMember?: (input: Record<string, unknown>) => Promise<unknown>;
       revokeOrganizationWorkspaceMember?: (input: Record<string, unknown>) => Promise<unknown>;

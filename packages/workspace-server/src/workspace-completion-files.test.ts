@@ -42,10 +42,21 @@ describe("Workspace completion files", () => {
     expect(() => isWorkspaceCompletionOwnedPath("../outside.md")).toThrow(WorkspaceServerError);
   });
 
-  it("keeps an allowed auxiliary file outside the four conventional Skill folders", () => {
-    expect(assertSkillSupportRelativePath("assets/icons/skill.bin")).toBe("assets/icons/skill.bin");
-    expect(() => assertSkillSupportRelativePath("SKILL.md")).toThrow(WorkspaceServerError);
-    expect(() => assertSkillSupportRelativePath("../outside.bin")).toThrow(WorkspaceServerError);
+  it("accepts only the four Skill support roots enforced by PostgreSQL", () => {
+    for (const relativePath of ["references/portable-fixture.md", "scripts/check.sh", "templates/prompt.md", "examples/example.json"]) {
+      expect(assertSkillSupportRelativePath(relativePath)).toBe(relativePath);
+    }
+  });
+
+  it("returns the API validation error before an invalid Skill support path reaches PostgreSQL", () => {
+    for (const relativePath of ["assets/icons/skill.bin", "SKILL.md", "references", "../outside.bin"]) {
+      expect(() => assertSkillSupportRelativePath(relativePath)).toThrow(WorkspaceServerError);
+      try {
+        assertSkillSupportRelativePath(relativePath);
+      } catch (error) {
+        expect(error).toMatchObject({ code: "workspace_completion_skill_support_path_invalid", status: 422 });
+      }
+    }
   });
 
   it("keeps a Workspace-common batch independent of any Room", async () => {

@@ -7,6 +7,7 @@ import type { WorkspaceCompletionFileEntry, WorkspaceCompletionResourceKind, Wor
 
 const frontmatterBoundary = "---";
 const resourceIdPattern = /^[a-z][a-z0-9_:-]{0,127}$/;
+const skillSupportRelativePathPattern = /^(?:references|scripts|templates|examples)\/.+/;
 const completionOwnedRoots = new Set([".completion-staging", ".versions", "knowledge", "policies", "profile", "skills"]);
 
 export interface WorkspaceCompletionDocument {
@@ -171,10 +172,10 @@ export function completionProfilePath(kind: "profile" | "soul"): string {
   return kind === "profile" ? "profile/PROFILE.md" : "profile/SOUL.md";
 }
 
-/** A Skill package may contain any safe auxiliary file, not only the common
- * references/scripts/templates/examples directories.  `SKILL.md` remains the
- * one canonical package entrypoint, while assertSafeRelativePath prevents a
- * caller from escaping the package with an absolute or traversal path. */
+/** A Skill package's auxiliary files are kept under the same four roots as the
+ * PostgreSQL relative_path constraint. `SKILL.md` remains the one canonical
+ * package entrypoint, while assertSafeRelativePath prevents a caller from
+ * escaping the package with an absolute or traversal path. */
 export function completionSkillSupportPath(input: { id: string; relativePath: string; version?: number; candidate?: boolean }): string {
   if (!resourceIdPattern.test(input.id)) throw new WorkspaceServerError("workspace_completion_resource_id_invalid", 400);
   const relative = assertSkillSupportRelativePath(input.relativePath);
@@ -186,8 +187,13 @@ export function completionSkillSupportPath(input: { id: string; relativePath: st
 }
 
 export function assertSkillSupportRelativePath(value: string): string {
-  const relative = assertSafeRelativePath(value);
-  if (relative === "SKILL.md") {
+  let relative: string;
+  try {
+    relative = assertSafeRelativePath(value);
+  } catch {
+    throw new WorkspaceServerError("workspace_completion_skill_support_path_invalid", 422);
+  }
+  if (relative === "SKILL.md" || !skillSupportRelativePathPattern.test(relative)) {
     throw new WorkspaceServerError("workspace_completion_skill_support_path_invalid", 422);
   }
   return relative;

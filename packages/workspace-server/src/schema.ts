@@ -9533,10 +9533,10 @@ const migrations: readonly WorkspaceServerMigration[] = [
         INSERT INTO organization_invitation_workspace_grants(
           id, organization_id, invitation_id, workspace_id, workspace_role, room_id, room_role
         )
-        SELECT 'orggrant_' || md5(replacement_invitation_id || '|' || grant.workspace_id || '|' || COALESCE(grant.room_id, '')),
-          grant.organization_id, replacement_invitation_id, grant.workspace_id, grant.workspace_role, grant.room_id, grant.room_role
-        FROM organization_invitation_workspace_grants grant
-        WHERE grant.invitation_id = target_invitation_id;
+        SELECT 'orggrant_' || md5(replacement_invitation_id || '|' || invitation_grant.workspace_id || '|' || COALESCE(invitation_grant.room_id, '')),
+          invitation_grant.organization_id, replacement_invitation_id, invitation_grant.workspace_id, invitation_grant.workspace_role, invitation_grant.room_id, invitation_grant.room_role
+        FROM organization_invitation_workspace_grants invitation_grant
+        WHERE invitation_grant.invitation_id = target_invitation_id;
         INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
         VALUES (target_organization_id, 'organization.member.invitation_reissued', target_operation_id,
           samurai_current_account_id(), jsonb_build_object('invitation_id', target_invitation_id, 'replacement_invitation_id', replacement_invitation_id));
@@ -9824,8 +9824,8 @@ const migrations: readonly WorkspaceServerMigration[] = [
         -- be carried across a move without also moving the invitation, so
         -- invalidate those grants atomically before changing the Workspace
         -- ownership.  The invitation metadata remains auditable in source.
-        DELETE FROM organization_invitation_workspace_grants grant
-        WHERE grant.workspace_id = target_workspace_id;
+        DELETE FROM organization_invitation_workspace_grants invitation_grant
+        WHERE invitation_grant.workspace_id = target_workspace_id;
         PERFORM set_config('samurai.organization_move', '1', true);
         PERFORM set_config('samurai.workspace_id', target_workspace_id, true);
         UPDATE workspaces
@@ -10208,8 +10208,8 @@ const migrations: readonly WorkspaceServerMigration[] = [
             added_guest_account_ids := array_append(added_guest_account_ids, member_row.account_id);
           END IF;
         END LOOP;
-        DELETE FROM organization_invitation_workspace_grants grant
-        WHERE grant.workspace_id = target_workspace_id;
+        DELETE FROM organization_invitation_workspace_grants invitation_grant
+        WHERE invitation_grant.workspace_id = target_workspace_id;
         PERFORM set_config('samurai.organization_move', '1', true);
         PERFORM set_config('samurai.workspace_id', target_workspace_id, true);
         UPDATE workspaces
@@ -10247,6 +10247,1490 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "REVOKE EXECUTE ON FUNCTION samurai_accept_organization_invitation(TEXT, TEXT) FROM PUBLIC",
       "REVOKE EXECUTE ON FUNCTION samurai_revoke_organization_pending_invitations() FROM PUBLIC",
       "REVOKE EXECUTE ON FUNCTION samurai_guard_organization_invitation_accept() FROM PUBLIC"
+    ]
+  },
+  {
+    // Workspace-first correction for the published Organization boundary.
+    // Keep v78/v79 immutable and make the correction a single, retry-safe
+    // migration instead.  organization_id is an optional association and
+    // workspace_events.organization_id is historical provenance only.
+    version: 80,
+    name: "workspace_server_workspace_first_organization_optional",
+    statements: [
+      "ALTER TABLE workspaces ALTER COLUMN organization_id DROP NOT NULL",
+      "ALTER TABLE workspace_events ALTER COLUMN organization_id DROP NOT NULL",
+      "ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS workspaces_organization_id_fkey",
+      "ALTER TABLE workspace_events DROP CONSTRAINT IF EXISTS workspace_events_organization_id_fkey",
+      `DO $workspace_first_organization_foreign_keys$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'workspaces_organization_id_fkey'
+            AND conrelid = 'workspaces'::regclass
+        ) THEN
+          ALTER TABLE workspaces ADD CONSTRAINT workspaces_organization_id_fkey
+            FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'workspace_events_organization_id_fkey'
+            AND conrelid = 'workspace_events'::regclass
+        ) THEN
+          ALTER TABLE workspace_events ADD CONSTRAINT workspace_events_organization_id_fkey
+            FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL;
+        END IF;
+      END
+      $workspace_first_organization_foreign_keys$`,
+      "CREATE INDEX IF NOT EXISTS workspaces_organization_id_lookup ON workspaces(organization_id) WHERE organization_id IS NOT NULL",
+      // v78 predates an origin column.  Reconstruct a marker only from the
+      // migration transaction timestamp, creator, and reserved ID formula;
+      // an explicitly-created Organization with a colliding ID is therefore
+      // never treated as legacy data.
+      "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS legacy_backfill_marker TEXT",
+      // Transfer records already use Workspace IDs as their primary scope.
+      // Add only optional, Organization-independent metadata needed by the
+      // later cross-Server cutover flow; existing states and callers remain
+      // valid and old rows receive deterministic source/idempotency values.
+      // Keep the v1 lifecycle values for old callers and add the explicit
+      // Phase 4 states so a persisted transfer can distinguish restoration,
+      // verification, cutover, and source-retention/deletion checkpoints.
+      "ALTER TABLE workspace_transfers DROP CONSTRAINT IF EXISTS workspace_transfers_state_check",
+      "ALTER TABLE workspace_transfers ADD CONSTRAINT workspace_transfers_state_check CHECK (state IN ('preparing', 'exported', 'imported', 'committed', 'rolled_back', 'failed', 'restoring', 'verified', 'cutover', 'source_retained', 'source_deleted'))",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS source_workspace_id TEXT",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS source_server_key TEXT",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS target_server_key TEXT",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS source_integrity_hash TEXT",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS target_integrity_hash TEXT",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS idempotency_key TEXT",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS cutover_at TIMESTAMPTZ",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS source_archived_at TIMESTAMPTZ",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS source_deleted_at TIMESTAMPTZ",
+      "ALTER TABLE workspace_transfers ADD COLUMN IF NOT EXISTS transfer_metadata JSONB NOT NULL DEFAULT '{}'::JSONB",
+      "UPDATE workspace_transfers SET source_workspace_id = workspace_id WHERE source_workspace_id IS NULL",
+      "UPDATE workspace_transfers SET idempotency_key = id WHERE idempotency_key IS NULL",
+      "CREATE UNIQUE INDEX IF NOT EXISTS workspace_transfers_idempotency_unique ON workspace_transfers(workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL",
+      `DO $workspace_transfer_metadata_constraints$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'workspace_transfers_metadata_object'
+            AND conrelid = 'workspace_transfers'::regclass
+        ) THEN
+          ALTER TABLE workspace_transfers ADD CONSTRAINT workspace_transfers_metadata_object
+            CHECK (jsonb_typeof(transfer_metadata) = 'object');
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'workspace_transfers_idempotency_key_nonempty'
+            AND conrelid = 'workspace_transfers'::regclass
+        ) THEN
+          ALTER TABLE workspace_transfers ADD CONSTRAINT workspace_transfers_idempotency_key_nonempty
+            CHECK (idempotency_key IS NULL OR btrim(idempotency_key) <> '');
+        END IF;
+      END
+      $workspace_transfer_metadata_constraints$`,
+      `CREATE OR REPLACE FUNCTION samurai_workspace_transfer_metadata_defaults() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        NEW.source_workspace_id := COALESCE(NEW.source_workspace_id, NEW.workspace_id);
+        NEW.idempotency_key := COALESCE(NEW.idempotency_key, NEW.id);
+        IF NEW.state = 'exported' AND NEW.source_integrity_hash IS NULL THEN
+          NEW.source_integrity_hash := NEW.bundle_hash;
+        END IF;
+        IF NEW.state IN ('imported', 'verified') THEN
+          NEW.verified_at := COALESCE(NEW.verified_at, NOW());
+          IF NEW.target_integrity_hash IS NULL AND NEW.target_receipt IS NOT NULL THEN
+            NEW.target_integrity_hash := NEW.target_receipt->>'target_integrity_hash';
+          END IF;
+        END IF;
+        IF NEW.state IN ('committed', 'cutover', 'source_retained', 'source_deleted') THEN
+          NEW.cutover_at := COALESCE(NEW.cutover_at, NOW());
+        END IF;
+        IF NEW.state IN ('committed', 'source_retained', 'source_deleted') THEN
+          NEW.source_archived_at := COALESCE(NEW.source_archived_at, NOW());
+        END IF;
+        IF NEW.state = 'source_deleted' THEN
+          NEW.source_deleted_at := COALESCE(NEW.source_deleted_at, NOW());
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_transfers_metadata_defaults ON workspace_transfers",
+      "CREATE TRIGGER workspace_transfers_metadata_defaults BEFORE INSERT OR UPDATE ON workspace_transfers FOR EACH ROW EXECUTE FUNCTION samurai_workspace_transfer_metadata_defaults()",
+      // Migration cleanup runs while the Organization tables are forced into
+      // RLS.  These policies are transaction-local in practice: they are
+      // created and dropped inside the migration transaction and are never
+      // recorded as part of the product policy surface.
+      "SELECT set_config('samurai.organization_mutation', '1', true)",
+      "SELECT set_config('samurai.organization_delete', '1', true)",
+      "DROP POLICY IF EXISTS organizations_workspace_first_migration_cleanup ON organizations",
+      `CREATE POLICY organizations_workspace_first_migration_cleanup ON organizations FOR ALL
+        USING (current_setting('samurai.organization_mutation', true) = '1')
+        WITH CHECK (current_setting('samurai.organization_mutation', true) = '1')`,
+      "DROP POLICY IF EXISTS organization_operations_workspace_first_migration_cleanup ON organization_operations",
+      `CREATE POLICY organization_operations_workspace_first_migration_cleanup ON organization_operations FOR DELETE
+        USING (current_setting('samurai.organization_mutation', true) = '1')`,
+      // v79's trigger would silently restore the generated Organization ID on
+      // an event update.  Remove it before clearing historical provenance;
+      // the optional/provenance-only guard is recreated below in this same
+      // transaction.
+      "DROP TRIGGER IF EXISTS workspace_events_organization_guard ON workspace_events",
+      `DO $workspace_first_generated_organization_cleanup$
+      DECLARE generated_organization_ids TEXT[];
+      DECLARE backfill_applied_at TIMESTAMPTZ;
+      BEGIN
+        -- v78 generated one deterministic Organization per Account, but the
+        -- ID alone is not an ownership proof.  NOW() is transaction-stable,
+        -- so the generated row's created_at equals v78's ledger applied_at.
+        -- If that historical marker is unavailable, fail closed and leave all
+        -- Organizations untouched rather than guessing.
+        SELECT applied_at INTO backfill_applied_at
+        FROM samurai_server_schema_migrations
+        WHERE version = 78
+          AND name = 'workspace_server_organization_boundary_and_workspace_backfill';
+        IF backfill_applied_at IS NULL THEN
+          RETURN;
+        END IF;
+
+        UPDATE organizations organization
+        SET legacy_backfill_marker = 'workspace_server_v78_account_backfill'
+        FROM accounts account
+        WHERE organization.legacy_backfill_marker IS NULL
+          AND organization.id = 'org_' || md5('samurai.legacy.organization|' || account.id)
+          AND organization.created_by = account.id
+          AND organization.created_at = backfill_applied_at;
+
+        SELECT COALESCE(array_agg(organization.id ORDER BY organization.id), ARRAY[]::TEXT[])
+        INTO generated_organization_ids
+        FROM organizations organization
+        WHERE organization.legacy_backfill_marker = 'workspace_server_v78_account_backfill';
+
+        IF cardinality(generated_organization_ids) = 0 THEN
+          RETURN;
+        END IF;
+
+        -- Grants use a composite Organization/Workspace foreign key, so
+        -- remove generated grants before making the Workspace independent.
+        DELETE FROM organization_invitation_workspace_grants
+        WHERE organization_id = ANY(generated_organization_ids);
+        DELETE FROM organization_invitations
+        WHERE organization_id = ANY(generated_organization_ids);
+        DELETE FROM organization_events
+        WHERE organization_id = ANY(generated_organization_ids);
+        DELETE FROM organization_members
+        WHERE organization_id = ANY(generated_organization_ids);
+        DELETE FROM organization_operations
+        WHERE organization_id = ANY(generated_organization_ids);
+
+        PERFORM set_config('samurai.organization_move', '1', true);
+        UPDATE workspace_events
+        SET organization_id = NULL
+        WHERE organization_id = ANY(generated_organization_ids);
+        UPDATE workspaces
+        SET organization_id = NULL, updated_at = COALESCE(updated_at, NOW())
+        WHERE organization_id = ANY(generated_organization_ids);
+
+        DELETE FROM organizations
+        WHERE id = ANY(generated_organization_ids);
+      END
+      $workspace_first_generated_organization_cleanup$`,
+      "DROP POLICY IF EXISTS organizations_workspace_first_migration_cleanup ON organizations",
+      "DROP POLICY IF EXISTS organization_operations_workspace_first_migration_cleanup ON organization_operations",
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_event_organization() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        -- organization_id is provenance from the event's historical point in
+        -- time.  It may be NULL for a standalone Workspace and may differ
+        -- from the Workspace's current Organization after detach/move.
+        -- A portable restore runs under an import session.  Older bundles may
+        -- still send the legacy column or top-level payload keys; normalize
+        -- both at the database boundary so Organization IDs never become
+        -- part of restored Workspace history.  Association-management events
+        -- written outside an import session retain their provenance.
+        IF samurai_is_import_session(NEW.workspace_id) THEN
+          NEW.organization_id := NULL;
+          IF jsonb_typeof(NEW.payload) = 'object' THEN
+            NEW.payload := NEW.payload - ARRAY[
+              'organization_id', 'source_organization_id', 'target_organization_id'
+            ]::TEXT[];
+          END IF;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM workspaces workspace WHERE workspace.id = NEW.workspace_id) THEN
+          RAISE EXCEPTION 'workspace_event_workspace_not_found';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_events_organization_guard ON workspace_events",
+      "CREATE TRIGGER workspace_events_organization_guard BEFORE INSERT OR UPDATE OF workspace_id, organization_id ON workspace_events FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_event_organization()",
+      // Organization membership is a discovery boundary by default.  The
+      // explicit Organization-admin management path may read only Workspace
+      // metadata and the member-management projection; content policies below
+      // remain Workspace-membership-only.
+      "DROP POLICY IF EXISTS workspaces_read ON workspaces",
+      `CREATE POLICY workspaces_read ON workspaces FOR SELECT USING (
+        (samurai_current_workspace_id() IS NULL OR id = samurai_current_workspace_id())
+        AND (
+          samurai_can_workspace(id, 'guest')
+          OR (organization_id IS NOT NULL AND samurai_can_organization(organization_id, 'admin'))
+        )
+      )`,
+      "DROP POLICY IF EXISTS workspace_members_read ON workspace_members",
+      `CREATE POLICY workspace_members_read ON workspace_members FOR SELECT USING (
+        (samurai_current_workspace_id() IS NULL OR workspace_id = samurai_current_workspace_id())
+        AND (
+          account_id = samurai_current_account_id()
+          OR samurai_can_workspace(workspace_id, 'admin')
+          OR EXISTS (
+            SELECT 1 FROM workspaces workspace
+            WHERE workspace.id = workspace_members.workspace_id
+              AND workspace.organization_id IS NOT NULL
+              AND samurai_can_organization(workspace.organization_id, 'admin')
+          )
+        )
+      )`,
+      `CREATE OR REPLACE FUNCTION samurai_create_workspace(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        default_room_id TEXT,
+        default_room_name TEXT,
+        target_organization_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL THEN
+          RAISE EXCEPTION 'workspace_creation_context_invalid';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = samurai_current_account_id() AND status = 'active') THEN
+          RAISE EXCEPTION 'account_not_found';
+        END IF;
+        IF target_organization_id IS NOT NULL
+          AND NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_hosting_mode NOT IN ('hosted', 'self_host') OR target_database_placement NOT IN ('shared', 'dedicated') THEN
+          RAISE EXCEPTION 'workspace_creation_invalid';
+        END IF;
+        IF EXISTS (SELECT 1 FROM workspaces WHERE id = target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_id_conflict';
+        END IF;
+        INSERT INTO workspaces(id, organization_id, name, state, hosting_mode, storage_namespace, database_placement, created_by)
+        VALUES (target_workspace_id, target_organization_id, workspace_name, 'active', target_hosting_mode,
+          'workspaces/' || target_workspace_id, target_database_placement, samurai_current_account_id());
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version)
+        VALUES (target_workspace_id, samurai_current_account_id(), 'owner', 'active', 1);
+        INSERT INTO rooms(workspace_id, id, name, created_by)
+        VALUES (target_workspace_id, default_room_id, default_room_name, samurai_current_account_id());
+        INSERT INTO room_members(workspace_id, room_id, account_id, role, state, version)
+        VALUES (target_workspace_id, default_room_id, samurai_current_account_id(), 'owner', 'active', 1);
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_workspace(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        default_room_id TEXT,
+        default_room_name TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        -- The legacy six-argument entry point now creates an independent
+        -- Workspace.  Organization attachment is an explicit later action.
+        PERFORM samurai_create_workspace(
+          target_workspace_id, workspace_name, target_hosting_mode,
+          target_database_placement, default_room_id, default_room_name, NULL
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_start_workspace_import(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        import_session_id TEXT,
+        target_initial_version BIGINT,
+        target_organization_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR samurai_current_account_id() IS NULL THEN
+          RAISE EXCEPTION 'workspace_import_context_invalid';
+        END IF;
+        IF target_initial_version < 1 THEN RAISE EXCEPTION 'workspace_import_invalid'; END IF;
+        IF NOT EXISTS (SELECT 1 FROM accounts WHERE id = samurai_current_account_id() AND status = 'active') THEN
+          RAISE EXCEPTION 'account_not_found';
+        END IF;
+        IF target_organization_id IS NOT NULL
+          AND NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_hosting_mode NOT IN ('hosted', 'self_host') OR target_database_placement NOT IN ('shared', 'dedicated') THEN
+          RAISE EXCEPTION 'workspace_import_invalid';
+        END IF;
+        IF EXISTS (SELECT 1 FROM workspaces WHERE id = target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_target_exists';
+        END IF;
+        INSERT INTO workspaces(id, organization_id, name, state, hosting_mode, storage_namespace, database_placement, created_by, version)
+        VALUES (target_workspace_id, target_organization_id, workspace_name, 'read_only', target_hosting_mode,
+          'workspaces/' || target_workspace_id, target_database_placement, samurai_current_account_id(), target_initial_version);
+        INSERT INTO workspace_members(workspace_id, account_id, role, state, version)
+        VALUES (target_workspace_id, samurai_current_account_id(), 'owner', 'active', 1);
+        INSERT INTO workspace_import_sessions(workspace_id, id, account_id, state, expires_at)
+        VALUES (target_workspace_id, import_session_id, samurai_current_account_id(), 'writing', NOW() + INTERVAL '1 hour');
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_start_workspace_import(
+        target_workspace_id TEXT,
+        workspace_name TEXT,
+        target_hosting_mode TEXT,
+        target_database_placement TEXT,
+        import_session_id TEXT,
+        target_initial_version BIGINT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        PERFORM samurai_start_workspace_import(
+          target_workspace_id, workspace_name, target_hosting_mode,
+          target_database_placement, import_session_id, target_initial_version, NULL
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_adopt_workspace_membership(
+        target_workspace_id TEXT,
+        target_account_id TEXT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_organization_id TEXT;
+      DECLARE workspace_role TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF target_account_id IS DISTINCT FROM samurai_current_account_id() THEN
+          RAISE EXCEPTION 'workspace_invitation_invalid';
+        END IF;
+        SELECT workspace.organization_id, member.role INTO workspace_organization_id, workspace_role
+        FROM workspaces workspace
+        JOIN workspace_members member ON member.workspace_id = workspace.id AND member.account_id = target_account_id
+        WHERE workspace.id = target_workspace_id AND member.state = 'active';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_invitation_invalid'; END IF;
+        -- A direct Workspace invitation must not require or manufacture an
+        -- Organization Membership when the Workspace is standalone.
+        IF workspace_organization_id IS NULL THEN RETURN; END IF;
+        INSERT INTO organization_members(
+          organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+        ) VALUES (
+          workspace_organization_id, target_account_id,
+          CASE WHEN workspace_role = 'owner' THEN 'owner' ELSE 'member' END,
+          'active', 1, NOW(), target_account_id, target_account_id
+        ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+          role = CASE WHEN EXCLUDED.role = 'owner' THEN 'owner' ELSE organization_members.role END,
+          state = 'active', removed_at = NULL, version = organization_members.version + 1,
+          updated_by = target_account_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_delete_organization(
+        target_organization_id TEXT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_organization organizations%ROWTYPE;
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE detached_event_key TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        PERFORM set_config('samurai.organization_delete', '1', true);
+        IF NOT samurai_can_organization(target_organization_id, 'owner') THEN
+          RAISE EXCEPTION 'organization_owner_permission_required';
+        END IF;
+        -- Organization -> Workspace is the common lock prefix used by
+        -- attach/detach/move.  Rows are locked in deterministic Workspace ID
+        -- order before their association is cleared.
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        SELECT * INTO current_organization FROM organizations
+        WHERE id = target_organization_id AND deleted_at IS NULL FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_not_found'; END IF;
+        PERFORM set_config('samurai.organization_move', '1', true);
+        FOR workspace_row IN
+          SELECT workspace.* FROM workspaces workspace
+          WHERE workspace.organization_id = target_organization_id
+          ORDER BY workspace.id
+          FOR UPDATE
+        LOOP
+          -- Organization invitation grants are organization-owned metadata;
+          -- removing them permits the composite FK to observe the detached
+          -- Workspace without touching any Workspace data or Membership.
+          DELETE FROM organization_invitation_workspace_grants grant_row
+          WHERE grant_row.organization_id = target_organization_id
+            AND grant_row.workspace_id = workspace_row.id;
+          PERFORM set_config('samurai.workspace_id', workspace_row.id, true);
+          UPDATE workspaces
+          SET organization_id = NULL, version = version + 1, updated_at = NOW()
+          WHERE id = workspace_row.id;
+          detached_event_key := 'event_' || md5('samurai.workspace.organization.detached|' || workspace_row.id || '|' || target_operation_id);
+          INSERT INTO workspace_events(
+            workspace_id, room_id, kind, operation_id, payload,
+            event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+          ) VALUES (
+            workspace_row.id, NULL, 'workspace.organization.detached', target_operation_id,
+            jsonb_build_object('workspace_id', workspace_row.id, 'organization_id', target_organization_id),
+            detached_event_key, '1.0', 'human', samurai_current_account_id(), target_organization_id,
+            'cursor_' || md5(detached_event_key), target_operation_id, '[]'::JSONB
+          ) ON CONFLICT (workspace_id, event_id) DO NOTHING;
+        END LOOP;
+        UPDATE organizations SET deleted_at = NOW(), version = version + 1, updated_at = NOW()
+        WHERE id = target_organization_id;
+        UPDATE organization_members
+        SET state = 'removed', removed_at = COALESCE(removed_at, NOW()),
+            version = version + 1, updated_by = samurai_current_account_id()
+        WHERE organization_id = target_organization_id AND state = 'active';
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.deleted', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('organization_id', target_organization_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_move_workspace_organization(
+        source_organization_id TEXT,
+        target_organization_id TEXT,
+        target_workspace_id TEXT,
+        target_expected_workspace_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE member_row RECORD;
+      DECLARE added_guest_account_ids TEXT[] := ARRAY[]::TEXT[];
+      DECLARE move_event_id BIGINT;
+      DECLARE move_event_key TEXT;
+      DECLARE event_kind TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        IF source_organization_id IS NOT DISTINCT FROM target_organization_id THEN
+          RAISE EXCEPTION 'workspace_organization_move_invalid';
+        END IF;
+        IF source_organization_id IS NOT NULL
+          AND target_organization_id IS NULL
+          AND NOT (
+            samurai_can_workspace(target_workspace_id, 'owner')
+            OR samurai_can_organization(source_organization_id, 'admin')
+          ) THEN
+          RAISE EXCEPTION 'workspace_or_organization_admin_permission_required';
+        END IF;
+        IF source_organization_id IS NOT NULL
+          AND target_organization_id IS NOT NULL
+          AND NOT samurai_can_organization(source_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        IF target_organization_id IS NOT NULL
+          AND NOT samurai_can_organization(target_organization_id, 'admin') THEN
+          RAISE EXCEPTION 'organization_admin_permission_required';
+        END IF;
+        -- Acquire Organization locks lexically, omitting the NULL side for
+        -- attach/detach, then acquire the Workspace lock.
+        IF source_organization_id IS NULL THEN
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        ELSIF target_organization_id IS NULL THEN
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || source_organization_id, 0));
+        ELSIF source_organization_id < target_organization_id THEN
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || source_organization_id, 0));
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        ELSE
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || source_organization_id, 0));
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace:' || target_workspace_id, 0));
+        SELECT * INTO workspace_row FROM workspaces workspace
+        WHERE workspace.id = target_workspace_id
+          AND workspace.organization_id IS NOT DISTINCT FROM source_organization_id
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_organization_move_source_mismatch'; END IF;
+        IF workspace_row.version <> target_expected_workspace_version THEN
+          RAISE EXCEPTION 'workspace_version_conflict';
+        END IF;
+        IF workspace_row.state NOT IN ('active', 'archived') THEN
+          RAISE EXCEPTION 'workspace_organization_move_state_invalid';
+        END IF;
+        IF target_organization_id IS NOT NULL THEN
+          FOR member_row IN
+            SELECT member.account_id
+            FROM workspace_members member
+            WHERE member.workspace_id = target_workspace_id AND member.state = 'active'
+            ORDER BY member.account_id
+          LOOP
+            INSERT INTO organization_members(
+              organization_id, account_id, role, state, version, joined_at, created_by, updated_by
+            ) VALUES (
+              target_organization_id, member_row.account_id, 'guest', 'active', 1, NOW(),
+              samurai_current_account_id(), samurai_current_account_id()
+            ) ON CONFLICT (organization_id, account_id) DO UPDATE SET
+              role = CASE
+                WHEN samurai_role_rank(organization_members.role) >= samurai_role_rank('guest')
+                  THEN organization_members.role
+                ELSE 'guest'
+              END,
+              state = 'active', removed_at = NULL, version = organization_members.version + 1,
+              updated_by = samurai_current_account_id();
+            added_guest_account_ids := array_append(added_guest_account_ids, member_row.account_id);
+          END LOOP;
+        END IF;
+        DELETE FROM organization_invitation_workspace_grants grant_row
+        WHERE grant_row.workspace_id = target_workspace_id
+          AND (source_organization_id IS NULL OR grant_row.organization_id = source_organization_id);
+        PERFORM set_config('samurai.organization_move', '1', true);
+        PERFORM set_config('samurai.workspace_id', target_workspace_id, true);
+        UPDATE workspaces
+        SET organization_id = target_organization_id, version = version + 1, updated_at = NOW()
+        WHERE id = target_workspace_id;
+        event_kind := CASE
+          WHEN source_organization_id IS NULL THEN 'workspace.organization.attached'
+          WHEN target_organization_id IS NULL THEN 'workspace.organization.detached'
+          ELSE 'workspace.organization.moved'
+        END;
+        move_event_key := 'event_' || md5(event_kind || '|' || target_workspace_id || '|' || target_operation_id);
+        INSERT INTO workspace_events(
+          workspace_id, room_id, kind, operation_id, payload,
+          event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+        ) VALUES (
+          target_workspace_id, NULL, event_kind, target_operation_id,
+          jsonb_build_object('source_organization_id', source_organization_id, 'target_organization_id', target_organization_id,
+            'workspace_id', target_workspace_id, 'added_guest_account_ids', to_jsonb(added_guest_account_ids)),
+          move_event_key, '1.0', 'human', samurai_current_account_id(),
+          COALESCE(target_organization_id, source_organization_id),
+          'cursor_' || md5(move_event_key), target_operation_id, '[]'::JSONB
+        ) ON CONFLICT (workspace_id, event_id) DO NOTHING
+        RETURNING id INTO move_event_id;
+        IF move_event_id IS NULL THEN
+          SELECT id INTO move_event_id FROM workspace_events WHERE workspace_id = target_workspace_id AND event_id = move_event_key;
+        END IF;
+        IF source_organization_id IS NOT NULL THEN
+          INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+          VALUES (source_organization_id, event_kind, target_operation_id, samurai_current_account_id(),
+            jsonb_build_object('workspace_id', target_workspace_id, 'source_organization_id', source_organization_id,
+              'target_organization_id', target_organization_id));
+        END IF;
+        IF target_organization_id IS NOT NULL THEN
+          INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+          VALUES (target_organization_id, event_kind, target_operation_id, samurai_current_account_id(),
+            jsonb_build_object('workspace_id', target_workspace_id, 'source_organization_id', source_organization_id,
+              'target_organization_id', target_organization_id));
+        END IF;
+        RETURN jsonb_build_object(
+          'workspace_id', target_workspace_id, 'source_organization_id', source_organization_id,
+          'target_organization_id', target_organization_id, 'added_guest_account_ids', to_jsonb(added_guest_account_ids),
+          'event_id', move_event_id, 'workspace_version', workspace_row.version + 1
+        );
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_create_workspace(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_create_workspace(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_start_workspace_import(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_start_workspace_import(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_adopt_workspace_membership(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_delete_organization(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_move_workspace_organization(TEXT, TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // V4 Agent rows gained the canonical role/instructions/enabled fields in
+    // migration 75. Keep the published ten-argument import overload intact
+    // for older callers, and expose a named thirteen-argument overload for
+    // newer Bundles that round-trip those fields without dynamic SQL loss.
+    version: 81,
+    name: "workspace_server_bundle_v4_agent_import_contract",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_import_workspace_agent(
+        target_workspace_id TEXT,
+        target_agent_id TEXT,
+        target_display_name TEXT,
+        target_description TEXT,
+        target_role TEXT,
+        target_instructions TEXT,
+        target_backend_id TEXT,
+        target_enabled BOOLEAN,
+        target_status TEXT,
+        target_version BIGINT,
+        target_created_by TEXT,
+        target_created_at TIMESTAMPTZ,
+        target_updated_at TIMESTAMPTZ
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        IF btrim(target_agent_id) = '' OR btrim(target_display_name) = ''
+          OR btrim(target_role) = '' OR btrim(target_instructions) = ''
+          OR btrim(target_backend_id) = '' OR target_enabled IS NULL
+          OR target_status NOT IN ('active', 'disabled', 'revoked') OR target_version < 1
+          OR target_created_at IS NULL OR target_updated_at IS NULL
+          OR NOT EXISTS (SELECT 1 FROM accounts WHERE id = target_created_by) THEN
+          RAISE EXCEPTION 'workspace_bundle_agent_invalid';
+        END IF;
+        INSERT INTO workspace_agents(
+          workspace_id, id, display_name, description, role, instructions,
+          backend_id, enabled, status, version, created_by, created_at, updated_at
+        ) VALUES (
+          target_workspace_id, btrim(target_agent_id), btrim(target_display_name),
+          btrim(COALESCE(target_description, '')), btrim(target_role),
+          btrim(target_instructions), btrim(target_backend_id), target_enabled,
+          target_status, target_version, target_created_by, target_created_at,
+          target_updated_at
+        )
+        ON CONFLICT (workspace_id, id) DO UPDATE SET
+          display_name = EXCLUDED.display_name,
+          description = EXCLUDED.description,
+          role = EXCLUDED.role,
+          instructions = EXCLUDED.instructions,
+          backend_id = EXCLUDED.backend_id,
+          enabled = EXCLUDED.enabled,
+          status = EXCLUDED.status,
+          version = EXCLUDED.version,
+          created_by = EXCLUDED.created_by,
+          created_at = EXCLUDED.created_at,
+          updated_at = EXCLUDED.updated_at;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_agent(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC"
+    ]
+  },
+  {
+    // workspace_transfers gained target_workspace_id and target_receipt in v9.
+    // Re-qualify every transfer function in a new migration because changing
+    // an already-applied function body would invalidate its migration hash.
+    version: 82,
+    name: "workspace_server_transfer_parameter_ambiguity_fix",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_begin_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_begin_transfer>>
+      DECLARE current_state TEXT;
+      BEGIN
+        IF workspace_begin_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_begin_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        SELECT workspace.state INTO current_state
+        FROM workspaces AS workspace
+        WHERE workspace.id = workspace_begin_transfer.target_workspace_id
+        FOR UPDATE;
+        IF current_state <> 'active' THEN RAISE EXCEPTION 'workspace_transfer_source_not_active'; END IF;
+        INSERT INTO workspace_transfers(workspace_id, id, state, initiated_by, version)
+        VALUES (workspace_begin_transfer.target_workspace_id, workspace_begin_transfer.target_transfer_id, 'preparing', samurai_current_account_id(), 1);
+        UPDATE workspaces AS workspace
+        SET state = 'read_only', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = workspace_begin_transfer.target_workspace_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_bundle(
+        target_workspace_id TEXT,
+        target_bundle_id TEXT,
+        target_path TEXT,
+        target_hash TEXT,
+        target_record_counts JSONB,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_record_bundle>>
+      DECLARE transfer_state TEXT;
+      DECLARE transfer_path TEXT;
+      DECLARE transfer_hash TEXT;
+      BEGIN
+        IF workspace_record_bundle.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_record_bundle.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF workspace_record_bundle.target_transfer_id IS NOT NULL THEN
+          SELECT transfer.state, transfer.bundle_path, transfer.bundle_hash
+          INTO transfer_state, transfer_path, transfer_hash
+          FROM workspace_transfers AS transfer
+          WHERE transfer.workspace_id = workspace_record_bundle.target_workspace_id
+            AND transfer.id = workspace_record_bundle.target_transfer_id
+          FOR UPDATE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+          IF transfer_state = 'exported' THEN
+            IF transfer_path IS NOT DISTINCT FROM workspace_record_bundle.target_path
+              AND transfer_hash IS NOT DISTINCT FROM workspace_record_bundle.target_hash
+              AND EXISTS (
+                SELECT 1 FROM workspace_bundles AS bundle
+                WHERE bundle.workspace_id = workspace_record_bundle.target_workspace_id
+                  AND bundle.id = workspace_record_bundle.target_bundle_id
+                  AND bundle.path = workspace_record_bundle.target_path
+                  AND bundle.sha256 = workspace_record_bundle.target_hash
+              ) THEN
+              RETURN;
+            END IF;
+            RAISE EXCEPTION 'workspace_transfer_bundle_conflict';
+          END IF;
+          IF transfer_state <> 'preparing' THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+        END IF;
+        INSERT INTO workspace_bundles(workspace_id, id, format_version, path, sha256, record_counts, created_by)
+        VALUES (workspace_record_bundle.target_workspace_id, workspace_record_bundle.target_bundle_id, 3,
+          workspace_record_bundle.target_path, workspace_record_bundle.target_hash,
+          workspace_record_bundle.target_record_counts, samurai_current_account_id())
+        ON CONFLICT (workspace_id, id) DO UPDATE SET
+          path = EXCLUDED.path, sha256 = EXCLUDED.sha256, record_counts = EXCLUDED.record_counts;
+        IF workspace_record_bundle.target_transfer_id IS NOT NULL THEN
+          UPDATE workspace_transfers AS transfer
+          SET state = 'exported', bundle_path = workspace_record_bundle.target_path,
+              bundle_hash = workspace_record_bundle.target_hash,
+              version = transfer.version + 1, updated_at = NOW()
+          WHERE transfer.workspace_id = workspace_record_bundle.target_workspace_id
+            AND transfer.id = workspace_record_bundle.target_transfer_id
+            AND transfer.state = 'preparing';
+          IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_fail_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT,
+        target_error_code TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_fail_transfer>>
+      BEGIN
+        IF workspace_fail_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_fail_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'failed', error_code = workspace_fail_transfer.target_error_code,
+            version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = workspace_fail_transfer.target_workspace_id
+          AND transfer.id = workspace_fail_transfer.target_transfer_id
+          AND transfer.state IN ('preparing', 'exported');
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_found'; END IF;
+        UPDATE workspaces AS workspace
+        SET state = 'active', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = workspace_fail_transfer.target_workspace_id
+          AND workspace.state = 'read_only';
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_rollback_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_rollback_transfer>>
+      BEGIN
+        IF workspace_rollback_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_rollback_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'rolled_back', version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = workspace_rollback_transfer.target_workspace_id
+          AND transfer.id = workspace_rollback_transfer.target_transfer_id
+          AND transfer.state IN ('preparing', 'exported', 'failed');
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_found'; END IF;
+        UPDATE workspaces AS workspace
+        SET state = 'active', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = workspace_rollback_transfer.target_workspace_id
+          AND workspace.state = 'read_only';
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_transfer_receipt(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT,
+        target_destination_workspace_id TEXT,
+        target_receipt JSONB
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_record_transfer_receipt>>
+      DECLARE exported_hash TEXT;
+      BEGIN
+        IF workspace_record_transfer_receipt.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_record_transfer_receipt.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        SELECT transfer.bundle_hash INTO exported_hash
+        FROM workspace_transfers AS transfer
+        WHERE transfer.workspace_id = workspace_record_transfer_receipt.target_workspace_id
+          AND transfer.id = workspace_record_transfer_receipt.target_transfer_id
+          AND transfer.state = 'exported'
+        FOR UPDATE;
+        IF NOT FOUND OR exported_hash IS NULL
+          OR workspace_record_transfer_receipt.target_receipt->>'format_version' IS DISTINCT FROM '1'
+          OR workspace_record_transfer_receipt.target_receipt->>'transfer_id' IS DISTINCT FROM workspace_record_transfer_receipt.target_transfer_id
+          OR workspace_record_transfer_receipt.target_receipt->>'source_workspace_id' IS DISTINCT FROM workspace_record_transfer_receipt.target_workspace_id
+          OR workspace_record_transfer_receipt.target_receipt->>'source_integrity_hash' IS DISTINCT FROM exported_hash
+          OR workspace_record_transfer_receipt.target_receipt->>'target_workspace_id' IS DISTINCT FROM workspace_record_transfer_receipt.target_destination_workspace_id
+          OR workspace_record_transfer_receipt.target_receipt->>'target_integrity_hash' IS DISTINCT FROM exported_hash
+          OR workspace_record_transfer_receipt.target_receipt->>'source_integrity_hash' !~ '^[a-f0-9]{64}$'
+          OR workspace_record_transfer_receipt.target_receipt->>'target_integrity_hash' !~ '^[a-f0-9]{64}$' THEN
+          RAISE EXCEPTION 'workspace_transfer_receipt_invalid';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'imported', target_workspace_id = workspace_record_transfer_receipt.target_destination_workspace_id,
+            target_receipt = workspace_record_transfer_receipt.target_receipt,
+            version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = workspace_record_transfer_receipt.target_workspace_id
+          AND transfer.id = workspace_record_transfer_receipt.target_transfer_id
+          AND transfer.state = 'exported';
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_complete_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_complete_transfer>>
+      BEGIN
+        IF workspace_complete_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_complete_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'committed', version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = workspace_complete_transfer.target_workspace_id
+          AND transfer.id = workspace_complete_transfer.target_transfer_id
+          AND transfer.state = 'imported'
+          AND transfer.target_receipt IS NOT NULL
+          AND transfer.target_workspace_id IS NOT NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+        UPDATE workspaces AS workspace
+        SET state = 'archived', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = workspace_complete_transfer.target_workspace_id
+          AND workspace.state = 'read_only';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_source_not_active'; END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_bundle_v4_transfer(
+        target_workspace_id TEXT,
+        target_bundle_id TEXT,
+        target_path TEXT,
+        target_hash TEXT,
+        target_record_counts JSONB,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      <<workspace_record_v4_transfer>>
+      DECLARE transfer_row workspace_transfers%ROWTYPE;
+      DECLARE existing_bundle workspace_bundles%ROWTYPE;
+      BEGIN
+        IF workspace_record_v4_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(workspace_record_v4_transfer.target_workspace_id, 'owner')
+          OR btrim(workspace_record_v4_transfer.target_transfer_id) = ''
+          OR workspace_record_v4_transfer.target_hash !~ '^[0-9a-f]{64}$'
+          OR jsonb_typeof(workspace_record_v4_transfer.target_record_counts) <> 'object'
+          OR workspace_record_v4_transfer.target_path = ''
+          OR workspace_record_v4_transfer.target_path LIKE '%.staging-%/%'
+        THEN RAISE EXCEPTION 'workspace_bundle_v4_transfer_ledger_input_invalid'; END IF;
+
+        SELECT transfer.* INTO transfer_row
+        FROM workspace_transfers AS transfer
+        WHERE transfer.workspace_id = workspace_record_v4_transfer.target_workspace_id
+          AND transfer.id = workspace_record_v4_transfer.target_transfer_id
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_found'; END IF;
+        IF transfer_row.state = 'exported'
+          AND transfer_row.bundle_path = workspace_record_v4_transfer.target_path
+          AND transfer_row.bundle_hash = workspace_record_v4_transfer.target_hash THEN
+          RETURN;
+        END IF;
+        IF transfer_row.state <> 'preparing' THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+
+        SELECT bundle.* INTO existing_bundle
+        FROM workspace_bundles AS bundle
+        WHERE bundle.workspace_id = workspace_record_v4_transfer.target_workspace_id
+          AND bundle.id = workspace_record_v4_transfer.target_bundle_id
+        FOR UPDATE;
+        IF FOUND THEN
+          IF existing_bundle.format_version <> 4
+            OR existing_bundle.path <> workspace_record_v4_transfer.target_path
+            OR existing_bundle.sha256 <> workspace_record_v4_transfer.target_hash
+            OR existing_bundle.record_counts <> workspace_record_v4_transfer.target_record_counts THEN
+            RAISE EXCEPTION 'workspace_bundle_v4_ledger_conflict';
+          END IF;
+        ELSE
+          INSERT INTO workspace_bundles(workspace_id, id, format_version, path, sha256, record_counts, created_by)
+          VALUES (workspace_record_v4_transfer.target_workspace_id, workspace_record_v4_transfer.target_bundle_id, 4,
+            workspace_record_v4_transfer.target_path, workspace_record_v4_transfer.target_hash,
+            workspace_record_v4_transfer.target_record_counts, samurai_current_account_id());
+        END IF;
+
+        UPDATE workspace_transfers AS transfer
+        SET state = 'exported', bundle_path = workspace_record_v4_transfer.target_path,
+            bundle_hash = workspace_record_v4_transfer.target_hash,
+            version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = workspace_record_v4_transfer.target_workspace_id
+          AND transfer.id = workspace_record_v4_transfer.target_transfer_id
+          AND transfer.state = 'preparing';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_begin_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_bundle(TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_fail_workspace_transfer(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_rollback_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_transfer_receipt(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_complete_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_bundle_v4_transfer(TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // v82 was already applied by existing verification databases.  Function
+    // names, rather than block labels, qualify parameters here because
+    // PL/pgSQL does not expose a block label as a SQL table alias.
+    version: 83,
+    name: "workspace_server_transfer_parameter_function_qualification_fix",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_begin_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_state TEXT;
+      BEGIN
+        IF samurai_begin_workspace_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_begin_workspace_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        SELECT workspace.state INTO current_state
+        FROM workspaces AS workspace
+        WHERE workspace.id = samurai_begin_workspace_transfer.target_workspace_id
+        FOR UPDATE;
+        IF current_state <> 'active' THEN RAISE EXCEPTION 'workspace_transfer_source_not_active'; END IF;
+        INSERT INTO workspace_transfers(workspace_id, id, state, initiated_by, version)
+        VALUES (samurai_begin_workspace_transfer.target_workspace_id, samurai_begin_workspace_transfer.target_transfer_id, 'preparing', samurai_current_account_id(), 1);
+        UPDATE workspaces AS workspace
+        SET state = 'read_only', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = samurai_begin_workspace_transfer.target_workspace_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_bundle(
+        target_workspace_id TEXT,
+        target_bundle_id TEXT,
+        target_path TEXT,
+        target_hash TEXT,
+        target_record_counts JSONB,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE transfer_state TEXT;
+      DECLARE transfer_path TEXT;
+      DECLARE transfer_hash TEXT;
+      BEGIN
+        IF samurai_record_workspace_bundle.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_record_workspace_bundle.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF samurai_record_workspace_bundle.target_transfer_id IS NOT NULL THEN
+          SELECT transfer.state, transfer.bundle_path, transfer.bundle_hash
+          INTO transfer_state, transfer_path, transfer_hash
+          FROM workspace_transfers AS transfer
+          WHERE transfer.workspace_id = samurai_record_workspace_bundle.target_workspace_id
+            AND transfer.id = samurai_record_workspace_bundle.target_transfer_id
+          FOR UPDATE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+          IF transfer_state = 'exported' THEN
+            IF transfer_path IS NOT DISTINCT FROM samurai_record_workspace_bundle.target_path
+              AND transfer_hash IS NOT DISTINCT FROM samurai_record_workspace_bundle.target_hash
+              AND EXISTS (
+                SELECT 1 FROM workspace_bundles AS bundle
+                WHERE bundle.workspace_id = samurai_record_workspace_bundle.target_workspace_id
+                  AND bundle.id = samurai_record_workspace_bundle.target_bundle_id
+                  AND bundle.path = samurai_record_workspace_bundle.target_path
+                  AND bundle.sha256 = samurai_record_workspace_bundle.target_hash
+              ) THEN
+              RETURN;
+            END IF;
+            RAISE EXCEPTION 'workspace_transfer_bundle_conflict';
+          END IF;
+          IF transfer_state <> 'preparing' THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+        END IF;
+        INSERT INTO workspace_bundles(workspace_id, id, format_version, path, sha256, record_counts, created_by)
+        VALUES (samurai_record_workspace_bundle.target_workspace_id, samurai_record_workspace_bundle.target_bundle_id, 3,
+          samurai_record_workspace_bundle.target_path, samurai_record_workspace_bundle.target_hash,
+          samurai_record_workspace_bundle.target_record_counts, samurai_current_account_id())
+        ON CONFLICT (workspace_id, id) DO UPDATE SET
+          path = EXCLUDED.path, sha256 = EXCLUDED.sha256, record_counts = EXCLUDED.record_counts;
+        IF samurai_record_workspace_bundle.target_transfer_id IS NOT NULL THEN
+          UPDATE workspace_transfers AS transfer
+          SET state = 'exported', bundle_path = samurai_record_workspace_bundle.target_path,
+              bundle_hash = samurai_record_workspace_bundle.target_hash,
+              version = transfer.version + 1, updated_at = NOW()
+          WHERE transfer.workspace_id = samurai_record_workspace_bundle.target_workspace_id
+            AND transfer.id = samurai_record_workspace_bundle.target_transfer_id
+            AND transfer.state = 'preparing';
+          IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_fail_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT,
+        target_error_code TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF samurai_fail_workspace_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_fail_workspace_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'failed', error_code = samurai_fail_workspace_transfer.target_error_code,
+            version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = samurai_fail_workspace_transfer.target_workspace_id
+          AND transfer.id = samurai_fail_workspace_transfer.target_transfer_id
+          AND transfer.state IN ('preparing', 'exported');
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_found'; END IF;
+        UPDATE workspaces AS workspace
+        SET state = 'active', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = samurai_fail_workspace_transfer.target_workspace_id
+          AND workspace.state = 'read_only';
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_rollback_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF samurai_rollback_workspace_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_rollback_workspace_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'rolled_back', version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = samurai_rollback_workspace_transfer.target_workspace_id
+          AND transfer.id = samurai_rollback_workspace_transfer.target_transfer_id
+          AND transfer.state IN ('preparing', 'exported', 'failed');
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_found'; END IF;
+        UPDATE workspaces AS workspace
+        SET state = 'active', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = samurai_rollback_workspace_transfer.target_workspace_id
+          AND workspace.state = 'read_only';
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_transfer_receipt(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT,
+        target_destination_workspace_id TEXT,
+        target_receipt JSONB
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE exported_hash TEXT;
+      BEGIN
+        IF samurai_record_workspace_transfer_receipt.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_record_workspace_transfer_receipt.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        SELECT transfer.bundle_hash INTO exported_hash
+        FROM workspace_transfers AS transfer
+        WHERE transfer.workspace_id = samurai_record_workspace_transfer_receipt.target_workspace_id
+          AND transfer.id = samurai_record_workspace_transfer_receipt.target_transfer_id
+          AND transfer.state = 'exported'
+        FOR UPDATE;
+        IF NOT FOUND OR exported_hash IS NULL
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'format_version' IS DISTINCT FROM '1'
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'transfer_id' IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_transfer_id
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'source_workspace_id' IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_workspace_id
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'source_integrity_hash' IS DISTINCT FROM exported_hash
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'target_workspace_id' IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_destination_workspace_id
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'target_integrity_hash' IS DISTINCT FROM exported_hash
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'source_integrity_hash' !~ '^[a-f0-9]{64}$'
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'target_integrity_hash' !~ '^[a-f0-9]{64}$' THEN
+          RAISE EXCEPTION 'workspace_transfer_receipt_invalid';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'imported', target_workspace_id = samurai_record_workspace_transfer_receipt.target_destination_workspace_id,
+            target_receipt = samurai_record_workspace_transfer_receipt.target_receipt,
+            version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = samurai_record_workspace_transfer_receipt.target_workspace_id
+          AND transfer.id = samurai_record_workspace_transfer_receipt.target_transfer_id
+          AND transfer.state = 'exported';
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_complete_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF samurai_complete_workspace_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_complete_workspace_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'committed', version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = samurai_complete_workspace_transfer.target_workspace_id
+          AND transfer.id = samurai_complete_workspace_transfer.target_transfer_id
+          AND transfer.state = 'imported'
+          AND transfer.target_receipt IS NOT NULL
+          AND transfer.target_workspace_id IS NOT NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+        UPDATE workspaces AS workspace
+        SET state = 'archived', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = samurai_complete_workspace_transfer.target_workspace_id
+          AND workspace.state = 'read_only';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_source_not_active'; END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_bundle_v4_transfer(
+        target_workspace_id TEXT,
+        target_bundle_id TEXT,
+        target_path TEXT,
+        target_hash TEXT,
+        target_record_counts JSONB,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE transfer_row workspace_transfers%ROWTYPE;
+      DECLARE existing_bundle workspace_bundles%ROWTYPE;
+      BEGIN
+        IF samurai_record_workspace_bundle_v4_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_record_workspace_bundle_v4_transfer.target_workspace_id, 'owner')
+          OR btrim(samurai_record_workspace_bundle_v4_transfer.target_transfer_id) = ''
+          OR samurai_record_workspace_bundle_v4_transfer.target_hash !~ '^[0-9a-f]{64}$'
+          OR jsonb_typeof(samurai_record_workspace_bundle_v4_transfer.target_record_counts) <> 'object'
+          OR samurai_record_workspace_bundle_v4_transfer.target_path = ''
+          OR samurai_record_workspace_bundle_v4_transfer.target_path LIKE '%.staging-%/%'
+        THEN RAISE EXCEPTION 'workspace_bundle_v4_transfer_ledger_input_invalid'; END IF;
+
+        SELECT transfer.* INTO transfer_row
+        FROM workspace_transfers AS transfer
+        WHERE transfer.workspace_id = samurai_record_workspace_bundle_v4_transfer.target_workspace_id
+          AND transfer.id = samurai_record_workspace_bundle_v4_transfer.target_transfer_id
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_found'; END IF;
+        IF transfer_row.state = 'exported'
+          AND transfer_row.bundle_path = samurai_record_workspace_bundle_v4_transfer.target_path
+          AND transfer_row.bundle_hash = samurai_record_workspace_bundle_v4_transfer.target_hash THEN
+          RETURN;
+        END IF;
+        IF transfer_row.state <> 'preparing' THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+
+        SELECT bundle.* INTO existing_bundle
+        FROM workspace_bundles AS bundle
+        WHERE bundle.workspace_id = samurai_record_workspace_bundle_v4_transfer.target_workspace_id
+          AND bundle.id = samurai_record_workspace_bundle_v4_transfer.target_bundle_id
+        FOR UPDATE;
+        IF FOUND THEN
+          IF existing_bundle.format_version <> 4
+            OR existing_bundle.path <> samurai_record_workspace_bundle_v4_transfer.target_path
+            OR existing_bundle.sha256 <> samurai_record_workspace_bundle_v4_transfer.target_hash
+            OR existing_bundle.record_counts <> samurai_record_workspace_bundle_v4_transfer.target_record_counts THEN
+            RAISE EXCEPTION 'workspace_bundle_v4_ledger_conflict';
+          END IF;
+        ELSE
+          INSERT INTO workspace_bundles(workspace_id, id, format_version, path, sha256, record_counts, created_by)
+          VALUES (samurai_record_workspace_bundle_v4_transfer.target_workspace_id, samurai_record_workspace_bundle_v4_transfer.target_bundle_id, 4,
+            samurai_record_workspace_bundle_v4_transfer.target_path, samurai_record_workspace_bundle_v4_transfer.target_hash,
+            samurai_record_workspace_bundle_v4_transfer.target_record_counts, samurai_current_account_id());
+        END IF;
+
+        UPDATE workspace_transfers AS transfer
+        SET state = 'exported', bundle_path = samurai_record_workspace_bundle_v4_transfer.target_path,
+            bundle_hash = samurai_record_workspace_bundle_v4_transfer.target_hash,
+            version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = samurai_record_workspace_bundle_v4_transfer.target_workspace_id
+          AND transfer.id = samurai_record_workspace_bundle_v4_transfer.target_transfer_id
+          AND transfer.state = 'preparing';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_begin_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_bundle(TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_fail_workspace_transfer(TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_rollback_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_transfer_receipt(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_complete_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_bundle_v4_transfer(TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // A failed/rolled-back transfer can be explicitly resumed with the same
+    // transfer ID. Keep the old Bundle ledger immutable; the server derives a
+    // fresh Bundle ID from the incremented transfer version on the next
+    // export. Re-qualify these functions in a new migration so v80-v83 remain
+    // immutable and already-applied databases receive the retry semantics.
+    version: 84,
+    name: "workspace_server_transfer_resume_and_receipt_replay",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_begin_workspace_transfer(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_state TEXT;
+      DECLARE existing_state TEXT;
+      BEGIN
+        IF samurai_begin_workspace_transfer.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_begin_workspace_transfer.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        SELECT workspace.state INTO current_state
+        FROM workspaces AS workspace
+        WHERE workspace.id = samurai_begin_workspace_transfer.target_workspace_id
+        FOR UPDATE;
+        IF current_state IS DISTINCT FROM 'active' THEN
+          RAISE EXCEPTION 'workspace_transfer_source_not_active';
+        END IF;
+
+        SELECT transfer.state INTO existing_state
+        FROM workspace_transfers AS transfer
+        WHERE transfer.workspace_id = samurai_begin_workspace_transfer.target_workspace_id
+          AND transfer.id = samurai_begin_workspace_transfer.target_transfer_id
+        FOR UPDATE;
+        IF FOUND THEN
+          IF existing_state IN ('failed', 'rolled_back') THEN
+            -- The old path/hash and receipt describe a previous attempt. Do
+            -- not let the next record function mistake its ledger for the new
+            -- Bundle; the transfer version is advanced for a fresh ID.
+            UPDATE workspace_transfers AS transfer
+            SET state = 'preparing', bundle_path = NULL, bundle_hash = NULL,
+                error_code = NULL, target_workspace_id = NULL, target_receipt = NULL,
+                source_integrity_hash = NULL, target_integrity_hash = NULL,
+                verified_at = NULL, cutover_at = NULL, source_archived_at = NULL,
+                source_deleted_at = NULL, version = transfer.version + 1,
+                updated_at = NOW()
+            WHERE transfer.workspace_id = samurai_begin_workspace_transfer.target_workspace_id
+              AND transfer.id = samurai_begin_workspace_transfer.target_transfer_id
+              AND transfer.state IN ('failed', 'rolled_back');
+            IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_not_ready'; END IF;
+            UPDATE workspaces AS workspace
+            SET state = 'read_only', version = workspace.version + 1, updated_at = NOW()
+            WHERE workspace.id = samurai_begin_workspace_transfer.target_workspace_id
+              AND workspace.state = 'active';
+            IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_source_not_active'; END IF;
+            RETURN;
+          END IF;
+          RAISE EXCEPTION 'workspace_transfer_not_ready';
+        END IF;
+
+        INSERT INTO workspace_transfers(workspace_id, id, state, initiated_by, version)
+        VALUES (samurai_begin_workspace_transfer.target_workspace_id,
+          samurai_begin_workspace_transfer.target_transfer_id, 'preparing',
+          samurai_current_account_id(), 1);
+        UPDATE workspaces AS workspace
+        SET state = 'read_only', version = workspace.version + 1, updated_at = NOW()
+        WHERE workspace.id = samurai_begin_workspace_transfer.target_workspace_id;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_record_workspace_transfer_receipt(
+        target_workspace_id TEXT,
+        target_transfer_id TEXT,
+        target_destination_workspace_id TEXT,
+        target_receipt JSONB
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE transfer_row workspace_transfers%ROWTYPE;
+      DECLARE exported_hash TEXT;
+      BEGIN
+        IF samurai_record_workspace_transfer_receipt.target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_workspace(samurai_record_workspace_transfer_receipt.target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        SELECT transfer.* INTO transfer_row
+        FROM workspace_transfers AS transfer
+        WHERE transfer.workspace_id = samurai_record_workspace_transfer_receipt.target_workspace_id
+          AND transfer.id = samurai_record_workspace_transfer_receipt.target_transfer_id
+        FOR UPDATE;
+        IF NOT FOUND OR transfer_row.bundle_hash IS NULL THEN
+          RAISE EXCEPTION 'workspace_transfer_receipt_invalid';
+        END IF;
+
+        -- A response-loss retry may arrive after the first receipt committed.
+        -- Exact JSONB equality is the idempotent success path; a changed
+        -- target/hash/receipt remains a conflict and is never accepted.
+        IF transfer_row.state IN ('imported', 'committed') THEN
+          IF transfer_row.target_workspace_id IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_destination_workspace_id
+            OR transfer_row.target_receipt IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_receipt THEN
+            RAISE EXCEPTION 'workspace_transfer_receipt_conflict';
+          END IF;
+          RETURN;
+        END IF;
+        IF transfer_row.state <> 'exported' THEN
+          RAISE EXCEPTION 'workspace_transfer_receipt_invalid';
+        END IF;
+        exported_hash := transfer_row.bundle_hash;
+        IF jsonb_typeof(samurai_record_workspace_transfer_receipt.target_receipt) <> 'object'
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'format_version' IS DISTINCT FROM '1'
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'transfer_id' IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_transfer_id
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'source_workspace_id' IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_workspace_id
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'source_integrity_hash' IS DISTINCT FROM exported_hash
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'target_workspace_id' IS DISTINCT FROM samurai_record_workspace_transfer_receipt.target_destination_workspace_id
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'target_integrity_hash' IS DISTINCT FROM exported_hash
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'source_integrity_hash' !~ '^[a-f0-9]{64}$'
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'target_integrity_hash' !~ '^[a-f0-9]{64}$'
+          OR samurai_record_workspace_transfer_receipt.target_receipt->>'imported_at' IS NULL THEN
+          RAISE EXCEPTION 'workspace_transfer_receipt_invalid';
+        END IF;
+        UPDATE workspace_transfers AS transfer
+        SET state = 'imported', target_workspace_id = samurai_record_workspace_transfer_receipt.target_destination_workspace_id,
+            target_receipt = samurai_record_workspace_transfer_receipt.target_receipt,
+            target_integrity_hash = exported_hash, version = transfer.version + 1, updated_at = NOW()
+        WHERE transfer.workspace_id = samurai_record_workspace_transfer_receipt.target_workspace_id
+          AND transfer.id = samurai_record_workspace_transfer_receipt.target_transfer_id
+          AND transfer.state = 'exported';
+        IF NOT FOUND THEN RAISE EXCEPTION 'workspace_transfer_receipt_invalid'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_begin_workspace_transfer(TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_record_workspace_transfer_receipt(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC"
+    ]
+  },
+  {
+    // Organization deletion must leave every Workspace usable as a
+    // standalone Workspace. Keep the previously applied delete function
+    // immutable and replace it in a new migration for already-migrated
+    // servers. The three-argument overload carries the optimistic version
+    // check into the same SECURITY DEFINER transaction; the two-argument
+    // overload remains for older callers without an expected version.
+    version: 85,
+    name: "workspace_server_organization_delete_detaches_workspaces",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_delete_organization(
+        target_organization_id TEXT,
+        target_expected_organization_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE current_organization organizations%ROWTYPE;
+      DECLARE workspace_key TEXT;
+      DECLARE workspace_row workspaces%ROWTYPE;
+      DECLARE detached_event_key TEXT;
+      BEGIN
+        PERFORM set_config('samurai.organization_mutation', '1', true);
+        PERFORM set_config('samurai.organization_delete', '1', true);
+        IF target_expected_organization_version IS NOT NULL
+          AND target_expected_organization_version < 1 THEN
+          RAISE EXCEPTION 'organization_expected_version_invalid';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended('samurai.organization.owner:' || target_organization_id, 0));
+        SELECT * INTO current_organization
+        FROM organizations AS organization
+        WHERE organization.id = target_organization_id AND organization.deleted_at IS NULL
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_not_found'; END IF;
+        IF NOT samurai_can_organization(target_organization_id, 'owner') THEN
+          RAISE EXCEPTION 'organization_owner_permission_required';
+        END IF;
+        IF target_expected_organization_version IS NOT NULL
+          AND current_organization.version <> target_expected_organization_version THEN
+          RAISE EXCEPTION 'organization_version_conflict';
+        END IF;
+
+        -- Keep the Organization lock before every Workspace lock. This is
+        -- the same lock prefix used by attach, detach, and move, and the
+        -- ordered key scan prevents a multi-Workspace delete from inverting
+        -- the Workspace lock order.
+        PERFORM set_config('samurai.organization_move', '1', true);
+        FOR workspace_key IN
+          SELECT workspace.id
+          FROM workspaces AS workspace
+          WHERE workspace.organization_id = target_organization_id
+          ORDER BY workspace.id
+        LOOP
+          PERFORM pg_advisory_xact_lock(hashtextextended('samurai.workspace:' || workspace_key, 0));
+          SELECT * INTO workspace_row
+          FROM workspaces AS workspace
+          WHERE workspace.id = workspace_key
+            AND workspace.organization_id = target_organization_id
+          FOR UPDATE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'organization_workspace_concurrent_change'; END IF;
+
+          -- Grants belong to the Organization association. Workspace data,
+          -- Membership, Room, and Chat rows are intentionally untouched.
+          DELETE FROM organization_invitation_workspace_grants AS grant_row
+          WHERE grant_row.organization_id = target_organization_id
+            AND grant_row.workspace_id = workspace_key;
+          PERFORM set_config('samurai.workspace_id', workspace_key, true);
+          UPDATE workspaces AS workspace
+          SET organization_id = NULL, version = workspace.version + 1, updated_at = NOW()
+          WHERE workspace.id = workspace_key
+            AND workspace.organization_id = target_organization_id;
+          IF NOT FOUND THEN RAISE EXCEPTION 'organization_workspace_concurrent_change'; END IF;
+
+          detached_event_key := 'event_' || md5('samurai.workspace.organization.detached|' || workspace_key || '|' || target_operation_id);
+          INSERT INTO workspace_events(
+            workspace_id, room_id, kind, operation_id, payload,
+            event_id, event_version, actor_kind, actor_id, organization_id, cursor, correlation_id, resources
+          ) VALUES (
+            workspace_key, NULL, 'workspace.organization.detached', target_operation_id,
+            jsonb_build_object('workspace_id', workspace_key, 'organization_id', target_organization_id),
+            detached_event_key, '1.0', 'human', samurai_current_account_id(), target_organization_id,
+            'cursor_' || md5(detached_event_key), target_operation_id, '[]'::JSONB
+          ) ON CONFLICT (workspace_id, event_id) DO NOTHING;
+        END LOOP;
+
+        UPDATE organizations AS organization
+        SET deleted_at = NOW(), version = organization.version + 1, updated_at = NOW()
+        WHERE organization.id = target_organization_id AND organization.deleted_at IS NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_not_found'; END IF;
+        UPDATE organization_members AS member
+        SET state = 'removed', removed_at = COALESCE(member.removed_at, NOW()),
+            version = member.version + 1, updated_by = samurai_current_account_id()
+        WHERE member.organization_id = target_organization_id AND member.state = 'active';
+        INSERT INTO organization_events(organization_id, kind, operation_id, actor_account_id, payload)
+        VALUES (target_organization_id, 'organization.deleted', target_operation_id,
+          samurai_current_account_id(), jsonb_build_object('organization_id', target_organization_id));
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_delete_organization(
+        target_organization_id TEXT,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        PERFORM samurai_delete_organization(target_organization_id, NULL::BIGINT, target_operation_id);
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_delete_organization(TEXT, BIGINT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // The runtime Organization RLS policy hides soft-deleted rows from a
+    // normal SELECT. Keep the already-applied v85 delete function immutable;
+    // this wrapper performs the same delete and returns only the public
+    // Organization projection while still running as the migration owner.
+    version: 86,
+    name: "workspace_server_organization_delete_returning_projection",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_delete_organization_and_return(
+        target_organization_id TEXT,
+        target_expected_organization_version BIGINT,
+        target_operation_id TEXT
+      ) RETURNS TABLE(
+        id TEXT,
+        name TEXT,
+        icon TEXT,
+        description TEXT,
+        created_by TEXT,
+        version BIGINT,
+        created_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ,
+        deleted_at TIMESTAMPTZ
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        PERFORM samurai_delete_organization(
+          target_organization_id,
+          target_expected_organization_version,
+          target_operation_id
+        );
+        RETURN QUERY
+        SELECT organization.id, organization.name, organization.icon,
+               organization.description, organization.created_by,
+               organization.version, organization.created_at,
+               organization.updated_at, organization.deleted_at
+        FROM organizations AS organization
+        WHERE organization.id = target_organization_id
+          AND organization.deleted_at IS NOT NULL;
+        IF NOT FOUND THEN RAISE EXCEPTION 'organization_delete_result_not_found'; END IF;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_delete_organization_and_return(TEXT, BIGINT, TEXT) FROM PUBLIC"
     ]
   }
 ];
@@ -10356,12 +11840,23 @@ export async function applyWorkspaceServerMigrations(pool: Pool, runtimeRole: st
       "SELECT version, name, checksum FROM samurai_server_schema_migrations ORDER BY version"
     );
     const appliedByVersion = new Map(applied.rows.map((row) => [Number(row.version), row]));
+    const legacyChecksumUpdates: Array<{ version: number; checksum: string }> = [];
     for (const migration of migrations) {
       const checksum = migrationChecksum(migration);
       const existing = appliedByVersion.get(migration.version);
       if (existing) {
-        if (existing.name !== migration.name || existing.checksum !== checksum) {
+        if (existing.name !== migration.name) {
           throw new Error(`workspace_server_schema_migration_mismatch:${migration.version}`);
+        }
+        if (existing.checksum !== checksum) {
+          if (legacyMigrationChecksum(migration) !== existing.checksum) {
+            throw new Error(`workspace_server_schema_migration_mismatch:${migration.version}`);
+          }
+          // Keep the old checksum until every pending migration and the
+          // runtime-role grant have succeeded.  If a later migration fails,
+          // an older server binary can still recognize this database and the
+          // next admin run can retry from the unchanged ledger.
+          legacyChecksumUpdates.push({ version: migration.version, checksum });
         }
         continue;
       }
@@ -10379,6 +11874,21 @@ export async function applyWorkspaceServerMigrations(pool: Pool, runtimeRole: st
       }
     }
     await grantRuntimeRole(client, runtimeRole);
+    if (legacyChecksumUpdates.length > 0) {
+      await client.query("BEGIN");
+      try {
+        for (const update of legacyChecksumUpdates) {
+          await client.query(
+            "UPDATE samurai_server_schema_migrations SET checksum = $1 WHERE version = $2",
+            [update.checksum, update.version]
+          );
+        }
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    }
   } finally {
     client.release();
   }
@@ -10846,9 +12356,11 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
       "samurai_can_organization(TEXT, TEXT)",
       "samurai_list_active_workspace_ids()",
       "samurai_resolve_organization_invitation(TEXT)",
-      "samurai_create_organization(TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_create_organization(TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_patch_organization(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_delete_organization(TEXT, TEXT)",
+    "samurai_delete_organization(TEXT, BIGINT, TEXT)",
+    "samurai_delete_organization_and_return(TEXT, BIGINT, TEXT)",
     "samurai_set_organization_member(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_create_organization_invitation(TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB)",
     "samurai_revoke_organization_invitation(TEXT, TEXT, BIGINT, TEXT)",
@@ -10868,6 +12380,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_import_workspace_room(TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
     "samurai_import_workspace_room_member(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ)",
     "samurai_import_workspace_agent(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
+    "samurai_import_workspace_agent(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
     "samurai_import_workspace_agent_room_permission(TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN, BOOLEAN, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
     "samurai_import_workspace_connection_descriptor(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT[], INTEGER, TEXT[], BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
     "samurai_validate_workspace_room_hierarchy(TEXT)",
@@ -10933,6 +12446,14 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
 
 function migrationChecksum(migration: WorkspaceServerMigration): string {
   return createHash("sha256").update(JSON.stringify({ name: migration.name, statements: migration.statements })).digest("hex");
+}
+
+function legacyMigrationChecksum(migration: WorkspaceServerMigration): string | undefined {
+  if (migration.version !== 78 && migration.version !== 79) return undefined;
+  return migrationChecksum({
+    ...migration,
+    statements: migration.statements.map((statement) => statement.replace(/\binvitation_grant\b/g, "grant"))
+  });
 }
 
 export type WorkspaceServerSchemaQueryRow = QueryResultRow;

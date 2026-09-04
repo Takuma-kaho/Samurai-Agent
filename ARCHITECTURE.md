@@ -14,7 +14,7 @@ Backend、Gateway、Adapterは外部のAgentやAI提供元との接続を担当�
 
 Workspace → Room → Session、Activity、Knowledge、Skill
 
-ServerはWorkspace Coreを配置・運用する境界であり、製品上の必須階層ではない。利用者は接続したServer上にWorkspaceを作成・選択する。
+ServerはWorkspace Coreを配置・運用する境界であり、製品上の必須階層ではない。Native Appは登録済みの複数Serverを横断してWorkspaceを表示し、利用者はWorkspaceを選択する。選択時に対応するServer接続を裏で解決し、対象Workspaceを再認可してから表示する。
 
 Workspaceは単体で成立する基本単位である。Room、Agent、Knowledge、メンバー、招待、実行結果、export / restoreを所有する。
 
@@ -22,7 +22,7 @@ Roomは会話、作業、Knowledge、権限の範囲を決める。
 
 SessionはRoom内の実行を継続・復旧するために内部管理する。
 
-Organizationは、同一Server上の複数Workspaceを任意でまとめる管理層である。OrganizationがなくてもWorkspaceは利用でき、Organizationへの所属だけではWorkspaceやRoomの内容を読めない。
+Organizationは、同一Server上の複数Workspaceを任意でまとめる管理層である。OrganizationがなくてもWorkspaceは利用でき、Organizationへの所属だけではWorkspaceやRoomの内容を読めない。複数Serverを横断するWorkspace switcherはNative Appの接続機能であり、Organizationを横断管理する機能ではない。
 
 ## 操作の入口
 
@@ -48,7 +48,7 @@ ClientはEvent履歴とリアルタイム通知を組み合わせ、切断後も
 
 Knowledgeの参照・学習範囲はRoomごとに管理し、共有は明示操作で行う。
 
-Workspaceは一つのホームServerに配置する。別Serverへの移転はexport / restoreで行い、同一Server内のOrganization追加・解除はWorkspaceのデータIDや履歴を変更しない。
+Workspaceは一つのホームServerに配置する。別Serverへの移転はWorkspace単位のexport / restoreと整合性確認で行い、切替完了後も移転元を自動削除せずarchiveとして残す。削除は別の明示操作とする。同一Server内のOrganization追加・解除はWorkspaceのデータIDや履歴を変更しない。
 
 ## 責務境界
 
@@ -58,7 +58,8 @@ Workspaceは一つのホームServerに配置する。別Serverへの移転はex
 - Knowledge Hostは学習処理を担当する
 - Gateway、Adapter、BackendはWorkspace Coreへ結果を返す
 - Native Appと外部アプリは同じCoreを利用する
-- OrganizationはWorkspaceの一覧、Membership管理、共通ポリシーを扱うが、Workspace / Room contentの認可根拠にはならない
+- Native AppのWorkspace targetは少なくともServer connectionとworkspace IDの組で識別し、workspace ID単独で別ServerのWorkspaceへ接続しない
+- Organizationは同一Server内のWorkspace一覧、Membership管理、共通ポリシーを扱うが、Workspace / Room contentの認可根拠にはならない
 
 ## 検証原則
 

@@ -22,7 +22,13 @@ export function createDesktopConfig(input: {
   isPackaged: boolean;
   env?: NodeJS.ProcessEnv;
 }): DesktopConfig {
-  const env = input.env ?? process.env;
+  // Vite replaces a direct `process.env` reference while bundling. Resolve the
+  // Node runtime object through globalThis so packaged Electron builds keep
+  // reading the environment provided at launch time.
+  const runtimeProcess = (globalThis as typeof globalThis & {
+    process?: { env?: NodeJS.ProcessEnv };
+  }).process;
+  const env = input.env ?? runtimeProcess?.env ?? {};
   const mode = input.isPackaged && env.SAMURAI_DESKTOP_DEV !== "1" ? "packaged" : "development";
   const apiPort = env.PORT ?? env.SAMURAI_API_PORT ?? "4317";
   const webPort = env.SAMURAI_WEB_PORT ?? "5173";

@@ -9,11 +9,23 @@ import {
   readWorkspaceBundleV3Transport,
   verifyWorkspaceBundleV3,
   WORKSPACE_BUNDLE_MAX_ENTRY_BYTES,
+  workspaceTransferBundleId,
+  workspaceTransferRetryDestination,
   WorkspaceBundleV3Service,
   writeWorkspaceBundleV3Transport
 } from "./workspace-bundle-v3";
 
 describe("Workspace Bundle v3 credential boundary", () => {
+  it("uses a fresh Bundle ID and sibling path for a transfer retry", async () => {
+    const destination = path.join(os.tmpdir(), "samurai-transfer-bundle");
+
+    expect(workspaceTransferBundleId("transfer_bundle_retry", 1)).toBe("bundle_transfer_bundle_retry");
+    expect(workspaceTransferBundleId("transfer_bundle_retry", 4)).toBe("bundle_transfer_bundle_retry_attempt_4");
+    expect(workspaceTransferBundleId("transfer_bundle_retry", 4)).not.toBe(workspaceTransferBundleId("transfer_bundle_retry", 1));
+    expect(workspaceTransferRetryDestination(destination, 4)).toBe(`${path.resolve(destination)}.attempt-4`);
+    expect(workspaceTransferRetryDestination(destination, 4)).not.toBe(path.resolve(destination));
+  });
+
   it("serializes PostgreSQL Date values as ISO timestamps in an exported Bundle", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-date-"));
     try {
@@ -52,6 +64,28 @@ describe("Workspace Bundle v3 credential boundary", () => {
               } as T]
             };
           }
+          if (query.includes("FROM workspace_audit_entries")) {
+            return {
+              rows: [{
+                source_audit_id: "audit_org_provenance",
+                workspace_id: workspaceId,
+                room_id: null,
+                actor_account_id: "account_owner",
+                action: "workspace.test",
+                outcome: "success",
+                operation_id: "operation_bundle_date_test",
+                subject_kind: "workspace",
+                subject_id: "workspace_bundle_date_test",
+                before_version: 1,
+                after_version: 2,
+                details: {
+                  source_organization_id: "organization_source",
+                  nested: { targetOrganizationId: "organization_target", retained: true }
+                },
+                created_at: timestamp
+              } as T]
+            };
+          }
           return { rows: [] };
         }
       };
@@ -71,12 +105,14 @@ describe("Workspace Bundle v3 credential boundary", () => {
       }, { destination: path.join(root, "bundle") });
       expect(exported.manifest.workspace_id).toBe(workspaceId);
       expect(exported.manifest).toMatchObject({
-        source_organization_id: "organization_source",
-        source: { organization_id: "organization_source" },
         schema_revision: 26
       });
+      expect(exported.manifest).not.toHaveProperty("source_organization_id");
+      expect(exported.manifest.source).not.toHaveProperty("organization_id");
+      const workspace = JSON.parse(await readFile(path.join(root, "bundle", "workspace.json"), "utf8")) as Record<string, unknown>;
+      expect(workspace).not.toHaveProperty("organization_id");
       await expect(verifyWorkspaceBundleV3(path.join(root, "bundle"))).resolves.toMatchObject({
-        manifest: { source_organization_id: "organization_source" }
+        manifest: { schema_revision: 26 }
       });
 
       const membership = JSON.parse((await readFile(path.join(root, "bundle", "memberships.jsonl"), "utf8")).trim()) as {
@@ -85,12 +121,14 @@ describe("Workspace Bundle v3 credential boundary", () => {
       };
       expect(membership.created_at).toBe(timestamp.toISOString());
       expect(membership.updated_at).toBe(timestamp.toISOString());
+      const audit = JSON.parse((await readFile(path.join(root, "bundle", "audits.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(audit.details).toEqual({ nested: { retained: true } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("retains source Organization provenance and schema revision in a new Bundle", async () => {
+  it("accepts historical source Organization provenance for old Bundles", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-provenance-"));
     try {
       await writeHierarchyBundle(root, {
@@ -119,9 +157,11 @@ describe("Workspace Bundle v3 credential boundary", () => {
     }
   });
 
-  it("requires an explicit target Organization before staging a Bundle", async () => {
+  it("stages a Bundle without a target Organization by default", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-target-"));
     try {
+      await writeHierarchyBundle(root, { rooms: [], roomMemberships: [] });
+      const manifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8")) as never;
       const store = { storageRoot: root } as unknown as WorkspaceServerStore;
       const service = new WorkspaceBundleV3Service(store);
       await expect(service.stageIncomingBundle({
@@ -129,8 +169,10 @@ describe("Workspace Bundle v3 credential boundary", () => {
         operationId: "operation_bundle_target_test"
       }, {
         targetWorkspaceId: workspaceId,
-        manifest: {} as never
-      })).rejects.toThrow("workspace_bundle_target_organization_required");
+        manifest
+      })).resolves.toBeUndefined();
+      const metadata = JSON.parse(await readFile(path.join(root, ".incoming", accountId, "operation_bundle_target_test.json"), "utf8")) as Record<string, unknown>;
+      expect(metadata).not.toHaveProperty("target_organization_id");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

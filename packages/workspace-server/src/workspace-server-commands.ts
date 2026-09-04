@@ -262,6 +262,20 @@ export class WorkspaceServerCommandService {
     return this.store.commitWorkspaceOrganizationMove(context, input);
   }
 
+  attachWorkspaceToOrganization(
+    context: Parameters<WorkspaceServerStore["attachWorkspaceToOrganization"]>[0],
+    input: Parameters<WorkspaceServerStore["attachWorkspaceToOrganization"]>[1]
+  ) {
+    return this.store.attachWorkspaceToOrganization(context, input);
+  }
+
+  detachWorkspaceFromOrganization(
+    context: Parameters<WorkspaceServerStore["detachWorkspaceFromOrganization"]>[0],
+    input: Parameters<WorkspaceServerStore["detachWorkspaceFromOrganization"]>[1]
+  ) {
+    return this.store.detachWorkspaceFromOrganization(context, input);
+  }
+
   getWorkspaceOrganizationMoveStatus(context: OrganizationRequestContext, operationId: string) {
     return this.store.getWorkspaceOrganizationMoveStatus(context, operationId);
   }
@@ -740,9 +754,8 @@ export class WorkspaceServerCommandService {
   ): Promise<Record<string, unknown>> {
     const accountId = assertOpaqueId(context.accountId, "account_id_invalid");
     const operationId = assertOpaqueId(context.operationId, "organization_operation_id_invalid");
-    const organizationId = assertOpaqueId(
-      input.organizationId ?? input.organization_id ?? context.organizationId ?? "",
-      "organization_id_invalid"
+    const requestedOrganizationId = optionalOrganizationId(
+      input.organizationId ?? input.organization_id ?? context.organizationId
     );
     const workspaceId = assertOpaqueId(input.workspaceId ?? input.workspace_id ?? "", "workspace_id_invalid");
 
@@ -750,7 +763,7 @@ export class WorkspaceServerCommandService {
     // authorization/ownership check.  It does not supply the public result.
     const authorized = await this.store.exportWorkspaceBundle(context, input);
     const authorizedSource = authorized.sourceOrganizationId ?? authorized.source_organization_id;
-    if (authorizedSource !== undefined && authorizedSource !== organizationId) {
+    if (requestedOrganizationId !== undefined && authorizedSource !== requestedOrganizationId) {
       throw new WorkspaceServerError("workspace_bundle_source_organization_mismatch", 409);
     }
 
@@ -771,18 +784,30 @@ export class WorkspaceServerCommandService {
       ? await readWorkspaceBundleV4Transport(exported.directory)
       : await readWorkspaceBundleV3Transport(exported.directory);
     const manifest = transport.manifest as unknown as BundleManifestMetadata;
-    const metadata = publicBundleMetadata(manifest, { requireSourceOrganization: true });
+    const metadata = publicBundleMetadata(manifest, { requireSourceOrganization: false });
     if (metadata.workspaceId !== workspaceId) {
       throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 409);
     }
-    if (metadata.sourceOrganizationId !== organizationId) {
+    // New portable V3/V4 exports intentionally omit the source Organization
+    // affiliation.  Validate provenance when an older Bundle still carries
+    // it, but do not turn the intentional absence into a false 409.  The
+    // Store check above remains the Organization authorization/ownership
+    // boundary for the export request.
+    if (metadata.sourceOrganizationId !== undefined
+      && requestedOrganizationId !== undefined
+      && metadata.sourceOrganizationId !== requestedOrganizationId) {
+      throw new WorkspaceServerError("workspace_bundle_source_organization_mismatch", 409);
+    }
+    if (metadata.sourceOrganizationId !== undefined
+      && authorizedSource !== undefined
+      && metadata.sourceOrganizationId !== authorizedSource) {
       throw new WorkspaceServerError("workspace_bundle_source_organization_mismatch", 409);
     }
 
     return {
       bundle_id: bundleId,
       workspace_id: metadata.workspaceId,
-      source_organization_id: metadata.sourceOrganizationId,
+      ...(metadata.sourceOrganizationId ? { source_organization_id: metadata.sourceOrganizationId } : {}),
       schema_version: metadata.schemaVersion,
       integrity_hash: metadata.integrityHash,
       file_count: transport.entries.length,
@@ -790,7 +815,7 @@ export class WorkspaceServerCommandService {
       manifest: {
         schema_version: metadata.schemaVersion,
         workspace_id: metadata.workspaceId,
-        source_organization_id: metadata.sourceOrganizationId,
+        ...(metadata.sourceOrganizationId ? { source_organization_id: metadata.sourceOrganizationId } : {}),
         integrity_hash: metadata.integrityHash,
         record_counts: metadata.recordCounts
       },
@@ -801,7 +826,8 @@ export class WorkspaceServerCommandService {
   /**
    * Restore resolves only a server-created export directory.  No filesystem
    * path is accepted from the request, and the verified Bundle is then handed
-   * to the normal V3/V4 import protocol with an explicit target Organization.
+   * to the normal V3/V4 import protocol.  The default import target is a
+   * standalone Workspace; an Organization is optional explicit metadata.
    */
   private async restoreWorkspaceBundleThroughService(
     context: OrganizationRequestContext,
@@ -810,9 +836,8 @@ export class WorkspaceServerCommandService {
     const accountId = assertOpaqueId(context.accountId, "account_id_invalid");
     const operationId = assertOpaqueId(context.operationId, "organization_operation_id_invalid");
     const bundleId = assertOpaqueId(input.bundleId ?? input.bundle_id ?? "", "workspace_bundle_id_invalid");
-    const targetOrganizationId = assertOpaqueId(
-      input.targetOrganizationId ?? input.target_organization_id ?? context.organizationId ?? "",
-      "organization_id_invalid"
+    const targetOrganizationId = optionalOrganizationId(
+      input.targetOrganizationId ?? input.target_organization_id ?? context.organizationId
     );
     if (input.confirm !== true) throw new WorkspaceServerError("workspace_bundle_restore_confirmation_required", 400);
 
@@ -831,13 +856,13 @@ export class WorkspaceServerCommandService {
         ? await this.completionBundles.importNew(importContext, {
           sourceDirectory: source.directory,
           targetWorkspaceId,
-          targetOrganizationId
+          ...(targetOrganizationId ? { targetOrganizationId } : {})
         })
         : (() => { throw new WorkspaceServerError("workspace_completion_bundle_service_unavailable", 503); })()
       : await this.bundles.importNew(importContext, {
         sourceDirectory: source.directory,
         targetWorkspaceId,
-        targetOrganizationId
+        ...(targetOrganizationId ? { targetOrganizationId } : {})
       });
     const importedMetadata = publicBundleMetadata(imported.manifest as unknown as BundleManifestMetadata, { requireSourceOrganization: false });
     if (imported.workspaceId !== targetWorkspaceId
@@ -852,7 +877,7 @@ export class WorkspaceServerCommandService {
       bundle_id: bundleId,
       workspace_id: targetWorkspaceId,
       ...(sourceMetadata.sourceOrganizationId ? { source_organization_id: sourceMetadata.sourceOrganizationId } : {}),
-      target_organization_id: targetOrganizationId,
+      ...(targetOrganizationId ? { target_organization_id: targetOrganizationId } : {}),
       schema_version: schemaVersion,
       integrity_hash: sourceMetadata.integrityHash,
       status: "restored",
@@ -942,12 +967,17 @@ function managedWorkspaceBundleId(operationId: string): string {
   return `bundle_${createHash("sha256").update(operationId).digest("hex")}`;
 }
 
-function restoredWorkspaceId(targetOrganizationId: string, accountId: string, operationId: string): string {
+function restoredWorkspaceId(targetOrganizationId: string | undefined, accountId: string, operationId: string): string {
   const digest = createHash("sha256")
-    .update(`workspace_restore|${targetOrganizationId}|${accountId}|${operationId}`)
+    .update(`workspace_restore|${targetOrganizationId ?? "standalone"}|${accountId}|${operationId}`)
     .digest("hex")
     .slice(0, 40);
   return assertOpaqueId(`workspace_restore_${digest}`, "workspace_id_invalid");
+}
+
+function optionalOrganizationId(value: string | null | undefined): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return assertOpaqueId(value, "organization_id_invalid");
 }
 
 function managedWorkspaceBundlePath(storageRoot: string, workspaceId: string, bundleId: string): string {

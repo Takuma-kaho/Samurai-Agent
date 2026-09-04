@@ -39,7 +39,7 @@ export function OrganizationSwitcher({
 
   return (
     <section className="native-org-switcher" aria-labelledby="native-org-heading">
-      <div className="native-section-eyebrow" id="native-org-heading">Organization</div>
+      <div className="native-section-eyebrow" id="native-org-heading">Organization（管理）</div>
       <div className="native-org-control-row">
         <span className="native-org-avatar" aria-hidden="true">{selected ? initials(selected) : "—"}</span>
         <label className="native-visually-hidden" htmlFor="native-organization-select">Organizationを選択</label>
@@ -69,7 +69,10 @@ export function OrganizationSwitcher({
           <span>{selected.workspaceCount ?? selected.workspaces?.length ?? 0} Workspaces</span>
         </div>
       ) : (
-        <button className="native-inline-action" type="button" onClick={onCreate} disabled={disabled || loading}>＋ 作成または参加</button>
+        <div className="native-org-empty">
+          <p className="native-empty-copy">Workspace利用にOrganizationは必須ではありません。</p>
+          <button className="native-inline-action" type="button" onClick={onCreate} disabled={disabled || loading}>＋ 作成または参加</button>
+        </div>
       )}
       {error ? <p className="native-inline-error" role="alert">{error}</p> : null}
     </section>

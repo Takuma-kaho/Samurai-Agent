@@ -52,6 +52,16 @@ export interface WorkspaceMoveCommitInput extends WorkspaceMovePreviewInput {
   confirmGuestMembership: boolean;
 }
 
+export interface WorkspaceOrganizationAttachInput {
+  expectedWorkspaceVersion?: number;
+  confirmGuestMemberships?: boolean;
+}
+
+export interface WorkspaceBundleRestoreInput {
+  /** Omit to let the Server allocate a new Workspace ID. */
+  targetWorkspaceId?: string;
+}
+
 export interface OrganizationApi {
   listOrganizations(): Promise<NativeOrganization[]>;
   getOrganization(organizationId: string): Promise<NativeOrganization>;
@@ -60,6 +70,8 @@ export interface OrganizationApi {
   deleteOrganization(organizationId: string): Promise<void>;
   listWorkspaces(organizationId: string): Promise<NativeWorkspace[]>;
   createWorkspace(organizationId: string, input: CreateWorkspaceInput): Promise<NativeWorkspace>;
+  attachWorkspace(organizationId: string, workspaceId: string, input?: WorkspaceOrganizationAttachInput): Promise<NativeWorkspace>;
+  detachWorkspace(organizationId: string, workspaceId: string, expectedWorkspaceVersion?: number): Promise<NativeWorkspace>;
   patchWorkspace(organizationId: string, workspaceId: string, input: { name?: string }): Promise<NativeWorkspace>;
   archiveWorkspace(organizationId: string, workspaceId: string): Promise<NativeWorkspace>;
   restoreWorkspace(organizationId: string, workspaceId: string): Promise<NativeWorkspace>;
@@ -77,7 +89,9 @@ export interface OrganizationApi {
   revokeWorkspaceMember(organizationId: string, workspaceId: string, accountId: string): Promise<void>;
   previewWorkspaceMove(organizationId: string, workspaceId: string, input: WorkspaceMovePreviewInput): Promise<NativeWorkspaceMovePreview>;
   moveWorkspace(organizationId: string, workspaceId: string, input: WorkspaceMoveCommitInput): Promise<NativeWorkspaceMoveResult>;
+  exportStandaloneWorkspaceBundle(workspaceId: string, expectedWorkspaceVersion?: number): Promise<NativeWorkspaceBundleExport>;
   exportWorkspaceBundle(organizationId: string, workspaceId: string, expectedWorkspaceVersion?: number): Promise<NativeWorkspaceBundleExport>;
+  restoreWorkspaceBundle(bundleId: string, input?: WorkspaceBundleRestoreInput): Promise<NativeWorkspaceBundleRestoreResult>;
   restoreOrganizationBundle(targetOrganizationId: string, bundleId: string): Promise<NativeWorkspaceBundleRestoreResult>;
 }
 
@@ -136,6 +150,13 @@ export function createOrganizationApi(transport?: OrganizationApiTransport): Org
     },
     listWorkspaces: async (organizationId) => normalizeWorkspaces(await call("GET", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces`), organizationId),
     createWorkspace: async (organizationId, input) => normalizeWorkspace(await call("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces`, input, operationId()), organizationId),
+    attachWorkspace: async (organizationId, workspaceId, input = {}) => normalizeWorkspaceAssociation(await call("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/attach`, {
+      ...(input.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: input.expectedWorkspaceVersion }),
+      ...(input.confirmGuestMemberships === undefined ? {} : { confirm_guest_memberships: input.confirmGuestMemberships })
+    }, operationId()), organizationId),
+    detachWorkspace: async (organizationId, workspaceId, expectedWorkspaceVersion) => normalizeWorkspaceAssociation(await call("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/detach`, {
+      ...(expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: expectedWorkspaceVersion })
+    }, operationId())),
     patchWorkspace: async (organizationId, workspaceId, input) => normalizeWorkspace(await call("PATCH", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}`, input, operationId()), organizationId),
     archiveWorkspace: async (organizationId, workspaceId) => normalizeWorkspace(await call("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/archive`, { confirm: true }, operationId()), organizationId),
     restoreWorkspace: async (organizationId, workspaceId) => normalizeWorkspace(await call("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/restore`, { confirm: true }, operationId()), organizationId),
@@ -194,8 +215,16 @@ export function createOrganizationApi(transport?: OrganizationApiTransport): Org
       confirm_guest_membership: input.confirmGuestMembership,
       ...(input.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: input.expectedWorkspaceVersion })
     }, operationId())),
+    exportStandaloneWorkspaceBundle: async (workspaceId, expectedWorkspaceVersion) => normalizeWorkspaceBundleExport(await call("POST", `/api/workspaces/${encodeURIComponent(workspaceId)}/bundle/export`, {
+      ...(expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: expectedWorkspaceVersion })
+    }, operationId())),
     exportWorkspaceBundle: async (organizationId, workspaceId, expectedWorkspaceVersion) => normalizeWorkspaceBundleExport(await call("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/bundle/export`, {
       ...(expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: expectedWorkspaceVersion })
+    }, operationId())),
+    restoreWorkspaceBundle: async (bundleId, input = {}) => normalizeWorkspaceBundleRestore(await call("POST", "/api/workspaces/bundles/restore", {
+      bundle_id: bundleId,
+      confirm: true,
+      ...(input.targetWorkspaceId ? { target_workspace_id: input.targetWorkspaceId } : {})
     }, operationId())),
     restoreOrganizationBundle: async (targetOrganizationId, bundleId) => normalizeWorkspaceBundleRestore(await call("POST", `/api/organizations/${encodeURIComponent(targetOrganizationId)}/bundles/restore`, {
       bundle_id: bundleId,
@@ -277,6 +306,23 @@ async function invokeDesktopOrganization(desktop: DesktopOrganizationBridge, req
     if (request.method === "GET") return invokeDesktopMethod(desktop, "listOrganizationWorkspaces", { organizationId });
     if (request.method === "POST") return invokeDesktopMethod(desktop, "createOrganizationWorkspace", operationInput({ organizationId, ...body }));
   }
+  if (organizationId && workspaceId && parts[5] === "attach" && parts.length === 6 && request.method === "POST") {
+    const method = desktop.attachOrganizationWorkspace ? "attachOrganizationWorkspace" : "attachWorkspaceToOrganization";
+    return invokeDesktopMethod(desktop, method, operationInput({
+      organizationId,
+      workspaceId,
+      ...(body.expected_workspace_version === undefined ? {} : { expectedWorkspaceVersion: body.expected_workspace_version }),
+      ...(body.confirm_guest_memberships === undefined ? {} : { confirmGuestMemberships: body.confirm_guest_memberships })
+    }));
+  }
+  if (organizationId && workspaceId && parts[5] === "detach" && parts.length === 6 && request.method === "POST") {
+    const method = desktop.detachOrganizationWorkspace ? "detachOrganizationWorkspace" : "detachWorkspaceFromOrganization";
+    return invokeDesktopMethod(desktop, method, operationInput({
+      organizationId,
+      workspaceId,
+      ...(body.expected_workspace_version === undefined ? {} : { expectedWorkspaceVersion: body.expected_workspace_version })
+    }));
+  }
   if (organizationId && workspaceId && parts.length === 5) {
     if (request.method === "PATCH") return invokeDesktopMethod(desktop, "patchOrganizationWorkspace", operationInput({ organizationId, workspaceId, ...body }));
     if (request.method === "DELETE") return invokeDesktopMethod(desktop, "setOrganizationWorkspaceLifecycle", operationInput({ organizationId, workspaceId, lifecycle: "delete", confirm: body.confirm === true, ...(expectedVersion === undefined ? {} : { expectedVersion }) }));
@@ -306,6 +352,19 @@ async function invokeDesktopOrganization(desktop: DesktopOrganizationBridge, req
   }
   if (organizationId && parts[3] === "bundles" && parts[4] === "restore" && request.method === "POST") {
     return invokeDesktopMethod(desktop, "restoreOrganizationBundle", operationInput({ organizationId, bundleId: body.bundle_id, confirm: body.confirm === true }));
+  }
+  if (parts[0] === "api" && parts[1] === "workspaces" && parts[2] && parts[3] === "bundle" && parts[4] === "export" && parts.length === 5 && request.method === "POST") {
+    return invokeDesktopMethod(desktop, "exportWorkspaceBundle", operationInput({
+      workspaceId: decodeURIComponent(parts[2]),
+      ...(body.expected_workspace_version === undefined ? {} : { expectedWorkspaceVersion: body.expected_workspace_version })
+    }));
+  }
+  if (request.path === "/api/workspaces/bundles/restore" && request.method === "POST") {
+    return invokeDesktopMethod(desktop, "restoreWorkspaceBundle", operationInput({
+      bundleId: body.bundle_id,
+      ...(body.target_workspace_id ? { targetWorkspaceId: body.target_workspace_id } : {}),
+      confirm: body.confirm === true
+    }));
   }
 
   throw new OrganizationApiError("organization_route_not_supported", 400);
@@ -399,9 +458,12 @@ function normalizeWorkspace(value: unknown, organizationId?: string): NativeWork
   const rooms = body.rooms === undefined ? undefined : normalizeRooms(body.rooms, stringValue(body.id ?? body.workspace_id));
   const accessValue = body.access ?? body.can_access ?? body.has_access;
   const access = accessValue === false || accessValue === "none" || body.permission === "denied" ? "none" : "granted";
+  const normalizedOrganizationId = optionalString(body.organization_id ?? body.organizationId ?? organizationId);
+  const connectionId = optionalString(body.connection_id ?? body.connectionId);
+  const serverOrigin = optionalString(body.server_url ?? body.serverUrl);
   return {
     id: stringValue(body.id ?? body.workspace_id),
-    organizationId: stringValue(body.organization_id ?? organizationId),
+    ...(normalizedOrganizationId ? { organizationId: normalizedOrganizationId } : {}),
     name: stringValue(body.name, "名称未設定のWorkspace"),
     state: workspaceState(body.state),
     access,
@@ -409,8 +471,17 @@ function normalizeWorkspace(value: unknown, organizationId?: string): NativeWork
     ...(numberValue(body.version) !== undefined ? { version: numberValue(body.version) } : {}),
     ...(optionalString(body.created_at) ? { createdAt: optionalString(body.created_at) } : {}),
     ...(optionalString(body.updated_at) ? { updatedAt: optionalString(body.updated_at) } : {}),
+    ...(connectionId ? { connectionId, target: { connectionId, workspaceId: stringValue(body.id ?? body.workspace_id) } } : {}),
+    ...(serverOrigin ? { serverOrigin } : {}),
+    ...(optionalString(body.server_label ?? body.serverLabel) ? { serverLabel: optionalString(body.server_label ?? body.serverLabel) } : {}),
+    ...(optionalString(body.account_id ?? body.accountId) ? { accountId: optionalString(body.account_id ?? body.accountId) } : {}),
     ...(rooms ? { rooms } : {})
   };
+}
+
+function normalizeWorkspaceAssociation(value: unknown, organizationId?: string): NativeWorkspace {
+  const body = record(value);
+  return normalizeWorkspace(body.workspace ?? value, organizationId);
 }
 
 function normalizeRooms(value: unknown, workspaceId: string): NativeRoom[] {
@@ -547,7 +618,7 @@ function normalizeWorkspaceBundleExport(value: unknown): NativeWorkspaceBundleEx
   return {
     bundleId: stringValue(body.bundle_id ?? body.bundleId ?? body.id),
     workspaceId: stringValue(body.workspace_id ?? body.workspaceId),
-    sourceOrganizationId: stringValue(body.source_organization_id ?? body.sourceOrganizationId),
+    ...(optionalString(body.source_organization_id ?? body.sourceOrganizationId) ? { sourceOrganizationId: optionalString(body.source_organization_id ?? body.sourceOrganizationId) } : {}),
     ...(numberValue(body.schema_version ?? body.schemaVersion ?? body.format_version) !== undefined ? { schemaVersion: numberValue(body.schema_version ?? body.schemaVersion ?? body.format_version) } : {}),
     ...(optionalString(body.integrity_hash ?? body.integrityHash ?? body.sha256) ? { integrityHash: optionalString(body.integrity_hash ?? body.integrityHash ?? body.sha256) } : {}),
     ...(numberValue(body.file_count ?? body.fileCount) !== undefined ? { fileCount: numberValue(body.file_count ?? body.fileCount) } : {}),
@@ -564,7 +635,7 @@ function normalizeWorkspaceBundleRestore(value: unknown): NativeWorkspaceBundleR
     bundleId: stringValue(body.bundle_id ?? body.bundleId ?? body.id),
     workspaceId: stringValue(body.workspace_id ?? body.workspaceId),
     ...(optionalString(body.source_organization_id ?? body.sourceOrganizationId) ? { sourceOrganizationId: optionalString(body.source_organization_id ?? body.sourceOrganizationId) } : {}),
-    targetOrganizationId: stringValue(body.target_organization_id ?? body.targetOrganizationId),
+    ...(optionalString(body.target_organization_id ?? body.targetOrganizationId) ? { targetOrganizationId: optionalString(body.target_organization_id ?? body.targetOrganizationId) } : {}),
     ...(numberValue(body.schema_version ?? body.schemaVersion ?? body.format_version) !== undefined ? { schemaVersion: numberValue(body.schema_version ?? body.schemaVersion ?? body.format_version) } : {}),
     ...(optionalString(body.integrity_hash ?? body.integrityHash ?? body.sha256) ? { integrityHash: optionalString(body.integrity_hash ?? body.integrityHash ?? body.sha256) } : {}),
     status: rawStatus === "restored" ? "restored" : "failed",

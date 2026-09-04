@@ -177,10 +177,59 @@ export function workspaceSelectionRoomsRequest(input: unknown): WorkspaceSelecti
   };
 }
 
+/** Create a standalone Workspace from the account-level directory. */
+export function workspaceCreateRequest(input: unknown): OrganizationRequestDescriptor {
+  const value = object(input);
+  return mutation("POST", "/api/workspaces", requiredOperationId(value), {
+    workspace_id: requiredId(value, "workspaceId"),
+    name: requiredText(value, "name", 240)
+  });
+}
+
+/** Export a standalone Workspace without an Organization route segment. */
+export function workspaceStandaloneBundleExportRequest(input: unknown): OrganizationRequestDescriptor {
+  const value = object(input);
+  return mutation("POST", `/api/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/bundle/export`, requiredOperationId(value), {
+    ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
+  });
+}
+
+/** Restore a Server-managed Bundle as a standalone Workspace. */
+export function workspaceStandaloneBundleRestoreRequest(input: unknown): OrganizationRequestDescriptor {
+  const value = object(input);
+  const targetWorkspaceId = optionalId(value, "targetWorkspaceId");
+  return mutation("POST", "/api/workspaces/bundles/restore", requiredOperationId(value), {
+    bundle_id: requiredId(value, "bundleId"),
+    confirm: true,
+    ...(targetWorkspaceId ? { target_workspace_id: targetWorkspaceId } : {})
+  });
+}
+
 export function workspaceOrganizationWorkspaceCreateRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces`, requiredOperationId(value), {
     name: requiredText(value, "name", 240)
+  });
+}
+
+/** Attach is an explicit same-Server control-plane operation. */
+export function workspaceOrganizationWorkspaceAttachRequest(input: unknown): OrganizationRequestDescriptor {
+  const value = object(input);
+  const organizationId = requiredId(value, "organizationId");
+  const workspaceId = requiredId(value, "workspaceId");
+  return mutation("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/attach`, requiredOperationId(value), {
+    ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") }),
+    ...(value.confirmGuestMemberships === undefined ? {} : { confirm_guest_memberships: requiredBoolean(value, "confirmGuestMemberships") })
+  });
+}
+
+/** Detach preserves the Workspace and all Workspace-owned content. */
+export function workspaceOrganizationWorkspaceDetachRequest(input: unknown): OrganizationRequestDescriptor {
+  const value = object(input);
+  const organizationId = requiredId(value, "organizationId");
+  const workspaceId = requiredId(value, "workspaceId");
+  return mutation("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/detach`, requiredOperationId(value), {
+    ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
   });
 }
 

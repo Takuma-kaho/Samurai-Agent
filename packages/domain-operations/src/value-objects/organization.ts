@@ -76,7 +76,8 @@ export type OrganizationInvitationIssueResult = z.infer<typeof organizationInvit
 /** Workspace list output is metadata only. It contains no Room, Message, or Knowledge content. */
 export const organizationWorkspaceRecordSchema = z.object({
   id: workspaceIdSchema,
-  organization_id: organizationIdSchema,
+  /** Omitted when the Workspace is standalone on this Server. */
+  organization_id: organizationIdSchema.optional(),
   name: z.string().trim().min(1).max(200),
   state: workspaceLifecycleStateSchema,
   version: versionSchema,
@@ -89,9 +90,31 @@ export const organizationWorkspaceRecordSchema = z.object({
 }).strict();
 export type OrganizationWorkspaceRecord = z.infer<typeof organizationWorkspaceRecordSchema>;
 
+/**
+ * Workspace-first directory projection.  This is intentionally separate from
+ * Organization membership: listing a Workspace here is account-scoped and
+ * never grants access to Room or other Workspace content.
+ */
+export const workspaceSummarySchema = z.object({
+  id: workspaceIdSchema,
+  organization_id: organizationIdSchema.optional(),
+  name: z.string().trim().min(1).max(200),
+  state: z.enum(["active", "archived", "deleted", "read_only"]),
+  version: versionSchema,
+  hosting_mode: z.enum(["hosted", "self_host"]).optional(),
+  database_placement: z.enum(["shared", "dedicated"]).optional(),
+  role: workspaceMembershipRoleSchema.optional(),
+  access: z.enum(["granted", "none"]).optional(),
+  created_by: accountIdSchema.optional(),
+  created_at: timestampSchema.optional(),
+  updated_at: timestampSchema.optional()
+}).strict();
+export type WorkspaceSummary = z.infer<typeof workspaceSummarySchema>;
+
 export const organizationWorkspaceMembershipRecordSchema = z.object({
   id: organizationIdSchema,
-  organization_id: organizationIdSchema,
+  /** Optional provenance for direct Workspace membership operations. */
+  organization_id: organizationIdSchema.optional(),
   workspace_id: workspaceIdSchema,
   account_id: accountIdSchema,
   role: workspaceMembershipRoleSchema,
@@ -115,8 +138,8 @@ export const workspaceMoveMemberSummarySchema = z.object({
 
 export const workspaceMovePreflightSchema = z.object({
   operation_id: operationIdSchema,
-  source_organization_id: organizationIdSchema,
-  target_organization_id: organizationIdSchema,
+  source_organization_id: organizationIdSchema.optional(),
+  target_organization_id: organizationIdSchema.optional(),
   workspace_id: workspaceIdSchema,
   workspace_version: versionSchema,
   workspace_state: workspaceLifecycleStateSchema,
@@ -133,8 +156,8 @@ export type WorkspaceMovePreflight = z.infer<typeof workspaceMovePreflightSchema
 export const workspaceMoveResultSchema = z.object({
   operation_id: operationIdSchema,
   workspace_id: workspaceIdSchema,
-  source_organization_id: organizationIdSchema,
-  target_organization_id: organizationIdSchema,
+  source_organization_id: organizationIdSchema.optional(),
+  target_organization_id: organizationIdSchema.optional(),
   status: workspaceMoveStatusSchema,
   guest_membership_account_ids: z.array(accountIdSchema).max(10_000),
   event_id: operationIdSchema.optional(),
@@ -152,7 +175,7 @@ export type WorkspaceMoveStatusRecord = z.infer<typeof workspaceMoveStatusRecord
 export const workspaceBundleManifestSchema = z.object({
   schema_version: z.number().int().positive(),
   workspace_id: workspaceIdSchema,
-  source_organization_id: organizationIdSchema,
+  source_organization_id: organizationIdSchema.optional(),
   integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
   record_counts: z.record(z.number().int().nonnegative())
 }).strict();
@@ -160,7 +183,7 @@ export const workspaceBundleManifestSchema = z.object({
 export const workspaceBundleExportResultSchema = z.object({
   bundle_id: operationIdSchema,
   workspace_id: workspaceIdSchema,
-  source_organization_id: organizationIdSchema,
+  source_organization_id: organizationIdSchema.optional(),
   schema_version: z.number().int().positive(),
   integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
   file_count: z.number().int().nonnegative(),
@@ -174,7 +197,7 @@ export const workspaceBundleRestoreResultSchema = z.object({
   bundle_id: operationIdSchema,
   workspace_id: workspaceIdSchema,
   source_organization_id: organizationIdSchema.optional(),
-  target_organization_id: organizationIdSchema,
+  target_organization_id: organizationIdSchema.optional(),
   schema_version: z.number().int().positive(),
   integrity_hash: z.string().regex(/^[a-f0-9]{64}$/i),
   status: z.enum(["restored", "failed"]),

@@ -91,7 +91,7 @@ export async function createPostgresExternalIntegrationRuntime(
   });
   retentionWorker.start();
 
-  const publicBaseUrl = options.config.publicBaseUrl ?? `http://${options.config.bindAddress}:${options.config.port}`;
+  const publicBaseUrl = resolveExternalIntegrationPublicBaseUrl(options.config);
   const protectedResourceUrl = new URL("/mcp", publicBaseUrl).toString();
   const oauth = new OAuthService({
     store,
@@ -128,6 +128,15 @@ export async function createPostgresExternalIntegrationRuntime(
     handler,
     close: () => retentionWorker.stop()
   };
+}
+
+export function resolveExternalIntegrationPublicBaseUrl(
+  config: Pick<WorkspaceServerConfig, "publicBaseUrl" | "mode" | "publicNetwork" | "bindAddress" | "port">
+): string {
+  return config.publicBaseUrl
+    ?? (config.mode === "self_host" && !config.publicNetwork
+      ? `http://127.0.0.1:${config.port}`
+      : `http://${config.bindAddress}:${config.port}`);
 }
 
 export function isPostgresExternalIntegrationPath(pathname: string): boolean {

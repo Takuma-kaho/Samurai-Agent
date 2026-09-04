@@ -1,9 +1,11 @@
 import {
   browserWorkspaceHealth,
   browserWorkspaceRequest,
-  createBrowserConnectionState,
+  createBrowserWorkspaceConnectionState,
   loadBrowserWorkspaceConnection,
+  loadBrowserWorkspaceConnections,
   registerBrowserWorkspaceAccount,
+  selectBrowserWorkspaceConnection,
   selectBrowserWorkspaceCandidate,
   subscribeBrowserWorkspaceRealtime
 } from "./workspace-browser-auth";
@@ -18,6 +20,8 @@ import type {
   DesktopRoomMovePreview,
   DesktopWorkspaceConnection,
   DesktopWorkspaceConnectionState,
+  DesktopWorkspaceDirectoryEntry,
+  DesktopWorkspaceDirectoryResult,
   DesktopWorkspaceLearningSettings,
   DesktopWorkspaceRoom,
   DesktopWorkspaceRoomMembership,
@@ -68,16 +72,47 @@ type DesktopBridge = NonNullable<Window["samuraiDesktop"]>;
 export function createBrowserWorkspaceBridge(): DesktopBridge {
   const bridge: DesktopBridge = {
     listWorkspaceConnections: async () => browserConnectionState(),
+    listWorkspaceDirectory: listBrowserWorkspaceDirectory,
+    listWorkspaceAccountWorkspaces: async (input) => listBrowserWorkspaceDirectory(input?.connectionId),
+    createWorkspace: async (input) => browserWorkspaceRequest({
+      method: "POST",
+      path: "/api/workspaces",
+      ...(input.operationId ? { operationId: input.operationId, idempotencyKey: input.operationId } : {}),
+      body: {
+        workspace_id: input.workspaceId ?? `workspace_${crypto.randomUUID()}`,
+        name: input.name
+      }
+    }),
+    exportWorkspaceBundle: (input) => workspaceRequest(
+      "POST",
+      "/bundle/export",
+      input.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: input.expectedWorkspaceVersion },
+      input.operationId,
+      input.operationId
+    ),
+    restoreWorkspaceBundle: (input) => browserWorkspaceRequest({
+      method: "POST",
+      path: "/api/workspaces/bundles/restore",
+      ...(input.operationId ? { operationId: input.operationId, idempotencyKey: input.operationId } : {}),
+      body: {
+        bundle_id: input.bundleId,
+        confirm: true,
+        ...(input.targetWorkspaceId ? { target_workspace_id: input.targetWorkspaceId } : {})
+      }
+    }),
     upsertWorkspaceConnection: async () => {
       throw new Error("workspace_browser_identity_required");
     },
     selectWorkspaceConnection: async (connectionId) => {
-      const connection = await loadBrowserWorkspaceConnection();
-      if (!connection || connection.id !== connectionId) throw new Error("workspace_connection_not_found");
+      await selectBrowserWorkspaceConnection(connectionId);
       return browserConnectionState();
     },
-    selectWorkspaceCandidate: async (workspaceId) => {
-      await selectBrowserWorkspaceCandidate(workspaceId);
+    selectWorkspaceCandidate: async (input) => {
+      await selectBrowserWorkspaceCandidate(input);
+      return browserConnectionState();
+    },
+    selectWorkspaceTarget: async (target) => {
+      await selectBrowserWorkspaceCandidate(target);
       return browserConnectionState();
     },
     registerWorkspaceServerAccount: (displayName) => registerBrowserWorkspaceAccount(displayName),
@@ -369,24 +404,76 @@ export function browserWorkspaceBridge(): DesktopBridge {
 }
 
 async function browserConnectionState(): Promise<DesktopWorkspaceConnectionState> {
-  const connection = await loadBrowserWorkspaceConnection();
-  if (!connection) return createBrowserConnectionState(undefined) as DesktopWorkspaceConnectionState;
-  const desktopConnection: DesktopWorkspaceConnection = {
-    id: connection.id,
-    label: connection.label,
-    serverUrl: connection.serverUrl,
-    workspaceId: connection.workspaceId,
-    accountId: connection.accountId,
-    createdAt: connection.createdAt,
-    updatedAt: connection.updatedAt
+  const state = await createBrowserWorkspaceConnectionState();
+  const active = state.connections.find((connection) => connection.id === state.activeConnectionId);
+  return {
+    ...(state.activeConnectionId ? { activeConnectionId: state.activeConnectionId } : {}),
+    ...(active?.workspaceId ? { activeTarget: { connectionId: active.id, workspaceId: active.workspaceId } } : {}),
+    connections: state.connections.map(toDesktopConnection)
   };
-  return { activeConnectionId: desktopConnection.id, connections: [desktopConnection] };
 }
 
-async function browserWorkspaceServerStatus(): Promise<DesktopWorkspaceServerStatus> {
-  const connection = await loadBrowserWorkspaceConnection();
+async function listBrowserWorkspaceDirectory(connectionId?: string): Promise<DesktopWorkspaceDirectoryResult> {
+  const connections = await loadBrowserWorkspaceConnections();
+  const selectedConnections = connectionId ? connections.filter((connection) => connection.id === connectionId) : connections;
+  if (connectionId && !selectedConnections.length) throw new Error("workspace_connection_not_found");
+  const workspaces: DesktopWorkspaceDirectoryEntry[] = [];
+  const errors: DesktopWorkspaceDirectoryResult["errors"] = [];
+  await Promise.all(selectedConnections.map(async (connection) => {
+    try {
+      const payload = await browserWorkspaceRequest<unknown>({
+        method: "GET",
+        path: "/api/account/workspaces",
+        connectionId: connection.id
+      });
+      for (const workspace of normalizeBrowserDirectoryRows(payload)) {
+        workspaces.push({
+          ...workspace,
+          connectionId: connection.id,
+          accountId: connection.accountId,
+          serverUrl: connection.serverUrl,
+          serverLabel: connection.label,
+          availability: "connected"
+        });
+      }
+    } catch (error) {
+      errors.push({
+        connectionId: connection.id,
+        serverUrl: connection.serverUrl,
+        serverLabel: connection.label,
+        code: browserErrorCode(error),
+        message: browserErrorMessage(error)
+      });
+    }
+  }));
+  return { workspaces: workspaces.sort((left, right) => left.name.localeCompare(right.name, "ja") || left.connectionId.localeCompare(right.connectionId)), ...(errors.length ? { errors } : {}) };
+}
+
+async function browserWorkspaceServerStatus(target?: { connectionId?: string; workspaceId?: string }): Promise<DesktopWorkspaceServerStatus> {
+  const connection = target?.connectionId
+    ? (await loadBrowserWorkspaceConnections()).find((item) => item.id === target.connectionId)
+    : await loadBrowserWorkspaceConnection();
   if (!connection) return { identityAvailable: false };
-  const desktopConnection: DesktopWorkspaceConnection = {
+  const desktopConnection = toDesktopConnection(connection);
+  const workspaceId = target?.workspaceId ?? connection.workspaceId;
+  if (!workspaceId) return { connection: desktopConnection, identityAvailable: true };
+  let health: { status: number; body: unknown };
+  try {
+    health = { status: 200, body: await browserWorkspaceHealth(connection.id) };
+  } catch (error) {
+    health = { status: 0, body: { error: browserErrorMessage(error) } };
+  }
+  try {
+    const workspace = await browserWorkspaceRequest({ method: "GET", path: `/api/workspaces/${encodeURIComponent(workspaceId)}`, connectionId: connection.id, workspaceScoped: true });
+    const rooms = await browserWorkspaceRequest({ method: "GET", path: `/api/workspaces/${encodeURIComponent(workspaceId)}/rooms`, connectionId: connection.id, workspaceScoped: true });
+    return { connection: desktopConnection, identityAvailable: true, health, workspace: { status: 200, body: workspace }, rooms: { status: 200, body: rooms } };
+  } catch (error) {
+    return { connection: desktopConnection, identityAvailable: true, health, workspace: { status: 0, body: { error: browserErrorMessage(error) } } };
+  }
+}
+
+function toDesktopConnection(connection: Awaited<ReturnType<typeof loadBrowserWorkspaceConnections>>[number]): DesktopWorkspaceConnection {
+  return {
     id: connection.id,
     label: connection.label,
     serverUrl: connection.serverUrl,
@@ -395,19 +482,43 @@ async function browserWorkspaceServerStatus(): Promise<DesktopWorkspaceServerSta
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt
   };
-  let health: { status: number; body: unknown };
-  try {
-    health = { status: 200, body: await browserWorkspaceHealth() };
-  } catch (error) {
-    health = { status: 0, body: { error: error instanceof Error ? error.message : "workspace_server_unreachable" } };
-  }
-  try {
-    const workspace = await workspaceRequest("GET", "");
-    const rooms = await workspaceRequest("GET", "/rooms");
-    return { connection: desktopConnection, identityAvailable: true, health, workspace: { status: 200, body: workspace }, rooms: { status: 200, body: rooms } };
-  } catch (error) {
-    return { connection: desktopConnection, identityAvailable: true, health, workspace: { status: 0, body: { error: error instanceof Error ? error.message : "workspace_server_request_failed" } } };
-  }
+}
+
+function normalizeBrowserDirectoryRows(value: unknown): DesktopWorkspaceDirectoryEntry[] {
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const rows = Array.isArray(value) ? value : Array.isArray(body.workspaces) ? body.workspaces : [];
+  return rows.map((entry) => {
+    const item = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
+    const workspaceId = stringValue(item.id ?? item.workspace_id);
+    return {
+      connectionId: "",
+      workspaceId,
+      organizationId: optionalString(item.organization_id ?? item.organizationId),
+      name: stringValue(item.name, "名称未設定のWorkspace"),
+      state: item.state === "archived" || item.state === "read_only" ? item.state : "active",
+      ...(item.role === "owner" || item.role === "admin" || item.role === "member" || item.role === "guest" ? { role: item.role } : {}),
+      access: item.access === "none" || item.can_access === false || item.has_access === false ? "none" : "granted",
+      ...(typeof item.version === "number" ? { version: item.version } : {}),
+      ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+      ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+    } satisfies DesktopWorkspaceDirectoryEntry;
+  }).filter((entry) => entry.workspaceId.length > 0);
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function browserErrorCode(error: unknown): string {
+  return error instanceof Error ? error.message.split(":", 1)[0] || "workspace_server_request_failed" : "workspace_server_request_failed";
+}
+
+function browserErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : "Workspace Serverに接続できません。";
 }
 
 async function workspaceRequest<T>(

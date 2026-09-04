@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { externalIntegrationRequestWorkspaceId, isPostgresExternalIntegrationPath } from "./postgres-external-integration";
+import { externalIntegrationRequestWorkspaceId, isPostgresExternalIntegrationPath, resolveExternalIntegrationPublicBaseUrl } from "./postgres-external-integration";
 
 describe("PostgreSQL external integration boundary", () => {
   it("routes only the external protocol paths to the integration handler", () => {
@@ -22,5 +22,21 @@ describe("PostgreSQL external integration boundary", () => {
     expect(externalIntegrationRequestWorkspaceId({ headers: { "x-samurai-workspace-id": "workspace-requested" }, body: { workspace_id: "workspace-body" } }, config)).toBe("workspace-requested");
     expect(externalIntegrationRequestWorkspaceId({ body: { workspace_id: "workspace-body" } }, config)).toBe("workspace-body");
     expect(externalIntegrationRequestWorkspaceId({ body: { room_id: "room-only" } }, config)).toBeUndefined();
+  });
+
+  it("uses a loopback origin for a non-public Self-host container fallback", () => {
+    expect(resolveExternalIntegrationPublicBaseUrl({
+      mode: "self_host",
+      publicNetwork: false,
+      bindAddress: "0.0.0.0",
+      port: 4318
+    })).toBe("http://127.0.0.1:4318");
+    expect(resolveExternalIntegrationPublicBaseUrl({
+      mode: "self_host",
+      publicNetwork: false,
+      bindAddress: "0.0.0.0",
+      port: 4318,
+      publicBaseUrl: "https://server.example.test"
+    })).toBe("https://server.example.test");
   });
 });

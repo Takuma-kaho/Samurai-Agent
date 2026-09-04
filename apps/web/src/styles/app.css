@@ -96,7 +96,9 @@
   flex-direction: column;
   gap: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 22px 16px 14px;
 }
 
@@ -275,6 +277,14 @@
   margin: 9px 0 0 38px;
 }
 
+.native-org-empty {
+  margin: 8px 0 0 38px;
+}
+
+.native-org-empty .native-empty-copy {
+  margin: 0 0 6px;
+}
+
 .native-role-chip {
   background: rgba(138, 216, 178, 0.1);
   border: 1px solid rgba(138, 216, 178, 0.22);
@@ -386,6 +396,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.native-workspace-copy .native-workspace-server {
+  color: var(--native-muted);
+  font-size: 9px;
+}
+
+.native-workspace-directory-error {
+  margin: 8px 0 0;
 }
 
 .native-status-dot,
@@ -956,6 +975,87 @@ input:disabled {
   margin-top: 5px;
 }
 
+.native-connection-settings-dialog {
+  max-width: 540px;
+}
+
+.native-connection-list {
+  border-bottom: 1px solid var(--native-line);
+  border-top: 1px solid var(--native-line);
+  display: grid;
+  margin: 18px 0;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.native-connection-row {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  color: var(--native-muted);
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  font-size: 10px;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 2px;
+  text-align: left;
+}
+
+.native-connection-row:last-child {
+  border-bottom: 0;
+}
+
+.native-connection-row:hover:not(:disabled),
+.native-connection-row.is-active {
+  color: var(--native-copy);
+}
+
+.native-connection-row:focus-visible {
+  outline: 2px solid var(--native-accent);
+  outline-offset: -2px;
+}
+
+.native-connection-row-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.native-connection-row-copy strong {
+  color: var(--native-copy);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.native-connection-row-copy small,
+.native-connection-row-copy em {
+  color: var(--native-dim);
+  font-size: 10px;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-connection-settings-form {
+  border-bottom: 1px solid var(--native-line);
+  padding-bottom: 18px;
+}
+
+.native-connection-identity {
+  display: grid;
+  gap: 8px;
+  padding-top: 17px;
+}
+
+.native-connection-identity-actions {
+  justify-content: flex-start;
+  margin-top: 0;
+}
+
 .native-management-scroll {
   flex: 1;
   min-height: 0;
@@ -1036,6 +1136,17 @@ input:disabled {
 .native-managed-workspace-list small {
   display: block;
   margin-top: 3px;
+}
+
+.native-association-attach {
+  border-top: 1px solid var(--native-line);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.native-association-attach h3 {
+  font-size: 14px;
+  margin: 0;
 }
 
 .native-invite-form {
@@ -1120,6 +1231,61 @@ input:disabled {
   padding: 9px 11px;
 }
 
+.native-action-feedback {
+  align-items: flex-start;
+  border: 1px solid var(--native-line-strong);
+  border-radius: 9px;
+  display: flex;
+  gap: 10px;
+  line-height: 1.55;
+  margin-top: 14px;
+  padding: 11px 12px;
+}
+
+.native-action-feedback.is-success {
+  background: rgba(138, 216, 178, 0.12);
+  border-color: rgba(138, 216, 178, 0.48);
+  color: var(--native-success);
+}
+
+.native-action-feedback.is-error {
+  background: rgba(238, 137, 129, 0.12);
+  border-color: rgba(238, 137, 129, 0.48);
+  color: var(--native-danger);
+}
+
+.native-action-feedback-icon {
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  height: 20px;
+  justify-content: center;
+  margin-top: 1px;
+  width: 20px;
+}
+
+.native-action-feedback-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.native-action-feedback-copy strong {
+  color: inherit;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.native-action-feedback-copy span {
+  color: var(--native-copy);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .native-token-reveal {
   background: rgba(241, 166, 92, 0.08);
   border: 1px solid rgba(241, 166, 92, 0.24);
@@ -1196,6 +1362,84 @@ input:disabled {
 }
 
 .native-move-preview ul {
+  color: var(--native-danger);
+  font-size: 10px;
+  line-height: 1.5;
+  margin: 3px 0 0;
+  padding-left: 16px;
+}
+
+.native-transfer-card {
+  border: 1px solid rgba(139, 204, 163, 0.22);
+  border-radius: 9px;
+  padding: 16px;
+}
+
+.native-transfer-unavailable {
+  background: rgba(241, 166, 92, 0.08);
+  border-left: 2px solid #f1a65c;
+  color: var(--native-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  margin: 0;
+  padding: 9px 11px;
+}
+
+.native-transfer-list {
+  display: grid;
+  gap: 10px;
+}
+
+.native-transfer-item {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--native-line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.native-transfer-route {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.native-transfer-route span,
+.native-transfer-preview span,
+.native-transfer-preview small,
+.native-transfer-status span,
+.native-transfer-status small {
+  color: var(--native-muted);
+  font-size: 10px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.native-transfer-preview,
+.native-transfer-status {
+  background: rgba(139, 204, 163, 0.07);
+  border: 1px solid rgba(139, 204, 163, 0.2);
+  border-radius: 8px;
+  display: grid;
+  flex-basis: 100%;
+  gap: 3px;
+  margin-top: 2px;
+  padding: 9px 11px;
+}
+
+.native-transfer-preview.is-blocked,
+.native-transfer-status.is-failed {
+  background: rgba(238, 137, 129, 0.08);
+  border-color: rgba(238, 137, 129, 0.28);
+}
+
+.native-transfer-preview strong,
+.native-transfer-status strong {
+  font-size: 11px;
+}
+
+.native-transfer-preview ul {
   color: var(--native-danger);
   font-size: 10px;
   line-height: 1.5;

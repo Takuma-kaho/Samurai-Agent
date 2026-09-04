@@ -9,6 +9,8 @@ Samurai Agentは、人と専門Agentが一緒に働き、その過程で得た�
 ## 製品体験
 
 - Native AppはChatを中心に構成する
+- 登録済みの複数ServerにあるWorkspaceを一つのWorkspace switcherから選択できる
+- Workspaceを選ぶと、対応するServer接続を裏で解決・再認可してからRoomを表示する
 - Workspace、Roomを左側から選択できる
 - Roomを継続的な会話と作業の場として扱う
 - Agentはプロフィールと専門性を持つチームメンバーとして参加する
@@ -20,9 +22,9 @@ Samurai Agentは、人と専門Agentが一緒に働き、その過程で得た�
 ## 基本単位
 
 - Server：Workspaceを配置・運用する場所。製品上の必須階層ではない
-- Workspace：利用者が所有するKnowledgeの正本であり、メンバー、Room、Agent作業、export / restoreの基本単位
+- Workspace：利用者が所有するKnowledgeの正本であり、メンバー、Room、Agent作業、export / restore、別Serverへの移転の基本単位
 - Room：会話、作業、Knowledge、権限の境界
-- Organization：同一Server上の複数Workspaceを任意でまとめて管理する追加機能
+- Organization：同一Server上の複数Workspaceを任意でまとめて管理する追加機能。複数Serverを横断するWorkspace switcherや移転とは別の機能
 - Agent：専門性を持って作業へ参加する実行主体
 - Session：Room内の実行継続を支える内部参照
 - Activity：作業で起きたことを示す証拠

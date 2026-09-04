@@ -27,11 +27,10 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
   if (command !== "completion-maintenance-tick" && !adminAccountId) throw new WorkspaceServerError("samurai_server_admin_account_id_required", 500);
   const parsedArguments = parseCliArguments(arguments_);
   const bundleTargetOrganizationId = command === "bundle-import"
-    ? requiredTargetOrganizationId(
-      parsedArguments.targetOrganizationId
-        || env.SAMURAI_TARGET_ORGANIZATION_ID?.trim()
-        || env.SAMURAI_ORGANIZATION_ID?.trim()
-    )
+    ? parsedArguments.targetOrganizationId
+      || env.SAMURAI_TARGET_ORGANIZATION_ID?.trim()
+      || env.SAMURAI_ORGANIZATION_ID?.trim()
+      || undefined
     : undefined;
   const core = await createWorkspaceServerCore(config);
   try {
@@ -54,8 +53,16 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
       const targetWorkspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env, parsedArguments.positional[1]);
       const context = { accountId, operationId: `server_cli_import_${randomUUID()}` };
       return await bundleFormat(sourceDirectory) === 4
-        ? core.completionBundles.importNew(context, { sourceDirectory, targetWorkspaceId, targetOrganizationId: bundleTargetOrganizationId! })
-        : core.bundles.importNew(context, { sourceDirectory, targetWorkspaceId, targetOrganizationId: bundleTargetOrganizationId! });
+        ? core.completionBundles.importNew(context, {
+          sourceDirectory,
+          targetWorkspaceId,
+          ...(bundleTargetOrganizationId ? { targetOrganizationId: bundleTargetOrganizationId } : {})
+        })
+        : core.bundles.importNew(context, {
+          sourceDirectory,
+          targetWorkspaceId,
+          ...(bundleTargetOrganizationId ? { targetOrganizationId: bundleTargetOrganizationId } : {})
+        });
     }
     if (command === "files-recover") {
       const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env, parsedArguments.positional[0]);
@@ -136,11 +143,6 @@ function configuredWorkspaceId(explicitWorkspaceId: string | undefined, env: Nod
   const workspaceId = explicitWorkspaceId?.trim() || positionalWorkspaceId?.trim() || env.SAMURAI_WORKSPACE_ID?.trim();
   if (!workspaceId) throw new WorkspaceServerError("workspace_id_required", 400);
   return workspaceId;
-}
-
-function requiredTargetOrganizationId(value: string | undefined): string {
-  if (!value?.trim()) throw new WorkspaceServerError("workspace_bundle_target_organization_required", 400);
-  return value.trim();
 }
 
 interface ParsedCliArguments {

@@ -5,9 +5,10 @@ export interface ConnectionRequiredProps {
   browserMode: boolean;
   error?: string | null;
   onConnected: () => void | Promise<void>;
+  onOpenSettings?: () => void;
 }
 
-export function ConnectionRequired({ browserMode, error, onConnected }: ConnectionRequiredProps) {
+export function ConnectionRequired({ browserMode, error, onConnected, onOpenSettings }: ConnectionRequiredProps) {
   const [draft, setDraft] = useState({ label: "Browser", serverUrl: "", workspaceId: "", accountId: "", publicKey: "", privateKey: "" });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -47,7 +48,7 @@ export function ConnectionRequired({ browserMode, error, onConnected }: Connecti
       <span className="native-placeholder-kicker">SECURE CONNECTION</span>
       <h1 id="native-connection-heading">Workspace Serverに接続してください</h1>
       <p>Organization、Workspace、RoomはServerの認可結果から読み込みます。接続候補だけをこの画面に保存し、権限は毎回確認します。</p>
-      {!browserMode ? <div className="native-banner native-banner-warning" role="status">Desktopの接続設定でServerと保護されたAccountを登録すると、ここへ戻って利用できます。</div> : null}
+      {!browserMode ? <div className="native-banner native-banner-warning" role="status">Desktopの接続設定でServerと保護されたAccountを登録すると、ここへ戻って利用できます。{onOpenSettings ? <button className="native-text-button" type="button" onClick={onOpenSettings}>接続設定を開く</button> : null}</div> : null}
       {browserMode ? <form className="native-connection-form" onSubmit={submit}>
         <label><span>接続名</span><input value={draft.label} onChange={(event) => update("label", event.currentTarget.value)} maxLength={100} /></label>
         <label><span>Server URL</span><input value={draft.serverUrl} onChange={(event) => update("serverUrl", event.currentTarget.value)} inputMode="url" placeholder="https://samurai.example" required /></label>

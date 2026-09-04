@@ -1,7 +1,7 @@
 import type { SupportedLocale } from "@samurai-agent/core-schemas";
 import type { MemoryCandidate } from "@samurai-agent/memory";
 import type { MessageRecord } from "@samurai-agent/core-schemas";
-import type { ProviderDiagnostics, ProviderId, ProviderInput, ProviderOutput, ProviderToolCall } from "./provider";
+import type { ProviderDiagnostics, ProviderId, ProviderInput, ProviderOutput, ProviderStreamChunk, ProviderToolCall } from "./provider";
 import { requireDomainCommandEntry } from "@samurai-agent/action-catalog";
 
 export interface ProviderCredential {
@@ -21,6 +21,8 @@ export interface ProviderProfile {
   resolveCredential(env: NodeJS.ProcessEnv): ProviderCredential | undefined;
   buildRequest(model: string, credential: ProviderCredential, input: ProviderInput): ProviderRequestSpec;
   normalizeResponse(response: unknown): ProviderOutput;
+  buildStreamRequest?: (model: string, credential: ProviderCredential, input: ProviderInput) => ProviderRequestSpec;
+  normalizeStreamChunk?: (response: unknown) => ProviderStreamChunk;
   classifyError(status: number, body: string): ProviderDiagnostics["reason"];
 }
 
@@ -38,7 +40,7 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
           { role: "system", content: stablePrompt(input.envelope.output_locale) },
           { role: "user", content: openAiResponsesUserContent(input, contextPrompt(input)) }
         ],
-        tools: providerTools("openai")
+        tools: providerTools("openai", input.availableTools ?? [])
       }
     }),
     normalizeResponse: normalizeOpenAIResponse,
@@ -48,16 +50,10 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
     id: "gemini",
     defaultModel: "gemini-3.5-flash",
     resolveCredential: (env) => (env.GEMINI_API_KEY || env.GOOGLE_API_KEY ? { apiKey: env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY! } : undefined),
-    buildRequest: (model, credential, input) => ({
-      url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      headers: { "Content-Type": "application/json", "x-goog-api-key": credential.apiKey },
-      body: {
-        systemInstruction: { parts: [{ text: stablePrompt(input.envelope.output_locale) }] },
-        contents: [{ role: "user", parts: geminiUserParts(input, contextPrompt(input)) }],
-        tools: providerTools("gemini")
-      }
-    }),
+    buildRequest: buildGeminiRequest,
+    buildStreamRequest: buildGeminiStreamRequest,
     normalizeResponse: normalizeGeminiResponse,
+    normalizeStreamChunk: normalizeGeminiStreamChunk,
     classifyError: classifyGeminiStatus
   },
   anthropic: {
@@ -76,7 +72,7 @@ export const providerProfiles: Record<ProviderId, ProviderProfile> = {
         max_tokens: 1800,
         system: stablePrompt(input.envelope.output_locale),
         messages: [{ role: "user", content: anthropicUserContent(input, contextPrompt(input)) }],
-        tools: providerTools("anthropic")
+        tools: providerTools("anthropic", input.availableTools ?? [])
       }
     }),
     normalizeResponse: normalizeAnthropicResponse,
@@ -107,9 +103,10 @@ export function defaultModelForProvider(provider: ProviderId): string {
   return providerProfiles[provider].defaultModel;
 }
 
-export function providerTools(provider: ProviderId): unknown {
+export function providerTools(provider: ProviderId, availableTools?: readonly string[]): unknown {
+  const definitions = toolDefinitions(availableTools);
   if (provider === "openai") {
-    return toolDefinitions().map((tool) => ({
+    return definitions.map((tool) => ({
       type: "function",
       name: tool.name,
       description: tool.description,
@@ -117,16 +114,16 @@ export function providerTools(provider: ProviderId): unknown {
     }));
   }
   if (provider === "anthropic") {
-    return toolDefinitions().map((tool) => ({
+    return definitions.map((tool) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.parameters
     }));
   }
   if (provider === "gemini") {
-    return [
+    return definitions.length === 0 ? [] : [
       {
-        functionDeclarations: toolDefinitions().map((tool) => ({
+        functionDeclarations: definitions.map((tool) => ({
           name: tool.name,
           description: tool.description,
           parameters: sanitizeGeminiSchema(tool.parameters)
@@ -134,7 +131,7 @@ export function providerTools(provider: ProviderId): unknown {
       }
     ];
   }
-  return toolDefinitions().map((tool) => ({
+  return definitions.map((tool) => ({
     type: "function",
     function: {
       name: tool.name,
@@ -154,8 +151,28 @@ function buildOpenAICompatibleRequest(model: string, credential: ProviderCredent
         { role: "system", content: stablePrompt(input.envelope.output_locale) },
         { role: "user", content: openAiChatUserContent(input, contextPrompt(input)) }
       ],
-      tools: providerTools("openai-compatible")
+      tools: providerTools("openai-compatible", input.availableTools ?? [])
     }
+  };
+}
+
+function buildGeminiRequest(model: string, credential: ProviderCredential, input: ProviderInput): ProviderRequestSpec {
+  return {
+    url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    headers: { "Content-Type": "application/json", "x-goog-api-key": credential.apiKey },
+    body: {
+      systemInstruction: { parts: [{ text: stablePrompt(input.envelope.output_locale) }] },
+      contents: [{ role: "user", parts: geminiUserParts(input, contextPrompt(input)) }],
+      tools: providerTools("gemini", input.availableTools ?? [])
+    }
+  };
+}
+
+function buildGeminiStreamRequest(model: string, credential: ProviderCredential, input: ProviderInput): ProviderRequestSpec {
+  const request = buildGeminiRequest(model, credential, input);
+  return {
+    ...request,
+    url: request.url.replace(":generateContent", ":streamGenerateContent") + "?alt=sse"
   };
 }
 
@@ -464,8 +481,8 @@ const artifactParameters = requireDomainCommandEntry("artifact.create").input_sc
 const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
 const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
-function toolDefinitions() {
-  return [
+function toolDefinitions(availableTools?: readonly string[]) {
+  const definitions = [
     {
       name: "create_artifact",
       description: "Create a local markdown draft artifact in the workspace.",
@@ -482,23 +499,79 @@ function toolDefinitions() {
       parameters: rememberTopicParameters
     }
   ] as const;
+  if (availableTools === undefined) return definitions;
+  const allowed = new Set(availableTools.map((tool) => tool.trim()).filter(Boolean));
+  return definitions.filter((tool) => allowed.has(tool.name) || allowed.has(domainCommandIdForProviderTool(tool.name)));
+}
+
+function domainCommandIdForProviderTool(toolName: string): string {
+  if (toolName === "create_artifact") return "artifact.create";
+  if (toolName === "request_external_send") return "external.send.prepare";
+  if (toolName === "remember_topic") return "memory.topic.create";
+  return toolName;
 }
 
 function sanitizeGeminiSchema(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sanitizeGeminiSchema);
-  }
-  if (!isRecord(value)) {
-    return value;
-  }
-  const sanitized: Record<string, unknown> = {};
+  if (!isRecord(value)) return value;
+  return expandGeminiSchema(value, value, new Set());
+}
+
+/**
+ * Gemini's function declaration schema accepts a JSON-Schema-shaped object,
+ * but does not resolve local `$ref`/definition entries for us. The domain
+ * catalog intentionally publishes those references to keep the canonical
+ * schema finite and reusable, so expand them at this provider boundary while
+ * retaining the actual type/validation fields.
+ */
+function expandGeminiSchema(value: unknown, root: Record<string, unknown>, resolvingRefs: Set<string>): unknown {
+  if (Array.isArray(value)) return value.map((entry) => expandGeminiSchema(entry, root, resolvingRefs));
+  if (!isRecord(value)) return value;
+
+  const reference = typeof value.$ref === "string" ? value.$ref : undefined;
+  const expanded: Record<string, unknown> = reference
+    ? expandGeminiReference(reference, root, resolvingRefs)
+    : {};
   for (const [key, entry] of Object.entries(value)) {
-    if (key === "additionalProperties" || key === "$schema" || key === "unevaluatedProperties") {
-      continue;
-    }
-    sanitized[key] = sanitizeGeminiSchema(entry);
+    if (key === "$ref" || GEMINI_SCHEMA_METADATA_KEYS.has(key)) continue;
+    expanded[key] = expandGeminiSchema(entry, root, resolvingRefs);
   }
-  return sanitized;
+  return expanded;
+}
+
+function expandGeminiReference(reference: string, root: Record<string, unknown>, resolvingRefs: Set<string>): Record<string, unknown> {
+  if (resolvingRefs.has(reference)) throw new Error("gemini_schema_cyclic_ref");
+  const target = resolveJsonPointer(root, reference);
+  if (!isRecord(target)) throw new Error("gemini_schema_ref_unresolved");
+  const expanded = expandGeminiSchema(target, root, new Set([...resolvingRefs, reference]));
+  return isRecord(expanded) ? expanded : {};
+}
+
+function resolveJsonPointer(root: Record<string, unknown>, reference: string): unknown {
+  if (reference === "#") return root;
+  if (!reference.startsWith("#/")) return undefined;
+  let current: unknown = root;
+  for (const rawSegment of reference.slice(2).split("/")) {
+    if (!isRecord(current)) return undefined;
+    const segment = rawSegment.replace(/~1/g, "/").replace(/~0/g, "~");
+    current = current[segment];
+  }
+  return current;
+}
+
+const GEMINI_SCHEMA_METADATA_KEYS = new Set([
+  "$schema",
+  "$id",
+  "$anchor",
+  "$comment",
+  "$defs",
+  "definitions",
+  "additionalProperties",
+  "unevaluatedProperties"
+]);
+
+function isThoughtSignaturePart(part: unknown): boolean {
+  return isRecord(part)
+    && (typeof part.thoughtSignature === "string" || typeof part.thought_signature === "string");
 }
 
 function normalizeOpenAIResponse(response: unknown): ProviderOutput {
@@ -532,19 +605,86 @@ function normalizeGeminiResponse(response: unknown): ProviderOutput {
     for (const part of parts) {
       if (isRecord(part) && isRecord(part.functionCall) && typeof part.functionCall.name === "string") {
         toolCalls.push({
+          ...(typeof part.functionCall.id === "string" ? { id: part.functionCall.id } : {}),
           name: part.functionCall.name,
           arguments: isRecord(part.functionCall.args) ? part.functionCall.args : {}
         });
       }
     }
   }
+  const first = isRecord(response) && Array.isArray(response.candidates) ? response.candidates[0] : undefined;
+  const finishReason = isRecord(first) && typeof first.finishReason === "string" ? first.finishReason : undefined;
+  const finishFailure = geminiFinishFailureMessage(finishReason);
+  if (finishFailure) throw new Error(finishFailure);
   const content = extractGeminiText(response, toolCalls.length > 0);
   return validateProviderOutput({
     content,
     toolCalls,
+    ...(finishReason ? { finishReason } : {}),
     ...(isRecord(response) && isRecord(response.usageMetadata) ? { usage: response.usageMetadata } : {})
   });
 }
+
+function normalizeGeminiStreamChunk(response: unknown): ProviderStreamChunk {
+  if (!isRecord(response) || !Array.isArray(response.candidates)) {
+    if (isRecord(response) && isRecord(response.usageMetadata)) {
+      return { usage: response.usageMetadata };
+    }
+    throw invalidResponse("Gemini stream response had no candidates.");
+  }
+  const first = response.candidates[0];
+  const parts = isRecord(first) && isRecord(first.content) && Array.isArray(first.content.parts) ? first.content.parts : [];
+  const toolCalls: ProviderToolCall[] = [];
+  for (const part of parts) {
+    if (isRecord(part) && isRecord(part.functionCall) && typeof part.functionCall.name === "string") {
+      toolCalls.push({
+        ...(typeof part.functionCall.id === "string" ? { id: part.functionCall.id } : {}),
+        name: part.functionCall.name,
+        arguments: isRecord(part.functionCall.args) ? part.functionCall.args : {}
+      });
+    }
+  }
+  const content = parts.map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : "")).join("");
+  const finishReason = isRecord(first) && typeof first.finishReason === "string" ? first.finishReason : undefined;
+  const usage = isRecord(response.usageMetadata) ? response.usageMetadata : undefined;
+  const finishFailure = geminiFinishFailureMessage(finishReason);
+  if (finishFailure) throw new Error(finishFailure);
+  const ignored = !content && toolCalls.length === 0 && parts.some(isThoughtSignaturePart);
+  if (!content && toolCalls.length === 0 && !finishReason && !usage && !ignored) {
+    throw invalidResponse("Gemini stream response had no content.");
+  }
+  return {
+    ...(content ? { content } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
+    ...(finishReason ? { finishReason } : {}),
+    ...(usage ? { usage } : {}),
+    ...(ignored ? { ignored: true } : {})
+  };
+}
+
+function geminiFinishFailureMessage(finishReason: string | undefined): string | undefined {
+  if (!finishReason || !GEMINI_FAILURE_FINISH_REASONS.has(finishReason.trim().toUpperCase())) return undefined;
+  const normalized = finishReason.trim().toUpperCase();
+  return normalized === "SAFETY" || normalized.includes("PROHIBITED") || normalized === "BLOCKLIST" || normalized === "SPII"
+    ? "Provider response was blocked by its safety policy."
+    : `Provider response could not be completed (${normalized}).`;
+}
+
+const GEMINI_FAILURE_FINISH_REASONS = new Set([
+  "FINISH_REASON_UNSPECIFIED",
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "MALFORMED_FUNCTION_CALL",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "IMAGE_RECITATION",
+  "IMAGE_OTHER",
+  "NO_IMAGE",
+  "OTHER"
+]);
 
 function normalizeAnthropicResponse(response: unknown): ProviderOutput {
   const toolCalls: ProviderToolCall[] = [];

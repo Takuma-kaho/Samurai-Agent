@@ -458,6 +458,12 @@ describe("Domain Operation strict gate coverage", () => {
             ? { ...(generatedInput as Record<string, unknown>), name: "sample" }
           : definition.id === "learning.resource.version.update"
             ? { ...(generatedInput as Record<string, unknown>), content: "fixture content" }
+          : definition.id === "workspace.organization.move.preflight" || definition.id === "workspace.organization.move.commit"
+            ? {
+              ...(generatedInput as Record<string, unknown>),
+              source_organization_id: "organization_fixture_source",
+              target_organization_id: "organization_fixture_target"
+            }
           : generatedInput);
       const context = {
         inputSource: definition.sources[0]!,

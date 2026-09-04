@@ -1,16 +1,16 @@
 # Organization 製品設計
 
-- 状態: 合意済みの目標設計。現在の未コミット実装は必須Organization前提のため、後続の実装修正が必要
+- 状態: 合意済みの現在設計。現在の未コミット実装は必須Organization前提のため、後続の実装修正が必要
 - 対象: 任意のOrganization、Membership、招待、Workspace追加・解除、権限、移行、export / restore
 - 正本: [PRODUCT.md](../../PRODUCT.md)、[ARCHITECTURE.md](../../ARCHITECTURE.md)
 - 関連設計: [Native App 製品設計](native-app.md)
-- 実装計画: Workspace-firstへ修正する新しいマスタープランを別途作成する
+- 実装計画: [Workspace-first・Organization再設計マスタープラン](../../plans/workspace-first-organization-realignment-master-plan.md)
 
 ## 1. 目的
 
 Organizationは、複数Workspaceをまとめて管理したい場合だけ利用する追加機能である。個人利用と小規模チームは、Organizationを作らずにWorkspaceとRoomだけで完結する。
 
-Organizationの目的は、同一Server上にある複数Workspaceの一覧、Membership、招待、所属、共通の管理操作を扱うことである。Workspaceのデータ、Room、Activity、Knowledge、実ファイル、Agent実行を所有する単位ではない。
+Organizationの目的は、同一Server上にある複数Workspaceについて、管理者が明示的にmetadata/list、Membership、招待、所属、共通の管理操作を扱うことである。Workspaceのデータ、Room、Activity、Knowledge、実ファイル、Agent実行を所有する単位ではない。
 
 この設計は、次を同時に満たす。
 
@@ -18,7 +18,7 @@ Organizationの目的は、同一Server上にある複数Workspaceの一覧、Me
 - Organizationを追加・解除しても、Workspace ID、Room、履歴、ファイル、Workspace Membershipは変わらない。
 - Organization Owner / Adminは複数Workspaceを管理できるが、Workspace / Room contentを自動では読めない。
 - HostedとSelf-hostで同じWorkspace-firstの仕組みを使う。
-- 将来の複数Server横断管理を妨げないが、現段階のOrganizationは同一Server内に限定する。
+- 現段階のOrganizationは同一Server内に限定する。Native Appの全Server横断Workspace switcherやServer間Workspace移転とは別の機能である。
 
 決済、課金、専用Compute、Compute共有はこの設計と実装範囲に含めない。
 
@@ -29,7 +29,7 @@ Organizationの目的は、同一Server上にある複数Workspaceの一覧、Me
 3. Workspaceは一つのホームServerに配置する。別Serverへの移転はexport / restoreで行う。
 4. WorkspaceはOrganizationに所属しなくてもよく、所属する場合もactiveなOrganizationは最大一つとする。
 5. Workspace MembershipがWorkspace contentへの基本権限であり、Room Membershipはさらに制限する。
-6. Organization MembershipはOrganizationの管理・発見のための記録であり、content read / writeの権限ではない。
+6. Organization MembershipはOrganization自身の管理・所属を記録するものであり、Workspace一覧・metadata・contentのread / write権限ではない。
 7. Organizationの追加・解除・削除は、Workspaceのデータや実行履歴を移動・複製・削除しない。
 8. Workspaceへの直接招待は、Organizationの有無にかかわらず常に利用できる。
 
@@ -43,7 +43,7 @@ Organizationの目的は、同一Server上にある複数Workspaceの一覧、Me
 | Workspace Membership | AccountがWorkspace contentを扱うための参加記録とrole。 |
 | Room | Workspace内の会話・作業の単位。必要な場合だけRoom Membershipでさらに制限する。 |
 | Organization | 同一Server上の複数Workspaceを任意でまとめて管理する追加単位。 |
-| Organization Membership | AccountがOrganizationを管理・発見するための参加記録とrole。 |
+| Organization Membership | AccountがOrganizationに所属し、その管理権限を持つことを記録する参加記録とrole。Workspace一覧・metadata・contentの権限は含まない。 |
 | Workspace Association | Workspaceが任意のOrganizationへ追加されている関係。 |
 | Invitation | WorkspaceまたはOrganizationへの参加を許可する直接招待またはone-time token。 |
 
@@ -59,6 +59,7 @@ flowchart TD
   OM --> O[Organization: 任意]
   O -.管理上の所属.- W
   SV[Server: 配置・運用] -.接続先.- W
+  NS[Native App: 全Server横断Workspace switcher] -.選択・再認可.- W
 ~~~
 
 SessionはRoomの継続実行・復旧を支える内部単位であり、Organizationの権限対象にもNative Appのナビゲーション対象にもならない。
@@ -71,6 +72,7 @@ SessionはRoomの継続実行・復旧を支える内部単位であり、Organi
 - Workspaceは、メンバー、直接招待、Room、Agent、Activity、Knowledge、実ファイル、archive / restore、export / restoreを自身の責務として持つ。
 - Workspaceには一つのホームServerがある。Agent実行先は外部AgentやBackendであり、WorkspaceのホームServerと同一である必要はない。
 - Workspaceの作成、削除、archive、restore、exportはOrganizationへの所属を前提にしない。
+- Workspaceを別Serverへ移転する場合は、Workspace単位でexport / restoreし、移転先の整合性を確認してから切り替える。これはOrganizationの追加・解除ではない。
 
 ### 4.2 Organization
 
@@ -101,10 +103,10 @@ Organization Memberを削除しても、Workspace Membershipは自動では削�
 
 | Organization role | 許可する操作 | 許可しない操作 |
 | --- | --- | --- |
-| Owner | Organization削除、Owner管理、Member管理、招待、Workspace作成・追加・解除、Workspace Membership管理 | Workspace / Room contentの自動閲覧・自動書込み |
-| Admin | Member管理、招待、Workspace作成・追加・解除、Workspace Membership管理 | Owner変更、Organization削除、Workspace / Room contentの自動閲覧・自動書込み |
-| Member | Organizationと発見可能なWorkspaceの確認 | Organization管理、Workspace / Room contentの自動閲覧・自動書込み |
-| Guest | 明示された最小のOrganization参加 | Organization管理、Workspace / Room contentの自動閲覧・自動書込み |
+| Owner | Organization削除、Owner管理、Member管理、招待、管理対象Workspaceのmetadata/list確認、Workspace作成・追加・解除、Workspace Membership管理 | Workspace / Room contentの自動閲覧・自動書込み |
+| Admin | Member管理、招待、管理対象Workspaceのmetadata/list確認、Workspace作成・追加・解除、Workspace Membership管理 | Owner変更、Organization削除、Workspace / Room contentの自動閲覧・自動書込み |
+| Member | 自分のOrganization MembershipとOrganization metadataの確認 | Workspace一覧・metadata、Organization管理、Workspace / Room contentの自動閲覧・自動書込み |
+| Guest | 明示された最小のOrganization Membershipの確認 | Workspace一覧・metadata、Organization管理、Workspace / Room contentの自動閲覧・自動書込み |
 
 - Workspace MembershipがMessage、Activity、Knowledge、添付、Artifact、Agent実行の可否を決める。
 - Room MembershipはWorkspace Membershipより狭いcontent accessを定義できる。
@@ -119,22 +121,22 @@ Organization Memberを削除しても、Workspace Membershipは自動では削�
 | 種類 | 目的 | content access |
 | --- | --- | --- |
 | Workspace直接招待 | 独立または所属済みWorkspaceへ参加させる | 指定されたWorkspace roleに従う |
-| Organization招待 | Organizationの管理・発見へ参加させる | Workspace grantなしでは与えない |
+| Organization招待 | Organizationの管理・所属へ参加させる | Workspace一覧・metadata・contentのgrantは与えない |
 
 直接招待とtoken招待は、WorkspaceとOrganizationのどちらにも利用できる。raw tokenは表示時だけ利用し、DB、Event payload、通常ログには保存しない。tokenのhash、有効期限、issuer、revoke / accept状態、対象roleは保存し、受諾はidempotentに扱う。
 
 ### 5.2 Workspaceの可視性
 
-完成形では、Organization内のWorkspaceに次の可視性を持たせる。
+Organization Membershipだけでは、Workspace一覧・metadata・contentを返さない。Owner / Adminが明示的なWorkspace管理操作を行う場合に限り、管理対象Workspaceのmetadataを確認し、Workspace Membershipを管理できる。この管理権限はRoom名、Message、Activity、Knowledge、添付、Artifactなどのcontent閲覧権へ変換しない。
 
-| 可視性 | Organization Memberからの見え方 |
-| --- | --- |
-| Open | 名前を確認でき、自分で参加できる |
-| By Request | 名前を確認でき、参加申請できる |
-| Invite Only | 名前を確認できるが、明示招待が必要 |
-| Hidden | 名前もcontentも見えず、明示招待が必要 |
+Workspace visibilityは将来の招待・参加フローを拡張する状態モデルとして保持するが、Organization MembershipだけでWorkspace一覧を公開する根拠にはしない。初期実装はInvite Onlyを標準とし、次の値を予約する。
 
-初期実装はInvite Onlyを標準とする。Organization MemberがWorkspace Memberでない場合、Room名、Message、Activity、Knowledge、添付、Artifactを返してはならない。
+| 可視性 | Organization Membershipだけの場合 | Workspace Membershipまたは明示招待後 |
+| --- | --- | --- |
+| Open | Workspace一覧・metadata・contentを返さない | 指定されたWorkspace roleに従う |
+| By Request | Workspace一覧・metadata・contentを返さない | 指定されたWorkspace roleに従う |
+| Invite Only | Workspace一覧・metadata・contentを返さない | 指定されたWorkspace roleに従う |
+| Hidden | Workspace一覧・metadata・contentを返さない | 明示招待と指定されたWorkspace roleに従う |
 
 ## 6. 論理データモデル
 
@@ -172,7 +174,7 @@ sequenceDiagram
 ~~~
 
 - Workspace queryとmutationはWorkspace-firstのAPIを使う。Organizationがなくても同じAPIで操作できる。
-- Organization APIは作成、Member、招待、Workspace追加・解除、一覧などの任意管理操作だけを扱う。
+- Organization APIは作成、Member、招待、管理者によるWorkspace metadata/list、Workspace追加・解除などの任意管理操作だけを扱う。
 - URLやClient状態でOrganizationを先に要求し、Workspace APIをOrganization配下に固定しない。
 - Serviceのpolicy checkとPostgreSQL RLSの両方で拒否する。
 - Organization MembershipをWorkspace / Room content tableのread / write条件に混ぜない。
@@ -182,7 +184,9 @@ sequenceDiagram
 
 HostedとSelf-hostは、同じWorkspace、Membership、Room、Organizationのモデルを利用する。差分はServerの配置、DB運用、接続先だけである。
 
-現段階のOrganizationは一つのServer内だけを管理する。複数Server上のWorkspaceを一つのOrganizationから横断管理する機能は、将来の別のcontrol planeとして設計する。現在のOrganization IDをServer間の共通認可やcontent共有の根拠にしてはならない。
+現段階のOrganizationは一つのServer内だけを管理する。複数Server上のWorkspaceを一つのOrganizationから横断管理する機能は実装しない。Native AppのWorkspace switcherは、各Serverの認可済みWorkspaceを一つに表示し、Workspace選択時に対象Server接続を裏で解決して再認可する別の接続機能である。内部のWorkspace targetは少なくともServer connectionとworkspace IDの組で識別し、workspace ID単独で別ServerのWorkspaceを参照しない。
+
+Server間のWorkspace移転は、portable bundleのexport、移転先へのrestore、DBと実ファイルの整合性確認、接続先の切替というWorkspace単位の処理である。移転先へOrganization所属を引き継がず、必要なら移転後に同じServer内のOrganizationへ明示的に追加する。Organization IDをServer間の共通認可、content共有、移転の根拠にしてはならない。
 
 ## 9. ExportとRestore
 
@@ -190,6 +194,7 @@ HostedとSelf-hostは、同じWorkspace、Membership、Room、Organizationのモ
 - export manifestは、Workspace自身のMember、Room、Activity、Knowledge、ファイル、必要なprovenanceを扱う。
 - 所属中のOrganization referenceは任意のprovenanceとして残せるが、restoreの必須入力にしない。
 - restore先は独立Workspaceを標準とし、明示操作で同一Server上のOrganizationへ追加できる。
+- Server間移転では、移転先の検証と切替が完了するまで移転元を自動削除しない。切替後は移転元をarchiveとして残し、削除は別の明示操作とする。
 - Organization全体exportは将来の一括管理機能として扱う。Workspace export / restoreの互換性を壊してはならない。
 
 ## 10. 既存実装からの移行
@@ -214,6 +219,7 @@ HostedとSelf-hostは、同じWorkspace、Membership、Room、Organizationのモ
 | Organization削除 | 全所属Workspaceを独立状態へ解除し、contentを削除しない |
 | Organization Adminのcontent読取り | denyし、DBを変更しない |
 | Workspace直接招待 | Organizationの有無にかかわらず受諾・revoke・期限切れを正しく扱う |
+| Server間Workspace移転 | 移転先の整合性確認後に切り替え、移転元をarchiveとして残す。OrganizationをServer間で引き継がない |
 | Server再起動 | 独立Workspace、所属Workspaceのどちらも再認可後に開ける |
 
 実PostgreSQL、実ファイル、実Agent、Native Appで少なくとも次を確認する。

@@ -29,7 +29,7 @@ describe("Organization public operation contracts", () => {
 
     expect(definitions.every(Boolean)).toBe(true);
     expect(new Set(definitions.map((definition) => definition?.id))).toEqual(new Set(organizationOperationIds));
-    expect(definitions.every((definition) => definition?.version === "1.0" && definition.sources.includes("runtime_api"))).toBe(true);
+    expect(definitions.every((definition) => (definition?.version === "1.0" || definition?.version === "1.1") && definition.sources.includes("runtime_api"))).toBe(true);
     expect(definitions.filter((definition) => definition?.kind === "query").map((definition) => definition?.id)).toEqual(expect.arrayContaining([...queryIds]));
     expect(definitions.filter((definition) => definition?.kind === "query")).toHaveLength(queryIds.size);
   });
@@ -50,6 +50,17 @@ describe("Organization public operation contracts", () => {
     for (const id of optimisticVersion) expect(definitions.get(id)).toMatchObject({ kind: "command", idempotency: "required", concurrency: "optimistic_version" });
     for (const id of stateTransition) expect(definitions.get(id)).toMatchObject({ kind: "command", idempotency: "required", concurrency: "state_transition" });
     for (const id of queryIds) expect(definitions.get(id)).toMatchObject({ kind: "query", idempotency: "none", concurrency: "none", effect: "read_only" });
+  });
+
+  it("keeps bundle restore standalone and makes Organization attachment explicit", () => {
+    const definition = operationDefinitions.find((candidate) => candidate.id === "workspace.bundle.restore")!;
+    expect(definition.input.safeParse({ bundle_id: "bundle_1", confirm: true }).success).toBe(true);
+    expect(definition.input.safeParse({ bundle_id: "bundle_1", target_workspace_id: "workspace_1", confirm: true }).success).toBe(true);
+    expect(definition.input.safeParse({
+      bundle_id: "bundle_1",
+      target_organization_id: "organization_1",
+      confirm: true
+    }).success).toBe(false);
   });
 
   it("keeps execution context separate from the legacy TrustedDomainContext", async () => {

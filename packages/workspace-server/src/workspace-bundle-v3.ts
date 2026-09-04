@@ -17,7 +17,7 @@ import { WorkspaceServerStore } from "./workspace-server-store";
  */
 type WorkspaceBundleV3ManifestWithProvenance = WorkspaceBundleV3Manifest & {
   source: WorkspaceBundleV3Manifest["source"] & { organization_id?: string };
-  /** Stable public spelling used by the Organization/domain contract. */
+  /** Historical raw provenance accepted when reading old Bundles only. */
   source_organization_id?: string;
   /** Schema revision of the portable snapshot contract. */
   schema_revision?: number;
@@ -61,6 +61,21 @@ export const WORKSPACE_BUNDLE_INCOMING_TTL_MS = 60 * 60 * 1000;
 const transferExportLocks = new Map<string, Promise<void>>();
 const bundleStagingLocks = new Map<string, Promise<void>>();
 
+/**
+ * A transfer row is retained for auditability across retries. Its monotonic
+ * version is therefore the attempt discriminator for the physical Bundle
+ * ledger; the first attempt keeps the historical `bundle_<transferId>` ID.
+ */
+export function workspaceTransferBundleId(transferId: string, version?: number): string {
+  const attempt = typeof version === "number" && Number.isSafeInteger(version) && version > 1 ? version : 1;
+  return attempt === 1 ? `bundle_${transferId}` : `bundle_${transferId}_attempt_${attempt}`;
+}
+
+export function workspaceTransferRetryDestination(destination: string, version?: number): string {
+  const attempt = typeof version === "number" && Number.isSafeInteger(version) && version > 1 ? version : 1;
+  return attempt === 1 ? path.resolve(destination) : `${path.resolve(destination)}.attempt-${attempt}`;
+}
+
 function safeErrorCode(error: unknown): string {
   if (error instanceof WorkspaceServerError) return error.code;
   if (error && typeof error === "object" && "code" in error) {
@@ -73,8 +88,9 @@ function safeErrorCode(error: unknown): string {
 const portableSchema: Readonly<Record<string, { required: readonly string[]; allowed: readonly string[] }>> = {
   [workspaceFile]: {
     required: ["id", "name", "hosting_mode", "database_placement", "storage_namespace", "created_by", "version", "created_at", "updated_at"],
-    // organization_id is emitted by current exports for provenance, but is
-    // optional so pre-Organization V3 Bundles remain importable.
+    // organization_id was emitted by older Organization-aware exports. It is
+    // accepted for backwards compatibility, but new exports omit it from the
+    // portable Workspace row and keep provenance only in the manifest.
     allowed: ["id", "name", "organization_id", "hosting_mode", "database_placement", "storage_namespace", "created_by", "version", "created_at", "updated_at"]
   },
   "accounts.jsonl": {
@@ -188,8 +204,8 @@ export interface ImportWorkspaceBundleInput {
   sourceDirectory: string;
   targetWorkspaceId: string;
   targetWorkspaceName?: string;
-  /** The target Organization is explicit; it is never inferred from a
-   * deployment-wide Self-host setting. */
+  /** Optional explicit target Organization; omission restores standalone and
+   * never infers one from a deployment-wide Self-host setting. */
   targetOrganizationId?: string;
   /** A newer Bundle format can add rows while the v3 target is still
    * read-only and its short-lived import capability is active.  The callback
@@ -300,9 +316,18 @@ export class WorkspaceBundleV3Service {
   async beginTransfer(context: WorkspaceRequestContext, destination: string): Promise<ExportWorkspaceBundleResult & { transferId: string }> {
     await assertWorkspaceOwner(this.store, context);
     const transferId = context.operationId;
-    const begun = await this.store.runIdempotent(context, {
+    const requestedDestination = path.resolve(destination);
+    // Capture the previous physical path before the resume function clears the
+    // current attempt's ledger fields. If that path still exists, a retry must
+    // never reinterpret it as the new Bundle; use a sibling attempt directory.
+    const previousTransfer = await readWorkspaceTransfer(this.store, context, transferId).catch((error) => {
+      if (error instanceof WorkspaceServerError && error.code === "workspace_transfer_not_found") return undefined;
+      throw error;
+    });
+    const retryingTerminalTransfer = previousTransfer?.state === "failed" || previousTransfer?.state === "rolled_back";
+    const begun = await this.store.runTransferIdempotent(context, {
       action: "workspace.transfer.begin",
-      input: { transferId, destination: path.resolve(destination) }
+      input: { transferId, destination: requestedDestination }
     }, async (sql) => {
       await sql.query("SELECT samurai_begin_workspace_transfer($1, $2)", [context.workspaceId, transferId]);
       await this.store.insertAudit(sql, context, {
@@ -320,15 +345,17 @@ export class WorkspaceBundleV3Service {
       const transfer = await readWorkspaceTransfer(this.store, context, transferId);
       if (transfer.state === "exported" && transfer.bundlePath) {
         const verified = await verifyWorkspaceBundleV3(transfer.bundlePath);
-        return { id: `bundle_${transferId}`, directory: transfer.bundlePath, manifest: verified.manifest, transferId };
+        return { id: workspaceTransferBundleId(transferId, transfer.version), directory: transfer.bundlePath, manifest: verified.manifest, transferId };
       }
-      if (transfer.state === "failed" || transfer.state === "rolled_back") {
-        throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
-      }
+      if (transfer.state === "failed" || transfer.state === "rolled_back") throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
+      const exportDestination = retryingTerminalTransfer && (previousTransfer?.bundlePath || await pathExists(requestedDestination))
+        ? workspaceTransferRetryDestination(requestedDestination, transfer.version)
+        : requestedDestination;
+      const bundleId = workspaceTransferBundleId(transferId, transfer.version);
       try {
         // Export is part of the original transfer operation. It deliberately
         // does not open a nested idempotency ledger using the same ID.
-        const exported = await this.exportPreparedTransfer(context, { destination, transferId });
+        const exported = await this.exportPreparedTransfer(context, { destination: exportDestination, transferId, bundleId });
         return { ...exported, transferId };
       } catch (error) {
         // If another process completed the durable DB transition while this
@@ -337,7 +364,7 @@ export class WorkspaceBundleV3Service {
         const resumed = await readWorkspaceTransfer(this.store, context, transferId).catch(() => undefined);
         if (resumed?.state === "exported" && resumed.bundlePath) {
           const verified = await verifyWorkspaceBundleV3(resumed.bundlePath);
-          return { id: `bundle_${transferId}`, directory: resumed.bundlePath, manifest: verified.manifest, transferId };
+          return { id: workspaceTransferBundleId(transferId, resumed.version), directory: resumed.bundlePath, manifest: verified.manifest, transferId };
         }
         await this.store.database.withContext(context, async (sql) => {
           await sql.query("SELECT samurai_fail_workspace_transfer($1, $2, $3)", [
@@ -360,9 +387,9 @@ export class WorkspaceBundleV3Service {
 
   private async exportPreparedTransfer(
     context: WorkspaceRequestContext,
-    input: ExportWorkspaceBundleInput & { transferId: string }
+    input: ExportWorkspaceBundleInput & { transferId: string; bundleId?: string }
   ): Promise<ExportWorkspaceBundleResult> {
-    const bundleId = `bundle_${input.transferId}`;
+    const bundleId = input.bundleId ?? workspaceTransferBundleId(input.transferId);
     const destination = path.resolve(input.destination);
     const staging = path.join(path.dirname(destination), `.${path.basename(destination)}.staging-${randomUUID()}`);
     let createdStaging = false;
@@ -412,7 +439,7 @@ export class WorkspaceBundleV3Service {
   async rollbackTransfer(context: WorkspaceRequestContext, transferId: string): Promise<void> {
     assertOpaqueId(transferId, "workspace_transfer_id_invalid");
     await assertWorkspaceOwner(this.store, context);
-    await this.store.runIdempotent(context, { action: "workspace.transfer.rollback", input: { transferId } }, async (sql) => {
+    await this.store.runTransferIdempotent(context, { action: "workspace.transfer.rollback", input: { transferId } }, async (sql) => {
       await sql.query("SELECT samurai_rollback_workspace_transfer($1, $2)", [context.workspaceId, transferId]);
       await this.store.insertAudit(sql, context, {
         action: "workspace.transfer.rollback",
@@ -425,7 +452,7 @@ export class WorkspaceBundleV3Service {
   async completeTransfer(context: WorkspaceRequestContext, transferId: string): Promise<void> {
     assertOpaqueId(transferId, "workspace_transfer_id_invalid");
     await assertWorkspaceOwner(this.store, context);
-    await this.store.runIdempotent(context, { action: "workspace.transfer.complete", input: { transferId } }, async (sql) => {
+    await this.store.runTransferIdempotent(context, { action: "workspace.transfer.complete", input: { transferId } }, async (sql) => {
       await sql.query("SELECT samurai_complete_workspace_transfer($1, $2)", [context.workspaceId, transferId]);
       await this.store.insertAudit(sql, context, {
         action: "workspace.transfer.complete",
@@ -443,7 +470,7 @@ export class WorkspaceBundleV3Service {
     assertOpaqueId(input.transferId, "workspace_transfer_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
     await assertWorkspaceOwner(this.store, context);
-    await this.store.runIdempotent(context, {
+    await this.store.runTransferIdempotent(context, {
       action: "workspace.transfer.receipt",
       input: { transferId: input.transferId, targetWorkspaceId: input.targetWorkspaceId, receipt: input.receipt }
     }, async (sql) => {
@@ -497,7 +524,7 @@ export class WorkspaceBundleV3Service {
     assertOpaqueId(context.accountId, "account_id_invalid");
     assertOpaqueId(context.operationId, "workspace_operation_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
-    const targetOrganizationId = assertWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
+    const targetOrganizationId = optionalWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
     assertBundleManifestCandidate(input.manifest);
     const createdAt = new Date();
     const manifestText = canonicalJson(input.manifest);
@@ -509,7 +536,7 @@ export class WorkspaceBundleV3Service {
       operation_id: context.operationId,
       target_workspace_id: input.targetWorkspaceId,
       ...(input.targetWorkspaceName?.trim() ? { target_workspace_name: input.targetWorkspaceName.trim().slice(0, 500) } : {}),
-      target_organization_id: targetOrganizationId,
+      ...(targetOrganizationId ? { target_organization_id: targetOrganizationId } : {}),
       manifest: input.manifest,
       created_at: createdAt.toISOString(),
       expires_at: new Date(createdAt.getTime() + WORKSPACE_BUNDLE_INCOMING_TTL_MS).toISOString(),
@@ -626,12 +653,12 @@ export class WorkspaceBundleV3Service {
     receipt?: WorkspaceTransferReceipt;
   }> {
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
-    const targetOrganizationId = assertWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
+    const targetOrganizationId = optionalWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
     // Check the target Organization before reading or creating the target
     // Workspace. The import SQL function repeats this check inside the
     // transaction, but the explicit service check also covers idempotent
     // retries that find an already-created target Workspace.
-    await assertTargetOrganizationAdmin(this.store, context.accountId, targetOrganizationId);
+    if (targetOrganizationId) await assertTargetOrganizationAdmin(this.store, context.accountId, targetOrganizationId);
     const source = await verifyWorkspaceBundleV3(input.sourceDirectory);
     const sourceWorkspace = await readJsonObject(path.join(source.directory, workspaceFile));
     const sourceWorkspaceVersion = Number(sourceWorkspace.version ?? 1);
@@ -639,7 +666,12 @@ export class WorkspaceBundleV3Service {
       throw new WorkspaceServerError("workspace_bundle_v3_manifest_invalid", 400);
     }
     const targetContext: WorkspaceRequestContext = { ...context, workspaceId: input.targetWorkspaceId };
-    const importId = `import_${randomUUID()}`;
+    // Restore retries belong to the same operation/transfer.  A random
+    // session id made a failed replay look like a new import and could leave
+    // an old session/receipt disconnected from the next attempt.  Derive the
+    // short-lived SQL capability from the verified Bundle identity instead so
+    // every retry uses one durable import id without ever duplicating rows.
+    const importId = stableWorkspaceImportId(input.targetWorkspaceId, source.manifest, context.operationId);
     const stagingRoot = path.join(this.store.storageRoot, ".imports", `import_${randomUUID()}`);
     const finalRoot = path.join(this.store.storageRoot, "workspaces", input.targetWorkspaceId);
     const existingWorkspace = await this.store.getWorkspace(targetContext).then(() => true).catch((error) => {
@@ -674,14 +706,48 @@ export class WorkspaceBundleV3Service {
         throw new WorkspaceServerError("workspace_import_recovery_required", 409);
       }
       const recoveryContext = { ...targetContext, importId: recovery.importId };
-      await this.store.database.withContext(recoveryContext, async (sql) => {
-        await sql.query("SELECT samurai_reopen_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
-      });
-      await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
-      if (input.beforeActivate) await input.beforeActivate(recoveryContext);
-      await this.store.database.withContext(recoveryContext, async (sql) => {
-        await sql.query("SELECT samurai_complete_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
-      });
+      let recoverySessionOpened = false;
+      try {
+        await this.store.database.withContext(recoveryContext, async (sql) => {
+          await sql.query("SELECT samurai_reopen_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
+        });
+        recoverySessionOpened = true;
+        await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
+        if (input.beforeActivate) await input.beforeActivate(recoveryContext);
+        await this.store.database.withContext(recoveryContext, async (sql) => {
+          await sql.query("SELECT samurai_complete_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
+        });
+      } catch (error) {
+        // A resumed import owns the target Workspace and its storage root. If
+        // verification, an extension finalize, or activation fails after the
+        // reopen committed, use the same capability to remove every DB row
+        // (including V4 receipts) and then remove the target files.  Keeping
+        // this path equivalent to a first-attempt failure makes a retry safe.
+        if (!recoverySessionOpened) throw error;
+        let abortError: unknown;
+        try {
+          await this.store.database.withContext(recoveryContext, async (sql) => {
+            await sql.query("SELECT samurai_abort_workspace_import($1, $2)", [input.targetWorkspaceId, recovery.importId]);
+          });
+        } catch (cleanupError) {
+          abortError = cleanupError;
+        }
+        if (abortError) {
+          throw new WorkspaceServerError("workspace_import_abort_failed", 500, {
+            primary_error_code: safeErrorCode(error),
+            cleanup_error_code: safeErrorCode(abortError)
+          });
+        }
+        try {
+          await rm(finalRoot, { recursive: true, force: true });
+        } catch (cleanupError) {
+          throw new WorkspaceServerError("workspace_import_cleanup_failed", 500, {
+            primary_error_code: safeErrorCode(error),
+            cleanup_error_code: safeErrorCode(cleanupError)
+          });
+        }
+        throw error;
+      }
       return {
         workspaceId: input.targetWorkspaceId,
         manifest: source.manifest,
@@ -704,7 +770,7 @@ export class WorkspaceBundleV3Service {
           databasePlacement: this.store.mode === "self_host" ? "dedicated" : "shared",
           importId,
           sourceWorkspaceVersion,
-          targetOrganizationId
+          ...(targetOrganizationId ? { targetOrganizationId } : {})
         });
         await importSnapshot(sql, {
           sourceDirectory: source.directory,
@@ -712,7 +778,7 @@ export class WorkspaceBundleV3Service {
           targetWorkspaceName: input.targetWorkspaceName,
           ownerAccountId: context.accountId,
           mode: this.store.mode,
-          targetOrganizationId
+          ...(targetOrganizationId ? { targetOrganizationId } : {})
         });
         await sql.query("SELECT samurai_record_import_bundle($1, $2, $3, $4, $5::JSONB)", [
           input.targetWorkspaceId,
@@ -735,8 +801,6 @@ export class WorkspaceBundleV3Service {
           subjectId: source.manifest.integrity_hash,
           details: {
             source_workspace_id: source.manifest.workspace_id,
-            ...(sourceManifestOrganizationId(source.manifest) ? { source_organization_id: sourceManifestOrganizationId(source.manifest) } : {}),
-            target_organization_id: targetOrganizationId,
             ...(source.manifest.transfer_id ? { transfer_id: source.manifest.transfer_id } : {})
           }
         });
@@ -761,11 +825,24 @@ export class WorkspaceBundleV3Service {
       }
       // Do not remove the files if database cleanup failed: keeping them is
       // the only recoverable evidence for a partially imported Workspace.
-      if (!abortFailed && finalRootCreated) await rm(finalRoot, { recursive: true, force: true }).catch(() => undefined);
+      let fileCleanupError: unknown;
+      if (!abortFailed && finalRootCreated) {
+        try {
+          await rm(finalRoot, { recursive: true, force: true });
+        } catch (cleanupError) {
+          fileCleanupError = cleanupError;
+        }
+      }
       if (abortFailed) {
         throw new WorkspaceServerError("workspace_import_abort_failed", 500, {
           primary_error_code: safeErrorCode(error),
           cleanup_error_code: safeErrorCode(abortError)
+        });
+      }
+      if (fileCleanupError) {
+        throw new WorkspaceServerError("workspace_import_cleanup_failed", 500, {
+          primary_error_code: safeErrorCode(error),
+          cleanup_error_code: safeErrorCode(fileCleanupError)
         });
       }
       throw error;
@@ -1020,7 +1097,7 @@ async function assertImportedBundleMatches(
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
   manifest: WorkspaceBundleV3Manifest,
-  targetOrganizationId: string
+  targetOrganizationId?: string
 ): Promise<void> {
   const result = await store.database.withContext(context, async (sql) => {
     const bundle = await sql.query<{ sha256: string }>(
@@ -1035,7 +1112,8 @@ async function assertImportedBundleMatches(
     return { bundle: true, organizationId: workspace.rows[0]?.organization_id ?? undefined };
   });
   if (!result.bundle) throw new WorkspaceServerError("workspace_import_target_exists", 409);
-  if (result.organizationId !== undefined && result.organizationId !== targetOrganizationId) {
+  if (result.organizationId !== targetOrganizationId
+    && (result.organizationId !== undefined || targetOrganizationId !== undefined)) {
     throw new WorkspaceServerError("workspace_import_target_organization_mismatch", 409);
   }
 }
@@ -1043,14 +1121,16 @@ async function assertImportedBundleMatches(
 async function assertTargetWorkspaceOrganization(
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-  targetOrganizationId: string
+  targetOrganizationId?: string
 ): Promise<void> {
   const result = await store.database.withContext(context, async (sql) => sql.query<{ organization_id: string | null }>(
     "SELECT organization_id FROM workspaces WHERE id = $1",
     [context.workspaceId]
   ));
   const organizationId = result.rows[0]?.organization_id;
-  if (organizationId !== undefined && organizationId !== null && organizationId !== targetOrganizationId) {
+  const normalizedOrganizationId = organizationId ?? undefined;
+  if (normalizedOrganizationId !== targetOrganizationId
+    && (normalizedOrganizationId !== undefined || targetOrganizationId !== undefined)) {
     throw new WorkspaceServerError("workspace_import_target_organization_mismatch", 409);
   }
 }
@@ -1186,15 +1266,20 @@ export async function readWorkspaceTransfer(
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
   transferId: string
-): Promise<{ state: string; bundlePath?: string }> {
+): Promise<{ state: string; bundlePath?: string; version?: number }> {
   return store.database.withContext(context, async (sql) => {
-    const result = await sql.query<{ state: string; bundle_path: string | null }>(
-      "SELECT state, bundle_path FROM workspace_transfers WHERE workspace_id = $1 AND id = $2",
+    const result = await sql.query<{ state: string; bundle_path: string | null; version: number | string | null }>(
+      "SELECT state, bundle_path, version FROM workspace_transfers WHERE workspace_id = $1 AND id = $2",
       [context.workspaceId, transferId]
     );
     const row = result.rows[0];
     if (!row) throw new WorkspaceServerError("workspace_transfer_not_found", 404);
-    return { state: row.state, ...(row.bundle_path ? { bundlePath: row.bundle_path } : {}) };
+    const version = typeof row.version === "number" ? row.version : typeof row.version === "string" ? Number(row.version) : undefined;
+    return {
+      state: row.state,
+      ...(row.bundle_path ? { bundlePath: row.bundle_path } : {}),
+      ...(version !== undefined && Number.isSafeInteger(version) && version > 0 ? { version } : {})
+    };
   });
 }
 
@@ -1232,18 +1317,22 @@ async function writeBundleDirectory(input: {
   context: WorkspaceRequestContext;
   transferId?: string;
 }): Promise<{ manifest: WorkspaceBundleV3Manifest }> {
+  // Organization is not part of the portable Workspace identity. Do not make
+  // the restored Workspace inherit source membership or provenance.
+  const portableWorkspace = portableWorkspaceRow(input.snapshot.workspace);
+  const portableEvents = input.snapshot.events.map(portableEventRow);
   const dataFiles: Array<[string, unknown]> = [
-    [workspaceFile, input.snapshot.workspace],
+    [workspaceFile, portableWorkspace],
     ["accounts.jsonl", input.snapshot.accounts],
     ["rooms.jsonl", input.snapshot.rooms],
     ["memberships.jsonl", input.snapshot.memberships],
     ["room-memberships.jsonl", input.snapshot.roomMemberships],
     ["records.jsonl", input.snapshot.records],
-    ["events.jsonl", input.snapshot.events],
+    ["events.jsonl", portableEvents],
     ["jobs.jsonl", input.snapshot.jobs],
     ["operations.jsonl", input.snapshot.operations],
     ["invitations.jsonl", input.snapshot.invitations],
-    ["audits.jsonl", input.snapshot.audits],
+    ["audits.jsonl", input.snapshot.audits.map(portableAuditRow)],
     ["files.jsonl", input.snapshot.files],
     ["learning-activities.jsonl", input.snapshot.learningActivities],
     ["learning-resources.jsonl", input.snapshot.learningResources],
@@ -1256,7 +1345,21 @@ async function writeBundleDirectory(input: {
     ["learning-resource-uses.jsonl", input.snapshot.learningResourceUses]
   ];
   for (const [file, payload] of dataFiles) {
-    const contents = Array.isArray(payload) ? payload.map((row) => canonicalBundleJson(row)).join("\n") + (payload.length > 0 ? "\n" : "") : canonicalBundleJson(payload);
+    // A portable Bundle never carries Organization affiliation.  Apply the
+    // same recursive filter to arbitrary JSON payloads (including Event and
+    // audit details), not only to the known top-level columns.
+    const portablePayload = stripOrganizationIdentifiers(payload);
+    // Validate the generated projection before it becomes part of the
+    // Bundle. This keeps server-local absolute paths out of exports as well
+    // as rejecting them on a later import/verification pass.
+    if (Array.isArray(portablePayload)) {
+      for (const row of portablePayload) assertPortablePathsFree(row);
+    } else {
+      assertPortablePathsFree(portablePayload);
+    }
+    const contents = Array.isArray(portablePayload)
+      ? portablePayload.map((row) => canonicalBundleJson(row)).join("\n") + (portablePayload.length > 0 ? "\n" : "")
+      : canonicalBundleJson(portablePayload);
     await writeFile(path.join(input.directory, file), contents, { flag: "wx", mode: 0o600 });
   }
   for (const row of input.snapshot.files) {
@@ -1293,7 +1396,6 @@ async function writeBundleDirectory(input: {
     learning_resource_uses: input.snapshot.learningResourceUses.length
   };
   const source = input.snapshot.workspace;
-  const sourceOrganizationId = optionalOpaqueId(source.organization_id, "organization_id_invalid");
   const schemaRevision = input.snapshot.schemaRevision;
   const manifest = {
     format_version: 3,
@@ -1301,14 +1403,13 @@ async function writeBundleDirectory(input: {
     exported_at: new Date().toISOString(),
     source: {
       hosting_mode: String(source.hosting_mode) as WorkspaceServerMode,
-      database_placement: String(source.database_placement) as "shared" | "dedicated",
-      ...(sourceOrganizationId ? { organization_id: sourceOrganizationId } : {})
+      database_placement: String(source.database_placement) as "shared" | "dedicated"
     },
     // `schema_version` is retained for older readers. New readers use the
-    // explicit revision field and the Organization reference below.
+    // explicit revision field. Source Organization provenance is intentionally
+    // omitted: a restore must not reveal or inherit the source affiliation.
     schema_version: schemaRevision,
     schema_revision: schemaRevision,
-    ...(sourceOrganizationId ? { source_organization_id: sourceOrganizationId } : {}),
     ...(input.transferId ? { transfer_id: input.transferId } : {}),
     files: hashes,
     record_counts: recordCounts,
@@ -1317,6 +1418,45 @@ async function writeBundleDirectory(input: {
   manifest.integrity_hash = hashText(canonicalJson(bundleV3IntegrityPayload(manifest)));
   await writeFile(path.join(input.directory, manifestFile), canonicalJson(manifest), { flag: "wx", mode: 0o600 });
   return { manifest };
+}
+
+function portableWorkspaceRow(row: Record<string, unknown>): Record<string, unknown> {
+  return stripOrganizationIdentifiers(row) as Record<string, unknown>;
+}
+
+function portableEventRow(row: Record<string, unknown>): Record<string, unknown> {
+  return stripOrganizationIdentifiers(row) as Record<string, unknown>;
+}
+
+const organizationIdentifierKeyNames = new Set([
+  "organizationid", "sourceorganizationid", "targetorganizationid",
+  "organizationids", "sourceorganizationids", "targetorganizationids",
+  "orgid", "sourceorgid", "targetorgid", "orgids", "sourceorgids", "targetorgids"
+]);
+
+function isOrganizationIdentifierKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return organizationIdentifierKeyNames.has(normalized);
+}
+
+function stripOrganizationIdentifiers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripOrganizationIdentifiers);
+  if (!value || typeof value !== "object" || value instanceof Date) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isOrganizationIdentifierKey(key))
+      .map(([key, nested]) => [key, stripOrganizationIdentifiers(nested)])
+  );
+}
+
+function portableAuditRow(row: Record<string, unknown>): Record<string, unknown> {
+  const portable = stripOrganizationIdentifiers(row) as Record<string, unknown>;
+  const subjectKind = typeof portable.subject_kind === "string" ? portable.subject_kind.toLowerCase() : "";
+  // An Organization subject ID is itself an affiliation even when the key is
+  // not present in the nested details. Keep the historical audit action but
+  // remove the identifier before exporting or restoring it.
+  if (subjectKind.includes("organization")) return { ...portable, subject_id: null };
+  return portable;
 }
 
 export async function verifyWorkspaceBundleV3(directory: string): Promise<{ directory: string; manifest: WorkspaceBundleV3Manifest }> {
@@ -1433,7 +1573,7 @@ async function importSnapshot(sql: WorkspaceSql, input: {
   targetWorkspaceName?: string;
   ownerAccountId: string;
   mode: WorkspaceServerMode;
-  targetOrganizationId: string;
+  targetOrganizationId?: string;
 }): Promise<void> {
   for (const row of await readJsonl(path.join(input.sourceDirectory, "accounts.jsonl"))) {
     const accountId = String(row.id);
@@ -1631,6 +1771,7 @@ async function importSnapshot(sql: WorkspaceSql, input: {
     );
   }
   for (const row of await readJsonl(path.join(input.sourceDirectory, "audits.jsonl"))) {
+    const portableAudit = portableAuditRow(row);
     await sql.query(
       `SELECT samurai_import_workspace_audit(
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::JSONB, $12::TIMESTAMPTZ
@@ -1642,11 +1783,11 @@ async function importSnapshot(sql: WorkspaceSql, input: {
         String(row.action),
         String(row.outcome),
         row.operation_id ? String(row.operation_id) : null,
-        row.subject_kind ? String(row.subject_kind) : null,
-        row.subject_id ? String(row.subject_id) : null,
+        portableAudit.subject_kind ? String(portableAudit.subject_kind) : null,
+        portableAudit.subject_id ? String(portableAudit.subject_id) : null,
         row.before_version === null || row.before_version === undefined ? null : Number(row.before_version),
         row.after_version === null || row.after_version === undefined ? null : Number(row.after_version),
-        canonicalJson(row.details && typeof row.details === "object" ? row.details : {}),
+        canonicalJson(portableAudit.details && typeof portableAudit.details === "object" ? portableAudit.details : {}),
         String(row.created_at ?? new Date().toISOString())
       ]
     );
@@ -1663,13 +1804,13 @@ const workspaceEventPublicColumns = [
 async function importWorkspaceEvents(
   sql: WorkspaceSql,
   targetWorkspaceId: string,
-  targetOrganizationId: string,
+  targetOrganizationId: string | undefined,
   rows: Record<string, unknown>[]
 ): Promise<void> {
   for (const row of rows) {
     // Public columns are optional only for backwards compatibility with
-    // older V3 bundles. Omitting them lets the database apply the safe
-    // legacy defaults; a current export includes and preserves every value.
+    // older V3 bundles. Omitting them lets the database apply safe defaults;
+    // Organization scope is deliberately omitted for standalone restores.
     const columns = [...workspaceEventBaseColumns] as string[];
     const values = workspaceEventBaseColumns.map((column) => jsonColumnValue(row[column]));
     for (const column of workspaceEventPublicColumns) {
@@ -1677,8 +1818,10 @@ async function importWorkspaceEvents(
       // A source value is provenance only and must never carry source-tenant
       // visibility into the target.
       if (column === "organization_id") {
-        columns.push(column);
-        values.push(targetOrganizationId);
+        if (targetOrganizationId !== undefined) {
+          columns.push(column);
+          values.push(targetOrganizationId);
+        }
         continue;
       }
       if (!(column in row)) continue;
@@ -1816,6 +1959,7 @@ async function assertPortableJsonFile(file: string, relativeFile: string): Promi
     assertExactPortableFields(record, schema);
     if (relativeFile === "events.jsonl") assertPortableEventFields(record);
     assertCredentialFree(record);
+    assertPortablePathsFree(record);
   }
   return rows as Record<string, unknown>[];
 }
@@ -1836,6 +1980,38 @@ function assertCredentialFree(value: unknown): void {
     }
     assertCredentialFree(nested);
   }
+}
+
+const portablePathFieldNames = new Set([
+  "path", "filepath", "storage_namespace", "storagenamespace", "working_directory", "workingdirectory",
+  "worktree_path", "worktreepath", "absolute_path", "absolutepath", "directory", "directory_path",
+  "directorypath", "root_path", "rootpath", "cwd", "home"
+]);
+
+function assertPortablePathsFree(value: unknown, fieldName?: string): void {
+  if (typeof value === "string") {
+    if (fieldName && portablePathFieldNames.has(fieldName.toLowerCase().replace(/[^a-z0-9]/g, ""))
+      && isAbsolutePortablePath(value)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_absolute_path_forbidden", 400);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertPortablePathsFree(item, fieldName);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    assertPortablePathsFree(nested, key);
+  }
+}
+
+function isAbsolutePortablePath(value: string): boolean {
+  return path.posix.isAbsolute(value)
+    || path.win32.isAbsolute(value)
+    || /^[A-Za-z]:[\\/]/.test(value)
+    || value.startsWith("\\\\")
+    || value.startsWith("file:///");
 }
 
 function assertExactPortableFields(value: Record<string, unknown>, schema: { required: readonly string[]; allowed: readonly string[] }): void {
@@ -2296,7 +2472,7 @@ async function readJsonObject(file: string): Promise<Record<string, unknown>> {
 
 function jsonColumnValue(value: unknown): unknown {
   if (value === null || value === undefined) return null;
-  if (typeof value === "object") return canonicalJson(value);
+  if (typeof value === "object") return canonicalJson(stripOrganizationIdentifiers(value));
   return value;
 }
 
@@ -2307,6 +2483,16 @@ export function assertWorkspaceBundleTargetOrganizationId(value: unknown): strin
   return assertOpaqueId(value.trim(), "organization_id_invalid");
 }
 
+/**
+ * A Workspace restore is standalone by default. Keep the historical strict
+ * assertion above for Organization-scoped callers, while Bundle staging and
+ * import treat the target Organization as an explicit optional override.
+ */
+function optionalWorkspaceBundleTargetOrganizationId(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return assertWorkspaceBundleTargetOrganizationId(value);
+}
+
 interface WorkspaceImportStartInput {
   targetWorkspaceId: string;
   workspaceName: string;
@@ -2314,7 +2500,7 @@ interface WorkspaceImportStartInput {
   databasePlacement: "shared" | "dedicated";
   importId: string;
   sourceWorkspaceVersion: number;
-  targetOrganizationId: string;
+  targetOrganizationId?: string;
 }
 
 /**
@@ -2344,10 +2530,10 @@ async function startWorkspaceImport(sql: WorkspaceSql, input: WorkspaceImportSta
   ];
   if (argumentCount >= 7) {
     const names = Array.isArray(functionRow?.proargnames) ? functionRow.proargnames : [];
-    const fallbackValues = [...legacyValues, input.targetOrganizationId];
+    const fallbackValues = [...legacyValues, input.targetOrganizationId ?? null];
     const values = Array.from({ length: argumentCount }, (_, index) => {
       const name = names[index]?.toLowerCase() ?? "";
-      if (name.includes("organization")) return input.targetOrganizationId;
+      if (name.includes("organization")) return input.targetOrganizationId ?? null;
       if (name.includes("version")) return input.sourceWorkspaceVersion;
       if (name.includes("workspace") && name.includes("name")) return input.workspaceName;
       if (name.includes("workspace")) return input.targetWorkspaceId;
@@ -2371,6 +2557,19 @@ async function pathExists(target: string): Promise<boolean> {
 
 function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function stableWorkspaceImportId(
+  targetWorkspaceId: string,
+  manifest: WorkspaceBundleV3Manifest,
+  operationId: string
+): string {
+  // Prefer the transfer identity when present so a resend from another
+  // request operation still resumes the same import. A non-transfer Bundle
+  // remains scoped to its restore operation and cannot collide with an
+  // unrelated manual restore of the same snapshot.
+  const replayIdentity = manifest.transfer_id ?? operationId;
+  return `import_${hashText(canonicalJson([targetWorkspaceId, replayIdentity, manifest.integrity_hash]))}`;
 }
 
 function hashBytes(value: Uint8Array): string {
@@ -2536,7 +2735,10 @@ function transferReceipt(manifest: WorkspaceBundleV3Manifest, targetWorkspaceId:
     source_workspace_id: manifest.workspace_id,
     source_integrity_hash: manifest.integrity_hash,
     target_workspace_id: targetWorkspaceId,
-    imported_at: new Date().toISOString(),
+    // A receipt may be reconstructed after a response-loss retry. Deriving
+    // this value from the verified immutable manifest keeps the complete
+    // receipt byte-for-byte stable without relying on process-local time.
+    imported_at: manifest.exported_at,
     target_integrity_hash: manifest.integrity_hash
   };
 }

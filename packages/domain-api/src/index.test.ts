@@ -3,7 +3,12 @@ import { z } from "zod";
 import {
   ActivityIngestRequestSchema,
   DomainApiRequestSchema,
+  DomainApiTransportRequest,
+  DomainApiClient,
   PublicEventEnvelopeSchema,
+  PublicWorkspaceDirectorySchema,
+  PublicWorkspaceTransferManifestSchema,
+  PublicWorkspaceTransferReceiptSchema,
   eventCatalog,
   eventPayloadSchemaFor,
   isApiVersionCompatible,
@@ -107,10 +112,11 @@ describe("public Domain API contract", () => {
     expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
       "organization.list",
       "organization.member.invite",
-      "organization.workspace.list",
       "workspace.organization.move.commit",
+      "workspace.bundle.export",
       "workspace.bundle.restore"
     ]));
+    expect(publicDomainOperationIds).not.toContain("organization.workspace.list");
     expect(publicOperationOutputSchemaFor("organization.invitation.list", z.any()).safeParse([{
       id: "invitation_1",
       organization_id: "organization_1",
@@ -153,5 +159,95 @@ describe("public Domain API contract", () => {
     expect(isApiVersionCompatible("2")).toBe(false);
     expect(isEventVersionCompatible("1.7")).toBe(true);
     expect(isEventVersionCompatible("2.0")).toBe(false);
+  });
+
+  it("publishes an Organization-optional Workspace directory contract", () => {
+    const directory = PublicWorkspaceDirectorySchema.parse({
+      workspaces: [{
+        id: "workspace_1",
+        name: "Personal",
+        state: "active",
+        version: 1,
+        hosting_mode: "self_host",
+        database_placement: "dedicated",
+        role: "owner",
+        access: "granted",
+        created_by: "account_1",
+        created_at: "2026-09-01T00:00:00.000Z",
+        updated_at: "2026-09-01T00:00:00.000Z"
+      }, {
+        id: "workspace_2",
+        organization_id: "organization_1",
+        name: "Team",
+        state: "active",
+        version: 2,
+        role: "member",
+        access: "granted"
+      }]
+    });
+    expect(directory.workspaces[0]?.organization_id).toBeUndefined();
+    expect(directory.workspaces[1]?.organization_id).toBe("organization_1");
+    expect(() => PublicWorkspaceDirectorySchema.parse({
+      workspaces: [{ id: "workspace_1", name: "Personal", state: "active", version: 1, storage_namespace: "private" }]
+    })).toThrow();
+  });
+
+  it("routes Workspace-first client calls without forcing Organization IDs", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const transport = async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    };
+    const client = new DomainApiClient(transport);
+    await client.listAccountWorkspaces();
+    await client.createWorkspace({ workspace_id: "workspace_1", name: "Personal" }, { operationId: "create_1" });
+    await client.importWorkspaceBundle({ target_workspace_id: "workspace_2", bundle: { format: "samurai-workspace-bundle-v4" } }, { operationId: "restore_1", idempotencyKey: "idem_1" });
+    await client.restoreWorkspaceBundle({ bundle_id: "bundle_1", confirm: true }, { operationId: "restore_managed_1" });
+    await client.exportWorkspaceBundle("workspace_1", { operationId: "export_1", expectedWorkspaceVersion: 2 });
+    await client.attachWorkspaceToOrganization("organization_1", "workspace_1", { operationId: "attach_1", expectedWorkspaceVersion: 3, confirmGuestMemberships: true });
+    await client.detachWorkspaceFromOrganization("organization_1", "workspace_1", { operationId: "detach_1" });
+
+    expect(requests).toEqual([
+      { method: "GET", path: "/api/account/workspaces" },
+      { method: "POST", path: "/api/workspaces", body: { workspace_id: "workspace_1", name: "Personal" }, operationId: "create_1" },
+      { method: "POST", path: "/api/workspaces/imports", body: { target_workspace_id: "workspace_2", bundle: { format: "samurai-workspace-bundle-v4" } }, operationId: "restore_1", idempotencyKey: "idem_1" },
+      { method: "POST", path: "/api/workspaces/bundles/restore", body: { bundle_id: "bundle_1", confirm: true }, operationId: "restore_managed_1", idempotencyKey: "restore_managed_1" },
+      { method: "POST", path: "/api/workspaces/workspace_1/bundle/export", body: { expected_workspace_version: 2 }, operationId: "export_1", idempotencyKey: "export_1" },
+      { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/attach", body: { expected_workspace_version: 3, confirm_guest_memberships: true }, operationId: "attach_1", idempotencyKey: "attach_1" },
+      { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/detach", body: {}, operationId: "detach_1", idempotencyKey: "detach_1" }
+    ]);
+  });
+
+  it("validates transfer proof and keeps cutover stages explicit", () => {
+    const hash = "a".repeat(64);
+    expect(PublicWorkspaceTransferManifestSchema.parse({
+      format_version: 4,
+      workspace_id: "workspace_1",
+      exported_at: "2026-09-01T00:00:00.000Z",
+      transfer_id: "transfer_1",
+      base_v3_integrity_hash: hash,
+      excluded_maintenance_account_ids: [],
+      files: { "workspace/core.jsonl": hash },
+      record_counts: { workspaces: 1 },
+      integrity_hash: hash
+    }).transfer_id).toBe("transfer_1");
+    expect(PublicWorkspaceTransferReceiptSchema.safeParse({
+      format_version: 1,
+      transfer_id: "transfer_1",
+      source_workspace_id: "workspace_1",
+      source_integrity_hash: hash,
+      target_workspace_id: "workspace_1",
+      imported_at: "2026-09-01T00:00:00.000Z",
+      target_integrity_hash: hash
+    }).success).toBe(true);
+    expect(PublicWorkspaceTransferReceiptSchema.safeParse({
+      format_version: 1,
+      transfer_id: "transfer_1",
+      source_workspace_id: "workspace_1",
+      source_integrity_hash: hash,
+      target_workspace_id: "workspace_1",
+      imported_at: "2026-09-01T00:00:00.000Z",
+      target_integrity_hash: "b".repeat(64)
+    }).success).toBe(false);
   });
 });

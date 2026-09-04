@@ -177,6 +177,12 @@ for (const definition of operationDefinitions) {
       ? { ...sampledInput, role: "Fixture role" }
       : definition.id === "learning.resource.version.update"
         ? { ...sampledInput, content: "Fixture Resource content." }
+      : definition.id === "workspace.organization.move.preflight" || definition.id === "workspace.organization.move.commit"
+        ? {
+          ...sampledInput,
+          source_organization_id: "organization_fixture_source",
+          target_organization_id: "organization_fixture_target"
+        }
       : sampledInput;
   assert.equal(definition.input.safeParse(input).success, true, `${definition.id} contract fixture sample is rejected by Zod`);
   const validatePublicInput = ajv.compile(catalog.input_schema);
