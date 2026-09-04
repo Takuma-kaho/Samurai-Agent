@@ -182,6 +182,16 @@ export interface WorkspaceCompletionActivityResult {
   replayed: boolean;
 }
 
+/**
+ * Server-internal provenance for the Runtime completion projection.  This is
+ * deliberately separate from `WorkspaceCompletionActivityInput`: HTTP and
+ * other transport callers cannot provide an Activity principal override.
+ */
+export interface WorkspaceRuntimeCompletionProjectionInput {
+  runId: string;
+  principalAccountId: string;
+}
+
 /** No request body accepts an attestor ID, provider response, or credential
  * as a substitute. The Host supplies the cassette during Server setup. */
 export interface ApplyWorkspaceCompletionAttestationInput {
@@ -243,9 +253,42 @@ export class WorkspaceCompletionService {
   }
 
   async ingestActivity(context: WorkspaceRequestContext, input: WorkspaceCompletionActivityInput): Promise<WorkspaceCompletionActivityResult> {
+    return this.ingestActivityWithPrincipal(context, input, context.accountId);
+  }
+
+  /**
+   * Projects a settled Runtime run into Completion while retaining the
+   * maintenance Account as the database/RLS context.  The requested
+   * participant is accepted only through this trusted, server-internal path;
+   * the source run is re-read in the same transaction before any write.
+   */
+  async ingestRuntimeCompletionActivity(
+    context: WorkspaceRequestContext,
+    input: WorkspaceCompletionActivityInput,
+    projection: WorkspaceRuntimeCompletionProjectionInput
+  ): Promise<WorkspaceCompletionActivityResult> {
+    const caller = context.caller;
+    if (!isTrustedWorkspaceCallerForAccount(caller, context.accountId) || caller.kind !== "maintenance") {
+      throw new WorkspaceServerError("workspace_completion_runtime_projection_forbidden", 403);
+    }
+    assertOpaqueId(projection.runId, "workspace_runtime_run_id_invalid");
+    assertOpaqueId(projection.principalAccountId, "workspace_completion_activity_principal_invalid");
+    if (input.sourceApp !== "samurai-workspace-chat" || input.sourceId !== projection.runId) {
+      throw new WorkspaceServerError("workspace_completion_runtime_projection_source_invalid", 409);
+    }
+    return this.ingestActivityWithPrincipal(context, input, projection.principalAccountId, projection.runId);
+  }
+
+  private async ingestActivityWithPrincipal(
+    context: WorkspaceRequestContext,
+    input: WorkspaceCompletionActivityInput,
+    principalAccountId: string,
+    runtimeRunId?: string
+  ): Promise<WorkspaceCompletionActivityResult> {
     validateActivityInput(input);
     const activityId = input.id ?? completionId("completion_activity", context.workspaceId, context.operationId);
     assertCompletionId(activityId, "workspace_completion_activity_id_invalid");
+    assertOpaqueId(principalAccountId, "workspace_completion_activity_principal_invalid");
     const payload = input.payload ?? {};
     const eligibility = classifyWorkspaceCompletionActivity({
       outcome: input.outcome,
@@ -257,10 +300,10 @@ export class WorkspaceCompletionService {
     });
     const saved = await this.store.runIdempotentResult(context, {
       action: "workspace.completion.activity.ingest",
-      input: { ...input, id: activityId }
+      input: { ...input, id: activityId, principalAccountId }
     }, async (sql) => {
+      if (runtimeRunId) await this.assertRuntimeProjectionSource(sql, context, input, runtimeRunId, principalAccountId);
       await this.assertPolicyAllowed(sql, context, input.roomId, "activity.ingest", "execute", { source_app: input.sourceApp });
-      const episode = await this.resolveEpisodeForActivity(sql, context, input, activityId);
       const inserted = await sql.query<ActivityRow>(
         `INSERT INTO workspace_completion_activities(
            workspace_id, room_id, id, principal_account_id, source_app, source_id,
@@ -268,15 +311,18 @@ export class WorkspaceCompletionService {
            instruction_summary, result_summary, changed_resources, verification_outcome,
            failure_state, outcome, explicit_remember, payload, session_ref
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::JSONB, $13, $14, $15, $16, $17::JSONB, $18::JSONB)
+         ON CONFLICT (workspace_id, id) DO NOTHING
          RETURNING *`,
         [
-          context.workspaceId, input.roomId, activityId, context.accountId, input.sourceApp.trim(), input.sourceId ?? null,
+          context.workspaceId, input.roomId, activityId, principalAccountId, input.sourceApp.trim(), input.sourceId ?? null,
           input.externalEpisodeKey ?? null, input.correctionOfActivityId ?? null, input.operationId ?? null,
           input.instructionSummary.trim(), input.resultSummary?.trim() || null, canonicalJson([...(input.changedResources ?? [])]),
           input.verificationOutcome, input.failureState, input.outcome, input.explicitRemember === true,
           canonicalJson(payload), input.sessionRef ? canonicalJson(input.sessionRef) : null
         ]
       );
+      if (!inserted.rows[0]) return this.replayActivityInTransaction(sql, context, input, activityId, principalAccountId);
+      const episode = await this.resolveEpisodeForActivity(sql, context, input, activityId);
       const activity = activityFromRow(inserted.rows[0]!);
       await sql.query(
         `INSERT INTO workspace_completion_episode_activities(workspace_id, episode_id, activity_id, relation)
@@ -3093,6 +3139,97 @@ export class WorkspaceCompletionService {
     if (found.rows[0]?.exists !== true) throw new WorkspaceServerError("workspace_completion_episode_activity_mismatch", 409);
   }
 
+  /**
+   * The Runtime run is the only authority for a projected Activity's
+   * principal.  Re-reading it under the maintenance RLS context prevents a
+   * caller from pairing an arbitrary Account with an arbitrary source ID.
+   * The database policy repeats this same binding at INSERT time.
+   */
+  private async assertRuntimeProjectionSource(
+    sql: WorkspaceSql,
+    context: WorkspaceRequestContext,
+    input: WorkspaceCompletionActivityInput,
+    runId: string,
+    principalAccountId: string
+  ): Promise<void> {
+    const result = await sql.query<{
+      room_id: string | null;
+      requested_by_participant_id: string | null;
+      phase: string | null;
+      status: string;
+    }>(
+      `SELECT room_id, requested_by_participant_id, phase, status
+       FROM workspace_runtime_runs
+       WHERE workspace_id = $1 AND id = $2
+       FOR SHARE`,
+      [context.workspaceId, runId]
+    );
+    const run = result.rows[0];
+    if (!run
+      || run.room_id !== input.roomId
+      || run.phase !== "settled"
+      || !["completed", "failed", "cancelled", "outcome_unknown"].includes(run.status)
+      || run.requested_by_participant_id !== principalAccountId) {
+      throw new WorkspaceServerError("workspace_completion_runtime_projection_source_invalid", 409, { run_id: runId });
+    }
+  }
+
+  /**
+   * A stable Activity ID is the projection identity, independently of the
+   * operation ledger used by the callback. The INSERT caller uses
+   * `ON CONFLICT DO NOTHING` so a concurrent retry can read the committed
+   * Activity without first creating an Episode that would have to be cleaned
+   * up. A different payload is a real identity collision and must stop.
+   */
+  private async replayActivityInTransaction(
+    sql: WorkspaceSql,
+    context: WorkspaceRequestContext,
+    input: WorkspaceCompletionActivityInput,
+    activityId: string,
+    principalAccountId: string
+  ): Promise<Omit<WorkspaceCompletionActivityResult, "replayed">> {
+    const existing = await sql.query<ActivityRow>(
+      "SELECT * FROM workspace_completion_activities WHERE workspace_id = $1 AND id = $2",
+      [context.workspaceId, activityId]
+    );
+    const activityRow = existing.rows[0];
+    if (!activityRow) throw new WorkspaceServerError("workspace_completion_activity_replay_unavailable", 503);
+    const activity = activityFromRow(activityRow);
+    if (!sameCompletionActivityInput(context, input, activity, principalAccountId)) {
+      throw new WorkspaceServerError("workspace_completion_activity_id_conflict", 409, { activity_id: activityId });
+    }
+    const linked = await sql.query<EpisodeRow>(
+      `SELECT episode.* FROM workspace_completion_episode_activities link
+       JOIN workspace_completion_episodes episode
+         ON episode.workspace_id = link.workspace_id AND episode.id = link.episode_id
+       WHERE link.workspace_id = $1 AND link.activity_id = $2
+       ORDER BY link.created_at ASC, link.episode_id ASC
+       LIMIT 2`,
+      [context.workspaceId, activityId]
+    );
+    if (linked.rows.length !== 1) {
+      throw new WorkspaceServerError("workspace_completion_activity_episode_missing", 503, { activity_id: activityId });
+    }
+    const episode = episodeFromRow(linked.rows[0]!);
+    if (input.episodeId && input.episodeId !== episode.id) {
+      throw new WorkspaceServerError("workspace_completion_activity_id_conflict", 409, { activity_id: activityId });
+    }
+    // When no existing Episode can be selected, the first ingest creates one
+    // from `goal` (or the instruction). In that case the goal is part of the
+    // durable projection input and must not be silently changed on replay.
+    if (!input.episodeId && !input.correctionOfActivityId && !input.externalEpisodeKey && !input.operationId
+      && episode.goal !== (input.goal?.trim() || input.instructionSummary.trim())) {
+      throw new WorkspaceServerError("workspace_completion_activity_id_conflict", 409, { activity_id: activityId });
+    }
+    const eligibility = classifyWorkspaceCompletionActivity(activity);
+    return {
+      activity,
+      episode,
+      eligible: eligibility.eligible,
+      reasons: eligibility.reasons
+    };
+  }
+
   /** Model-derived Resource versions are room-local.  Checking this inside
    * the same transaction prevents a forged Activity ID from becoming
    * provenance for another Room through a non-HTTP caller. */
@@ -3138,7 +3275,7 @@ export class WorkspaceCompletionService {
          JOIN workspace_completion_episode_activities link ON link.workspace_id = activity.workspace_id AND link.activity_id = activity.id
          JOIN workspace_completion_episodes episode ON episode.workspace_id = link.workspace_id AND episode.id = link.episode_id
          WHERE activity.workspace_id = $1 AND activity.room_id = $2 AND activity.operation_id = $3
-         ORDER BY activity.created_at DESC LIMIT 1 FOR UPDATE`,
+         ORDER BY activity.created_at DESC LIMIT 1 FOR UPDATE OF episode`,
         [context.workspaceId, input.roomId, input.operationId]
       );
       if (found.rows[0]) return episodeFromRow(found.rows[0]);
@@ -3968,6 +4105,51 @@ function activityFromRow(row: ActivityRow): WorkspaceCompletionActivity {
     createdAt: iso(row.created_at),
     finalizedAt: iso(row.finalized_at)
   };
+}
+
+function sameCompletionActivityInput(
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  input: WorkspaceCompletionActivityInput,
+  activity: WorkspaceCompletionActivity,
+  principalAccountId = context.accountId
+): boolean {
+  return canonicalJson({
+    workspace_id: context.workspaceId,
+    room_id: input.roomId,
+    principal_account_id: principalAccountId,
+    source_app: input.sourceApp.trim(),
+    source_id: input.sourceId ?? null,
+    external_episode_key: input.externalEpisodeKey ?? null,
+    correction_of_activity_id: input.correctionOfActivityId ?? null,
+    operation_id: input.operationId ?? null,
+    instruction_summary: input.instructionSummary.trim(),
+    result_summary: input.resultSummary?.trim() || null,
+    changed_resources: [...(input.changedResources ?? [])],
+    verification_outcome: input.verificationOutcome,
+    failure_state: input.failureState,
+    outcome: input.outcome,
+    explicit_remember: input.explicitRemember === true,
+    payload: input.payload ?? {},
+    session_ref: input.sessionRef ?? null
+  }) === canonicalJson({
+    workspace_id: activity.workspaceId,
+    room_id: activity.roomId,
+    principal_account_id: activity.principalAccountId,
+    source_app: activity.sourceApp,
+    source_id: activity.sourceId ?? null,
+    external_episode_key: activity.externalEpisodeKey ?? null,
+    correction_of_activity_id: activity.correctionOfActivityId ?? null,
+    operation_id: activity.operationId ?? null,
+    instruction_summary: activity.instructionSummary,
+    result_summary: activity.resultSummary ?? null,
+    changed_resources: [...activity.changedResources],
+    verification_outcome: activity.verificationOutcome,
+    failure_state: activity.failureState,
+    outcome: activity.outcome,
+    explicit_remember: activity.explicitRemember,
+    payload: activity.payload,
+    session_ref: activity.sessionRef ?? null
+  });
 }
 
 function episodeFromRow(row: EpisodeRow): WorkspaceCompletionEpisode {

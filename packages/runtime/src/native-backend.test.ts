@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
-import { FakeProviderAdapter, ProviderRegistry, ProviderRequestError, type ProviderAdapter } from "./provider";
+import { createProviderRegistryFromEnv, FakeProviderAdapter, ProviderRegistry, ProviderRequestError, type ProviderAdapter } from "./provider";
 import { NativeContextBuilder, NativeToolExecutor, NativeToolLoop, SamuraiNativeBackend } from "./native-backend";
 
 describe("SamuraiNativeBackend components", () => {
@@ -187,6 +187,64 @@ describe("SamuraiNativeBackend components", () => {
       terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
       payload: { reason: "invalid_response" }
     });
+  });
+
+  it.each([
+    [429, "rate_limited"],
+    [503, "temporary_unavailable"]
+  ] as const)("surfaces Gemini HTTP %s as a failed run", async (status, reason) => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: `upstream ${status}` } }), {
+      status,
+      headers: { "content-type": "application/json" }
+    });
+
+    try {
+      const provider = createProviderRegistryFromEnv({
+        SAMURAI_LLM_MODEL: "gemini/gemini-http-test",
+        GEMINI_API_KEY: "gemini-http-secret"
+      });
+      const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+      expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_failed"]);
+      expect(events.at(-1)).toMatchObject({
+        terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
+        payload: { provider: "gemini", reason, retryable: true }
+      });
+      expect(JSON.stringify(events)).not.toContain("gemini-http-secret");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces a Gemini empty-candidates response as a failed run", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data: {\"candidates\":[]}\n\ndata: [DONE]\n\n"));
+          controller.close();
+        }
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+
+    try {
+      const provider = createProviderRegistryFromEnv({
+        SAMURAI_LLM_MODEL: "gemini/gemini-empty-candidates-test",
+        GEMINI_API_KEY: "gemini-empty-secret"
+      });
+      const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn(backendRunInput()));
+
+      expect(events.map((event) => event.event_type)).toEqual(["run_started", "run_failed"]);
+      expect(events.at(-1)).toMatchObject({
+        terminal_evidence: { kind: "failed", source: "provider_terminal_response" },
+        payload: { provider: "gemini", reason: "invalid_response", retryable: false }
+      });
+      expect(JSON.stringify(events)).not.toContain("gemini-empty-secret");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("does not complete an empty terminated stream unless it carries ignored provider metadata", async () => {

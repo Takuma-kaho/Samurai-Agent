@@ -601,7 +601,7 @@ export class PostgresRuntimeChat {
 
   async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
     const initial = await this.requireControlRun(runId);
-    if (isSettled(initial)) return initial;
+    if (isSettled(initial)) return this.reprojectSettledRun(initial);
     const admission = await this.admissionForRun(initial);
     if (initial.status === "queued") {
       const evidence = { kind: "not_started" as const, source: "preflight_rejection" as const };
@@ -618,7 +618,7 @@ export class PostgresRuntimeChat {
 
     const preExternal = isPreExternalPhase(initial.phase);
     const cancelling = await this.markCancelling(initial);
-    if (isSettled(cancelling)) return cancelling;
+    if (isSettled(cancelling)) return this.reprojectSettledRun(cancelling);
     const backend = this.backendRegistry.get(cancelling.backend_id);
     let cancellation: { kind: "settled"; evidence: BackendTerminalEvidence } | { kind: "requested" } | { kind: "unsupported" } = { kind: "unsupported" };
     let cancelError: unknown;
@@ -631,7 +631,7 @@ export class PostgresRuntimeChat {
     }
     const latest = await this.getBackendRun(runId);
     if (!latest) throw new WorkspaceServerError(`runtime_backend_run_not_found:${runId}`, 404);
-    if (isSettled(latest)) return latest;
+    if (isSettled(latest)) return this.reprojectSettledRun(latest);
     const evidence: BackendTerminalEvidence = cancellation.kind === "settled"
       ? cancellation.evidence
       : preExternal
@@ -653,7 +653,7 @@ export class PostgresRuntimeChat {
 
   async resumeBackendRun(runId: string, input: Record<string, JsonValue>): Promise<BackendRunRecord> {
     const initial = await this.requireControlRun(runId);
-    if (isSettled(initial)) return initial;
+    if (isSettled(initial)) return this.reprojectSettledRun(initial);
     if (initial.status !== "waiting_for_backend_input") throw new WorkspaceServerError(`runtime_run_not_waiting:${runId}`, 409);
     const safeInput = validateResumeInput(input);
     const backend = this.backendRegistry.get(initial.backend_id);
@@ -671,7 +671,7 @@ export class PostgresRuntimeChat {
       return settled;
     }
     const resumed = await this.prepareResumeRun(initial, safeInput);
-    if (isSettled(resumed)) return resumed;
+    if (isSettled(resumed)) return this.reprojectSettledRun(resumed);
     const admission = await this.admissionForRun(resumed);
     const backendSessionId = resumed.backend_session_id;
     if (!backendSessionId) throw new WorkspaceServerError("runtime_resume_backend_session_missing", 409);
@@ -689,7 +689,7 @@ export class PostgresRuntimeChat {
 
   async syncBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireControlRun(runId);
-    if (isSettled(run)) return run;
+    if (isSettled(run)) return this.reprojectSettledRun(run);
     const admission = await this.admissionForRun(run);
     const backend = this.backendRegistry.get(run.backend_id);
     if (!backend?.streamEvents) {
@@ -721,7 +721,7 @@ export class PostgresRuntimeChat {
 
   async recoverBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireControlRun(runId);
-    if (isSettled(run)) return run;
+    if (isSettled(run)) return this.reprojectSettledRun(run);
     const startedAt = Date.parse(run.started_at);
     if (!Number.isFinite(startedAt) || Date.now() - startedAt < 60_000) {
       throw new WorkspaceServerError("runtime_recovery_run_not_stale", 409);
@@ -972,6 +972,18 @@ export class PostgresRuntimeChat {
       await this.notifyEvent(terminal, admission.session.room_id!);
     }
     if (isSettled(run)) await this.notifyCompletionActivity(await this.project(run), admission.userMessage.content);
+  }
+
+  /**
+   * Control operations may race with a backend settlement. Rebuild the
+   * canonical admission/projected result and retry only the Completion
+   * projection; never re-run the provider for an already settled Run.
+   */
+  private async reprojectSettledRun(run: BackendRunRecord): Promise<BackendRunRecord> {
+    if (!isSettled(run) || !this.onCompletionActivity) return run;
+    const admission = await this.admissionForRun(run);
+    await this.notifyCompletionActivity(await this.project(run), admission.userMessage.content);
+    return run;
   }
 
   async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]> {
@@ -1447,11 +1459,36 @@ export class PostgresRuntimeChat {
         if (!raced.rows[0]) throw new WorkspaceServerError("runtime_idempotency_race_unresolved", 500);
         return replayAdmission(sql, runFromRow(raced.rows[0]));
       }
-      await sql.query(
+      const reservation = await sql.query<{ run_id: string; status: "held" | "released" }>(
         `INSERT INTO workspace_runtime_reservations(workspace_id, session_id, run_id, version, status, created_at, updated_at)
-         VALUES ($1, $2, $3, 1, 'held', $4, $4)`,
+         VALUES ($1, $2, $3, 1, 'held', $4, $4)
+         ON CONFLICT (workspace_id, session_id) DO UPDATE
+         SET run_id = EXCLUDED.run_id,
+             status = 'held',
+             version = workspace_runtime_reservations.version + 1,
+             updated_at = EXCLUDED.updated_at
+         WHERE workspace_runtime_reservations.status = 'released'
+         RETURNING run_id, status`,
         [this.workspaceId, input.session.id, run.id, now]
       );
+      if (!reservation.rows[0]) {
+        // A competing request can win the released-row upsert after the
+        // initial held check. Surface the same stable 409 and let the
+        // transaction roll back the provisional message/run rows.
+        const conflicting = await sql.query<{ run_id: string; status: "held" | "released" }>(
+          `SELECT run_id, status FROM workspace_runtime_reservations
+           WHERE workspace_id = $1 AND session_id = $2
+           FOR UPDATE`,
+          [this.workspaceId, input.session.id]
+        );
+        const heldRunId = conflicting.rows[0]?.status === "held" ? conflicting.rows[0].run_id : undefined;
+        throw new WorkspaceServerError(
+          heldRunId
+            ? `runtime_session_run_in_progress:${heldRunId}`
+            : `runtime_reservation_conflict:${input.session.id}`,
+          409
+        );
+      }
       await sql.query(
         `INSERT INTO workspace_runtime_operations(
            workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
@@ -2539,14 +2576,21 @@ export class PostgresRuntimeChat {
         .filter((change) => change.run_id === result.backendRun.id)
         .map((change) => change.resource_ref)
     ]);
-    await this.onCompletionActivity({
+    const completion = {
       session: result.session,
       run: result.backendRun,
       ...(operation ? { operation } : {}),
       instructionSummary,
       ...(result.backendRun.output_summary ? { resultSummary: result.backendRun.output_summary } : {}),
       ...(resourceRefs.length > 0 ? { resourceRefs } : {})
-    });
+    } satisfies PostgresRuntimeChatCompletionEvent;
+    // A Runtime result may be reported as successful only after its required
+    // Completion evidence is durable. When no independently configured
+    // maintenance identity is available, swallowing a projection failure
+    // would leave a settled Run with no recoverable Activity. The caller gets
+    // a retryable failure and can safely repeat the same idempotent request;
+    // configured maintenance workers additionally reconcile after a restart.
+    await this.onCompletionActivity(completion);
   }
 
   private context() {

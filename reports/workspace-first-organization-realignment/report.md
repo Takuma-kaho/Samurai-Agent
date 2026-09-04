@@ -24,12 +24,13 @@
 - 保存済み`text_delta`の順序・重複を処理し、Run中からUIへ逐次表示する。Workspace/Room切替・停止・unmount時は古いpollingを止める。
 - 左サイドナビゲーションを縦スクロール可能にした。
 - 旧Organization必須DBをOrganization任意DBへ移行する互換Migrationと、旧形式のChat操作履歴を読める互換投影を追加した。
+- Runtimeの完了記録は、同じ実行を二重保存せず、内容・主体が異なる衝突は明示的に失敗させる。callback失敗後は、Providerを再実行せず、保存済みRuntime結果だけを安全に再投影できるようにした。
 
 ## 実行済み検証
 
 | 分類 | command / 条件 | 結果 |
 | --- | --- | --- |
-| 全体回帰 | `pnpm test` | 成功: 151 files / 816 tests |
+| 全体回帰 | `pnpm test` | 成功: 154 files / 844 tests |
 | 全体型 | `pnpm typecheck` | 成功: 24 workspace projects |
 | リリース統合 | `pnpm run backend:release:verify` | 成功（型、全体テスト、i18n、Web/Desktop build、Architecture、Doctorを含む） |
 | Provider | focused Vitest | 成功: 39 tests（Gemini SSE、安全block、空応答、通信断、timeoutを含む） |
@@ -40,13 +41,15 @@
 | Domain契約 | `pnpm run core:domain-contracts:verify` | 成功: 3 checks |
 | PostgreSQL静的Migration | `pnpm run verify:postgres-migration:static` | 成功: legacy reference 0、API route 305（静的検査） |
 | PostgreSQL runtime scope | `pnpm run verify:postgres-runtime-scope` | 成功: scanned 535、issue 0 |
-| 書式・lint | `pnpm run format:check` | 成功: format 903、lint 784、issue 0 |
+| 書式・lint | `pnpm run format:check` | 成功: format 906、lint 787、issue 0 |
 | 差分 | `git diff --check` | 成功 |
 
 ### 実PostgreSQL・二つの実Server検証
 
 - このPCのDocker Desktopに、リポジトリ外の隔離Self-host Server A（`127.0.0.1:4317`）とB（`127.0.0.1:4318`）を用意した。検証DB・Storageは`~/.samurai-e2e`と専用Docker volumeにのみ置き、既存データ・リポジトリ・Git履歴は操作していない。volume削除もしていない。
 - 旧v79のOrganization必須DBをv80〜v86へ実Migrationした。移行前はOrganization 2件、WorkspaceのOrganization紐付けあり、Room 1・Membership 2・Record 1・File 1・Event 1。移行後はOrganization 0件、Organization Membership 0件、WorkspaceのOrganization紐付けなしで、Room/Membership/Record/File/Eventは同数保持された。
+- 現在のv87 MigrationをA/B両方の隔離PostgreSQLへ適用し、両Serverを最新コンテナで再起動後、health、PostgreSQL接続、RLS必須設定を確認した。
+- この隔離環境にはmaintenance identityをあえて設定していないため、定期的な再投影workerはdisabledである。通常の直接保存は有効で、保存callbackが失敗した場合は成功応答にせず、同じ操作の再実行でProviderを動かさず保存だけ再試行する。運用環境で自動回復も使う場合は、別途maintenance identityを設定する。
 - OrganizationなしのWorkspace、direct invite、revoke、Organization membershipと内容閲覧の分離、attach/detach/delete後の本文保持を実PostgreSQLで確認した。
 - A→B移転で、Room、Chat session、Activity、Episode、Evidence、Knowledge、Skill本文と補助ファイル、Agent設定、Room権限、実ファイルを移転した。BでWorkspace active、General Room、Chat session、実ファイルhash一致を確認した。
 - B再起動後も移転済みWorkspace、Chat、実ファイルhashを確認した。Aは削除せずarchive、transferはcommittedのまま保持された。
@@ -61,14 +64,14 @@
 
 ## 実Gemini検証の状態
 
-- 実Geminiの逐次回答・実Artifact保存を行う隔離E2Eを1回起動した。
-- 隔離Aコンテナでは`GEMINI_API_KEY`と`GOOGLE_API_KEY`が未設定だったため、Runは`provider_not_configured`で安全にfailedへ終端した。キーの値は確認・出力していない。
-- Gemini APIへの追加retryは実行していない。429/5xxによる無料枠の過負荷確認ではなく、隔離サーバーにProvider鍵が未投入という設定不足である。
-- よって「実AI逐次回答」「実AIが作ったArtifact保存」「その実AI WorkspaceのA→B移転」は未検証であり、成功扱いにしない。
+- 隔離Aで実Geminiへの会話を1回実行し、完了Run、22件の保存済み`text_delta`、完了Activity/Evidenceを確認した。したがって「実AIとの会話・回答の逐次表示」の技術E2Eは確認済みである。
+- Gemini APIへの不要なretryは実行していない。無料枠で429/5xxが起きた場合は、同じ検証を連打しない方針である。
+- 実Artifact作成を依頼する残り1回は、既存の隔離テスト会話本文をGeminiへ送る操作であるため、外部送信の明示承認待ちで未実行である。拒否・失敗・429/5xx時の自動retryは行わない。
+- よって「実AIが作ったArtifact保存」と「その実AI WorkspaceのA→B移転・B再起動後のArtifact確認」は未検証であり、成功扱いにしない。
 
 ## 残る手動1作業
 
-隔離Aのリポジトリ外環境ファイル`~/.samurai-e2e/server-a/.env`に、ドパガキくん自身が`GEMINI_API_KEY`を設定してAサーバーを再作成する必要がある。秘密鍵・APIキーはリポジトリ、報告書、チャット出力へ保存しない。その後、同じ隔離E2Eを最大1回だけ実行し、成功時はA再起動→A→B移転→B再起動までを確認する。
+ドパガキくんが「隔離E2Eの既存テスト会話本文をGeminiへ送って、成果物作成の残り1回を実行してよい」と明示承認する。その後、最大1回だけ実行し、成功時はA再起動→A→B移転→B再起動までを確認する。秘密鍵・APIキーはリポジトリ、報告書、チャット出力へ保存しない。
 
 ## Git操作
 

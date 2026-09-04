@@ -369,7 +369,7 @@ export async function createWorkspaceServerHttp(
   const workerSupervisor = new WorkspaceWorkerSupervisor({
     learningRunner,
     maintenance,
-    executionJobWorker: new PostgresRuntimeExecutionWorker(core.database),
+    executionJobWorker: new PostgresRuntimeExecutionWorker(core.database, 60_000, completion),
     gatewayMaintenance: new PostgresGatewayMaintenanceWorker(core.database),
     skillOptimizationWorker: new PostgresSkillOptimizationWorker({
       database: core.database,
@@ -3891,32 +3891,42 @@ function createPostgresRuntimeToolExecutionPort(
 /** Converts a settled PG Runtime run into the product's formal Completion
  * Activity. Runtime's detailed operational ledger remains the source for
  * execution state; Completion receives a stable, Room-scoped evidence row. */
-async function recordPostgresChatCompletionActivity(
+export async function recordPostgresChatCompletionActivity(
   commands: WorkspaceServerCore["commands"],
   context: WorkspaceRequestContext,
   event: PostgresRuntimeChatCompletionEvent
 ): Promise<void> {
   const roomId = event.session.room_id;
   if (!roomId) return;
+  const activityId = `completion_activity_${createHash("sha256").update(`${context.workspaceId}|${event.run.id}`).digest("hex").slice(0, 48)}`;
   const outcome = event.run.status === "completed"
     ? "completed"
     : event.run.status === "cancelled"
       ? "cancelled"
       : event.run.status === "outcome_unknown"
         ? "unknown"
-    : event.run.status === "waiting_for_backend_input"
-      ? "unknown"
+      : event.run.status === "waiting_for_backend_input"
+        ? "unknown"
       : "failed";
-  const changedResources = [
+  // A projection attempt must not reuse the chat request's failed operation
+  // row.  Each attempt gets its own ledger entry; the deterministic Activity
+  // ID above is what prevents duplicate durable evidence on concurrent or
+  // repeated callbacks.
+  const projectionContext: WorkspaceRequestContext = {
+    ...context,
+    operationId: createId("runtime_chat_completion")
+  };
+  const changedResources = [...new Set([
     event.operation?.result_ref?.id,
     event.run.output_message_id,
     ...(event.resourceRefs ?? []).map((ref) => ref.id)
-  ].filter((value): value is string => Boolean(value));
-  await commands.ingestCompletionActivity(context, {
-    id: `completion_activity_${createHash("sha256").update(`${context.workspaceId}|${event.run.id}`).digest("hex").slice(0, 48)}`,
+  ].filter((value): value is string => Boolean(value)))];
+  await commands.ingestCompletionActivity(projectionContext, {
+    id: activityId,
     roomId,
     sourceApp: "samurai-workspace-chat",
     sourceId: event.run.id,
+    externalEpisodeKey: event.run.id,
     ...(event.operation ? { operationId: event.operation.id } : {}),
     instructionSummary: event.instructionSummary,
     ...(event.resultSummary ? { resultSummary: event.resultSummary } : {}),

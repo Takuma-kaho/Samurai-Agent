@@ -577,6 +577,309 @@ describe("PostgresRuntimeChat session projections", () => {
       status: "completed"
     });
   });
+
+  it("surfaces a completion projection failure so the idempotent request can be retried", async () => {
+    let completionAttempts = 0;
+    const chat = new PostgresRuntimeChat({
+      database: {} as PostgresWorkspaceDatabase,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-completion",
+      coreWorkspaceRoot: "/tmp/samurai-core-completion",
+      onCompletionActivity: async () => {
+        completionAttempts += 1;
+        throw new WorkspaceServerError("workspace_completion_projection_failed", 503);
+      }
+    });
+    const settledResult = {
+      session: {
+        id: "session-a",
+        session_key: "workspace:workspace-a:thread-a",
+        room_id: "room-a",
+        title: "A session",
+        ui_locale: "ja",
+        output_locale: "ja",
+        created_at: "2026-09-03T00:00:00.000Z",
+        updated_at: "2026-09-03T00:00:00.000Z"
+      },
+      messages: [],
+      messagePresentations: [],
+      backendRun: {
+        id: "run-a",
+        session_id: "session-a",
+        room_id: "room-a",
+        requested_by_participant_id: "account-a",
+        input_message_id: "message-a",
+        output_message_id: "message-output-a",
+        backend_id: "samurai-native",
+        backend_kind: "samurai_native",
+        status: "completed",
+        phase: "settled",
+        current_attempt: 1,
+        request_idempotency_key: "request-a",
+        request_hash: "request-hash-a",
+        started_at: "2026-09-03T00:00:00.000Z",
+        completed_at: "2026-09-03T00:01:00.000Z",
+        input_summary: "A request",
+        output_summary: "A response",
+        metadata: {}
+      },
+      backendEvents: [],
+      workspaceChanges: [],
+      operations: [],
+      policyDecisions: [],
+      artifacts: [],
+      memories: [],
+      approvalRequests: [],
+      auditRecords: [],
+      rollbackPoints: [],
+      activity: [],
+      reflectionRuns: [],
+      reflectionSuggestions: [],
+      toolRuns: []
+    } as never;
+    const notifyCompletionActivity = (chat as unknown as {
+      notifyCompletionActivity: (result: unknown, instructionSummary: string) => Promise<void>
+    }).notifyCompletionActivity.bind(chat);
+
+    await expect(notifyCompletionActivity(settledResult, "A request")).rejects.toMatchObject({
+      code: "workspace_completion_projection_failed",
+      status: 503
+    });
+    expect(completionAttempts).toBe(1);
+  });
+
+  it("reprojects settled control replays without rerunning Runtime and surfaces failures", async () => {
+    const settledRun = {
+      id: "run-settled",
+      session_id: "session-a",
+      room_id: "room-a",
+      status: "completed",
+      phase: "settled"
+    } as never;
+    const projected = {
+      session: reservationTestSession(),
+      backendRun: settledRun,
+      operations: [],
+      workspaceChanges: []
+    } as never;
+    let shouldFail = false;
+    let completionAttempts = 0;
+    const instructions: string[] = [];
+    const chat = new PostgresRuntimeChat({
+      database: {} as PostgresWorkspaceDatabase,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: {
+        statuses: () => [],
+        get: () => { throw new Error("provider must not run for a settled control replay"); }
+      } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-settled-replay",
+      coreWorkspaceRoot: "/tmp/samurai-core-settled-replay",
+      onCompletionActivity: async (completion) => {
+        completionAttempts += 1;
+        instructions.push(completion.instructionSummary);
+        if (shouldFail) throw new WorkspaceServerError("workspace_completion_projection_failed", 503);
+      }
+    });
+    const internals = chat as unknown as {
+      requireControlRun: (runId: string) => Promise<unknown>;
+      admissionForRun: (run: unknown) => Promise<{ userMessage: { content: string } }>;
+      project: (run: unknown) => Promise<unknown>;
+    };
+    internals.requireControlRun = async () => settledRun;
+    internals.admissionForRun = async () => ({ userMessage: { content: "Canonical request" } });
+    internals.project = async () => projected;
+
+    await expect(chat.cancelBackendRun("run-settled")).resolves.toBe(settledRun);
+    await expect(chat.resumeBackendRun("run-settled", {})).resolves.toBe(settledRun);
+    await expect(chat.syncBackendRun("run-settled")).resolves.toBe(settledRun);
+    await expect(chat.recoverBackendRun("run-settled")).resolves.toBe(settledRun);
+    expect(completionAttempts).toBe(4);
+    expect(instructions).toEqual(["Canonical request", "Canonical request", "Canonical request", "Canonical request"]);
+
+    shouldFail = true;
+    await expect(chat.cancelBackendRun("run-settled")).rejects.toMatchObject({
+      code: "workspace_completion_projection_failed",
+      status: 503
+    });
+    expect(completionAttempts).toBe(5);
+  });
+
+  it("reuses a released session reservation for a new idempotent run", async () => {
+    const reservationStatements: string[] = [];
+    const database = {
+      withContext: async (_context: unknown, action: (sql: { query: (text: string, values?: readonly unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => action({
+        query: async (text: string, values: readonly unknown[] = []) => {
+          if (text.includes("samurai_can_room")) return { rows: [{ allowed: true }] };
+          if (text.startsWith("SELECT * FROM workspace_runtime_runs") && text.includes("request_idempotency_key = $3")) return { rows: [] };
+          if (text.startsWith("SELECT run_id FROM workspace_runtime_reservations")) return { rows: [] };
+          if (text.startsWith("INSERT INTO workspace_runtime_messages")) return { rows: [] };
+          if (text.startsWith("INSERT INTO workspace_runtime_runs")) return { rows: [{}] };
+          if (text.startsWith("INSERT INTO workspace_runtime_reservations")) {
+            reservationStatements.push(text);
+            return { rows: [{ run_id: String(values[2]), status: "held" }] };
+          }
+          return { rows: [] };
+        }
+      })
+    } as unknown as PostgresWorkspaceDatabase;
+    const chat = new PostgresRuntimeChat({
+      database,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-reservation",
+      coreWorkspaceRoot: "/tmp/samurai-core-reservation"
+    });
+    const admit = (chat as unknown as { admit: (input: unknown) => Promise<{ replay: boolean; run: { id: string } }> }).admit.bind(chat);
+
+    const admitted = await admit({
+      session: reservationTestSession(),
+      backend: { id: "samurai-native", kind: "samurai_native" },
+      envelope: reservationTestEnvelope(),
+      content: "Second request",
+      requestHash: "request-hash-2",
+      idempotencyKey: "request-2",
+      outputLocale: "ja"
+    });
+
+    expect(admitted.replay).toBe(false);
+    expect(admitted.run.id).toMatch(/^run_/);
+    expect(reservationStatements).toHaveLength(1);
+    expect(reservationStatements[0]).toContain("ON CONFLICT (workspace_id, session_id)");
+    expect(reservationStatements[0]).toContain("WHERE workspace_runtime_reservations.status = 'released'");
+  });
+
+  it("keeps a held session reservation as a stable 409 when the upsert loses a race", async () => {
+    const database = {
+      withContext: async (_context: unknown, action: (sql: { query: (text: string, values?: readonly unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => action({
+        query: async (text: string) => {
+          if (text.includes("samurai_can_room")) return { rows: [{ allowed: true }] };
+          if (text.startsWith("SELECT * FROM workspace_runtime_runs") && text.includes("request_idempotency_key = $3")) return { rows: [] };
+          if (text.startsWith("SELECT run_id FROM workspace_runtime_reservations")) return { rows: [] };
+          if (text.startsWith("INSERT INTO workspace_runtime_messages")) return { rows: [] };
+          if (text.startsWith("INSERT INTO workspace_runtime_runs")) return { rows: [{}] };
+          if (text.startsWith("INSERT INTO workspace_runtime_reservations")) return { rows: [] };
+          if (text.startsWith("SELECT run_id, status FROM workspace_runtime_reservations")) {
+            return { rows: [{ run_id: "run-in-flight", status: "held" }] };
+          }
+          return { rows: [] };
+        }
+      })
+    } as unknown as PostgresWorkspaceDatabase;
+    const chat = new PostgresRuntimeChat({
+      database,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-reservation-race",
+      coreWorkspaceRoot: "/tmp/samurai-core-reservation-race"
+    });
+    const admit = (chat as unknown as { admit: (input: unknown) => Promise<unknown> }).admit.bind(chat);
+
+    await expect(admit({
+      session: reservationTestSession(),
+      backend: { id: "samurai-native", kind: "samurai_native" },
+      envelope: reservationTestEnvelope(),
+      content: "Competing request",
+      requestHash: "request-hash-3",
+      idempotencyKey: "request-3",
+      outputLocale: "ja"
+    })).rejects.toMatchObject({
+      code: "runtime_session_run_in_progress:run-in-flight",
+      status: 409
+    });
+  });
+
+  it("replays an existing idempotent run without replacing its released reservation", async () => {
+    const now = "2026-09-03T00:00:00.000Z";
+    const existingRun = {
+      workspace_id: "workspace-a",
+      id: "run-existing",
+      session_id: "session-a",
+      room_id: "room-a",
+      principal: { kind: "human", participant_id: "account-a" },
+      source: { kind: "native_app", app_id: "samurai-native" },
+      session_ref: { app_id: "samurai-native", session_id: "session-a" },
+      agent_id: null,
+      requested_by_participant_id: "account-a",
+      input_message_id: "message-existing",
+      output_message_id: null,
+      backend_id: "samurai-native",
+      backend_kind: "samurai_native",
+      backend_session_id: null,
+      status: "completed",
+      phase: "settled",
+      current_attempt: 1,
+      request_idempotency_key: "request-replay",
+      request_hash: "request-hash-replay",
+      started_at: now,
+      completed_at: now,
+      input_summary: "Existing request",
+      output_summary: "Existing response",
+      error_code: null,
+      metadata: {}
+    };
+    const message = {
+      workspace_id: "workspace-a",
+      id: "message-existing",
+      session_id: "session-a",
+      role: "user",
+      content: "Existing request",
+      input_locale: "ja",
+      output_locale: "ja",
+      envelope: reservationTestEnvelope(),
+      created_at: now
+    };
+    let savedOperation: Record<string, unknown> | undefined;
+    let reservationQueryCount = 0;
+    const database = {
+      withContext: async (_context: unknown, action: (sql: { query: (text: string, values?: readonly unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => action({
+        query: async (text: string, values: readonly unknown[] = []) => {
+          if (text.includes("samurai_can_room")) return { rows: [{ allowed: true }] };
+          if (text.startsWith("SELECT * FROM workspace_runtime_runs") && text.includes("request_idempotency_key = $3")) return { rows: [existingRun] };
+          if (text.includes("FROM workspace_runtime_messages")) return { rows: [message] };
+          if (text.includes("FROM workspace_runtime_activities")) return { rows: [] };
+          if (text.startsWith("SELECT workspace_id, id, session_id, room_id, operation, status, payload")) {
+            return { rows: savedOperation ? [operationRow(savedOperation)] : [] };
+          }
+          if (text.startsWith("INSERT INTO workspace_runtime_operations")) {
+            savedOperation = JSON.parse(String(values[6])) as Record<string, unknown>;
+            return { rows: [] };
+          }
+          if (text.includes("workspace_runtime_reservations")) {
+            reservationQueryCount += 1;
+            return { rows: [] };
+          }
+          return { rows: [] };
+        }
+      })
+    } as unknown as PostgresWorkspaceDatabase;
+    const chat = new PostgresRuntimeChat({
+      database,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-reservation-replay",
+      coreWorkspaceRoot: "/tmp/samurai-core-reservation-replay"
+    });
+    const admit = (chat as unknown as { admit: (input: unknown) => Promise<{ replay: boolean; run: { id: string } }> }).admit.bind(chat);
+
+    const replayed = await admit({
+      session: reservationTestSession(),
+      backend: { id: "samurai-native", kind: "samurai_native" },
+      envelope: reservationTestEnvelope(),
+      content: "Existing request",
+      requestHash: "request-hash-replay",
+      idempotencyKey: "request-replay",
+      outputLocale: "ja"
+    });
+
+    expect(replayed).toMatchObject({ replay: true, run: { id: "run-existing" } });
+    expect(reservationQueryCount).toBe(0);
+  });
 });
 
 describe("PostgresRuntimeChat provider tool execution", () => {
@@ -833,6 +1136,34 @@ describe("PostgresRuntimeChat provider tool execution", () => {
     expect([...operations.values()].some((operation) => operation.status === "failed")).toBe(true);
   });
 });
+
+function reservationTestSession() {
+  return {
+    id: "session-a",
+    session_key: "workspace:workspace-a:thread-a",
+    room_id: "room-a",
+    title: "Reservation test",
+    ui_locale: "ja",
+    output_locale: "ja",
+    created_at: "2026-09-03T00:00:00.000Z",
+    updated_at: "2026-09-03T00:00:00.000Z"
+  };
+}
+
+function reservationTestEnvelope() {
+  return {
+    id: "envelope-a",
+    source: "web",
+    actor_identity: "owner",
+    session_key: "workspace:workspace-a:thread-a",
+    user_intent: "chat",
+    attachments: [],
+    input_locale: "ja",
+    output_locale: "ja",
+    metadata: {},
+    received_at: "2026-09-03T00:00:00.000Z"
+  };
+}
 
 function bareChat(): PostgresRuntimeChat {
   return new PostgresRuntimeChat({

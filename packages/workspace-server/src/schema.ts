@@ -11732,6 +11732,46 @@ const migrations: readonly WorkspaceServerMigration[] = [
       $$`,
       "REVOKE EXECUTE ON FUNCTION samurai_delete_organization_and_return(TEXT, BIGINT, TEXT) FROM PUBLIC"
     ]
+  },
+  {
+    // Runtime completion projection runs under a separately configured
+    // maintenance Account, but the Activity must retain the original
+    // requester. Bind that exceptional write to the settled Runtime row so
+    // an HTTP caller or a maintenance caller cannot choose an arbitrary
+    // principal. The application service performs the same source check
+    // before writing; this policy is the final database boundary.
+    version: 87,
+    name: "workspace_server_runtime_completion_projection_principal",
+    statements: [
+      "DROP POLICY workspace_completion_activities_write ON workspace_completion_activities",
+      `CREATE POLICY workspace_completion_activities_write ON workspace_completion_activities FOR ALL
+       USING (workspace_id = samurai_current_workspace_id() AND samurai_can_room(workspace_id, room_id, 'execute'))
+       WITH CHECK (workspace_id = samurai_current_workspace_id() AND (
+         samurai_is_import_session(workspace_id)
+         OR (
+           samurai_workspace_is_writable(workspace_id)
+           AND principal_account_id = samurai_current_account_id()
+           AND samurai_can_room(workspace_id, room_id, 'execute')
+         )
+         OR (
+           current_setting('samurai.caller_kind', true) = 'maintenance'
+           AND samurai_is_completion_maintenance_identity(workspace_id)
+           AND samurai_workspace_is_writable(workspace_id)
+           AND source_app = 'samurai-workspace-chat'
+           AND source_id IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM workspace_runtime_runs run
+             WHERE run.workspace_id = workspace_completion_activities.workspace_id
+               AND run.id = workspace_completion_activities.source_id
+               AND run.room_id = workspace_completion_activities.room_id
+               AND run.phase = 'settled'
+               AND run.status IN ('completed', 'failed', 'cancelled', 'outcome_unknown')
+               AND run.requested_by_participant_id = workspace_completion_activities.principal_account_id
+           )
+         )
+       ))`
+    ]
   }
 ];
 
