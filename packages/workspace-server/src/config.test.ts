@@ -16,16 +16,25 @@ describe("Workspace Server configuration", () => {
     expect(() => resolveRequestWorkspaceId(config, undefined)).toThrow("workspace_id_required");
   });
 
-  it("pins a self-host server to exactly one Workspace", () => {
+  it("accepts a Self-host server without a fixed Workspace and resolves the requested Workspace", () => {
     const config = loadWorkspaceServerConfig({
       ...common,
       SAMURAI_SERVER_MODE: "self_host",
-      SAMURAI_SELF_HOST_WORKSPACE_ID: "workspace_home",
       SAMURAI_SELF_HOST_BOOTSTRAP_MODE: "empty"
     });
     expect(config.selfHostBootstrapMode).toBe("empty");
-    expect(resolveRequestWorkspaceId(config, undefined)).toBe("workspace_home");
-    expect(() => resolveRequestWorkspaceId(config, "workspace_other")).toThrow("workspace_not_found");
+    expect(resolveRequestWorkspaceId(config, "workspace_other")).toBe("workspace_other");
+    expect(() => resolveRequestWorkspaceId(config, undefined)).toThrow("workspace_id_required");
+  });
+
+  it("keeps the legacy Self-host Workspace ID as optional bootstrap input only", () => {
+    const config = loadWorkspaceServerConfig({
+      ...common,
+      SAMURAI_SERVER_MODE: "self_host",
+      SAMURAI_SELF_HOST_WORKSPACE_ID: "workspace_legacy"
+    });
+    expect(config.selfHostWorkspaceId).toBe("workspace_legacy");
+    expect(resolveRequestWorkspaceId(config, "workspace_other")).toBe("workspace_other");
   });
 
   it("requires a sufficiently long invitation-token secret", () => {

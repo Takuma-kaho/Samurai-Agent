@@ -8,8 +8,10 @@ import type { WorkspaceSql } from "./postgres";
 import type { WorkspaceRequestContext, WorkspaceTransferReceipt } from "./types";
 import {
   readWorkspaceTransfer,
+  workspaceTransferRetryDestination,
   runExclusiveWorkspaceBundleStaging,
   runExclusiveWorkspaceTransferExport,
+  assertWorkspaceBundleTargetOrganizationId,
   verifyWorkspaceBundleV3,
   WORKSPACE_BUNDLE_INCOMING_TTL_MS,
   WORKSPACE_BUNDLE_MAX_BYTES,
@@ -55,16 +57,34 @@ const tableFiles = [
   ["workspace_completion_search_projection", "search-projection.jsonl"],
   ["workspace_completion_migration_receipts", "migration-receipts.jsonl"],
   ["workspace_completion_workspace_documents", "workspace-documents.jsonl"],
-  // Runtime Activity is portable evidence. Process leases and backend-run
-  // foreign keys are normalized below before export; the next host reclaims
-  // due Automation through its normal Worker lane.
-  ["workspace_runtime_activities", "runtime-activities.jsonl"],
   ["workspace_runtime_automation_jobs", "automation-jobs.jsonl"],
   ["workspace_runtime_automation_runs", "automation-runs.jsonl"],
   // Raw model exchanges are deliberately omitted: their hash/error evidence
   // remains with Job/Attempt, while their text follows local retention and
   // redaction rather than becoming portable Workspace content.
   ["workspace_completion_redactions", "redactions.jsonl"]
+] as const;
+
+// Chat sessions and messages are Workspace history, not deployment-local
+// runtime state. They live outside the Completion extension's historical table
+// list, so keep them as optional files: older V4 Bundles remain verifiable and
+// importable while new exports carry the Chat transcript used by the target.
+const workspaceChatFiles = [
+  ["workspace_runtime_sessions", "runtime-sessions.jsonl"],
+  ["workspace_runtime_messages", "runtime-messages.jsonl"]
+] as const;
+
+// Completed Runtime history is Workspace-owned evidence. Keep the process
+// state out of a Bundle: reservations, live leases, client notifications and
+// provider-native sessions are deployment-local and are intentionally absent.
+// `workspace_runtime_operations` is also intentionally excluded: its
+// idempotency ledger may contain deployment-local tokens.
+const workspaceRuntimeHistoryFiles = [
+  ["workspace_runtime_runs", "runtime-runs.jsonl"],
+  ["workspace_runtime_events", "runtime-events.jsonl"],
+  ["workspace_runtime_changes", "runtime-changes.jsonl"],
+  ["workspace_runtime_activities", "runtime-activities.jsonl"],
+  ["workspace_runtime_resource_usage", "runtime-resource-usage.jsonl"]
 ] as const;
 
 // Authorization and external-connection state is part of the Workspace
@@ -77,10 +97,25 @@ const workspaceIdentityFiles = [
   ["workspace_connection_descriptors", "connection-descriptors.jsonl"]
 ] as const;
 
+function safeErrorCode(error: unknown): string {
+  if (error instanceof WorkspaceServerError) return error.code;
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Za-z0-9_.:-]+$/.test(code)) return code;
+  }
+  return "workspace_server_internal_error";
+}
+
 export interface WorkspaceBundleV4Manifest {
   format_version: 4;
   workspace_id: string;
   exported_at: string;
+  /** Historical raw provenance accepted from old V4 Bundles; new exports omit it. */
+  source_organization_id?: string;
+  /** DB/schema revision used by the embedded portable snapshot. */
+  schema_revision?: number;
+  /** Compatibility spelling consumed by the public domain contract. */
+  schema_version?: number;
   transfer_id?: string;
   base_v3_integrity_hash: string;
   /** Public Account identities may remain in audit history, but these IDs
@@ -90,6 +125,13 @@ export interface WorkspaceBundleV4Manifest {
   record_counts: Record<string, number>;
   integrity_hash: string;
 }
+
+type WorkspaceBundleV3Provenance = {
+  source?: { organization_id?: string };
+  source_organization_id?: string;
+  schema_revision?: number;
+  schema_version?: number;
+};
 
 export interface ExportWorkspaceBundleV4Result {
   directory: string;
@@ -105,6 +147,8 @@ export interface WorkspaceBundleV4Transport {
 export interface StageWorkspaceBundleV4Input {
   targetWorkspaceId: string;
   targetWorkspaceName?: string;
+  /** Omit to restore a standalone Workspace; attach to an Organization later. */
+  targetOrganizationId?: string;
   manifest: WorkspaceBundleV4Manifest;
 }
 
@@ -115,6 +159,7 @@ interface IncomingV4BundleMetadata {
   operation_id: string;
   target_workspace_id: string;
   target_workspace_name?: string;
+  target_organization_id?: string;
   manifest: WorkspaceBundleV4Manifest;
   created_at: string;
   expires_at: string;
@@ -151,7 +196,21 @@ export class WorkspaceBundleV4Service {
   async export(context: WorkspaceRequestContext, input: { destination: string; transferId?: string }): Promise<ExportWorkspaceBundleV4Result> {
     const destination = path.resolve(input.destination);
     const staging = path.join(path.dirname(destination), `.${path.basename(destination)}.staging-${randomUUID()}`);
-    const bundleId = completionId("bundle_v4", context.workspaceId, context.operationId);
+    // A transfer replay can arrive with a new request operation after the
+    // original transfer has been recorded. Bind the ledger identity to the
+    // transfer itself whenever one is supplied so the replay cannot generate
+    // a second Bundle row.
+    const transfer = input.transferId
+      ? await readWorkspaceTransfer(this.store, context, input.transferId).catch((error) => {
+        if (error instanceof WorkspaceServerError && error.code === "workspace_transfer_not_found") return undefined;
+        throw error;
+      })
+      : undefined;
+    const bundleId = completionId(
+      "bundle_v4",
+      context.workspaceId,
+      input.transferId ? transferAttemptKey(input.transferId, transfer?.version) : context.operationId
+    );
     // Authorization is never skipped just because a previous attempt already
     // created the destination directory.
     await this.assertOwner(context);
@@ -186,6 +245,12 @@ export class WorkspaceBundleV4Service {
       for (const [table, filename] of tableFiles) {
         await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
       }
+      for (const [table, filename] of workspaceChatFiles) {
+        await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
+      }
+      for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+        await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
+      }
       for (const [table, filename] of workspaceIdentityFiles) {
         await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), identityRows[table] ?? []);
       }
@@ -195,25 +260,30 @@ export class WorkspaceBundleV4Service {
       const files = await hashBundleFiles(staging);
       const recordCounts = Object.fromEntries([
         ...tableFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
+        ...workspaceChatFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
+        ...workspaceRuntimeHistoryFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
         ...workspaceIdentityFiles.map(([table]) => [portableCountKey(table), (identityRows[table] ?? []).length] as const)
       ]);
-      const manifest: WorkspaceBundleV4Manifest = {
+      const baseProvenance = base.manifest as typeof base.manifest & WorkspaceBundleV3Provenance;
+      // A legacy V3 manifest's schema_version is only a compatibility label;
+      // promote it to the explicit revision when it is available. Source
+      // Organization provenance is intentionally not copied into V4: the
+      // portable bundle must not reveal or inherit the source affiliation.
+      const schemaRevision = baseProvenance.schema_revision
+        ?? baseProvenance.schema_version;
+      const manifest = {
         format_version: 4,
         workspace_id: context.workspaceId,
         exported_at: new Date().toISOString(),
+        ...(schemaRevision !== undefined ? { schema_revision: schemaRevision, schema_version: schemaRevision } : {}),
         ...(input.transferId ? { transfer_id: input.transferId } : {}),
         base_v3_integrity_hash: base.manifest.integrity_hash,
         excluded_maintenance_account_ids: maintenanceAccountIds.sort(),
         files,
         record_counts: recordCounts,
-        integrity_hash: hashText(canonicalJson({
-          files,
-          record_counts: recordCounts,
-          ...(input.transferId ? { transfer_id: input.transferId } : {}),
-          base_v3_integrity_hash: base.manifest.integrity_hash,
-          excluded_maintenance_account_ids: maintenanceAccountIds.sort()
-        }))
-      };
+        integrity_hash: ""
+      } satisfies WorkspaceBundleV4Manifest;
+      manifest.integrity_hash = hashText(canonicalJson(bundleV4IntegrityPayload(manifest)));
       await writeFile(path.join(staging, manifestName), canonicalJson(manifest), { flag: "wx", mode: 0o600 });
       await rename(staging, destination);
       const verified = await verifyWorkspaceBundleV4(destination);
@@ -232,9 +302,15 @@ export class WorkspaceBundleV4Service {
   async beginTransfer(context: WorkspaceRequestContext, destination: string): Promise<ExportWorkspaceBundleV4Result & { transferId: string }> {
     await this.assertOwner(context);
     const transferId = context.operationId;
-    const begun = await this.store.runIdempotent(context, {
+    const requestedDestination = path.resolve(destination);
+    const previousTransfer = await readWorkspaceTransfer(this.store, context, transferId).catch((error) => {
+      if (error instanceof WorkspaceServerError && error.code === "workspace_transfer_not_found") return undefined;
+      throw error;
+    });
+    const retryingTerminalTransfer = previousTransfer?.state === "failed" || previousTransfer?.state === "rolled_back";
+    const begun = await this.store.runTransferIdempotent(context, {
       action: "workspace.transfer.begin",
-      input: { transferId, destination: path.resolve(destination) }
+      input: { transferId, destination: requestedDestination }
     }, async (sql) => {
       await sql.query("SELECT samurai_begin_workspace_transfer($1, $2)", [context.workspaceId, transferId]);
       await this.store.insertAudit(sql, context, {
@@ -256,8 +332,11 @@ export class WorkspaceBundleV4Service {
       if (transfer.state === "failed" || transfer.state === "rolled_back") {
         throw new WorkspaceServerError("workspace_transfer_not_ready", 409);
       }
+      const exportDestination = retryingTerminalTransfer && (previousTransfer?.bundlePath || await pathExists(requestedDestination))
+        ? workspaceTransferRetryDestination(requestedDestination, transfer.version)
+        : requestedDestination;
       try {
-        const exported = await this.export(context, { destination, transferId });
+        const exported = await this.export(context, { destination: exportDestination, transferId });
         return { ...exported, transferId };
       } catch (error) {
         const resumed = await readWorkspaceTransfer(this.store, context, transferId).catch(() => undefined);
@@ -288,7 +367,7 @@ export class WorkspaceBundleV4Service {
   async rollbackTransfer(context: WorkspaceRequestContext, transferId: string): Promise<void> {
     assertOpaqueId(transferId, "workspace_transfer_id_invalid");
     await this.assertOwner(context);
-    await this.store.runIdempotent(context, { action: "workspace.transfer.rollback", input: { transferId } }, async (sql) => {
+    await this.store.runTransferIdempotent(context, { action: "workspace.transfer.rollback", input: { transferId } }, async (sql) => {
       await sql.query("SELECT samurai_rollback_workspace_transfer($1, $2)", [context.workspaceId, transferId]);
       await this.store.insertAudit(sql, context, { action: "workspace.transfer.rollback", subjectKind: "workspace_transfer", subjectId: transferId });
     });
@@ -297,7 +376,7 @@ export class WorkspaceBundleV4Service {
   async completeTransfer(context: WorkspaceRequestContext, transferId: string): Promise<void> {
     assertOpaqueId(transferId, "workspace_transfer_id_invalid");
     await this.assertOwner(context);
-    await this.store.runIdempotent(context, { action: "workspace.transfer.complete", input: { transferId } }, async (sql) => {
+    await this.store.runTransferIdempotent(context, { action: "workspace.transfer.complete", input: { transferId } }, async (sql) => {
       await sql.query("SELECT samurai_complete_workspace_transfer($1, $2)", [context.workspaceId, transferId]);
       await this.store.insertAudit(sql, context, { action: "workspace.transfer.complete", subjectKind: "workspace_transfer", subjectId: transferId });
     });
@@ -311,7 +390,7 @@ export class WorkspaceBundleV4Service {
     assertOpaqueId(input.transferId, "workspace_transfer_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
     await this.assertOwner(context);
-    await this.store.runIdempotent(context, {
+    await this.store.runTransferIdempotent(context, {
       action: "workspace.transfer.receipt",
       input: { transferId: input.transferId, targetWorkspaceId: input.targetWorkspaceId, receipt: input.receipt }
     }, async (sql) => {
@@ -360,13 +439,20 @@ export class WorkspaceBundleV4Service {
   /** Restores the v3 core first, then imports the verified completion rows and
    * their staged file batches. PostgreSQL constraints validate every relation
    * before any completion body is renamed into the active file tree. */
-  async importNew(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">, input: { sourceDirectory: string; targetWorkspaceId: string; targetWorkspaceName?: string }): Promise<{ workspaceId: string; manifest: WorkspaceBundleV4Manifest; receipt?: WorkspaceTransferReceipt }> {
+  async importNew(context: Pick<WorkspaceRequestContext, "accountId" | "operationId">, input: { sourceDirectory: string; targetWorkspaceId: string; targetWorkspaceName?: string; targetOrganizationId?: string }): Promise<{ workspaceId: string; manifest: WorkspaceBundleV4Manifest; receipt?: WorkspaceTransferReceipt }> {
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
+    const targetOrganizationId = optionalWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
     const source = await verifyWorkspaceBundleV4(input.sourceDirectory);
     const imported = await this.v3.importNew(context, {
       sourceDirectory: path.join(source.directory, baseV3Directory), targetWorkspaceId: input.targetWorkspaceId,
       ...(input.targetWorkspaceName ? { targetWorkspaceName: input.targetWorkspaceName } : {}),
-      beforeActivate: async (targetContext) => this.importCompletionExtension(targetContext, source)
+      ...(targetOrganizationId ? { targetOrganizationId } : {}),
+      beforeActivate: async (targetContext) => {
+        await this.importCompletionExtension(targetContext, source);
+        // Validate this while V3 still owns a read-only import session. Any
+        // failure can then use the same abort path to remove DB and storage.
+        await this.assertNoMaintenanceMembership(targetContext, source.manifest.excluded_maintenance_account_ids);
+      }
     });
     // v3 can idempotently return an already-active Workspace. That is only a
     // valid v4 retry when its Completion extension was activated in the same
@@ -379,30 +465,22 @@ export class WorkspaceBundleV4Service {
       )
     );
     if (!extension.rows[0]) throw new WorkspaceServerError("workspace_bundle_v4_extension_missing", 409);
-    const maintenance = await this.store.database.withContext({ workspaceId: input.targetWorkspaceId, accountId: context.accountId }, async (sql) => {
-      const marker = await sql.query<{ exists: boolean }>(
-        "SELECT EXISTS(SELECT 1 FROM workspace_completion_maintenance_identities WHERE workspace_id = $1) AS exists",
-        [input.targetWorkspaceId]
-      );
-      const memberships = source.manifest.excluded_maintenance_account_ids.length === 0
-        ? { rows: [{ exists: false }] }
-        : await sql.query<{ exists: boolean }>(
-          `SELECT EXISTS(
-             SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND account_id = ANY($2::TEXT[])
-             UNION ALL
-             SELECT 1 FROM room_members WHERE workspace_id = $1 AND account_id = ANY($2::TEXT[])
-           ) AS exists`,
-          [input.targetWorkspaceId, [...source.manifest.excluded_maintenance_account_ids]]
-        );
-      return { marker: marker.rows[0]?.exists === true, memberships: memberships.rows[0]?.exists === true };
-    });
-    if (maintenance.marker || maintenance.memberships) {
-      throw new WorkspaceServerError("workspace_bundle_v4_maintenance_membership_restored", 409);
-    }
+    await this.assertNoMaintenanceMembership(
+      { workspaceId: input.targetWorkspaceId, accountId: context.accountId },
+      source.manifest.excluded_maintenance_account_ids
+    );
+    // V3 restores the embedded core and therefore returns the base-v3 hash in
+    // its receipt. A V4 transfer is recorded against the outer manifest hash,
+    // so the receipt sent back to the source must prove the complete V4
+    // Bundle. Keep the V3 value only for legacy callers that do not carry a
+    // transfer id.
+    const receipt = source.manifest.transfer_id
+      ? transferReceipt(source.manifest, input.targetWorkspaceId)
+      : imported.receipt;
     return {
       workspaceId: imported.workspaceId,
       manifest: source.manifest,
-      ...(imported.receipt ? { receipt: imported.receipt } : {})
+      ...(receipt ? { receipt } : {})
     };
   }
 
@@ -420,6 +498,7 @@ export class WorkspaceBundleV4Service {
     assertOpaqueId(context.operationId, "workspace_operation_id_invalid");
     assertOpaqueId(input.targetWorkspaceId, "workspace_id_invalid");
     assertWorkspaceBundleV4ManifestCandidate(input.manifest);
+    const targetOrganizationId = optionalWorkspaceBundleTargetOrganizationId(input.targetOrganizationId);
     const createdAt = new Date();
     const manifestText = canonicalJson(input.manifest);
     if (Buffer.byteLength(manifestText, "utf8") > WORKSPACE_BUNDLE_MAX_BYTES) throw new WorkspaceServerError("workspace_bundle_v4_transport_too_large", 413);
@@ -431,6 +510,7 @@ export class WorkspaceBundleV4Service {
       operation_id: context.operationId,
       target_workspace_id: input.targetWorkspaceId,
       ...(input.targetWorkspaceName?.trim() ? { target_workspace_name: input.targetWorkspaceName.trim().slice(0, 500) } : {}),
+      ...(targetOrganizationId ? { target_organization_id: targetOrganizationId } : {}),
       manifest: input.manifest,
       created_at: createdAt.toISOString(),
       expires_at: new Date(createdAt.getTime() + WORKSPACE_BUNDLE_INCOMING_TTL_MS).toISOString(),
@@ -529,7 +609,8 @@ export class WorkspaceBundleV4Service {
     const imported = await this.importNew(context, {
       sourceDirectory: root,
       targetWorkspaceId: metadata.target_workspace_id,
-      ...(metadata.target_workspace_name ? { targetWorkspaceName: metadata.target_workspace_name } : {})
+      ...(metadata.target_workspace_name ? { targetWorkspaceName: metadata.target_workspace_name } : {}),
+      targetOrganizationId: metadata.target_organization_id
     });
     await this.writeIncomingMetadata(context, {
       ...metadata,
@@ -568,6 +649,9 @@ export class WorkspaceBundleV4Service {
       throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
     }
     assertOpaqueId(metadata.target_workspace_id, "workspace_id_invalid");
+    if (metadata.target_organization_id !== undefined) {
+      assertWorkspaceBundleTargetOrganizationId(metadata.target_organization_id);
+    }
     assertWorkspaceBundleV4ManifestCandidate(metadata.manifest);
     if (metadata.created_at !== undefined && !isValidTimestamp(metadata.created_at)) throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
     if (metadata.expires_at !== undefined && !isValidTimestamp(metadata.expires_at)) throw new WorkspaceServerError("workspace_import_staging_invalid", 400);
@@ -610,6 +694,14 @@ export class WorkspaceBundleV4Service {
         const result = await sql.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE workspace_id = $1`, [context.workspaceId]);
         values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
       }
+      for (const [table] of workspaceChatFiles) {
+        const result = await sql.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE workspace_id = $1`, [context.workspaceId]);
+        values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
+      }
+      for (const [table] of workspaceRuntimeHistoryFiles) {
+        const result = await sql.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE workspace_id = $1`, [context.workspaceId]);
+        values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
+      }
       return values;
     });
   }
@@ -617,7 +709,7 @@ export class WorkspaceBundleV4Service {
   private async readWorkspaceIdentityRows(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<Record<string, Record<string, unknown>[]>> {
     return this.store.database.withReadSnapshot(context, async (sql) => {
       const agents = await sql.query<Record<string, unknown>>(
-        `SELECT workspace_id, id, display_name, description, backend_id, status, version,
+        `SELECT workspace_id, id, display_name, description, role, instructions, backend_id, enabled, status, version,
                 created_by, created_at, updated_at
          FROM workspace_agents WHERE workspace_id = $1 ORDER BY id`,
         [context.workspaceId]
@@ -760,6 +852,7 @@ export class WorkspaceBundleV4Service {
       return;
     }
     const batches = await this.stageImportedBatches(context, source.directory, rows);
+    let databaseCommitted = false;
     try {
       await this.store.database.withContext(context, async (sql) => {
         await sql.query("SET CONSTRAINTS ALL DEFERRED");
@@ -794,6 +887,7 @@ export class WorkspaceBundleV4Service {
           [context.workspaceId, completionId("completion_receipt", context.workspaceId, source.manifest.integrity_hash), canonicalJson(counts), source.manifest.integrity_hash, context.accountId]
         );
       });
+      databaseCommitted = true;
       for (const batch of batches) {
         await this.files.finalize(batch);
         await this.store.database.withContext(context, async (sql) => {
@@ -801,7 +895,28 @@ export class WorkspaceBundleV4Service {
         });
       }
     } catch (error) {
-      await Promise.all(batches.map((batch) => this.files.rollback(batch).catch(() => undefined)));
+      // Once the receipt transaction commits, db_committed headers plus the
+      // stable receipt are the recovery ledger. Do not delete their staged
+      // files: a later retry with the same transfer/import identity can finish
+      // a partially-renamed batch via recoverImportedCommittedBatches. Before
+      // commit, however, no DB row can authorize those files, so remove every
+      // staged batch and surface cleanup errors instead of hiding them.
+      if (!databaseCommitted) {
+        const cleanupErrors = (await Promise.all(batches.map(async (batch) => {
+          try {
+            await this.files.rollback(batch);
+            return undefined;
+          } catch (cleanupError) {
+            return cleanupError;
+          }
+        }))).filter((cleanupError): cleanupError is unknown => cleanupError !== undefined);
+        if (cleanupErrors.length > 0) {
+          throw new WorkspaceServerError("workspace_bundle_v4_cleanup_failed", 500, {
+            primary_error_code: safeErrorCode(error),
+            cleanup_error_code: safeErrorCode(cleanupErrors[0])
+          });
+        }
+      }
       throw error;
     }
   }
@@ -851,21 +966,7 @@ export class WorkspaceBundleV4Service {
     rows: Record<string, Record<string, unknown>[]>
   ): Promise<void> {
     for (const row of rows.workspace_agents ?? []) {
-      await sql.query(
-        "SELECT samurai_import_workspace_agent($1, $2, $3, $4, $5, $6, $7, $8, $9::TIMESTAMPTZ, $10::TIMESTAMPTZ)",
-        [
-          context.workspaceId,
-          stringValue(row.id, "workspace_bundle_agent_id_invalid"),
-          stringValue(row.display_name, "workspace_bundle_agent_display_name_invalid"),
-          typeof row.description === "string" ? row.description : "",
-          stringValue(row.backend_id, "workspace_bundle_agent_backend_invalid"),
-          stringValue(row.status, "workspace_bundle_agent_status_invalid"),
-          integerValue(row.version, "workspace_bundle_agent_version_invalid"),
-          stringValue(row.created_by, "workspace_bundle_agent_created_by_invalid"),
-          timestampValue(row.created_at, "workspace_bundle_agent_created_at_invalid"),
-          timestampValue(row.updated_at, "workspace_bundle_agent_updated_at_invalid")
-        ]
-      );
+      await importWorkspaceAgentRow(context, sql, row);
     }
     for (const row of rows.workspace_agent_room_permissions ?? []) {
       await sql.query(
@@ -930,29 +1031,73 @@ export class WorkspaceBundleV4Service {
       const rightCreated = typeof rightHeader?.created_at === "string" ? rightHeader.created_at : "";
       return leftCreated.localeCompare(rightCreated) || left.localeCompare(right);
     });
-    for (const batchId of orderedBatchIds) {
-      const header = headers.get(batchId);
-      if (!header || header.status !== "renamed") throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
-      const scope = batchScopeFromPortableHeader(header);
-      const files = entries.get(batchId);
-      if (!files || files.length === 0) throw new WorkspaceServerError("workspace_bundle_v4_batch_entries_missing", 400);
-      const stagedFiles: Array<{ path: string; content: Uint8Array }> = [];
-      for (const entry of files) {
-        const relative = assertSafeRelativePath(stringValue(entry.path, "workspace_bundle_v4_file_path_invalid"));
-        const expectedHash = stringValue(entry.sha256, "workspace_bundle_v4_file_hash_invalid");
-        const content = await readFile(resolveBundlePath(root, `${completionDirectory}/files/${relative}`));
-        if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
-        stagedFiles.push({ path: relative, content });
+    try {
+      for (const batchId of orderedBatchIds) {
+        const header = headers.get(batchId);
+        if (!header || header.status !== "renamed") throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+        const scope = batchScopeFromPortableHeader(header);
+        const files = entries.get(batchId);
+        if (!files || files.length === 0) throw new WorkspaceServerError("workspace_bundle_v4_batch_entries_missing", 400);
+        const stagedFiles: Array<{ path: string; content: Uint8Array }> = [];
+        for (const entry of files) {
+          const relative = assertSafeRelativePath(stringValue(entry.path, "workspace_bundle_v4_file_path_invalid"));
+          const expectedHash = stringValue(entry.sha256, "workspace_bundle_v4_file_hash_invalid");
+          const content = await readFile(resolveBundlePath(root, `${completionDirectory}/files/${relative}`));
+          if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
+          stagedFiles.push({ path: relative, content });
+        }
+        staged.push(await this.files.stageImported(context.workspaceId, scope, batchId, stagedFiles));
       }
-      staged.push(await this.files.stageImported(context.workspaceId, scope, batchId, stagedFiles));
+      return staged;
+    } catch (error) {
+      const cleanupErrors = (await Promise.all(staged.map(async (batch) => {
+        try {
+          await this.files.rollback(batch);
+          return undefined;
+        } catch (cleanupError) {
+          return cleanupError;
+        }
+      }))).filter((cleanupError): cleanupError is unknown => cleanupError !== undefined);
+      if (cleanupErrors.length > 0) {
+        throw new WorkspaceServerError("workspace_bundle_v4_cleanup_failed", 500, {
+          primary_error_code: safeErrorCode(error),
+          cleanup_error_code: safeErrorCode(cleanupErrors[0])
+        });
+      }
+      throw error;
     }
-    return staged;
   }
 
   private async filesRecover(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<void> {
     // An export never treats an interrupted rename as a valid Bundle state.
     const result = await this.store.database.withContext(context, async (sql) => sql.query<{ id: string }>("SELECT id FROM workspace_completion_file_batches WHERE workspace_id = $1 AND status = 'db_committed'", [context.workspaceId]));
     if (result.rows.length > 0) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503);
+  }
+
+  private async assertNoMaintenanceMembership(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    excludedAccountIds: readonly string[]
+  ): Promise<void> {
+    const result = await this.store.database.withContext(context, async (sql) => {
+      const marker = await sql.query<{ exists: boolean }>(
+        "SELECT EXISTS(SELECT 1 FROM workspace_completion_maintenance_identities WHERE workspace_id = $1) AS exists",
+        [context.workspaceId]
+      );
+      const memberships = excludedAccountIds.length === 0
+        ? { rows: [{ exists: false }] }
+        : await sql.query<{ exists: boolean }>(
+          `SELECT EXISTS(
+             SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND account_id = ANY($2::TEXT[])
+             UNION ALL
+             SELECT 1 FROM room_members WHERE workspace_id = $1 AND account_id = ANY($2::TEXT[])
+           ) AS exists`,
+          [context.workspaceId, [...excludedAccountIds]]
+        );
+      return { marker: marker.rows[0]?.exists === true, memberships: memberships.rows[0]?.exists === true };
+    });
+    if (result.marker || result.memberships) {
+      throw new WorkspaceServerError("workspace_bundle_v4_maintenance_membership_restored", 409);
+    }
   }
 
   private async readMaintenanceAccountIds(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<string[]> {
@@ -1064,7 +1209,15 @@ const importTableOrder = [
   "workspace_completion_search_projection",
   "workspace_completion_workspace_documents",
   "workspace_completion_redactions",
+  "workspace_runtime_sessions",
+  "workspace_runtime_messages",
+  // Runtime history follows its foreign-key graph: runs own events and
+  // changes, activities retain their run link, and usage refers to both.
+  "workspace_runtime_runs",
+  "workspace_runtime_events",
+  "workspace_runtime_changes",
   "workspace_runtime_activities",
+  "workspace_runtime_resource_usage",
   "workspace_runtime_automation_jobs",
   "workspace_runtime_automation_runs"
 ] as const;
@@ -1075,19 +1228,34 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   const manifest = JSON.parse(raw) as unknown;
   assertWorkspaceBundleV4ManifestCandidate(manifest);
   const v3 = await verifyWorkspaceBundleV3(resolveBundlePath(root, baseV3Directory));
+  if (v3.manifest.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
   if (v3.manifest.integrity_hash !== manifest.base_v3_integrity_hash) throw new WorkspaceServerError("workspace_bundle_v4_base_mismatch", 400);
   if (v3.manifest.transfer_id !== manifest.transfer_id) throw new WorkspaceServerError("workspace_transfer_bundle_mismatch", 409);
+  const baseProvenance = v3.manifest as typeof v3.manifest & WorkspaceBundleV3Provenance;
+  const baseOrganizationId = baseProvenance.source_organization_id ?? baseProvenance.source?.organization_id;
+  const baseSchemaRevision = baseProvenance.schema_revision
+    ?? (baseOrganizationId !== undefined ? baseProvenance.schema_version : undefined);
+  // Organization provenance is optional. New exports omit the source
+  // Organization entirely; old V4 manifests may still carry the historical
+  // raw field and remain verifiable for backwards compatibility.
+  if (baseSchemaRevision !== undefined && manifest.schema_revision === undefined) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_missing", 400);
+  }
+  if (manifest.source_organization_id !== undefined
+    && (baseOrganizationId === undefined || manifest.source_organization_id !== baseOrganizationId)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_mismatch", 400);
+  }
+  if (manifest.schema_revision !== undefined && manifest.schema_revision !== baseSchemaRevision) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_mismatch", 400);
+  }
+  if (manifest.schema_version !== undefined && manifest.schema_version !== (baseSchemaRevision ?? baseProvenance.schema_version)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_provenance_mismatch", 400);
+  }
   assertBundleUsage(await measureBundleUsage(root), "workspace_bundle_v4_transport_too_large");
   const actual = await hashBundleFiles(root);
   if (canonicalJson(actual) !== canonicalJson(manifest.files)) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
   for (const accountId of manifest.excluded_maintenance_account_ids) assertOpaqueId(accountId, "workspace_bundle_v4_maintenance_account_invalid");
-  const expected = hashText(canonicalJson({
-    files: manifest.files,
-    record_counts: manifest.record_counts,
-    ...(manifest.transfer_id ? { transfer_id: manifest.transfer_id } : {}),
-    base_v3_integrity_hash: manifest.base_v3_integrity_hash,
-    excluded_maintenance_account_ids: [...manifest.excluded_maintenance_account_ids].sort()
-  }));
+  const expected = hashText(canonicalJson(bundleV4IntegrityPayload(manifest)));
   if (expected !== manifest.integrity_hash) throw new WorkspaceServerError("workspace_bundle_v4_integrity_invalid", 400);
   for (const relative of Object.keys(actual)) {
     const content = await readFile(resolveBundlePath(root, relative));
@@ -1095,6 +1263,25 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   }
   const rows: Record<string, Record<string, unknown>[]> = {};
   for (const [table, filename] of tableFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  for (const [table, filename] of workspaceChatFiles) {
+    rows[table] = await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  }
+  for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+    // Activities were already part of the first V4 implementation and remain
+    // required. The other history files are additive and optional for older
+    // V4 Bundles; new exports include all of them and bind their counts.
+    const required = table === "workspace_runtime_activities";
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if ((required || hasManifestCount) && !hasBundleFile) {
+      throw new WorkspaceServerError("workspace_bundle_v4_required_file_missing", 400);
+    }
+    rows[table] = required || hasManifestCount || hasBundleFile
+      ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
+      : [];
+  }
+  assertPortableRuntimeHistory(rows);
   const connections = await readJsonl(resolveBundlePath(root, `${completionDirectory}/connection-descriptors.jsonl`));
   if (connections.some((row) => row.status === "active")) {
     throw new WorkspaceServerError("workspace_bundle_v4_active_connection_forbidden", 400);
@@ -1102,6 +1289,27 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   for (const [table, filename] of workspaceIdentityFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
   const countByKey = new Map<string, number>();
   for (const [table] of tableFiles) countByKey.set(portableCountKey(table), rows[table]?.length ?? 0);
+  for (const [table, filename] of workspaceChatFiles) {
+    // The files were added after the first V4 release. Only require/count
+    // them when the manifest or the directory actually contains one.
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if (hasManifestCount && !hasBundleFile) {
+      throw new WorkspaceServerError("workspace_bundle_v4_required_file_missing", 400);
+    }
+    if (hasManifestCount || hasBundleFile) {
+      countByKey.set(key, rows[table]?.length ?? 0);
+    }
+  }
+  for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if (hasManifestCount || hasBundleFile || table === "workspace_runtime_activities") {
+      countByKey.set(key, rows[table]?.length ?? 0);
+    }
+  }
   for (const [table] of workspaceIdentityFiles) countByKey.set(portableCountKey(table), rows[table]?.length ?? 0);
   if (canonicalJson(Object.keys(manifest.record_counts).sort()) !== canonicalJson([...countByKey.keys()].sort())) {
     throw new WorkspaceServerError("workspace_bundle_v4_record_count_mismatch", 400, {
@@ -1168,7 +1376,19 @@ export async function writeWorkspaceBundleV4Transport(input: { transport: unknow
 async function readCompletionBundleRows(root: string): Promise<Record<string, Record<string, unknown>[]>> {
   const rows: Record<string, Record<string, unknown>[]> = {};
   for (const [table, filename] of tableFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  for (const [table, filename] of workspaceChatFiles) {
+    rows[table] = await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  }
+  for (const [table, filename] of workspaceRuntimeHistoryFiles) {
+    rows[table] = table === "workspace_runtime_activities"
+      ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
+      : await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  }
   for (const [table, filename] of workspaceIdentityFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  // Keep the import path defensive even if a future caller bypasses the
+  // public verifier. The source row `session_ref` remains untouched; only
+  // provider-shaped identifiers in Runtime metadata/payload are rejected.
+  assertPortableRuntimeHistory(rows);
   return rows;
 }
 
@@ -1251,6 +1471,7 @@ async function insertPortableStaticRow(
 
 async function writeJsonl(destination: string, rows: readonly Record<string, unknown>[]): Promise<void> {
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  for (const row of rows) assertPortablePathsFree(row);
   const body = rows.map((row) => canonicalJson(row)).join("\n") + (rows.length ? "\n" : "");
   await writeFile(destination, body, { flag: "wx", mode: 0o600 });
 }
@@ -1265,11 +1486,54 @@ async function readJsonl(source: string): Promise<Record<string, unknown>[]> {
     try {
       const value = JSON.parse(line) as unknown;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("row");
-      return value as Record<string, unknown>;
-    } catch {
+      assertPortablePathsFree(value);
+      return stripOrganizationIdentifiers(value) as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof WorkspaceServerError) throw error;
       throw new WorkspaceServerError("workspace_bundle_v4_jsonl_invalid", 400);
     }
   });
+}
+
+async function readOptionalJsonl(source: string): Promise<Record<string, unknown>[]> {
+  try {
+    return await readJsonl(source);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+const portablePathFieldNames = new Set([
+  "path", "filepath", "storage_namespace", "storagenamespace", "working_directory", "workingdirectory",
+  "worktree_path", "worktreepath", "absolute_path", "absolutepath", "directory", "directory_path",
+  "directorypath", "root_path", "rootpath", "cwd", "home"
+]);
+
+function assertPortablePathsFree(value: unknown, fieldName?: string): void {
+  if (typeof value === "string") {
+    if (fieldName && portablePathFieldNames.has(fieldName.toLowerCase().replace(/[^a-z0-9]/g, ""))
+      && isAbsolutePortablePath(value)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_absolute_path_forbidden", 400);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertPortablePathsFree(item, fieldName);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    assertPortablePathsFree(nested, key);
+  }
+}
+
+function isAbsolutePortablePath(value: string): boolean {
+  return path.posix.isAbsolute(value)
+    || path.win32.isAbsolute(value)
+    || /^[A-Za-z]:[\\/]/.test(value)
+    || value.startsWith("\\\\")
+    || value.startsWith("file:///");
 }
 
 async function hashBundleFiles(root: string): Promise<Record<string, string>> {
@@ -1305,7 +1569,7 @@ function resolveBundlePath(root: string, relative: string): string {
 }
 
 function portableRow(row: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, portableValue(value)]));
+  return stripOrganizationIdentifiers(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, portableValue(value)]))) as Record<string, unknown>;
 }
 
 function portableRuntimeRow(table: string, row: Record<string, unknown>): Record<string, unknown> {
@@ -1316,10 +1580,31 @@ function portableRuntimeRow(table: string, row: Record<string, unknown>): Record
     // matched secret detection.  Keep a count as portable audit evidence.
     return { ...portable, counts: portableMigrationReceiptCounts(portable.counts) };
   }
-  if (table === "workspace_runtime_activities") {
-    // Runtime runs are intentionally not part of V4's process state. Keep the
-    // Activity record, but remove the foreign key to a non-portable run.
-    return { ...portable, backend_run_id: null };
+  if (table === "workspace_runtime_runs") {
+    assertPortableRuntimeRun(portable);
+    // A provider-native session ID can make a restored Run look resumable.
+    // Keep the settled outcome and request idempotency, but force a fresh
+    // provider session if the target later starts a new operation. The
+    // top-level `session_ref` is a Workspace-owned app/session reference and
+    // remains portable; only provider-shaped IDs inside Runtime metadata are
+    // removed.
+    return {
+      ...portable,
+      metadata: stripPortableRuntimeProviderIdentifiers(portable.metadata),
+      backend_session_id: null
+    };
+  }
+  if (table === "workspace_runtime_events") {
+    // Event payloads are historical evidence; provider-native session state is
+    // deployment-local and must never be used as a restore credential. Keep
+    // artifact evidence and Workspace row `session_id` intact while removing
+    // provider/backend/native session, thread, and conversation identifiers
+    // from the opaque payload.
+    return {
+      ...portable,
+      payload: stripPortableRuntimeProviderIdentifiers(portable.payload),
+      backend_session_id: null
+    };
   }
   if (table === "workspace_runtime_automation_jobs") {
     // A bundle never transports a live worker lease or lock owner.
@@ -1336,6 +1621,94 @@ function portableRuntimeRow(table: string, row: Record<string, unknown>): Record
     };
   }
   return portable;
+}
+
+const portableRuntimeTerminalStatuses = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
+
+function assertPortableRuntimeRun(row: Record<string, unknown>, requireBackendSessionAbsent = false): void {
+  const settled = row.phase === "settled"
+    || (typeof row.status === "string" && portableRuntimeTerminalStatuses.has(row.status));
+  if (!settled) throw new WorkspaceServerError("workspace_bundle_v4_runtime_run_unsettled", 409);
+  if (requireBackendSessionAbsent && row.backend_session_id !== null && row.backend_session_id !== undefined) {
+    throw new WorkspaceServerError("workspace_bundle_v4_backend_session_forbidden", 400);
+  }
+}
+
+function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknown>[]>): void {
+  const runs = rows.workspace_runtime_runs ?? [];
+  const runIds = new Set(runs.map((row) => row.id).filter((id): id is string => typeof id === "string"));
+  for (const run of runs) {
+    assertPortableRuntimeRun(run, true);
+    assertPortableRuntimeProviderIdentifiersAbsent(run.metadata);
+  }
+  for (const event of rows.workspace_runtime_events ?? []) {
+    if (event.backend_session_id !== null && event.backend_session_id !== undefined) {
+      throw new WorkspaceServerError("workspace_bundle_v4_backend_session_forbidden", 400);
+    }
+    assertPortableRuntimeProviderIdentifiersAbsent(event.payload);
+    if (typeof event.run_id !== "string" || !runIds.has(event.run_id)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+  for (const change of rows.workspace_runtime_changes ?? []) {
+    if (typeof change.run_id === "string" && !runIds.has(change.run_id)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+  const activityIds = new Set((rows.workspace_runtime_activities ?? [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string"));
+  for (const activity of rows.workspace_runtime_activities ?? []) {
+    if (typeof activity.backend_run_id === "string" && !runIds.has(activity.backend_run_id)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+  const changeIds = new Set((rows.workspace_runtime_changes ?? [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string"));
+  for (const usage of rows.workspace_runtime_resource_usage ?? []) {
+    if (typeof usage.activity_id !== "string" || !activityIds.has(usage.activity_id)
+      || (typeof usage.workspace_change_id === "string" && !changeIds.has(usage.workspace_change_id))) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
+  }
+}
+
+/**
+ * Opaque provider payloads must never decide whether a restored Runtime can
+ * resume an external conversation. Normalize only the established provider
+ * key shapes, so provider handles are excluded without deleting unrelated
+ * Workspace-specific metadata. Canonical Workspace `session_id` /
+ * `session_ref` columns are handled separately and remain portable.
+ */
+function isPortableRuntimeProviderIdentifierKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (normalized === "sessionid" || normalized === "threadid" || normalized === "conversationid") return true;
+  return /^(?:(?:provider|backend|native|codex|claude|gemini|openai|anthropic|google|vertex|azure|ollama|external|remote))+(?:session|thread|conversation)(?:id|ref)?$/.test(normalized);
+}
+
+function stripPortableRuntimeProviderIdentifiers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripPortableRuntimeProviderIdentifiers);
+  if (!value || typeof value !== "object" || value instanceof Date) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isPortableRuntimeProviderIdentifierKey(key))
+      .map(([key, nested]) => [key, stripPortableRuntimeProviderIdentifiers(nested)])
+  );
+}
+
+function assertPortableRuntimeProviderIdentifiersAbsent(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertPortableRuntimeProviderIdentifiersAbsent(item);
+    return;
+  }
+  if (!value || typeof value !== "object" || value instanceof Date) return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (isPortableRuntimeProviderIdentifierKey(key)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_provider_identifier_forbidden", 400);
+    }
+    assertPortableRuntimeProviderIdentifiersAbsent(nested);
+  }
 }
 
 function portableMigrationReceiptCounts(value: unknown): unknown {
@@ -1365,6 +1738,27 @@ function portableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(portableValue);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, portableValue(child)]));
   return value;
+}
+
+const organizationIdentifierKeyNames = new Set([
+  "organizationid", "sourceorganizationid", "targetorganizationid",
+  "organizationids", "sourceorganizationids", "targetorganizationids",
+  "orgid", "sourceorgid", "targetorgid", "orgids", "sourceorgids", "targetorgids"
+]);
+
+function isOrganizationIdentifierKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return organizationIdentifierKeyNames.has(normalized);
+}
+
+function stripOrganizationIdentifiers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripOrganizationIdentifiers);
+  if (!value || typeof value !== "object" || value instanceof Date) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isOrganizationIdentifierKey(key))
+      .map(([key, nested]) => [key, stripOrganizationIdentifiers(nested)])
+  );
 }
 
 function rememberFile(paths: Map<string, string>, relative: string, hash: string): void {
@@ -1482,6 +1876,21 @@ function assertWorkspaceBundleV4ManifestCandidate(value: unknown): asserts value
     throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
   assertOpaqueId(manifest.workspace_id, "workspace_bundle_workspace_id_invalid");
+  if (manifest.source_organization_id !== undefined) {
+    assertWorkspaceBundleTargetOrganizationId(manifest.source_organization_id);
+  }
+  if (manifest.schema_revision !== undefined
+    && (!Number.isSafeInteger(manifest.schema_revision) || manifest.schema_revision < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+  }
+  if (manifest.schema_version !== undefined
+    && (!Number.isSafeInteger(manifest.schema_version) || manifest.schema_version < 1)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+  }
+  if (manifest.schema_revision !== undefined && manifest.schema_version !== undefined
+    && manifest.schema_revision !== manifest.schema_version) {
+    throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
+  }
   if (!/^[a-f0-9]{64}$/.test(manifest.base_v3_integrity_hash) || !/^[a-f0-9]{64}$/.test(manifest.integrity_hash)) {
     throw new WorkspaceServerError("workspace_bundle_v4_manifest_invalid", 400);
   }
@@ -1562,7 +1971,29 @@ function incomingV4Request(metadata: IncomingV4BundleMetadata): Record<string, u
     operation_id: metadata.operation_id,
     target_workspace_id: metadata.target_workspace_id,
     ...(metadata.target_workspace_name ? { target_workspace_name: metadata.target_workspace_name } : {}),
+    ...(metadata.target_organization_id ? { target_organization_id: metadata.target_organization_id } : {}),
     manifest: metadata.manifest
+  };
+}
+
+function bundleV4IntegrityPayload(manifest: WorkspaceBundleV4Manifest): Record<string, unknown> {
+  const base = {
+    files: manifest.files,
+    record_counts: manifest.record_counts,
+    ...(manifest.transfer_id ? { transfer_id: manifest.transfer_id } : {}),
+    base_v3_integrity_hash: manifest.base_v3_integrity_hash,
+    excluded_maintenance_account_ids: [...manifest.excluded_maintenance_account_ids].sort()
+  };
+  if (manifest.source_organization_id === undefined
+    && manifest.schema_revision === undefined
+    && manifest.schema_version === undefined) {
+    return base;
+  }
+  return {
+    ...base,
+    ...(manifest.source_organization_id ? { source_organization_id: manifest.source_organization_id } : {}),
+    ...(manifest.schema_revision !== undefined ? { schema_revision: manifest.schema_revision } : {}),
+    ...(manifest.schema_version !== undefined ? { schema_version: manifest.schema_version } : {})
   };
 }
 
@@ -1611,8 +2042,107 @@ function decodeV4TransportContent(value: string): Buffer {
   return content;
 }
 
+async function importWorkspaceAgentRow(
+  context: WorkspaceRequestContext,
+  sql: WorkspaceSql,
+  row: Record<string, unknown>
+): Promise<void> {
+  const valuesByName: Record<string, unknown> = {
+    target_workspace_id: context.workspaceId,
+    target_agent_id: stringValue(row.id, "workspace_bundle_agent_id_invalid"),
+    target_display_name: stringValue(row.display_name, "workspace_bundle_agent_display_name_invalid"),
+    target_description: typeof row.description === "string" ? row.description : "",
+    // V4 rows from before the v1 Agent contract receive the same safe defaults
+    // as the schema migration. New rows round-trip all three canonical fields.
+    target_role: stringValue(row.role ?? "workspace_agent", "workspace_bundle_agent_role_invalid"),
+    target_instructions: stringValue(
+      row.instructions ?? (typeof row.description === "string" && row.description.trim() ? row.description : "Workspace Agent"),
+      "workspace_bundle_agent_instructions_invalid"
+    ),
+    target_backend_id: stringValue(row.backend_id, "workspace_bundle_agent_backend_invalid"),
+    target_enabled: row.enabled === undefined ? row.status !== "disabled" : booleanValue(row.enabled, "workspace_bundle_agent_enabled_invalid"),
+    target_status: stringValue(row.status, "workspace_bundle_agent_status_invalid"),
+    target_version: integerValue(row.version, "workspace_bundle_agent_version_invalid"),
+    target_created_by: stringValue(row.created_by, "workspace_bundle_agent_created_by_invalid"),
+    target_created_at: timestampValue(row.created_at, "workspace_bundle_agent_created_at_invalid"),
+    target_updated_at: timestampValue(row.updated_at, "workspace_bundle_agent_updated_at_invalid")
+  };
+  // The original V4 schema exposed a ten-argument import function. Resolve
+  // the installed function by argument names so a migrated target can import
+  // role/instructions/enabled while an older target keeps accepting legacy
+  // Bundles until its schema is upgraded.
+  const functions = await sql.query<{ pronargs: number | string; proargnames: string[] | null }>(
+    `SELECT p.pronargs, p.proargnames
+       FROM pg_proc AS p
+       JOIN pg_namespace AS n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname = 'samurai_import_workspace_agent'
+      ORDER BY p.pronargs DESC
+      LIMIT 1`
+  );
+  const functionRow = functions.rows[0];
+  const argumentCount = Number(functionRow?.pronargs ?? 0);
+  if (argumentCount <= 10) {
+    const legacyValues = [
+      valuesByName.target_workspace_id,
+      valuesByName.target_agent_id,
+      valuesByName.target_display_name,
+      valuesByName.target_description,
+      valuesByName.target_backend_id,
+      valuesByName.target_status,
+      valuesByName.target_version,
+      valuesByName.target_created_by,
+      valuesByName.target_created_at,
+      valuesByName.target_updated_at
+    ];
+    await sql.query(
+      "SELECT samurai_import_workspace_agent($1, $2, $3, $4, $5, $6, $7, $8, $9::TIMESTAMPTZ, $10::TIMESTAMPTZ)",
+      legacyValues
+    );
+    return;
+  }
+  const names = Array.isArray(functionRow?.proargnames) ? functionRow.proargnames : [];
+  const fallbackNames = [
+    "target_workspace_id", "target_agent_id", "target_display_name", "target_description",
+    "target_role", "target_instructions", "target_backend_id", "target_enabled", "target_status",
+    "target_version", "target_created_by", "target_created_at", "target_updated_at"
+  ];
+  const values = Array.from({ length: argumentCount }, (_, index) => {
+    const name = names[index] ?? fallbackNames[index];
+    const value = name ? valuesByName[name.toLowerCase()] : undefined;
+    if (value !== undefined) return value;
+    throw new WorkspaceServerError("workspace_bundle_agent_schema_invalid", 400);
+  });
+  await sql.query(
+    `SELECT samurai_import_workspace_agent(${values.map((_, index) => `$${index + 1}`).join(", ")})`,
+    values
+  );
+}
+
 function completionId(prefix: string, workspaceId: string, input: string): string {
   return `${prefix}_${hashText(`${workspaceId}:${input}`).slice(0, 40)}`;
+}
+
+function transferAttemptKey(transferId: string, version?: number): string {
+  const attempt = typeof version === "number" && Number.isSafeInteger(version) && version > 1 ? version : 1;
+  return attempt === 1 ? transferId : `${transferId}:${attempt}`;
+}
+
+function transferReceipt(manifest: WorkspaceBundleV4Manifest, targetWorkspaceId: string, importedAt?: string): WorkspaceTransferReceipt {
+  if (!manifest.transfer_id) throw new WorkspaceServerError("workspace_transfer_receipt_invalid", 400);
+  return {
+    format_version: 1,
+    transfer_id: manifest.transfer_id,
+    source_workspace_id: manifest.workspace_id,
+    source_integrity_hash: manifest.integrity_hash,
+    target_workspace_id: targetWorkspaceId,
+    imported_at: importedAt ?? manifest.exported_at,
+    target_integrity_hash: manifest.integrity_hash
+  };
+}
+
+function optionalWorkspaceBundleTargetOrganizationId(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return assertWorkspaceBundleTargetOrganizationId(value);
 }
 
 async function pathExists(value: string): Promise<boolean> {

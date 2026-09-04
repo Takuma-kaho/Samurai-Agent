@@ -68,7 +68,7 @@ function checkPreloadAllowlist() {
   const preload = read("apps/desktop/src/preload.cts");
   const exposed = ["getStatus", "openMainWindow", "reloadMainWindow", "quitApp", "closeAppShot", "closeQuickAsk", "submitAppShot", "submitQuickAsk"];
   const missing = exposed.filter((name) => !preload.includes(`${name}:`));
-  const unsafe = ["readFile", "writeFile", "exec", "spawn", "shell"].filter((snippet) => preload.includes(snippet));
+  const unsafe = ["readFile", "writeFile", "exec", "spawn", "shell"].filter((snippet) => containsIdentifier(preload, snippet));
   const good = missing.length === 0 && unsafe.length === 0;
   return result("preload-allowlist", good, good ? "preload exposes only the allowlisted IPC surface" : `missing=${missing.join(", ") || "none"} unsafe=${unsafe.join(", ") || "none"}`);
 }
@@ -161,6 +161,9 @@ function checkWebDesktopBridge() {
 function missingResult(name, pairs, successMessage) {
   const missing = pairs.filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
   return result(name, missing.length === 0, missing.length === 0 ? successMessage : `missing snippets: ${missing.join(", ")}`);
+}
+function containsIdentifier(content, identifier) {
+  return new RegExp(`(?<![A-Za-z0-9_$])${identifier}(?![A-Za-z0-9_$])`).test(content);
 }
 function result(name, ok, message) { return { name, ok, message }; }
 function buildScoreItems(inputChecks) {

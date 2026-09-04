@@ -6,10 +6,19 @@ export type WorkspaceServerMode = (typeof workspaceServerModes)[number];
 export const workspaceMembershipRoles = ["owner", "admin", "member", "guest"] as const;
 export type WorkspaceMembershipRole = (typeof workspaceMembershipRoles)[number];
 
+/** Organization roles are intentionally a separate contract from Workspace
+ * roles.  The values currently mirror the role names, but an Organization
+ * membership never grants Workspace or Room content access by itself. */
+export const organizationRoles = ["owner", "admin", "member", "guest"] as const;
+export type OrganizationRole = (typeof organizationRoles)[number];
+
+export const organizationMembershipStates = ["active", "removed"] as const;
+export type OrganizationMembershipState = (typeof organizationMembershipStates)[number];
+
 export const workspaceMembershipStates = ["active", "revoked"] as const;
 export type WorkspaceMembershipState = (typeof workspaceMembershipStates)[number];
 
-export const workspaceStates = ["active", "read_only", "archived"] as const;
+export const workspaceStates = ["active", "read_only", "archived", "deleted"] as const;
 export type WorkspaceState = (typeof workspaceStates)[number];
 
 export const workspaceAgentStatuses = ["active", "disabled", "revoked"] as const;
@@ -73,6 +82,194 @@ export interface WorkspaceRequestContext {
   migrationOperation?: "completion_backfill" | "completion_rollback";
 }
 
+/** Context for Organization-scoped Queries and Domain Operations. */
+export interface OrganizationRequestContext {
+  accountId: string;
+  /** A caller-provided identifier that lets retries return the original result. */
+  operationId: string;
+  /** Request correlation identifier supplied by the authenticated Server boundary. */
+  requestId: string;
+  /** Organization scope is optional for cross-Organization list/create calls. */
+  organizationId?: string;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  icon?: string;
+  description?: string;
+  createdBy: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+  /** Present on mutation results so the Domain API can preserve replay state. */
+  replayed?: boolean;
+}
+
+export interface OrganizationMembership {
+  id: string;
+  organizationId: string;
+  accountId: string;
+  role: OrganizationRole;
+  state: OrganizationMembershipState;
+  version: number;
+  joinedAt: string;
+  removedAt?: string;
+  createdBy: string;
+  updatedBy: string;
+  replayed?: boolean;
+}
+
+export interface OrganizationInvitationWorkspaceGrant {
+  id: string;
+  organizationId: string;
+  invitationId: string;
+  workspaceId: string;
+  workspaceRole: WorkspaceMembershipRole;
+  roomId?: string;
+  roomRole?: WorkspaceMembershipRole;
+}
+
+/** Public invitation metadata.  The token hash is deliberately not exposed. */
+export interface OrganizationInvitation {
+  id: string;
+  organizationId: string;
+  targetAccountId?: string;
+  role: OrganizationRole;
+  version: number;
+  expiresAt: string;
+  issuedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+  acceptedBy?: string;
+  acceptedAt?: string;
+  workspaceGrants: OrganizationInvitationWorkspaceGrant[];
+  replayed?: boolean;
+}
+
+export interface OrganizationInvitationCreateResult {
+  invitation: OrganizationInvitation;
+  /** Returned only at creation/reissue time; never read back from storage. */
+  token?: string;
+  replayed: boolean;
+}
+
+export interface OrganizationInvitationAcceptResult {
+  organizationId: string;
+  accountId: string;
+  role: OrganizationRole;
+  membership: OrganizationMembership;
+  /** Applied Workspace grants are returned as current membership records,
+   * including version/timestamps required by the public contract. */
+  workspaceGrants: OrganizationWorkspaceMembership[];
+  replayed: boolean;
+}
+
+/** Safe Workspace metadata visible to an Organization member without content. */
+export interface OrganizationWorkspaceSummary {
+  /** Omitted when the Workspace is standalone. */
+  organizationId?: string;
+  workspaceId: string;
+  name: string;
+  state: WorkspaceState;
+  hasAccess: boolean;
+  workspaceRole?: WorkspaceMembershipRole;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  replayed?: boolean;
+}
+
+export interface OrganizationWorkspaceMoveMember {
+  accountId: string;
+  currentWorkspaceRole: WorkspaceMembershipRole;
+  state: WorkspaceMembershipState;
+  targetOrganizationRole?: OrganizationRole;
+}
+
+export interface OrganizationWorkspaceMovePreview {
+  allowed: boolean;
+  reason?: string;
+  /** Undefined represents the standalone side of the transition. */
+  sourceOrganizationId?: string;
+  /** Undefined represents the standalone side of the transition. */
+  targetOrganizationId?: string;
+  workspaceId: string;
+  workspaceName?: string;
+  expectedWorkspaceVersion?: number;
+  sourceOwner?: boolean;
+  targetOwner?: boolean;
+  members: OrganizationWorkspaceMoveMember[];
+  missingTargetMemberships: string[];
+  requiresGuestConfirmation: boolean;
+  writeFreezeRequired: boolean;
+  operationId?: string;
+  workspaceState?: WorkspaceState;
+  failureConditions?: string[];
+  expiresAt?: string;
+  createdAt?: string;
+}
+
+export interface OrganizationWorkspaceMoveResult {
+  workspace: OrganizationWorkspaceSummary;
+  addedGuestAccountIds: string[];
+  eventId?: string;
+  replayed: boolean;
+  operationId?: string;
+  sourceOrganizationId?: string;
+  targetOrganizationId?: string;
+  workspaceId?: string;
+  status?: "preflight" | "queued" | "running" | "committed" | "failed" | "rolled_back";
+  guestMembershipAccountIds?: string[];
+  committedAt?: string;
+  failureCode?: string;
+}
+
+/** Result shared by the explicit standalone attach and detach commands. */
+export interface WorkspaceOrganizationAssociationResult {
+  workspace: OrganizationWorkspaceSummary;
+  organizationId?: string;
+  previousOrganizationId?: string;
+  addedGuestAccountIds: string[];
+  eventId?: string;
+  replayed: boolean;
+}
+
+/** Explicit standalone -> Organization association request. */
+export interface AttachWorkspaceToOrganizationInput {
+  organizationId: string;
+  workspaceId: string;
+  expectedWorkspaceVersion?: number;
+  confirmGuestMemberships?: boolean;
+}
+
+/** Explicit Organization -> standalone association removal request. */
+export interface DetachWorkspaceFromOrganizationInput {
+  organizationId: string;
+  workspaceId: string;
+  expectedWorkspaceVersion?: number;
+  confirm?: true;
+}
+
+export interface OrganizationWorkspaceMembership {
+  organizationId: string;
+  workspaceId: string;
+  accountId: string;
+  role: WorkspaceMembershipRole;
+  state: WorkspaceMembershipState;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+  id?: string;
+  joinedAt?: string;
+  createdBy?: string;
+  updatedBy?: string;
+  replayed?: boolean;
+}
+
 /** Internal principal shape used by the formal external-ingress boundary.
  * Transport adapters may construct this value, but they cannot use it to
  * bypass the Workspace Server's Room checks. */
@@ -107,6 +304,8 @@ export interface WorkspaceAccount {
 
 export interface WorkspaceSummary {
   id: string;
+  /** Optional same-Server Organization association. */
+  organizationId?: string;
   name: string;
   state: WorkspaceState;
   hostingMode: WorkspaceServerMode;

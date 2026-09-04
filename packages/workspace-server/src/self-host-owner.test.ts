@@ -17,13 +17,12 @@ describe("Self-host restore ownership", () => {
     expect(() => store.assertSelfHostInitialAdmin("account_owner")).not.toThrow();
   });
 
-  it("does not permit a Self-host store without a configured owner", () => {
+  it("permits a multi-Workspace Self-host store without bootstrap-only settings", () => {
     expect(() => new WorkspaceServerStore({
       database: {} as never,
       mode: "self_host",
-      selfHostWorkspaceId: "workspace_self_host",
       storageRoot: "/tmp/samurai-self-host-owner-test",
       invitationTokenSecret: "x".repeat(32)
-    })).toThrowError(WorkspaceServerError);
+    })).not.toThrow();
   });
 });

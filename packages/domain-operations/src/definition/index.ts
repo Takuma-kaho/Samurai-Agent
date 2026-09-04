@@ -2,6 +2,7 @@ import { toStrictJsonSchema, type JsonValue } from "@samurai-agent/core-schemas"
 import { principalParticipantId, type ParticipantPrincipal } from "@samurai-agent/room-permissions";
 import { z } from "zod";
 import { domainOperationAccess, type DomainAccessClassification } from "./access-classification.js";
+export type { OrganizationRequestContext } from "./organization-context.js";
 
 export const domainInputSources = [
   "surface_operation",
@@ -136,6 +137,23 @@ export interface QueryOperationPort<I, O> {
 
 export interface OperationHandler<I, O> {
   execute(context: TrustedDomainContext, input: I): Promise<DomainResult<O>> | DomainResult<O>;
+}
+
+/**
+ * Organization operations currently publish a transport-neutral contract;
+ * their Core/HTTP adapter owns execution and supplies OrganizationRequestContext.
+ * Keep a generator-compatible handler without making TrustedDomainContext an
+ * accidental Organization authorization channel.
+ */
+export function publicContractHandler<I, O>(operationId: string): OperationHandler<I, O> {
+  const execute = async function publicContractOnly(): Promise<DomainResult<O>> {
+    throw new Error(`domain_operation_public_contract_only:${operationId}`);
+  };
+  Object.defineProperty(execute, "name", {
+    configurable: true,
+    value: `publicContractOnly_${operationId.replaceAll(/[^a-zA-Z0-9_$]/g, "_")}`
+  });
+  return { execute };
 }
 
 /**

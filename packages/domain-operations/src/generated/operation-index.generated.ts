@@ -102,74 +102,101 @@ import operation97 from "../operations/memory/topic/create.operation.js";
 import operation98 from "../operations/message/presentation/update.operation.js";
 import operation99 from "../operations/objective/create.operation.js";
 import operation100 from "../operations/objective/transition.operation.js";
-import operation101 from "../operations/plugin/status/set.operation.js";
-import operation102 from "../operations/policy/change/request.operation.js";
-import operation103 from "../operations/presentation/plan.operation.js";
-import operation104 from "../operations/profile/change/request.operation.js";
-import operation105 from "../operations/reflection/run.operation.js";
-import operation106 from "../operations/reflection/suggestion/apply.operation.js";
-import operation107 from "../operations/resource/copy.operation.js";
-import operation108 from "../operations/resource/move.operation.js";
-import operation109 from "../operations/resource/promote.operation.js";
-import operation110 from "../operations/resource/redact.operation.js";
-import operation111 from "../operations/resource/translation_job/save.operation.js";
-import operation112 from "../operations/resource/translation/save.operation.js";
-import operation113 from "../operations/resource/version/get.operation.js";
-import operation114 from "../operations/rollback/restore.operation.js";
-import operation115 from "../operations/room/agent-permission-set.operation.js";
-import operation116 from "../operations/room/agent-remove.operation.js";
-import operation117 from "../operations/room/create.operation.js";
-import operation118 from "../operations/room/list.operation.js";
-import operation119 from "../operations/room/member-add.operation.js";
-import operation120 from "../operations/room/member-list.operation.js";
-import operation121 from "../operations/room/member-remove.operation.js";
-import operation122 from "../operations/room/member-role-change.operation.js";
-import operation123 from "../operations/room/owner-recover.operation.js";
-import operation124 from "../operations/room/owner-transfer.operation.js";
-import operation125 from "../operations/room/ownerless-list.operation.js";
-import operation126 from "../operations/room/patch.operation.js";
-import operation127 from "../operations/room/resource-share.operation.js";
-import operation128 from "../operations/room/resource-share-list.operation.js";
-import operation129 from "../operations/room/resource-share-revoke.operation.js";
-import operation130 from "../operations/room/view.operation.js";
-import operation131 from "../operations/sandbox/exec.operation.js";
-import operation132 from "../operations/session/create.operation.js";
-import operation133 from "../operations/search/session.operation.js";
-import operation134 from "../operations/session/search/reindex.operation.js";
-import operation135 from "../operations/settings/patch.operation.js";
-import operation136 from "../operations/skill/candidate/create.operation.js";
-import operation137 from "../operations/skill/lifecycle/apply.operation.js";
-import operation138 from "../operations/skill/optimization/cancel.operation.js";
-import operation139 from "../operations/skill/optimization/promote.operation.js";
-import operation140 from "../operations/skill/optimization/reject.operation.js";
-import operation141 from "../operations/skill/optimization/rollback.operation.js";
-import operation142 from "../operations/skill/optimization/start.operation.js";
-import operation143 from "../operations/skill/patch.operation.js";
-import operation144 from "../operations/skill/project/save.operation.js";
-import operation145 from "../operations/search/skill.operation.js";
-import operation146 from "../operations/skill/support_file/save.operation.js";
-import operation147 from "../operations/skill/usage/record.operation.js";
-import operation148 from "../operations/skill/view.operation.js";
-import operation149 from "../operations/soul/change/request.operation.js";
-import operation150 from "../operations/wiki/accept.operation.js";
-import operation151 from "../operations/wiki/archive.operation.js";
-import operation152 from "../operations/wiki/patch.operation.js";
-import operation153 from "../operations/wiki/proposal/create.operation.js";
-import operation154 from "../operations/wiki/reindex.operation.js";
-import operation155 from "../operations/wiki/reject.operation.js";
-import operation156 from "../operations/search/wiki.operation.js";
-import operation157 from "../operations/work_item/create.operation.js";
-import operation158 from "../operations/work_item/follow_up.operation.js";
-import operation159 from "../operations/work_item/steer.operation.js";
-import operation160 from "../operations/workspace/backup/create.operation.js";
-import operation161 from "../operations/workspace/backup/restore.operation.js";
-import operation162 from "../operations/workspace/context/get.operation.js";
-import operation163 from "../operations/workspace/member-add.operation.js";
-import operation164 from "../operations/workspace/member-list.operation.js";
-import operation165 from "../operations/workspace/member-remove.operation.js";
-import operation166 from "../operations/workspace/member-role-change.operation.js";
-import operation167 from "../operations/workspace/owner-transfer.operation.js";
-import operation168 from "../operations/workspace/repair.operation.js";
+import operation101 from "../operations/organization/organization-create.operation.js";
+import operation102 from "../operations/organization/organization-delete.operation.js";
+import operation103 from "../operations/organization/invitation-extend.operation.js";
+import operation104 from "../operations/organization/invitation-list.operation.js";
+import operation105 from "../operations/organization/invitation-reissue.operation.js";
+import operation106 from "../operations/organization/invitation-revoke.operation.js";
+import operation107 from "../operations/organization/organization-list.operation.js";
+import operation108 from "../operations/organization/member-accept.operation.js";
+import operation109 from "../operations/organization/member-invite.operation.js";
+import operation110 from "../operations/organization/member-leave.operation.js";
+import operation111 from "../operations/organization/member-list.operation.js";
+import operation112 from "../operations/organization/member-remove.operation.js";
+import operation113 from "../operations/organization/member-role-change.operation.js";
+import operation114 from "../operations/organization/organization-patch.operation.js";
+import operation115 from "../operations/organization/organization-view.operation.js";
+import operation116 from "../operations/organization/workspace-archive.operation.js";
+import operation117 from "../operations/organization/workspace-create.operation.js";
+import operation118 from "../operations/organization/workspace-delete.operation.js";
+import operation119 from "../operations/organization/workspace-list.operation.js";
+import operation120 from "../operations/organization/workspace-member-grant.operation.js";
+import operation121 from "../operations/organization/workspace-member-revoke.operation.js";
+import operation122 from "../operations/organization/workspace-restore.operation.js";
+import operation123 from "../operations/plugin/status/set.operation.js";
+import operation124 from "../operations/policy/change/request.operation.js";
+import operation125 from "../operations/presentation/plan.operation.js";
+import operation126 from "../operations/profile/change/request.operation.js";
+import operation127 from "../operations/reflection/run.operation.js";
+import operation128 from "../operations/reflection/suggestion/apply.operation.js";
+import operation129 from "../operations/resource/copy.operation.js";
+import operation130 from "../operations/resource/move.operation.js";
+import operation131 from "../operations/resource/promote.operation.js";
+import operation132 from "../operations/resource/redact.operation.js";
+import operation133 from "../operations/resource/translation_job/save.operation.js";
+import operation134 from "../operations/resource/translation/save.operation.js";
+import operation135 from "../operations/resource/version/get.operation.js";
+import operation136 from "../operations/rollback/restore.operation.js";
+import operation137 from "../operations/room/agent-permission-set.operation.js";
+import operation138 from "../operations/room/agent-remove.operation.js";
+import operation139 from "../operations/room/create.operation.js";
+import operation140 from "../operations/room/list.operation.js";
+import operation141 from "../operations/room/member-add.operation.js";
+import operation142 from "../operations/room/member-list.operation.js";
+import operation143 from "../operations/room/member-remove.operation.js";
+import operation144 from "../operations/room/member-role-change.operation.js";
+import operation145 from "../operations/room/owner-recover.operation.js";
+import operation146 from "../operations/room/owner-transfer.operation.js";
+import operation147 from "../operations/room/ownerless-list.operation.js";
+import operation148 from "../operations/room/patch.operation.js";
+import operation149 from "../operations/room/resource-share.operation.js";
+import operation150 from "../operations/room/resource-share-list.operation.js";
+import operation151 from "../operations/room/resource-share-revoke.operation.js";
+import operation152 from "../operations/room/view.operation.js";
+import operation153 from "../operations/sandbox/exec.operation.js";
+import operation154 from "../operations/session/create.operation.js";
+import operation155 from "../operations/search/session.operation.js";
+import operation156 from "../operations/session/search/reindex.operation.js";
+import operation157 from "../operations/settings/patch.operation.js";
+import operation158 from "../operations/skill/candidate/create.operation.js";
+import operation159 from "../operations/skill/lifecycle/apply.operation.js";
+import operation160 from "../operations/skill/optimization/cancel.operation.js";
+import operation161 from "../operations/skill/optimization/promote.operation.js";
+import operation162 from "../operations/skill/optimization/reject.operation.js";
+import operation163 from "../operations/skill/optimization/rollback.operation.js";
+import operation164 from "../operations/skill/optimization/start.operation.js";
+import operation165 from "../operations/skill/patch.operation.js";
+import operation166 from "../operations/skill/project/save.operation.js";
+import operation167 from "../operations/search/skill.operation.js";
+import operation168 from "../operations/skill/support_file/save.operation.js";
+import operation169 from "../operations/skill/usage/record.operation.js";
+import operation170 from "../operations/skill/view.operation.js";
+import operation171 from "../operations/soul/change/request.operation.js";
+import operation172 from "../operations/wiki/accept.operation.js";
+import operation173 from "../operations/wiki/archive.operation.js";
+import operation174 from "../operations/wiki/patch.operation.js";
+import operation175 from "../operations/wiki/proposal/create.operation.js";
+import operation176 from "../operations/wiki/reindex.operation.js";
+import operation177 from "../operations/wiki/reject.operation.js";
+import operation178 from "../operations/search/wiki.operation.js";
+import operation179 from "../operations/work_item/create.operation.js";
+import operation180 from "../operations/work_item/follow_up.operation.js";
+import operation181 from "../operations/work_item/steer.operation.js";
+import operation182 from "../operations/workspace/backup/create.operation.js";
+import operation183 from "../operations/workspace/backup/restore.operation.js";
+import operation184 from "../operations/organization/workspace-bundle-export.operation.js";
+import operation185 from "../operations/organization/workspace-bundle-restore.operation.js";
+import operation186 from "../operations/workspace/context/get.operation.js";
+import operation187 from "../operations/workspace/member-add.operation.js";
+import operation188 from "../operations/workspace/member-list.operation.js";
+import operation189 from "../operations/workspace/member-remove.operation.js";
+import operation190 from "../operations/workspace/member-role-change.operation.js";
+import operation191 from "../operations/organization/workspace-move-commit.operation.js";
+import operation192 from "../operations/organization/workspace-move-preflight.operation.js";
+import operation193 from "../operations/organization/workspace-move-status.operation.js";
+import operation194 from "../operations/workspace/owner-transfer.operation.js";
+import operation195 from "../operations/workspace/repair.operation.js";
 
 export interface DomainOperationContractMap {
   "activity.history.list": {
@@ -677,345 +704,480 @@ export interface DomainOperationContractMap {
     input: z.input<typeof operation100.input>;
     output: z.output<typeof operation100.output>;
   };
-  "plugin.status.set": {
+  "organization.create": {
     kind: typeof operation101.kind;
     input: z.input<typeof operation101.input>;
     output: z.output<typeof operation101.output>;
   };
-  "policy.change.request": {
+  "organization.delete": {
     kind: typeof operation102.kind;
     input: z.input<typeof operation102.input>;
     output: z.output<typeof operation102.output>;
   };
-  "presentation.plan": {
+  "organization.invitation.extend": {
     kind: typeof operation103.kind;
     input: z.input<typeof operation103.input>;
     output: z.output<typeof operation103.output>;
   };
-  "profile.change.request": {
+  "organization.invitation.list": {
     kind: typeof operation104.kind;
     input: z.input<typeof operation104.input>;
     output: z.output<typeof operation104.output>;
   };
-  "reflection.run": {
+  "organization.invitation.reissue": {
     kind: typeof operation105.kind;
     input: z.input<typeof operation105.input>;
     output: z.output<typeof operation105.output>;
   };
-  "reflection.suggestion.apply": {
+  "organization.invitation.revoke": {
     kind: typeof operation106.kind;
     input: z.input<typeof operation106.input>;
     output: z.output<typeof operation106.output>;
   };
-  "resource.copy": {
+  "organization.list": {
     kind: typeof operation107.kind;
     input: z.input<typeof operation107.input>;
     output: z.output<typeof operation107.output>;
   };
-  "resource.move": {
+  "organization.member.accept": {
     kind: typeof operation108.kind;
     input: z.input<typeof operation108.input>;
     output: z.output<typeof operation108.output>;
   };
-  "resource.promote": {
+  "organization.member.invite": {
     kind: typeof operation109.kind;
     input: z.input<typeof operation109.input>;
     output: z.output<typeof operation109.output>;
   };
-  "resource.redact": {
+  "organization.member.leave": {
     kind: typeof operation110.kind;
     input: z.input<typeof operation110.input>;
     output: z.output<typeof operation110.output>;
   };
-  "resource.translation_job.save": {
+  "organization.member.list": {
     kind: typeof operation111.kind;
     input: z.input<typeof operation111.input>;
     output: z.output<typeof operation111.output>;
   };
-  "resource.translation.save": {
+  "organization.member.remove": {
     kind: typeof operation112.kind;
     input: z.input<typeof operation112.input>;
     output: z.output<typeof operation112.output>;
   };
-  "resource.version.get": {
+  "organization.member.role.change": {
     kind: typeof operation113.kind;
     input: z.input<typeof operation113.input>;
     output: z.output<typeof operation113.output>;
   };
-  "rollback.restore": {
+  "organization.patch": {
     kind: typeof operation114.kind;
     input: z.input<typeof operation114.input>;
     output: z.output<typeof operation114.output>;
   };
-  "room.agent.permission.set": {
+  "organization.view": {
     kind: typeof operation115.kind;
     input: z.input<typeof operation115.input>;
     output: z.output<typeof operation115.output>;
   };
-  "room.agent.remove": {
+  "organization.workspace.archive": {
     kind: typeof operation116.kind;
     input: z.input<typeof operation116.input>;
     output: z.output<typeof operation116.output>;
   };
-  "room.create": {
+  "organization.workspace.create": {
     kind: typeof operation117.kind;
     input: z.input<typeof operation117.input>;
     output: z.output<typeof operation117.output>;
   };
-  "room.list": {
+  "organization.workspace.delete": {
     kind: typeof operation118.kind;
     input: z.input<typeof operation118.input>;
     output: z.output<typeof operation118.output>;
   };
-  "room.member.add": {
+  "organization.workspace.list": {
     kind: typeof operation119.kind;
     input: z.input<typeof operation119.input>;
     output: z.output<typeof operation119.output>;
   };
-  "room.member.list": {
+  "organization.workspace.member.grant": {
     kind: typeof operation120.kind;
     input: z.input<typeof operation120.input>;
     output: z.output<typeof operation120.output>;
   };
-  "room.member.remove": {
+  "organization.workspace.member.revoke": {
     kind: typeof operation121.kind;
     input: z.input<typeof operation121.input>;
     output: z.output<typeof operation121.output>;
   };
-  "room.member.role.change": {
+  "organization.workspace.restore": {
     kind: typeof operation122.kind;
     input: z.input<typeof operation122.input>;
     output: z.output<typeof operation122.output>;
   };
-  "room.owner.recover": {
+  "plugin.status.set": {
     kind: typeof operation123.kind;
     input: z.input<typeof operation123.input>;
     output: z.output<typeof operation123.output>;
   };
-  "room.owner.transfer": {
+  "policy.change.request": {
     kind: typeof operation124.kind;
     input: z.input<typeof operation124.input>;
     output: z.output<typeof operation124.output>;
   };
-  "room.ownerless.list": {
+  "presentation.plan": {
     kind: typeof operation125.kind;
     input: z.input<typeof operation125.input>;
     output: z.output<typeof operation125.output>;
   };
-  "room.patch": {
+  "profile.change.request": {
     kind: typeof operation126.kind;
     input: z.input<typeof operation126.input>;
     output: z.output<typeof operation126.output>;
   };
-  "room.resource.share": {
+  "reflection.run": {
     kind: typeof operation127.kind;
     input: z.input<typeof operation127.input>;
     output: z.output<typeof operation127.output>;
   };
-  "room.resource.share.list": {
+  "reflection.suggestion.apply": {
     kind: typeof operation128.kind;
     input: z.input<typeof operation128.input>;
     output: z.output<typeof operation128.output>;
   };
-  "room.resource.share.revoke": {
+  "resource.copy": {
     kind: typeof operation129.kind;
     input: z.input<typeof operation129.input>;
     output: z.output<typeof operation129.output>;
   };
-  "room.view": {
+  "resource.move": {
     kind: typeof operation130.kind;
     input: z.input<typeof operation130.input>;
     output: z.output<typeof operation130.output>;
   };
-  "sandbox.exec": {
+  "resource.promote": {
     kind: typeof operation131.kind;
     input: z.input<typeof operation131.input>;
     output: z.output<typeof operation131.output>;
   };
-  "session.create": {
+  "resource.redact": {
     kind: typeof operation132.kind;
     input: z.input<typeof operation132.input>;
     output: z.output<typeof operation132.output>;
   };
-  "session.search": {
+  "resource.translation_job.save": {
     kind: typeof operation133.kind;
     input: z.input<typeof operation133.input>;
     output: z.output<typeof operation133.output>;
   };
-  "session.search.reindex": {
+  "resource.translation.save": {
     kind: typeof operation134.kind;
     input: z.input<typeof operation134.input>;
     output: z.output<typeof operation134.output>;
   };
-  "settings.patch": {
+  "resource.version.get": {
     kind: typeof operation135.kind;
     input: z.input<typeof operation135.input>;
     output: z.output<typeof operation135.output>;
   };
-  "skill.candidate.create": {
+  "rollback.restore": {
     kind: typeof operation136.kind;
     input: z.input<typeof operation136.input>;
     output: z.output<typeof operation136.output>;
   };
-  "skill.lifecycle.apply": {
+  "room.agent.permission.set": {
     kind: typeof operation137.kind;
     input: z.input<typeof operation137.input>;
     output: z.output<typeof operation137.output>;
   };
-  "skill.optimization.cancel": {
+  "room.agent.remove": {
     kind: typeof operation138.kind;
     input: z.input<typeof operation138.input>;
     output: z.output<typeof operation138.output>;
   };
-  "skill.optimization.promote": {
+  "room.create": {
     kind: typeof operation139.kind;
     input: z.input<typeof operation139.input>;
     output: z.output<typeof operation139.output>;
   };
-  "skill.optimization.reject": {
+  "room.list": {
     kind: typeof operation140.kind;
     input: z.input<typeof operation140.input>;
     output: z.output<typeof operation140.output>;
   };
-  "skill.optimization.rollback": {
+  "room.member.add": {
     kind: typeof operation141.kind;
     input: z.input<typeof operation141.input>;
     output: z.output<typeof operation141.output>;
   };
-  "skill.optimization.start": {
+  "room.member.list": {
     kind: typeof operation142.kind;
     input: z.input<typeof operation142.input>;
     output: z.output<typeof operation142.output>;
   };
-  "skill.patch": {
+  "room.member.remove": {
     kind: typeof operation143.kind;
     input: z.input<typeof operation143.input>;
     output: z.output<typeof operation143.output>;
   };
-  "skill.project.save": {
+  "room.member.role.change": {
     kind: typeof operation144.kind;
     input: z.input<typeof operation144.input>;
     output: z.output<typeof operation144.output>;
   };
-  "skill.search": {
+  "room.owner.recover": {
     kind: typeof operation145.kind;
     input: z.input<typeof operation145.input>;
     output: z.output<typeof operation145.output>;
   };
-  "skill.support_file.save": {
+  "room.owner.transfer": {
     kind: typeof operation146.kind;
     input: z.input<typeof operation146.input>;
     output: z.output<typeof operation146.output>;
   };
-  "skill.usage.record": {
+  "room.ownerless.list": {
     kind: typeof operation147.kind;
     input: z.input<typeof operation147.input>;
     output: z.output<typeof operation147.output>;
   };
-  "skill.view": {
+  "room.patch": {
     kind: typeof operation148.kind;
     input: z.input<typeof operation148.input>;
     output: z.output<typeof operation148.output>;
   };
-  "soul.change.request": {
+  "room.resource.share": {
     kind: typeof operation149.kind;
     input: z.input<typeof operation149.input>;
     output: z.output<typeof operation149.output>;
   };
-  "wiki.accept": {
+  "room.resource.share.list": {
     kind: typeof operation150.kind;
     input: z.input<typeof operation150.input>;
     output: z.output<typeof operation150.output>;
   };
-  "wiki.archive": {
+  "room.resource.share.revoke": {
     kind: typeof operation151.kind;
     input: z.input<typeof operation151.input>;
     output: z.output<typeof operation151.output>;
   };
-  "wiki.patch": {
+  "room.view": {
     kind: typeof operation152.kind;
     input: z.input<typeof operation152.input>;
     output: z.output<typeof operation152.output>;
   };
-  "wiki.proposal.create": {
+  "sandbox.exec": {
     kind: typeof operation153.kind;
     input: z.input<typeof operation153.input>;
     output: z.output<typeof operation153.output>;
   };
-  "wiki.reindex": {
+  "session.create": {
     kind: typeof operation154.kind;
     input: z.input<typeof operation154.input>;
     output: z.output<typeof operation154.output>;
   };
-  "wiki.reject": {
+  "session.search": {
     kind: typeof operation155.kind;
     input: z.input<typeof operation155.input>;
     output: z.output<typeof operation155.output>;
   };
-  "wiki.search": {
+  "session.search.reindex": {
     kind: typeof operation156.kind;
     input: z.input<typeof operation156.input>;
     output: z.output<typeof operation156.output>;
   };
-  "work_item.create": {
+  "settings.patch": {
     kind: typeof operation157.kind;
     input: z.input<typeof operation157.input>;
     output: z.output<typeof operation157.output>;
   };
-  "work_item.follow_up": {
+  "skill.candidate.create": {
     kind: typeof operation158.kind;
     input: z.input<typeof operation158.input>;
     output: z.output<typeof operation158.output>;
   };
-  "work_item.steer": {
+  "skill.lifecycle.apply": {
     kind: typeof operation159.kind;
     input: z.input<typeof operation159.input>;
     output: z.output<typeof operation159.output>;
   };
-  "workspace.backup.create": {
+  "skill.optimization.cancel": {
     kind: typeof operation160.kind;
     input: z.input<typeof operation160.input>;
     output: z.output<typeof operation160.output>;
   };
-  "workspace.backup.restore": {
+  "skill.optimization.promote": {
     kind: typeof operation161.kind;
     input: z.input<typeof operation161.input>;
     output: z.output<typeof operation161.output>;
   };
-  "workspace.context.get": {
+  "skill.optimization.reject": {
     kind: typeof operation162.kind;
     input: z.input<typeof operation162.input>;
     output: z.output<typeof operation162.output>;
   };
-  "workspace.member.add": {
+  "skill.optimization.rollback": {
     kind: typeof operation163.kind;
     input: z.input<typeof operation163.input>;
     output: z.output<typeof operation163.output>;
   };
-  "workspace.member.list": {
+  "skill.optimization.start": {
     kind: typeof operation164.kind;
     input: z.input<typeof operation164.input>;
     output: z.output<typeof operation164.output>;
   };
-  "workspace.member.remove": {
+  "skill.patch": {
     kind: typeof operation165.kind;
     input: z.input<typeof operation165.input>;
     output: z.output<typeof operation165.output>;
   };
-  "workspace.member.role.change": {
+  "skill.project.save": {
     kind: typeof operation166.kind;
     input: z.input<typeof operation166.input>;
     output: z.output<typeof operation166.output>;
   };
-  "workspace.owner.transfer": {
+  "skill.search": {
     kind: typeof operation167.kind;
     input: z.input<typeof operation167.input>;
     output: z.output<typeof operation167.output>;
   };
-  "workspace.repair": {
+  "skill.support_file.save": {
     kind: typeof operation168.kind;
     input: z.input<typeof operation168.input>;
     output: z.output<typeof operation168.output>;
+  };
+  "skill.usage.record": {
+    kind: typeof operation169.kind;
+    input: z.input<typeof operation169.input>;
+    output: z.output<typeof operation169.output>;
+  };
+  "skill.view": {
+    kind: typeof operation170.kind;
+    input: z.input<typeof operation170.input>;
+    output: z.output<typeof operation170.output>;
+  };
+  "soul.change.request": {
+    kind: typeof operation171.kind;
+    input: z.input<typeof operation171.input>;
+    output: z.output<typeof operation171.output>;
+  };
+  "wiki.accept": {
+    kind: typeof operation172.kind;
+    input: z.input<typeof operation172.input>;
+    output: z.output<typeof operation172.output>;
+  };
+  "wiki.archive": {
+    kind: typeof operation173.kind;
+    input: z.input<typeof operation173.input>;
+    output: z.output<typeof operation173.output>;
+  };
+  "wiki.patch": {
+    kind: typeof operation174.kind;
+    input: z.input<typeof operation174.input>;
+    output: z.output<typeof operation174.output>;
+  };
+  "wiki.proposal.create": {
+    kind: typeof operation175.kind;
+    input: z.input<typeof operation175.input>;
+    output: z.output<typeof operation175.output>;
+  };
+  "wiki.reindex": {
+    kind: typeof operation176.kind;
+    input: z.input<typeof operation176.input>;
+    output: z.output<typeof operation176.output>;
+  };
+  "wiki.reject": {
+    kind: typeof operation177.kind;
+    input: z.input<typeof operation177.input>;
+    output: z.output<typeof operation177.output>;
+  };
+  "wiki.search": {
+    kind: typeof operation178.kind;
+    input: z.input<typeof operation178.input>;
+    output: z.output<typeof operation178.output>;
+  };
+  "work_item.create": {
+    kind: typeof operation179.kind;
+    input: z.input<typeof operation179.input>;
+    output: z.output<typeof operation179.output>;
+  };
+  "work_item.follow_up": {
+    kind: typeof operation180.kind;
+    input: z.input<typeof operation180.input>;
+    output: z.output<typeof operation180.output>;
+  };
+  "work_item.steer": {
+    kind: typeof operation181.kind;
+    input: z.input<typeof operation181.input>;
+    output: z.output<typeof operation181.output>;
+  };
+  "workspace.backup.create": {
+    kind: typeof operation182.kind;
+    input: z.input<typeof operation182.input>;
+    output: z.output<typeof operation182.output>;
+  };
+  "workspace.backup.restore": {
+    kind: typeof operation183.kind;
+    input: z.input<typeof operation183.input>;
+    output: z.output<typeof operation183.output>;
+  };
+  "workspace.bundle.export": {
+    kind: typeof operation184.kind;
+    input: z.input<typeof operation184.input>;
+    output: z.output<typeof operation184.output>;
+  };
+  "workspace.bundle.restore": {
+    kind: typeof operation185.kind;
+    input: z.input<typeof operation185.input>;
+    output: z.output<typeof operation185.output>;
+  };
+  "workspace.context.get": {
+    kind: typeof operation186.kind;
+    input: z.input<typeof operation186.input>;
+    output: z.output<typeof operation186.output>;
+  };
+  "workspace.member.add": {
+    kind: typeof operation187.kind;
+    input: z.input<typeof operation187.input>;
+    output: z.output<typeof operation187.output>;
+  };
+  "workspace.member.list": {
+    kind: typeof operation188.kind;
+    input: z.input<typeof operation188.input>;
+    output: z.output<typeof operation188.output>;
+  };
+  "workspace.member.remove": {
+    kind: typeof operation189.kind;
+    input: z.input<typeof operation189.input>;
+    output: z.output<typeof operation189.output>;
+  };
+  "workspace.member.role.change": {
+    kind: typeof operation190.kind;
+    input: z.input<typeof operation190.input>;
+    output: z.output<typeof operation190.output>;
+  };
+  "workspace.organization.move.commit": {
+    kind: typeof operation191.kind;
+    input: z.input<typeof operation191.input>;
+    output: z.output<typeof operation191.output>;
+  };
+  "workspace.organization.move.preflight": {
+    kind: typeof operation192.kind;
+    input: z.input<typeof operation192.input>;
+    output: z.output<typeof operation192.output>;
+  };
+  "workspace.organization.move.status": {
+    kind: typeof operation193.kind;
+    input: z.input<typeof operation193.input>;
+    output: z.output<typeof operation193.output>;
+  };
+  "workspace.owner.transfer": {
+    kind: typeof operation194.kind;
+    input: z.input<typeof operation194.input>;
+    output: z.output<typeof operation194.output>;
+  };
+  "workspace.repair": {
+    kind: typeof operation195.kind;
+    input: z.input<typeof operation195.input>;
+    output: z.output<typeof operation195.output>;
   };
 }
 
@@ -1114,6 +1276,23 @@ export const domainCommandIds = Object.freeze([
   "message.presentation.update",
   "objective.create",
   "objective.transition",
+  "organization.create",
+  "organization.delete",
+  "organization.invitation.extend",
+  "organization.invitation.reissue",
+  "organization.invitation.revoke",
+  "organization.member.accept",
+  "organization.member.invite",
+  "organization.member.leave",
+  "organization.member.remove",
+  "organization.member.role.change",
+  "organization.patch",
+  "organization.workspace.archive",
+  "organization.workspace.create",
+  "organization.workspace.delete",
+  "organization.workspace.member.grant",
+  "organization.workspace.member.revoke",
+  "organization.workspace.restore",
   "plugin.status.set",
   "policy.change.request",
   "profile.change.request",
@@ -1164,9 +1343,12 @@ export const domainCommandIds = Object.freeze([
   "work_item.steer",
   "workspace.backup.create",
   "workspace.backup.restore",
+  "workspace.bundle.export",
+  "workspace.bundle.restore",
   "workspace.member.add",
   "workspace.member.remove",
   "workspace.member.role.change",
+  "workspace.organization.move.commit",
   "workspace.owner.transfer",
   "workspace.repair",
 ] as const);
@@ -1188,6 +1370,11 @@ export const domainQueryIds = Object.freeze([
   "file.read",
   "generated_surface.export",
   "memory.search",
+  "organization.invitation.list",
+  "organization.list",
+  "organization.member.list",
+  "organization.view",
+  "organization.workspace.list",
   "presentation.plan",
   "resource.version.get",
   "room.list",
@@ -1201,6 +1388,8 @@ export const domainQueryIds = Object.freeze([
   "wiki.search",
   "workspace.context.get",
   "workspace.member.list",
+  "workspace.organization.move.preflight",
+  "workspace.organization.move.status",
 ] as const);
 export const domainOperationIds = Object.freeze({
   activityHistoryList: "activity.history.list",
@@ -1304,6 +1493,28 @@ export const domainOperationIds = Object.freeze({
   messagePresentationUpdate: "message.presentation.update",
   objectiveCreate: "objective.create",
   objectiveTransition: "objective.transition",
+  organizationCreate: "organization.create",
+  organizationDelete: "organization.delete",
+  organizationInvitationExtend: "organization.invitation.extend",
+  organizationInvitationList: "organization.invitation.list",
+  organizationInvitationReissue: "organization.invitation.reissue",
+  organizationInvitationRevoke: "organization.invitation.revoke",
+  organizationList: "organization.list",
+  organizationMemberAccept: "organization.member.accept",
+  organizationMemberInvite: "organization.member.invite",
+  organizationMemberLeave: "organization.member.leave",
+  organizationMemberList: "organization.member.list",
+  organizationMemberRemove: "organization.member.remove",
+  organizationMemberRoleChange: "organization.member.role.change",
+  organizationPatch: "organization.patch",
+  organizationView: "organization.view",
+  organizationWorkspaceArchive: "organization.workspace.archive",
+  organizationWorkspaceCreate: "organization.workspace.create",
+  organizationWorkspaceDelete: "organization.workspace.delete",
+  organizationWorkspaceList: "organization.workspace.list",
+  organizationWorkspaceMemberGrant: "organization.workspace.member.grant",
+  organizationWorkspaceMemberRevoke: "organization.workspace.member.revoke",
+  organizationWorkspaceRestore: "organization.workspace.restore",
   pluginStatusSet: "plugin.status.set",
   policyChangeRequest: "policy.change.request",
   presentationPlan: "presentation.plan",
@@ -1365,11 +1576,16 @@ export const domainOperationIds = Object.freeze({
   workItemSteer: "work_item.steer",
   workspaceBackupCreate: "workspace.backup.create",
   workspaceBackupRestore: "workspace.backup.restore",
+  workspaceBundleExport: "workspace.bundle.export",
+  workspaceBundleRestore: "workspace.bundle.restore",
   workspaceContextGet: "workspace.context.get",
   workspaceMemberAdd: "workspace.member.add",
   workspaceMemberList: "workspace.member.list",
   workspaceMemberRemove: "workspace.member.remove",
   workspaceMemberRoleChange: "workspace.member.role.change",
+  workspaceOrganizationMoveCommit: "workspace.organization.move.commit",
+  workspaceOrganizationMovePreflight: "workspace.organization.move.preflight",
+  workspaceOrganizationMoveStatus: "workspace.organization.move.status",
   workspaceOwnerTransfer: "workspace.owner.transfer",
   workspaceRepair: "workspace.repair",
 } as const);
@@ -1484,74 +1700,101 @@ const domainOperationInputSchemas = Object.freeze({
   "message.presentation.update": operation98.input,
   "objective.create": operation99.input,
   "objective.transition": operation100.input,
-  "plugin.status.set": operation101.input,
-  "policy.change.request": operation102.input,
-  "presentation.plan": operation103.input,
-  "profile.change.request": operation104.input,
-  "reflection.run": operation105.input,
-  "reflection.suggestion.apply": operation106.input,
-  "resource.copy": operation107.input,
-  "resource.move": operation108.input,
-  "resource.promote": operation109.input,
-  "resource.redact": operation110.input,
-  "resource.translation_job.save": operation111.input,
-  "resource.translation.save": operation112.input,
-  "resource.version.get": operation113.input,
-  "rollback.restore": operation114.input,
-  "room.agent.permission.set": operation115.input,
-  "room.agent.remove": operation116.input,
-  "room.create": operation117.input,
-  "room.list": operation118.input,
-  "room.member.add": operation119.input,
-  "room.member.list": operation120.input,
-  "room.member.remove": operation121.input,
-  "room.member.role.change": operation122.input,
-  "room.owner.recover": operation123.input,
-  "room.owner.transfer": operation124.input,
-  "room.ownerless.list": operation125.input,
-  "room.patch": operation126.input,
-  "room.resource.share": operation127.input,
-  "room.resource.share.list": operation128.input,
-  "room.resource.share.revoke": operation129.input,
-  "room.view": operation130.input,
-  "sandbox.exec": operation131.input,
-  "session.create": operation132.input,
-  "session.search": operation133.input,
-  "session.search.reindex": operation134.input,
-  "settings.patch": operation135.input,
-  "skill.candidate.create": operation136.input,
-  "skill.lifecycle.apply": operation137.input,
-  "skill.optimization.cancel": operation138.input,
-  "skill.optimization.promote": operation139.input,
-  "skill.optimization.reject": operation140.input,
-  "skill.optimization.rollback": operation141.input,
-  "skill.optimization.start": operation142.input,
-  "skill.patch": operation143.input,
-  "skill.project.save": operation144.input,
-  "skill.search": operation145.input,
-  "skill.support_file.save": operation146.input,
-  "skill.usage.record": operation147.input,
-  "skill.view": operation148.input,
-  "soul.change.request": operation149.input,
-  "wiki.accept": operation150.input,
-  "wiki.archive": operation151.input,
-  "wiki.patch": operation152.input,
-  "wiki.proposal.create": operation153.input,
-  "wiki.reindex": operation154.input,
-  "wiki.reject": operation155.input,
-  "wiki.search": operation156.input,
-  "work_item.create": operation157.input,
-  "work_item.follow_up": operation158.input,
-  "work_item.steer": operation159.input,
-  "workspace.backup.create": operation160.input,
-  "workspace.backup.restore": operation161.input,
-  "workspace.context.get": operation162.input,
-  "workspace.member.add": operation163.input,
-  "workspace.member.list": operation164.input,
-  "workspace.member.remove": operation165.input,
-  "workspace.member.role.change": operation166.input,
-  "workspace.owner.transfer": operation167.input,
-  "workspace.repair": operation168.input,
+  "organization.create": operation101.input,
+  "organization.delete": operation102.input,
+  "organization.invitation.extend": operation103.input,
+  "organization.invitation.list": operation104.input,
+  "organization.invitation.reissue": operation105.input,
+  "organization.invitation.revoke": operation106.input,
+  "organization.list": operation107.input,
+  "organization.member.accept": operation108.input,
+  "organization.member.invite": operation109.input,
+  "organization.member.leave": operation110.input,
+  "organization.member.list": operation111.input,
+  "organization.member.remove": operation112.input,
+  "organization.member.role.change": operation113.input,
+  "organization.patch": operation114.input,
+  "organization.view": operation115.input,
+  "organization.workspace.archive": operation116.input,
+  "organization.workspace.create": operation117.input,
+  "organization.workspace.delete": operation118.input,
+  "organization.workspace.list": operation119.input,
+  "organization.workspace.member.grant": operation120.input,
+  "organization.workspace.member.revoke": operation121.input,
+  "organization.workspace.restore": operation122.input,
+  "plugin.status.set": operation123.input,
+  "policy.change.request": operation124.input,
+  "presentation.plan": operation125.input,
+  "profile.change.request": operation126.input,
+  "reflection.run": operation127.input,
+  "reflection.suggestion.apply": operation128.input,
+  "resource.copy": operation129.input,
+  "resource.move": operation130.input,
+  "resource.promote": operation131.input,
+  "resource.redact": operation132.input,
+  "resource.translation_job.save": operation133.input,
+  "resource.translation.save": operation134.input,
+  "resource.version.get": operation135.input,
+  "rollback.restore": operation136.input,
+  "room.agent.permission.set": operation137.input,
+  "room.agent.remove": operation138.input,
+  "room.create": operation139.input,
+  "room.list": operation140.input,
+  "room.member.add": operation141.input,
+  "room.member.list": operation142.input,
+  "room.member.remove": operation143.input,
+  "room.member.role.change": operation144.input,
+  "room.owner.recover": operation145.input,
+  "room.owner.transfer": operation146.input,
+  "room.ownerless.list": operation147.input,
+  "room.patch": operation148.input,
+  "room.resource.share": operation149.input,
+  "room.resource.share.list": operation150.input,
+  "room.resource.share.revoke": operation151.input,
+  "room.view": operation152.input,
+  "sandbox.exec": operation153.input,
+  "session.create": operation154.input,
+  "session.search": operation155.input,
+  "session.search.reindex": operation156.input,
+  "settings.patch": operation157.input,
+  "skill.candidate.create": operation158.input,
+  "skill.lifecycle.apply": operation159.input,
+  "skill.optimization.cancel": operation160.input,
+  "skill.optimization.promote": operation161.input,
+  "skill.optimization.reject": operation162.input,
+  "skill.optimization.rollback": operation163.input,
+  "skill.optimization.start": operation164.input,
+  "skill.patch": operation165.input,
+  "skill.project.save": operation166.input,
+  "skill.search": operation167.input,
+  "skill.support_file.save": operation168.input,
+  "skill.usage.record": operation169.input,
+  "skill.view": operation170.input,
+  "soul.change.request": operation171.input,
+  "wiki.accept": operation172.input,
+  "wiki.archive": operation173.input,
+  "wiki.patch": operation174.input,
+  "wiki.proposal.create": operation175.input,
+  "wiki.reindex": operation176.input,
+  "wiki.reject": operation177.input,
+  "wiki.search": operation178.input,
+  "work_item.create": operation179.input,
+  "work_item.follow_up": operation180.input,
+  "work_item.steer": operation181.input,
+  "workspace.backup.create": operation182.input,
+  "workspace.backup.restore": operation183.input,
+  "workspace.bundle.export": operation184.input,
+  "workspace.bundle.restore": operation185.input,
+  "workspace.context.get": operation186.input,
+  "workspace.member.add": operation187.input,
+  "workspace.member.list": operation188.input,
+  "workspace.member.remove": operation189.input,
+  "workspace.member.role.change": operation190.input,
+  "workspace.organization.move.commit": operation191.input,
+  "workspace.organization.move.preflight": operation192.input,
+  "workspace.organization.move.status": operation193.input,
+  "workspace.owner.transfer": operation194.input,
+  "workspace.repair": operation195.input,
 } as const);
 
 export function parseDomainOperationInput<Id extends DomainOperationId>(
@@ -1734,4 +1977,31 @@ export const operationDefinitions: readonly OperationDefinition[] = Object.freez
   operation166,
   operation167,
   operation168,
+  operation169,
+  operation170,
+  operation171,
+  operation172,
+  operation173,
+  operation174,
+  operation175,
+  operation176,
+  operation177,
+  operation178,
+  operation179,
+  operation180,
+  operation181,
+  operation182,
+  operation183,
+  operation184,
+  operation185,
+  operation186,
+  operation187,
+  operation188,
+  operation189,
+  operation190,
+  operation191,
+  operation192,
+  operation193,
+  operation194,
+  operation195,
 ]);

@@ -29,6 +29,20 @@ export interface ProviderOutput {
   diagnostics?: ProviderDiagnostics[];
 }
 
+/** A provider-owned increment. Text is deliberately kept untrimmed so that
+ * whitespace between streamed model tokens is not lost at the Host boundary.
+ */
+export interface ProviderStreamChunk {
+  content?: string;
+  toolCalls?: ProviderToolCall[];
+  finishReason?: string;
+  usage?: Record<string, unknown>;
+  /** Provider metadata that must not be rendered as assistant text. */
+  ignored?: boolean;
+  /** Explicit stream terminator (for example an SSE [DONE] sentinel). */
+  terminal?: boolean;
+}
+
 export interface ProviderInput {
   abortSignal?: AbortSignal;
   envelope: MessageEnvelope;
@@ -89,7 +103,12 @@ export interface ProviderAdapter {
   readonly id: ProviderId | "fake";
   readonly model: string;
   generate(input: ProviderInput): Promise<ProviderOutput>;
+  /** Optional native streaming path. Adapters without it keep generate(). */
+  stream?(input: ProviderInput): AsyncIterable<ProviderStreamChunk>;
 }
+
+/** A single provider request must eventually settle, even if the transport never responds. */
+export const PROVIDER_REQUEST_TIMEOUT_MS = 120_000;
 
 export interface ProviderStatus {
   provider: string;
@@ -188,6 +207,73 @@ export class ProviderRegistry implements ProviderAdapter {
       combineFailureDispositions(failures.map((failure) => failure.disposition))
     );
   }
+
+  async *stream(input: ProviderInput): AsyncIterable<ProviderStreamChunk> {
+    if (input.abortSignal?.aborted) {
+      throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
+        reason: "network",
+        retryable: false,
+        message: "Provider request was cancelled before starting."
+      }, "not_started");
+    }
+    if (this.candidates.length === 0) {
+      throw new ProviderRequestError("provider_not_configured", "No LLM provider is configured.", {
+        reason: "not_configured",
+        retryable: false
+      });
+    }
+
+    const failures: Array<{ diagnostics: ProviderDiagnostics; disposition: ProviderFailureDisposition }> = [];
+    for (const candidate of this.candidates) {
+      if (input.abortSignal?.aborted) {
+        throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
+          reason: "network",
+          retryable: false,
+          message: "Provider request was cancelled before starting."
+        }, "not_started");
+      }
+      let emitted = false;
+      try {
+        if (candidate.stream) {
+          for await (const chunk of candidate.stream(input)) {
+            const normalized = validateProviderStreamChunk(chunk);
+            if (hasProviderStreamValue(normalized)) emitted = true;
+            yield normalized;
+          }
+        } else {
+          const output = await candidate.generate(input);
+          emitted = true;
+          yield {
+            content: output.content,
+            toolCalls: output.toolCalls,
+            ...(output.finishReason ? { finishReason: output.finishReason } : {}),
+            ...(output.usage ? { usage: output.usage } : {}),
+            terminal: true
+          };
+        }
+        return;
+      } catch (error) {
+        const disposition = providerFailureDisposition(error);
+        // Once a stream has exposed output, retrying another provider could
+        // duplicate visible work or a host-side effect. A transport loss is
+        // also intentionally never retried, matching generate().
+        if (emitted || disposition === "transport_lost" || disposition === "cancel_unconfirmed") {
+          throw providerFailureForCandidate(candidate, error, disposition);
+        }
+        failures.push({
+          diagnostics: providerFailureDiagnostic(candidate, error),
+          disposition
+        });
+      }
+    }
+
+    throw new ProviderRequestError(
+      "provider_failed",
+      "All configured LLM providers failed.",
+      combineFailureDiagnostics(failures.map((failure) => failure.diagnostics)),
+      combineFailureDispositions(failures.map((failure) => failure.disposition))
+    );
+  }
 }
 
 export class FakeProviderAdapter implements ProviderAdapter {
@@ -259,6 +345,7 @@ function adapterForRef(ref: ModelRef, env: NodeJS.ProcessEnv): ProviderAdapter |
 
 class ProfileProviderAdapter implements ProviderAdapter {
   readonly id: ProviderId;
+  readonly stream?: (input: ProviderInput) => AsyncIterable<ProviderStreamChunk>;
 
   constructor(
     private readonly profile: ProviderProfile,
@@ -266,19 +353,47 @@ class ProfileProviderAdapter implements ProviderAdapter {
     private readonly credential: ProviderCredential
   ) {
     this.id = profile.id;
+    if (profile.buildStreamRequest && profile.normalizeStreamChunk) {
+      this.stream = (input) => this.streamProfile(input);
+    }
   }
 
   async generate(input: ProviderInput): Promise<ProviderOutput> {
     const request = this.profile.buildRequest(this.model, this.credential, input);
     const response = await postJson(this.profile, request.url, request.headers, request.body, input.abortSignal);
     try {
-      return this.profile.normalizeResponse(response);
+      const output = this.profile.normalizeResponse(response);
+      return { ...output, toolCalls: ensureProviderToolCallIds(output.toolCalls) };
     } catch (error) {
       throw new ProviderRequestError("provider_failed", error instanceof Error ? error.message : "Provider response was invalid.", {
         reason: "invalid_response",
         retryable: false,
         message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider response was invalid.")
       });
+    }
+  }
+
+  private async *streamProfile(input: ProviderInput): AsyncIterable<ProviderStreamChunk> {
+    const buildStreamRequest = this.profile.buildStreamRequest;
+    const normalizeStreamChunk = this.profile.normalizeStreamChunk;
+    if (!buildStreamRequest || !normalizeStreamChunk) return;
+    const request = buildStreamRequest(this.model, this.credential, input);
+    for await (const response of postSse(this.profile, request.url, request.headers, request.body, input.abortSignal)) {
+      if (response === providerSseDoneMarker) {
+        yield { terminal: true };
+        return;
+      }
+      try {
+        yield normalizeStreamChunk(response);
+      } catch (error) {
+        throw new ProviderRequestError("provider_failed", error instanceof Error ? error.message : "Provider response was invalid.", {
+          provider: this.id,
+          model: this.model,
+          reason: "invalid_response",
+          retryable: false,
+          message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider response was invalid.")
+        }, "provider_terminal_response");
+      }
     }
   }
 }
@@ -330,43 +445,304 @@ async function postJson(profile: ProviderProfile, url: string, headers: Record<s
       message: "Provider request was cancelled before starting."
     }, "not_started");
   }
-  let response: Response;
+  const control = createProviderRequestControl(signal);
   try {
-    response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal
+    let response: Response;
+    try {
+      response = await awaitProviderRequest(fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: control.signal
+      }), control);
+    } catch (error) {
+      if (error instanceof ProviderRequestError) throw error;
+      const aborted = signal?.aborted === true || error instanceof Error && error.name === "AbortError";
+      throw new ProviderRequestError("provider_failed", "Provider request failed.", {
+        reason: "network",
+        retryable: !aborted,
+        message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider request failed.", headerSecrets(headers))
+      }, aborted ? "cancel_unconfirmed" : "transport_lost");
+    }
+
+    if (!response.ok) {
+      const message = await awaitProviderRequest(response.text().catch(() => response.statusText), control);
+      throw new ProviderRequestError("provider_failed", `Provider returned ${response.status}.`, {
+        status: response.status,
+        reason: profile.classifyError(response.status, message),
+        retryable: response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500,
+        message: safeDiagnosticMessage(message, headerSecrets(headers))
+      });
+    }
+
+    try {
+      return await awaitProviderRequest(response.json() as Promise<unknown>, control);
+    } catch (error) {
+      if (error instanceof ProviderRequestError) throw error;
+      throw new ProviderRequestError("provider_failed", "Provider response was invalid.", {
+        status: response.status,
+        reason: "invalid_response",
+        retryable: false,
+        message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider response was invalid.", headerSecrets(headers))
+      }, "provider_terminal_response");
+    }
+  } finally {
+    control.dispose();
+  }
+}
+
+export interface ProviderSseEvent {
+  event?: string;
+  data: string;
+}
+
+/** Incremental SSE parser that safely carries an incomplete line across reads. */
+export class ServerSentEventParser {
+  private lineBuffer = "";
+  private dataLines: string[] = [];
+  private eventName: string | undefined;
+
+  push(chunk: string): ProviderSseEvent[] {
+    this.lineBuffer += chunk;
+    const events: ProviderSseEvent[] = [];
+    while (true) {
+      const lineEnd = findSseLineEnd(this.lineBuffer);
+      if (!lineEnd) break;
+      const rawLine = this.lineBuffer.slice(0, lineEnd.index);
+      this.lineBuffer = this.lineBuffer.slice(lineEnd.nextIndex);
+      this.consumeLine(rawLine, events);
+    }
+    return events;
+  }
+
+  finish(): ProviderSseEvent[] {
+    const events: ProviderSseEvent[] = [];
+    if (this.lineBuffer) {
+      const rawLine = this.lineBuffer.endsWith("\r") ? this.lineBuffer.slice(0, -1) : this.lineBuffer;
+      this.lineBuffer = "";
+      this.consumeLine(rawLine, events);
+    }
+    this.dispatch(events);
+    return events;
+  }
+
+  private consumeLine(line: string, events: ProviderSseEvent[]): void {
+    if (line === "") {
+      this.dispatch(events);
+      return;
+    }
+    if (line.startsWith(":")) return;
+    const separator = line.indexOf(":");
+    const field = separator >= 0 ? line.slice(0, separator) : line;
+    const rawValue = separator >= 0 ? line.slice(separator + 1) : "";
+    const value = rawValue.startsWith(" ") ? rawValue.slice(1) : rawValue;
+    if (field === "data") {
+      this.dataLines.push(value);
+    } else if (field === "event") {
+      this.eventName = value;
+    }
+  }
+
+  private dispatch(events: ProviderSseEvent[]): void {
+    if (this.dataLines.length === 0 && this.eventName === undefined) return;
+    events.push({
+      ...(this.eventName !== undefined ? { event: this.eventName } : {}),
+      data: this.dataLines.join("\n")
     });
-  } catch (error) {
-    const aborted = signal?.aborted === true || error instanceof Error && error.name === "AbortError";
-    throw new ProviderRequestError("provider_failed", "Provider request failed.", {
+    this.dataLines = [];
+    this.eventName = undefined;
+  }
+}
+
+function findSseLineEnd(value: string): { index: number; nextIndex: number } | undefined {
+  const lineFeed = value.indexOf("\n");
+  const carriageReturn = value.indexOf("\r");
+  const index = lineFeed < 0 ? carriageReturn : carriageReturn < 0 ? lineFeed : Math.min(lineFeed, carriageReturn);
+  if (index < 0) return undefined;
+  if (value[index] === "\r" && index === value.length - 1) return undefined;
+  return {
+    index,
+    nextIndex: value[index] === "\r" && value[index + 1] === "\n" ? index + 2 : index + 1
+  };
+}
+
+export function parseServerSentEventData(event: ProviderSseEvent): unknown | undefined {
+  const data = event.data.trim();
+  if (!data || data === "[DONE]") return undefined;
+  try {
+    return JSON.parse(data) as unknown;
+  } catch {
+    throw invalidResponse("Provider stream response was invalid.");
+  }
+}
+
+interface ProviderRequestControl {
+  signal: AbortSignal;
+  timeoutPromise: Promise<never>;
+  abortPromise: Promise<never>;
+  timedOut(): boolean;
+  dispose(): void;
+}
+
+function createProviderRequestControl(parentSignal?: AbortSignal): ProviderRequestControl {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let rejectTimeout: (error: ProviderRequestError) => void = () => undefined;
+  let rejectAbort: (error: ProviderRequestError) => void = () => undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    rejectTimeout = reject;
+  });
+  const abortPromise = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  // The race below observes this rejection while a request is active. Keep a
+  // handler attached as well so a caller aborting just after a fast response
+  // cannot create an unhandled rejection before dispose() removes the listener.
+  void abortPromise.catch(() => undefined);
+  const onAbort = () => {
+    controller.abort();
+    rejectAbort(providerRequestCancellationError());
+  };
+  if (parentSignal?.aborted) {
+    onAbort();
+  } else {
+    parentSignal?.addEventListener("abort", onAbort, { once: true });
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      rejectTimeout(providerRequestTimeoutError());
+    }, PROVIDER_REQUEST_TIMEOUT_MS);
+  }
+  return {
+    signal: controller.signal,
+    timeoutPromise,
+    abortPromise,
+    timedOut: () => timedOut,
+    dispose: () => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      parentSignal?.removeEventListener("abort", onAbort);
+    }
+  };
+}
+
+function awaitProviderRequest<T>(operation: Promise<T>, control: ProviderRequestControl): Promise<T> {
+  return Promise.race([operation, control.timeoutPromise, control.abortPromise]);
+}
+
+function providerRequestTimeoutError(): ProviderRequestError {
+  return new ProviderRequestError("provider_failed", "Provider request timed out.", {
+    reason: "network",
+    retryable: true,
+    message: "Provider request timed out."
+  }, "transport_lost");
+}
+
+function providerRequestCancellationError(): ProviderRequestError {
+  return new ProviderRequestError("provider_failed", "Provider request cancellation was not confirmed.", {
+    reason: "network",
+    retryable: false,
+    message: "Provider request cancellation was not confirmed."
+  }, "cancel_unconfirmed");
+}
+
+async function* postSse(profile: ProviderProfile, url: string, headers: Record<string, string>, body: unknown, signal?: AbortSignal): AsyncIterable<unknown> {
+  if (signal?.aborted) {
+    throw new ProviderRequestError("provider_failed", "Provider request was cancelled before starting.", {
       reason: "network",
-      retryable: !aborted,
-      message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider request failed.")
-    }, aborted ? "cancel_unconfirmed" : "transport_lost");
-  }
-
-  if (!response.ok) {
-    const message = await response.text().catch(() => response.statusText);
-    throw new ProviderRequestError("provider_failed", `Provider returned ${response.status}.`, {
-      status: response.status,
-      reason: profile.classifyError(response.status, message),
-      retryable: response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500,
-      message: safeDiagnosticMessage(message)
-    });
-  }
-
-  try {
-    return await response.json() as unknown;
-  } catch (error) {
-    throw new ProviderRequestError("provider_failed", "Provider response was invalid.", {
-      status: response.status,
-      reason: "invalid_response",
       retryable: false,
-      message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider response was invalid.")
-    }, "provider_terminal_response");
+      message: "Provider request was cancelled before starting."
+    }, "not_started");
   }
+  const control = createProviderRequestControl(signal);
+  try {
+    let response: Response;
+    try {
+      response = await awaitProviderRequest(fetch(url, {
+        method: "POST",
+        headers: { ...headers, Accept: "text/event-stream" },
+        body: JSON.stringify(body),
+        signal: control.signal
+      }), control);
+    } catch (error) {
+      if (error instanceof ProviderRequestError) throw error;
+      const aborted = signal?.aborted === true || error instanceof Error && error.name === "AbortError";
+      throw new ProviderRequestError("provider_failed", "Provider request failed.", {
+        reason: "network",
+        retryable: !aborted,
+        message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider request failed.", headerSecrets(headers))
+      }, aborted ? "cancel_unconfirmed" : "transport_lost");
+    }
+
+    if (!response.ok) {
+      const message = await awaitProviderRequest(response.text().catch(() => response.statusText), control);
+      throw new ProviderRequestError("provider_failed", `Provider returned ${response.status}.`, {
+        status: response.status,
+        reason: profile.classifyError(response.status, message),
+        retryable: response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500,
+        message: safeDiagnosticMessage(message, headerSecrets(headers))
+      });
+    }
+    if (!response.body) {
+      throw new ProviderRequestError("provider_failed", "Provider stream response was empty.", {
+        status: response.status,
+        reason: "invalid_response",
+        retryable: false,
+        message: "Provider stream response was empty."
+      }, "provider_terminal_response");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = new ServerSentEventParser();
+    try {
+      while (true) {
+        const next = await awaitProviderRequest(reader.read(), control);
+        if (next.done) break;
+        const text = decoder.decode(next.value, { stream: true });
+        for (const event of parser.push(text)) {
+          const parsed = parseSseEventForStream(event);
+          if (parsed !== undefined) yield parsed;
+        }
+      }
+      const tail = decoder.decode();
+      for (const event of parser.push(tail)) {
+        const parsed = parseSseEventForStream(event);
+        if (parsed !== undefined) yield parsed;
+      }
+      for (const event of parser.finish()) {
+        const parsed = parseSseEventForStream(event);
+        if (parsed !== undefined) yield parsed;
+      }
+    } catch (error) {
+      if (error instanceof ProviderRequestError) throw error;
+      const aborted = signal?.aborted === true || error instanceof Error && error.name === "AbortError";
+      throw new ProviderRequestError("provider_failed", "Provider stream was interrupted.", {
+        status: response.status,
+        reason: "network",
+        retryable: !aborted,
+        message: safeDiagnosticMessage(error instanceof Error ? error.message : "Provider stream was interrupted.", headerSecrets(headers))
+      }, aborted ? "cancel_unconfirmed" : "transport_lost");
+    } finally {
+      if (control.timedOut() || signal?.aborted) void reader.cancel().catch(() => undefined);
+      try {
+        reader.releaseLock();
+      } catch {
+        // A transport that ignores abort may still have a pending read. The
+        // request has already settled; there is no safe work left to expose.
+      }
+    }
+  } finally {
+    control.dispose();
+  }
+}
+
+/** The SSE transport treats [DONE] as an explicit end-of-stream marker. */
+const providerSseDoneMarker = Symbol("provider_sse_done");
+
+function parseSseEventForStream(event: ProviderSseEvent): unknown | typeof providerSseDoneMarker | undefined {
+  if (event.data.trim() === "[DONE]") return providerSseDoneMarker;
+  return parseServerSentEventData(event);
 }
 
 function validateProviderOutput(value: unknown): ProviderOutput {
@@ -374,7 +750,8 @@ function validateProviderOutput(value: unknown): ProviderOutput {
     throw invalidResponse("Provider output was not an object.");
   }
   if (typeof value.agentMessage === "string") {
-    return normalizeLegacyProviderOutput(value);
+    const output = normalizeLegacyProviderOutput(value);
+    return { ...output, toolCalls: ensureProviderToolCallIds(output.toolCalls) };
   }
   const content = stringValue(value.content).trim();
   if (!content) {
@@ -382,11 +759,43 @@ function validateProviderOutput(value: unknown): ProviderOutput {
   }
   return {
     content,
-    toolCalls: normalizeToolCalls(value.toolCalls),
+    toolCalls: ensureProviderToolCallIds(normalizeToolCalls(value.toolCalls)),
     ...(typeof value.finishReason === "string" ? { finishReason: value.finishReason } : {}),
     ...(isRecord(value.usage) ? { usage: value.usage } : {}),
     ...(Array.isArray(value.diagnostics) ? { diagnostics: value.diagnostics.filter(isProviderDiagnostics) } : {})
   };
+}
+
+function validateProviderStreamChunk(value: unknown): ProviderStreamChunk {
+  if (!isRecord(value)) {
+    throw invalidResponse("Provider stream chunk was not an object.");
+  }
+  const content = typeof value.content === "string" ? value.content : undefined;
+  const toolCalls = normalizeToolCalls(value.toolCalls);
+  const finishReason = typeof value.finishReason === "string" ? value.finishReason : undefined;
+  const usage = isRecord(value.usage) ? value.usage : undefined;
+  const ignored = value.ignored === true;
+  const terminal = value.terminal === true;
+  if (content === undefined && toolCalls.length === 0 && finishReason === undefined && usage === undefined && !ignored && !terminal) {
+    throw invalidResponse("Provider stream chunk was empty.");
+  }
+  return {
+    ...(content !== undefined ? { content } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
+    ...(finishReason !== undefined ? { finishReason } : {}),
+    ...(usage ? { usage } : {}),
+    ...(ignored ? { ignored: true } : {}),
+    ...(terminal ? { terminal: true } : {})
+  };
+}
+
+function hasProviderStreamValue(chunk: ProviderStreamChunk): boolean {
+  return (chunk.content?.length ?? 0) > 0
+  || (chunk.toolCalls?.length ?? 0) > 0
+  || chunk.finishReason !== undefined
+  || chunk.usage !== undefined
+  || chunk.ignored === true
+  || chunk.terminal === true;
 }
 
 function normalizeLegacyProviderOutput(value: Record<string, unknown>): ProviderOutput {
@@ -423,6 +832,45 @@ function normalizeToolCall(value: unknown): ProviderToolCall | undefined {
     name: value.name,
     arguments: parseToolArguments(value.arguments)
   };
+}
+
+/**
+ * Provider APIs do not share a tool-call ID contract. In particular Gemini
+ * function calls may omit one. Host execution needs an ID even for a replay,
+ * so derive it from the call shape and occurrence rather than randomness.
+ */
+export function ensureProviderToolCallIds(toolCalls: ProviderToolCall[]): ProviderToolCall[] {
+  const occurrences = new Map<string, number>();
+  return toolCalls.map((toolCall) => {
+    const base = toolCall.id?.trim() || `tool_${stableToolCallHash(toolCall)}`;
+    const occurrence = (occurrences.get(base) ?? 0) + 1;
+    occurrences.set(base, occurrence);
+    return {
+      ...toolCall,
+      id: occurrence === 1 ? base : `${base}_${occurrence}`
+    };
+  });
+}
+
+function stableToolCallHash(toolCall: ProviderToolCall): string {
+  const value = stableJson({ name: toolCall.name, arguments: toolCall.arguments });
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function stableJson(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(String(value));
 }
 
 function parseToolArguments(value: unknown): Record<string, unknown> {
@@ -464,6 +912,22 @@ function providerFailureDiagnostic(candidate: ProviderAdapter, error: unknown): 
   };
 }
 
+function providerFailureForCandidate(candidate: ProviderAdapter, error: unknown, disposition: ProviderFailureDisposition): ProviderRequestError {
+  if (error instanceof ProviderRequestError) {
+    return new ProviderRequestError(error.code, error.message, {
+      ...error.diagnostics,
+      provider: error.diagnostics.provider ?? candidate.id,
+      model: error.diagnostics.model ?? candidate.model
+    }, disposition);
+  }
+  return new ProviderRequestError(
+    "provider_failed",
+    error instanceof Error ? error.message : "Provider request failed.",
+    providerFailureDiagnostic(candidate, error),
+    disposition
+  );
+}
+
 function providerFailureDisposition(error: unknown): ProviderFailureDisposition {
   return error instanceof ProviderRequestError ? error.disposition : "transport_lost";
 }
@@ -494,8 +958,12 @@ function combineFailureDiagnostics(failures: ProviderDiagnostics[]): ProviderDia
   };
 }
 
-function safeDiagnosticMessage(value: string): string {
-  return value
+function safeDiagnosticMessage(value: string, secretValues: string[] = []): string {
+  let sanitized = value;
+  for (const secret of secretValues) {
+    if (secret) sanitized = sanitized.split(secret).join("[redacted]");
+  }
+  return sanitized
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/key=([A-Za-z0-9._~+/=-]+)/gi, "key=[redacted]")
     .replace(/api[_-]?key["']?\s*[:=]\s*["']?[^"',\s}]+/gi, "api_key=[redacted]")
@@ -506,6 +974,13 @@ function safeDiagnosticMessage(value: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 240);
+}
+
+function headerSecrets(headers: Record<string, string>): string[] {
+  return Object.entries(headers)
+    .filter(([name]) => /(authorization|api[-_]?key|token|secret)/i.test(name))
+    .map(([, value]) => value.replace(/^Bearer\s+/i, ""))
+    .filter(Boolean);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

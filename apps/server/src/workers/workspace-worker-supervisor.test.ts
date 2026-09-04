@@ -12,6 +12,13 @@ function makeMaintenance(): WorkspaceCompletionMaintenancePort {
   return { runTick: vi.fn(async () => undefined) };
 }
 
+function makeExecutionJobWorker() {
+  return {
+    runTick: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined)
+  };
+}
+
 const context = { workspaceId: "workspace_one", accountId: "account_one" };
 
 describe("WorkspaceWorkerSupervisor", () => {
@@ -67,6 +74,42 @@ describe("WorkspaceWorkerSupervisor", () => {
       accountId: value.accountId
     }))).toEqual([context, secondContext]);
     expect(maintenance.runTick.mock.calls.every(([value]) => value.operationId.startsWith("workspace_worker_tick_"))).toBe(true);
+
+    await supervisor.stop();
+    vi.useRealTimers();
+  });
+
+  it("runs the execution reconciliation lane once before Completion maintenance", async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner();
+    const maintenance = makeMaintenance();
+    const executionJobWorker = makeExecutionJobWorker();
+    const order: string[] = [];
+    vi.mocked(executionJobWorker.runTick).mockImplementation(async () => {
+      order.push("execution");
+    });
+    vi.mocked(maintenance.runTick).mockImplementation(async () => {
+      order.push("maintenance");
+    });
+    const supervisor = new WorkspaceWorkerSupervisor({
+      learningRunner: runner,
+      maintenance,
+      executionJobWorker,
+      resolveContext: async () => ({ state: "enabled", context }),
+      intervalMs: 10_000
+    });
+
+    await supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(executionJobWorker.runTick).toHaveBeenCalledTimes(1);
+    expect(executionJobWorker.runTick.mock.calls[0]?.[0]).toMatchObject(context);
+    expect(executionJobWorker.runTick.mock.calls[0]?.[1]).toMatchObject({
+      workerId: expect.stringMatching(/^workspace_worker_/),
+      maxRuns: 100,
+      signal: expect.any(AbortSignal)
+    });
+    expect(order).toEqual(["execution", "maintenance"]);
 
     await supervisor.stop();
     vi.useRealTimers();

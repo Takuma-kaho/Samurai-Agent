@@ -25,40 +25,47 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
   const config = loadWorkspaceServerConfig(env);
   const adminAccountId = env.SAMURAI_SERVER_ADMIN_ACCOUNT_ID?.trim() || config.initialAdminId;
   if (command !== "completion-maintenance-tick" && !adminAccountId) throw new WorkspaceServerError("samurai_server_admin_account_id_required", 500);
+  const parsedArguments = parseCliArguments(arguments_);
+  const bundleTargetOrganizationId = command === "bundle-import"
+    ? parsedArguments.targetOrganizationId
+      || env.SAMURAI_TARGET_ORGANIZATION_ID?.trim()
+      || env.SAMURAI_ORGANIZATION_ID?.trim()
+      || undefined
+    : undefined;
   const core = await createWorkspaceServerCore(config);
   try {
     if (command === "completion-maintenance-tick") {
       const accountId = env.SAMURAI_COMPLETION_MAINTENANCE_ACCOUNT_ID?.trim();
       if (!accountId) throw new WorkspaceServerError("samurai_completion_maintenance_account_id_required", 500);
-      const workspaceId = configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env);
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env, parsedArguments.positional[0]);
       const workerId = env.SAMURAI_COMPLETION_MAINTENANCE_WORKER_ID?.trim() || "completion_maintenance_worker";
       return core.maintenance.runTick({ workspaceId, accountId, operationId: `completion_maintenance_${randomUUID().replaceAll("-", "")}` }, { workerId });
     }
     const accountId = adminAccountId!;
     if (command === "bundle-export") {
-      const workspaceId = configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env);
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env);
       return core.completionBundles.export({ workspaceId, accountId, operationId: `server_cli_${randomUUID()}` }, {
-        destination: requiredArgument(arguments_, 0, "bundle_destination_required")
+        destination: requiredArgument(parsedArguments.positional, 0, "bundle_destination_required")
       });
     }
     if (command === "bundle-import") {
-      const sourceDirectory = requiredArgument(arguments_, 0, "bundle_directory_required");
-      const targetWorkspaceId = requiredArgument(arguments_, 1, "workspace_id_required");
-      if (config.mode === "self_host" && targetWorkspaceId !== config.selfHostWorkspaceId) {
-        throw new WorkspaceServerError("self_host_workspace_mismatch", 409, {
-          configured_workspace_id: config.selfHostWorkspaceId,
-          target_workspace_id: targetWorkspaceId
-        });
-      }
+      const sourceDirectory = requiredArgument(parsedArguments.positional, 0, "bundle_directory_required");
+      const targetWorkspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env, parsedArguments.positional[1]);
       const context = { accountId, operationId: `server_cli_import_${randomUUID()}` };
       return await bundleFormat(sourceDirectory) === 4
-        ? core.completionBundles.importNew(context, { sourceDirectory, targetWorkspaceId })
-        : core.bundles.importNew(context, { sourceDirectory, targetWorkspaceId });
+        ? core.completionBundles.importNew(context, {
+          sourceDirectory,
+          targetWorkspaceId,
+          ...(bundleTargetOrganizationId ? { targetOrganizationId: bundleTargetOrganizationId } : {})
+        })
+        : core.bundles.importNew(context, {
+          sourceDirectory,
+          targetWorkspaceId,
+          ...(bundleTargetOrganizationId ? { targetOrganizationId: bundleTargetOrganizationId } : {})
+        });
     }
     if (command === "files-recover") {
-      const workspaceId = config.mode === "self_host"
-        ? configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env)
-        : requiredArgument(arguments_, 0, "workspace_id_required");
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env, parsedArguments.positional[0]);
       const recovery = await core.files.recover({ workspaceId, accountId });
       if (recovery.failed.length > 0) {
         throw new WorkspaceServerError("workspace_file_recovery_required", 409, { failed_transaction_ids: recovery.failed });
@@ -66,37 +73,35 @@ export async function runWorkspaceServerCli(argv = process.argv.slice(2), env: N
       return recovery;
     }
     if (command === "completion-files-recover") {
-      const workspaceId = config.mode === "self_host"
-        ? configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env)
-        : requiredArgument(arguments_, 0, "workspace_id_required");
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env, parsedArguments.positional[0]);
       const recovery = await core.completion.recoverFileBatches({ workspaceId, accountId });
       if (recovery.failed.length > 0) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 409, { failed_batch_ids: recovery.failed });
       return recovery;
     }
     if (command === "completion-physical-edit-prepare") {
-      const workspaceId = configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env);
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env);
       return core.completion.preparePhysicalResourceEdit({
         workspaceId,
         accountId,
         operationId: `completion_physical_prepare_${randomUUID().replaceAll("-", "")}`
-      }, requiredArgument(arguments_, 0, "workspace_completion_resource_id_required"));
+      }, requiredArgument(parsedArguments.positional, 0, "workspace_completion_resource_id_required"));
     }
     if (command === "completion-physical-edit-import") {
-      const workspaceId = configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env);
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env);
       return core.completion.importPhysicalResourceEdit({
         workspaceId,
         accountId,
         operationId: `completion_physical_import_${randomUUID().replaceAll("-", "")}`
       }, {
-        resourceId: requiredArgument(arguments_, 0, "workspace_completion_resource_id_required"),
-        expectedVersion: requiredPositiveInteger(arguments_, 1, "workspace_completion_resource_version_required"),
-        reason: requiredArgument(arguments_, 2, "workspace_completion_physical_import_reason_required")
+        resourceId: requiredArgument(parsedArguments.positional, 0, "workspace_completion_resource_id_required"),
+        expectedVersion: requiredPositiveInteger(parsedArguments.positional, 1, "workspace_completion_resource_version_required"),
+        reason: requiredArgument(parsedArguments.positional, 2, "workspace_completion_physical_import_reason_required")
       });
     }
     if (command === "completion-migrate") {
-      const workspaceId = configuredWorkspaceId(config.mode, config.selfHostWorkspaceId, env);
+      const workspaceId = configuredWorkspaceId(parsedArguments.workspaceId, env);
       return core.completionMigrations.migrateLegacy({ workspaceId, accountId, operationId: `completion_migration_${randomUUID().replaceAll("-", "")}` }, {
-        dryRun: arguments_.includes("--dry-run")
+        dryRun: parsedArguments.dryRun
       });
     }
     // All currently accepted commands return above. Keep this fail-closed so
@@ -134,10 +139,42 @@ function requiredPositiveInteger(values: readonly string[], index: number, code:
   return value;
 }
 
-function configuredWorkspaceId(mode: "hosted" | "self_host", selfHostWorkspaceId: string | undefined, env: NodeJS.ProcessEnv): string {
-  const workspaceId = mode === "self_host" ? selfHostWorkspaceId : env.SAMURAI_WORKSPACE_ID?.trim();
+function configuredWorkspaceId(explicitWorkspaceId: string | undefined, env: NodeJS.ProcessEnv, positionalWorkspaceId?: string): string {
+  const workspaceId = explicitWorkspaceId?.trim() || positionalWorkspaceId?.trim() || env.SAMURAI_WORKSPACE_ID?.trim();
   if (!workspaceId) throw new WorkspaceServerError("workspace_id_required", 400);
   return workspaceId;
+}
+
+interface ParsedCliArguments {
+  positional: string[];
+  workspaceId?: string;
+  targetOrganizationId?: string;
+  dryRun: boolean;
+}
+
+function parseCliArguments(values: readonly string[]): ParsedCliArguments {
+  const positional: string[] = [];
+  let workspaceId: string | undefined;
+  let targetOrganizationId: string | undefined;
+  let dryRun = false;
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index] ?? "";
+    if (value === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (value === "--workspace-id" || value === "--workspace") {
+      workspaceId = requiredArgument(values, ++index, "workspace_id_required");
+      continue;
+    }
+    if (value === "--target-organization-id" || value === "--target-organization") {
+      targetOrganizationId = requiredArgument(values, ++index, "workspace_bundle_target_organization_required");
+      continue;
+    }
+    if (value.startsWith("--")) throw new WorkspaceServerError("workspace_server_cli_argument_invalid", 400);
+    positional.push(value);
+  }
+  return { positional, ...(workspaceId ? { workspaceId } : {}), ...(targetOrganizationId ? { targetOrganizationId } : {}), dryRun };
 }
 
 const entry = process.argv[1]?.endsWith("workspace-server-cli.ts") || process.argv[1]?.endsWith("workspace-server-cli.js");

@@ -48,9 +48,9 @@ export function loadWorkspaceServerConfig(env: NodeJS.ProcessEnv = process.env):
   }
   const storageRoot = path.resolve(requiredEnv(env, "SAMURAI_WORKSPACE_STORAGE_ROOT"));
   const selfHostWorkspaceId = env.SAMURAI_SELF_HOST_WORKSPACE_ID?.trim();
-  if (mode === "self_host" && !selfHostWorkspaceId) {
-    throw new WorkspaceServerError("samurai_self_host_workspace_id_required", 500);
-  }
+  // This value is retained only as a one-release compatibility input for
+  // bootstrap/migration. It must not be required to start a Self-host Server:
+  // request routing is always selected and authorized per Workspace.
   if (selfHostWorkspaceId) assertOpaqueId(selfHostWorkspaceId, "workspace_id_invalid");
   const selfHostBootstrapMode = env.SAMURAI_SELF_HOST_BOOTSTRAP_MODE?.trim() || "create";
   if (selfHostBootstrapMode !== "create" && selfHostBootstrapMode !== "empty") {
@@ -149,14 +149,8 @@ export function loadWorkspaceServerAdminConfig(env: NodeJS.ProcessEnv = process.
   };
 }
 
-export function resolveRequestWorkspaceId(config: Pick<WorkspaceServerConfig, "mode" | "selfHostWorkspaceId">, requestedWorkspaceId: string | undefined): string {
+export function resolveRequestWorkspaceId(_config: Pick<WorkspaceServerConfig, "mode" | "selfHostWorkspaceId">, requestedWorkspaceId: string | undefined): string {
   const requested = requestedWorkspaceId?.trim();
-  if (config.mode === "self_host") {
-    const expected = config.selfHostWorkspaceId;
-    if (!expected) throw new WorkspaceServerError("samurai_self_host_workspace_id_required", 500);
-    if (requested && requested !== expected) throw new WorkspaceServerError("workspace_not_found", 404);
-    return expected;
-  }
   if (!requested) throw new WorkspaceServerError("workspace_id_required", 400);
   assertOpaqueId(requested, "workspace_id_invalid");
   return requested;

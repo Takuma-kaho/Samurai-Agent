@@ -52,7 +52,9 @@ services:
       SAMURAI_SERVER_PUBLIC: ${SAMURAI_SERVER_PUBLIC:-0}
       SAMURAI_PUBLIC_BASE_URL: ${SAMURAI_PUBLIC_BASE_URL:-}
       SAMURAI_SERVER_MODE: self_host
-      SAMURAI_SELF_HOST_WORKSPACE_ID: ${SAMURAI_SELF_HOST_WORKSPACE_ID:?set in .env}
+      # Optional one-time bootstrap input.  Requests are routed and
+      # authorized per Workspace, so one Self-host Server can serve many.
+      SAMURAI_SELF_HOST_WORKSPACE_ID: ${SAMURAI_SELF_HOST_WORKSPACE_ID:-}
       SAMURAI_SELF_HOST_BOOTSTRAP_MODE: ${SAMURAI_SELF_HOST_BOOTSTRAP_MODE:-create}
       SAMURAI_WORKSPACE_STORAGE_ROOT: /var/lib/samurai
       SAMURAI_DATABASE_RUNTIME_ROLE: samurai_app
@@ -64,6 +66,18 @@ services:
       SAMURAI_INITIAL_ADMIN_DISPLAY_NAME: ${SAMURAI_INITIAL_ADMIN_DISPLAY_NAME:-Owner}
       SAMURAI_SERVER_ADMIN_ACCOUNT_ID: ${SAMURAI_INITIAL_ADMIN_ID:?set in .env}
       SAMURAI_CORS_ORIGINS: ${SAMURAI_CORS_ORIGINS:-}
+      # Optional Samurai Native provider configuration. These values are
+      # consumed only by the long-running Server; the migration container
+      # above intentionally receives none of these provider secrets.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      SAMURAI_OPENAI_COMPATIBLE_API_KEY: ${SAMURAI_OPENAI_COMPATIBLE_API_KEY:-}
+      SAMURAI_OPENAI_COMPATIBLE_BASE_URL: ${SAMURAI_OPENAI_COMPATIBLE_BASE_URL:-}
+      SAMURAI_LLM_MODEL: ${SAMURAI_LLM_MODEL:-}
+      SAMURAI_LLM_FALLBACKS: ${SAMURAI_LLM_FALLBACKS:-}
     ports:
       - "${SAMURAI_SERVER_BIND_ADDRESS:-127.0.0.1}:${SAMURAI_SERVER_PORT:-4317}:4317"
     volumes:

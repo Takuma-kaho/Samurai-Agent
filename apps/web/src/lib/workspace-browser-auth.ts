@@ -1,7 +1,8 @@
 import { io, type Socket } from "socket.io-client";
 
 export interface BrowserWorkspaceConnection {
-  id: "browser";
+  /** Stable local ID for this Server + Account credential pair. */
+  id: string;
   label: string;
   serverUrl: string;
   workspaceId: string;
@@ -23,6 +24,8 @@ export interface BrowserWorkspaceConnectionInput {
 export interface BrowserWorkspaceRequestInput {
   method: string;
   path: string;
+  /** Use a non-active stored credential for account-scoped directory reads. */
+  connectionId?: string;
   workspaceScoped?: boolean;
   operationId?: string;
   idempotencyKey?: string;
@@ -32,6 +35,7 @@ export interface BrowserWorkspaceRequestInput {
 export interface BrowserWorkspaceRealtimeEvent {
   type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
   workspaceId: string;
+  connectionId?: string;
   roomId?: string;
   kind?: string;
   eventId?: string;
@@ -43,11 +47,14 @@ interface StoredBrowserWorkspaceConnection extends BrowserWorkspaceConnection {
 }
 
 const databaseName = "samurai-workspace-browser";
-const databaseVersion = 1;
+const databaseVersion = 2;
 const objectStoreName = "connections";
 const activeConnectionKey = "active";
+const connectionKeyPrefix = "connection:";
 let cachedConnection: StoredBrowserWorkspaceConnection | null | undefined;
 let connectionLoad: Promise<StoredBrowserWorkspaceConnection | undefined> | undefined;
+let cachedConnections: StoredBrowserWorkspaceConnection[] | undefined;
+let connectionsLoad: Promise<StoredBrowserWorkspaceConnection[]> | undefined;
 let browserRealtimeSocket: Socket | undefined;
 let browserRealtimeGeneration = 0;
 let browserRealtimeLastCursor: string | undefined;
@@ -57,6 +64,45 @@ const browserRealtimeListeners = new Set<(event: BrowserWorkspaceRealtimeEvent |
 export async function loadBrowserWorkspaceConnection(): Promise<BrowserWorkspaceConnection | undefined> {
   const connection = await loadStoredConnection();
   return connection ? publicConnection(connection) : undefined;
+}
+
+/** Return every stored Browser credential without exposing private keys. */
+export async function loadBrowserWorkspaceConnections(): Promise<BrowserWorkspaceConnection[]> {
+  return (await loadStoredConnections()).map(publicConnection);
+}
+
+/**
+ * Transitional workspace selection for the browser bridge. The value is only
+ * a routing candidate; the caller must obtain the account-scoped list first
+ * and then re-authorize the selected Workspace before opening content.
+ */
+export async function selectBrowserWorkspaceConnection(connectionId: string): Promise<BrowserWorkspaceConnection> {
+  const connection = (await loadStoredConnections()).find((item) => item.id === connectionId);
+  if (!connection) throw new Error("workspace_connection_not_found");
+  await setActiveBrowserWorkspaceConnection(connection);
+  return publicConnection(connection);
+}
+
+export async function selectBrowserWorkspaceCandidate(input: string | { connectionId: string; workspaceId: string }): Promise<BrowserWorkspaceConnection> {
+  const workspaceId = typeof input === "string" ? input : input.workspaceId;
+  const normalizedWorkspaceId = requiredOpaqueId(workspaceId, "workspace_id_invalid");
+  const connection = typeof input === "string"
+    ? await loadStoredConnection()
+    : (await loadStoredConnections()).find((item) => item.id === input.connectionId);
+  if (!connection) throw new Error("workspace_connection_required");
+  if (typeof input !== "string") await setActiveBrowserWorkspaceConnection(connection);
+  const updated: StoredBrowserWorkspaceConnection = {
+    ...connection,
+    workspaceId: normalizedWorkspaceId,
+    updatedAt: new Date().toISOString()
+  };
+  await writeStoredConnection(updated);
+  cachedConnection = updated;
+  cachedConnections = (await loadStoredConnections()).map((item) => item.id === updated.id ? updated : item);
+  browserRealtimeLastCursor = undefined;
+  browserRealtimeSeenEventIds.clear();
+  restartBrowserWorkspaceRealtime();
+  return publicConnection(updated);
 }
 
 export async function configureBrowserWorkspaceConnection(input: BrowserWorkspaceConnectionInput): Promise<BrowserWorkspaceConnection> {
@@ -74,7 +120,7 @@ export async function configureBrowserWorkspaceConnection(input: BrowserWorkspac
   }
   await verifyKeyPair(privateKey, publicDer);
   const connection: StoredBrowserWorkspaceConnection = {
-    id: "browser",
+    id: await browserConnectionId(serverUrl, accountId),
     label,
     serverUrl,
     workspaceId,
@@ -86,6 +132,8 @@ export async function configureBrowserWorkspaceConnection(input: BrowserWorkspac
   };
   await writeStoredConnection(connection);
   cachedConnection = connection;
+  cachedConnections = [...(await loadStoredConnections()).filter((item) => item.id !== connection.id), connection];
+  await setActiveBrowserWorkspaceConnection(connection);
   browserRealtimeLastCursor = undefined;
   browserRealtimeSeenEventIds.clear();
   restartBrowserWorkspaceRealtime();
@@ -94,9 +142,15 @@ export async function configureBrowserWorkspaceConnection(input: BrowserWorkspac
 
 export async function clearBrowserWorkspaceConnection(): Promise<void> {
   if (typeof window === "undefined" || !window.indexedDB) return;
-  await withStore("readwrite", (store) => store.delete(activeConnectionKey));
+  const connection = await loadStoredConnection();
+  await withStore("readwrite", async (store) => {
+    store.delete(activeConnectionKey);
+    if (connection) store.delete(`${connectionKeyPrefix}${connection.id}`);
+  });
   cachedConnection = null;
   connectionLoad = undefined;
+  cachedConnections = undefined;
+  connectionsLoad = undefined;
   browserRealtimeLastCursor = undefined;
   browserRealtimeSeenEventIds.clear();
   restartBrowserWorkspaceRealtime();
@@ -124,7 +178,9 @@ export function subscribeBrowserWorkspaceRealtime(
 }
 
 export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspaceRequestInput): Promise<T> {
-  const connection = await loadStoredConnection();
+  const connection = input.connectionId
+    ? (await loadStoredConnections()).find((item) => item.id === input.connectionId)
+    : await loadStoredConnection();
   if (!connection) throw new Error("workspace_connection_required");
   const url = new URL(input.path, `${connection.serverUrl}/`);
   const base = new URL(connection.serverUrl);
@@ -186,15 +242,17 @@ export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspa
   return responseBody as T;
 }
 
-export async function browserWorkspaceHealth(): Promise<unknown> {
-  const connection = await loadStoredConnection();
+export async function browserWorkspaceHealth(connectionId?: string): Promise<unknown> {
+  const connection = connectionId
+    ? (await loadStoredConnections()).find((item) => item.id === connectionId)
+    : await loadStoredConnection();
   if (!connection) {
     const target = typeof window === "undefined" ? undefined : window.location.origin;
     if (!target) throw new Error("workspace_connection_required");
     const response = await fetch(`${target}/api/health`, { redirect: "error" });
     return response.json();
   }
-  return browserWorkspaceRequest({ method: "GET", path: "/api/health" });
+  return browserWorkspaceRequest({ method: "GET", path: "/api/health", ...(connectionId ? { connectionId } : {}) });
 }
 
 export async function registerBrowserWorkspaceAccount(displayName = "Samurai Account"): Promise<unknown> {
@@ -220,6 +278,14 @@ export function createBrowserConnectionState(connection: BrowserWorkspaceConnect
     : { connections: [] };
 }
 
+export async function createBrowserWorkspaceConnectionState() {
+  const connections = await loadBrowserWorkspaceConnections();
+  return {
+    ...(connections[0] ? { activeConnectionId: (await loadBrowserWorkspaceConnection())?.id } : {}),
+    connections
+  };
+}
+
 function publicConnection(connection: StoredBrowserWorkspaceConnection): BrowserWorkspaceConnection {
   const { privateKey: _privateKey, ...publicValue } = connection;
   return publicValue;
@@ -228,22 +294,83 @@ function publicConnection(connection: StoredBrowserWorkspaceConnection): Browser
 async function loadStoredConnection(): Promise<StoredBrowserWorkspaceConnection | undefined> {
   if (cachedConnection !== undefined) return cachedConnection ?? undefined;
   if (connectionLoad) return connectionLoad;
-  if (typeof window === "undefined" || !window.indexedDB) {
-    cachedConnection = null;
-    return undefined;
-  }
-  connectionLoad = withStore<StoredBrowserWorkspaceConnection | undefined>("readonly", async (store) => {
-    const result = await requestResult<StoredBrowserWorkspaceConnection | undefined>(store.get(activeConnectionKey));
-    return result;
+  connectionLoad = loadStoredConnections().then((connections) => {
+    const connection = cachedConnection ?? connections[0];
+    cachedConnection = connection ?? null;
+    return connection;
+  }).finally(() => {
+    connectionLoad = undefined;
   });
-  const connection = await connectionLoad;
-  cachedConnection = connection ?? null;
-  connectionLoad = undefined;
-  return connection;
+  return connectionLoad;
+}
+
+async function loadStoredConnections(): Promise<StoredBrowserWorkspaceConnection[]> {
+  if (cachedConnections) return cachedConnections;
+  if (connectionsLoad) return connectionsLoad;
+  if (typeof window === "undefined" || !window.indexedDB) {
+    cachedConnections = [];
+    cachedConnection = null;
+    return cachedConnections;
+  }
+  connectionsLoad = withStore<{ keys: IDBValidKey[]; values: unknown[] }>("readonly", async (store) => {
+    const [keys, values] = await Promise.all([
+      requestResult<IDBValidKey[]>(store.getAllKeys()),
+      requestResult<unknown[]>(store.getAll())
+    ]);
+    return { keys, values };
+  }).then(async ({ keys, values }) => {
+    const activeIndex = keys.findIndex((key) => key === activeConnectionKey);
+    const activeValue = activeIndex >= 0 ? values[activeIndex] : undefined;
+    const recordById = new Map<string, StoredBrowserWorkspaceConnection>();
+    for (const value of values) {
+      if (isStoredConnection(value)) recordById.set(value.id, value);
+    }
+    const records = [...recordById.values()];
+    // Version 1 stored the active record directly under "active". Migrate it
+    // to a named record while retaining the active pointer.
+    if (isStoredConnection(activeValue)) {
+      if (!keys.some((key) => key === `${connectionKeyPrefix}${activeValue.id}`)) {
+        recordById.set(activeValue.id, activeValue);
+        records.splice(0, records.length, ...recordById.values());
+      }
+      await withStore("readwrite", (store) => {
+        if (!keys.some((key) => key === `${connectionKeyPrefix}${activeValue.id}`)) {
+          store.put(activeValue, `${connectionKeyPrefix}${activeValue.id}`);
+        }
+        store.put(activeValue.id, activeConnectionKey);
+      });
+    }
+    const activeId = typeof activeValue === "string"
+      ? activeValue
+      : isStoredConnection(activeValue) ? activeValue.id : undefined;
+    cachedConnections = records;
+    cachedConnection = records.find((connection) => connection.id === activeId) ?? records[0] ?? null;
+    return records;
+  }).finally(() => {
+    connectionsLoad = undefined;
+  });
+  return connectionsLoad;
+}
+
+async function setActiveBrowserWorkspaceConnection(connection: StoredBrowserWorkspaceConnection): Promise<void> {
+  await withStore("readwrite", (store) => store.put(connection.id, activeConnectionKey));
+  cachedConnection = connection;
+  cachedConnections = [...(cachedConnections ?? []), connection].filter((item, index, values) => values.findIndex((candidate) => candidate.id === item.id) === index);
+  browserRealtimeLastCursor = undefined;
+  browserRealtimeSeenEventIds.clear();
+  restartBrowserWorkspaceRealtime();
 }
 
 async function writeStoredConnection(connection: StoredBrowserWorkspaceConnection): Promise<void> {
-  await withStore("readwrite", (store) => store.put(connection, activeConnectionKey));
+  await withStore("readwrite", (store) => store.put(connection, `${connectionKeyPrefix}${connection.id}`));
+}
+
+function isStoredConnection(value: unknown): value is StoredBrowserWorkspaceConnection {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && typeof (value as { id?: unknown }).id === "string"
+    && typeof (value as { serverUrl?: unknown }).serverUrl === "string"
+    && typeof (value as { accountId?: unknown }).accountId === "string"
+    && (value as { privateKey?: unknown }).privateKey);
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -356,6 +483,11 @@ async function accountIdFromPublicKey(publicDer: Uint8Array): Promise<string> {
   return "account_" + Array.from(digest).map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 40);
 }
 
+async function browserConnectionId(serverUrl: string, accountId: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${serverUrl}\n${accountId}`)));
+  return "browser_" + Array.from(digest).map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 40);
+}
+
 async function ensureBrowserWorkspaceRealtime(): Promise<void> {
   if (browserRealtimeSocket || browserRealtimeListeners.size === 0) return;
   const connection = await loadStoredConnection();
@@ -379,30 +511,30 @@ async function ensureBrowserWorkspaceRealtime(): Promise<void> {
   });
   socket.on("workspace:v1:event", (event: unknown) => {
     if (!isCurrent() || !acceptBrowserPublicEvent(event)) return;
-    notifyBrowserWorkspaceRealtime("event", connection.workspaceId, event);
+    notifyBrowserWorkspaceRealtime("event", connection.id, connection.workspaceId, event);
   });
   socket.on("workspace:event", (event: unknown) => {
     if (!isCurrent()) return;
-    notifyBrowserWorkspaceRealtime("event", connection.workspaceId, event);
+    notifyBrowserWorkspaceRealtime("event", connection.id, connection.workspaceId, event);
     void refreshBrowserWorkspaceRealtimeRooms(socket, connection, isCurrent);
   });
   socket.on("workspace:access-changed", (event: unknown) => {
     if (!isCurrent()) return;
-    notifyBrowserWorkspaceRealtime("access_changed", connection.workspaceId, event);
+    notifyBrowserWorkspaceRealtime("access_changed", connection.id, connection.workspaceId, event);
     void refreshBrowserWorkspaceRealtimeRooms(socket, connection, isCurrent);
   });
   socket.on("workspace:room-access-changed", (event: unknown) => {
     if (!isCurrent()) return;
-    notifyBrowserWorkspaceRealtime("room_access_changed", connection.workspaceId, event);
+    notifyBrowserWorkspaceRealtime("room_access_changed", connection.id, connection.workspaceId, event);
     void refreshBrowserWorkspaceRealtimeRooms(socket, connection, isCurrent);
   });
   socket.on("workspace:room-access-revoked", (event: unknown) => {
     if (!isCurrent()) return;
-    notifyBrowserWorkspaceRealtime("room_access_revoked", connection.workspaceId, event);
+    notifyBrowserWorkspaceRealtime("room_access_revoked", connection.id, connection.workspaceId, event);
   });
   socket.on("workspace:access-revoked", (event: unknown) => {
     if (!isCurrent()) return;
-    notifyBrowserWorkspaceRealtime("access_revoked", connection.workspaceId, event);
+    notifyBrowserWorkspaceRealtime("access_revoked", connection.id, connection.workspaceId, event);
     socket.disconnect();
   });
   socket.on("disconnect", () => {
@@ -477,7 +609,7 @@ async function syncBrowserWorkspaceRealtime(
       if (!isCurrent() || !Array.isArray(response.events)) break;
       for (const event of response.events) {
         if (!acceptBrowserPublicEvent(event)) continue;
-        notifyBrowserWorkspaceRealtime("event", connection.workspaceId, event);
+        notifyBrowserWorkspaceRealtime("event", connection.id, connection.workspaceId, event);
       }
       const nextCursor = typeof response.next_cursor === "string" ? response.next_cursor : undefined;
       if (response.has_more === true && nextCursor) {
@@ -510,6 +642,7 @@ function acceptBrowserPublicEvent(event: unknown): boolean {
 
 function notifyBrowserWorkspaceRealtime(
   type: BrowserWorkspaceRealtimeEvent["type"],
+  connectionId: string,
   expectedWorkspaceId: string,
   event: unknown
 ): void {
@@ -517,7 +650,7 @@ function notifyBrowserWorkspaceRealtime(
   const value = event as { workspaceId?: unknown; roomId?: unknown; kind?: unknown; event_type?: unknown; scope?: { workspace_id?: unknown; room_id?: unknown } };
   const workspaceId = value.workspaceId ?? value.scope?.workspace_id;
   if (workspaceId !== expectedWorkspaceId) return;
-  const notice: BrowserWorkspaceRealtimeEvent = { type, workspaceId: expectedWorkspaceId };
+  const notice: BrowserWorkspaceRealtimeEvent = { type, connectionId, workspaceId: expectedWorkspaceId };
   const roomId = value.roomId ?? value.scope?.room_id;
   if (typeof roomId === "string" && isWorkspaceOpaqueId(roomId)) notice.roomId = roomId;
   const kind = value.kind ?? value.event_type;

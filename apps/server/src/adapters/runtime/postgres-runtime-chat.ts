@@ -75,6 +75,15 @@ export interface PostgresRuntimeChatOptions {
   source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
   sessionRefAppId?: string;
   operationId?: string;
+  /**
+   * The Host-owned execution port for provider tool calls.  Runtime keeps the
+   * event/operation/evidence ledger here; the port performs only the
+   * canonical Workspace mutation (for example, PostgresArtifact.create).
+   */
+  toolExecution?: PostgresRuntimeToolExecutionPort;
+  /** Capability advertisement for the provider.  It is not an authorization
+   * decision; tool execution re-checks the Room boundary before mutation. */
+  availableTools?: readonly string[];
   /** Reads a Room-authorized Workspace File through the formal file Port. */
   readWorkspaceFile?: (
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
@@ -83,12 +92,38 @@ export interface PostgresRuntimeChatOptions {
   ) => Promise<{ path: string; version: number; sha256: string; content: Buffer }>;
 }
 
+export interface PostgresRuntimeToolCallEvent {
+  tool_call_id: string;
+  provider_tool_name?: string;
+  action_id?: string;
+  arguments: Record<string, JsonValue>;
+  payload: Record<string, JsonValue>;
+}
+
+export interface PostgresRuntimeToolExecutionInput {
+  run: BackendRunRecord;
+  runInput: BackendRunInput;
+  event: PostgresRuntimeToolCallEvent;
+  operation: OperationRecord;
+}
+
+export interface PostgresRuntimeToolExecutionResult {
+  resourceRefs: ResourceRef[];
+  summary: string;
+  output?: JsonValue;
+}
+
+export interface PostgresRuntimeToolExecutionPort {
+  execute(input: PostgresRuntimeToolExecutionInput): Promise<PostgresRuntimeToolExecutionResult>;
+}
+
 export interface PostgresRuntimeChatCompletionEvent {
   session: SessionRecord;
   run: BackendRunRecord;
   operation?: OperationRecord;
   instructionSummary: string;
   resultSummary?: string;
+  resourceRefs?: ResourceRef[];
 }
 
 /** The only mutable Runtime entry used by the public Run Control service. */
@@ -185,6 +220,18 @@ interface RuntimeAdmission {
   replay: boolean;
 }
 
+interface RuntimeToolOutcome {
+  status: "completed" | "ignored" | "failed";
+  providerToolName?: string;
+  actionId?: string;
+  operationId?: string;
+  resourceRefs?: ResourceRef[];
+  summary: string;
+  output?: JsonValue;
+  reason?: string;
+  errorCode?: string;
+}
+
 interface RuntimeRunRow {
   workspace_id: string;
   id: string;
@@ -205,8 +252,8 @@ interface RuntimeRunRow {
   current_attempt: number | string | null;
   request_idempotency_key: string | null;
   request_hash: string | null;
-  started_at: string;
-  completed_at: string | null;
+  started_at: Date | string;
+  completed_at: Date | string | null;
   input_summary: string;
   output_summary: string | null;
   error_code: string | null;
@@ -222,7 +269,7 @@ interface RuntimeMessageRow {
   input_locale: string;
   output_locale: string;
   envelope: unknown;
-  created_at: string;
+  created_at: Date | string;
 }
 
 interface RuntimeSessionRow {
@@ -233,8 +280,8 @@ interface RuntimeSessionRow {
   title: string;
   ui_locale: string;
   output_locale: string;
-  created_at: string;
-  updated_at: string;
+  created_at: Date | string;
+  updated_at: Date | string;
 }
 
 interface RuntimeActivityRow {
@@ -257,8 +304,8 @@ interface RuntimeOperationRow {
   operation: string;
   status: string;
   payload: unknown;
-  created_at: string;
-  updated_at: string;
+  created_at: Date | string;
+  updated_at: Date | string;
 }
 
 interface RuntimeAuditRecordRow {
@@ -286,7 +333,7 @@ interface RuntimeChangeRow {
   summary: string;
   legacy_operation_id: string | null;
   correlation_id: string | null;
-  created_at: string;
+  created_at: Date | string;
 }
 
 const RuntimeSessionRecordSchema = z.object({
@@ -334,6 +381,8 @@ export class PostgresRuntimeChat {
   private readonly source?: import("@samurai-agent/core-schemas").TrustedWorkspaceSource;
   private readonly sessionRefAppId: string;
   private readonly operationId?: string;
+  private readonly toolExecution?: PostgresRuntimeToolExecutionPort;
+  private readonly availableTools: string[];
   private readonly readWorkspaceFile?: PostgresRuntimeChatOptions["readWorkspaceFile"];
 
   constructor(options: PostgresRuntimeChatOptions) {
@@ -351,6 +400,8 @@ export class PostgresRuntimeChat {
     this.source = options.source ? TrustedWorkspaceSourceSchema.parse(options.source) : undefined;
     this.sessionRefAppId = options.sessionRefAppId?.trim() || "samurai-native";
     this.operationId = options.operationId?.trim() || undefined;
+    this.toolExecution = options.toolExecution;
+    this.availableTools = options.availableTools ? [...options.availableTools] : [];
     this.readWorkspaceFile = options.readWorkspaceFile;
   }
 
@@ -395,6 +446,15 @@ export class PostgresRuntimeChat {
         created_at: now,
         updated_at: now
       });
+      const operation = buildSessionCreateOperation({
+        id: operationRecordId,
+        correlationId: operationId,
+        session,
+        inputHash,
+        now,
+        principal: this.principal,
+        source: this.source
+      });
       await sql.query(
         `INSERT INTO workspace_runtime_sessions(
            workspace_id, id, session_key, room_id, title, ui_locale, output_locale, created_at, updated_at
@@ -404,7 +464,7 @@ export class PostgresRuntimeChat {
       await sql.query(
         `INSERT INTO workspace_runtime_operations(workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at)
          VALUES ($1, $2, $3, $4, 'runtime.chat.session.create', 'completed', $5::JSONB, $6, $6)`,
-        [this.workspaceId, operationRecordId, session.id, roomId, jsonText({ input_hash: inputHash, session_id: session.id }), now]
+        [this.workspaceId, operationRecordId, session.id, roomId, jsonText(operation), now]
       );
       return session;
     });
@@ -541,7 +601,7 @@ export class PostgresRuntimeChat {
 
   async cancelBackendRun(runId: string): Promise<BackendRunRecord> {
     const initial = await this.requireControlRun(runId);
-    if (isSettled(initial)) return initial;
+    if (isSettled(initial)) return this.reprojectSettledRun(initial);
     const admission = await this.admissionForRun(initial);
     if (initial.status === "queued") {
       const evidence = { kind: "not_started" as const, source: "preflight_rejection" as const };
@@ -558,7 +618,7 @@ export class PostgresRuntimeChat {
 
     const preExternal = isPreExternalPhase(initial.phase);
     const cancelling = await this.markCancelling(initial);
-    if (isSettled(cancelling)) return cancelling;
+    if (isSettled(cancelling)) return this.reprojectSettledRun(cancelling);
     const backend = this.backendRegistry.get(cancelling.backend_id);
     let cancellation: { kind: "settled"; evidence: BackendTerminalEvidence } | { kind: "requested" } | { kind: "unsupported" } = { kind: "unsupported" };
     let cancelError: unknown;
@@ -571,7 +631,7 @@ export class PostgresRuntimeChat {
     }
     const latest = await this.getBackendRun(runId);
     if (!latest) throw new WorkspaceServerError(`runtime_backend_run_not_found:${runId}`, 404);
-    if (isSettled(latest)) return latest;
+    if (isSettled(latest)) return this.reprojectSettledRun(latest);
     const evidence: BackendTerminalEvidence = cancellation.kind === "settled"
       ? cancellation.evidence
       : preExternal
@@ -593,7 +653,7 @@ export class PostgresRuntimeChat {
 
   async resumeBackendRun(runId: string, input: Record<string, JsonValue>): Promise<BackendRunRecord> {
     const initial = await this.requireControlRun(runId);
-    if (isSettled(initial)) return initial;
+    if (isSettled(initial)) return this.reprojectSettledRun(initial);
     if (initial.status !== "waiting_for_backend_input") throw new WorkspaceServerError(`runtime_run_not_waiting:${runId}`, 409);
     const safeInput = validateResumeInput(input);
     const backend = this.backendRegistry.get(initial.backend_id);
@@ -611,13 +671,15 @@ export class PostgresRuntimeChat {
       return settled;
     }
     const resumed = await this.prepareResumeRun(initial, safeInput);
-    if (isSettled(resumed)) return resumed;
+    if (isSettled(resumed)) return this.reprojectSettledRun(resumed);
     const admission = await this.admissionForRun(resumed);
     const backendSessionId = resumed.backend_session_id;
     if (!backendSessionId) throw new WorkspaceServerError("runtime_resume_backend_session_missing", 409);
     const streamInput: Record<string, JsonValue> = { ...safeInput, backend_session_id: backendSessionId };
+    const resumedAdmission = { ...admission, run: resumed };
     const settled = await this.executeBackendStream({
-      admission: { ...admission, run: resumed },
+      admission: resumedAdmission,
+      runInput: this.backendRunInputForControl(resumedAdmission),
       stream: backend.resumeRun(resumed.id, streamInput),
       unknownOnError: true
     });
@@ -627,7 +689,7 @@ export class PostgresRuntimeChat {
 
   async syncBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireControlRun(runId);
-    if (isSettled(run)) return run;
+    if (isSettled(run)) return this.reprojectSettledRun(run);
     const admission = await this.admissionForRun(run);
     const backend = this.backendRegistry.get(run.backend_id);
     if (!backend?.streamEvents) {
@@ -647,14 +709,19 @@ export class PostgresRuntimeChat {
       if (saved) await this.notifyEvent(saved, admission.session.room_id!);
       return (await this.getBackendRun(run.id)) ?? run;
     }
-    const settled = await this.executeBackendStream({ admission, stream: backend.streamEvents(run.id), unknownOnError: true });
+    const settled = await this.executeBackendStream({
+      admission,
+      runInput: this.backendRunInputForControl(admission),
+      stream: backend.streamEvents(run.id),
+      unknownOnError: true
+    });
     await this.notifyCompletionActivity(await this.project(settled), admission.userMessage.content);
     return settled;
   }
 
   async recoverBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireControlRun(runId);
-    if (isSettled(run)) return run;
+    if (isSettled(run)) return this.reprojectSettledRun(run);
     const startedAt = Date.parse(run.started_at);
     if (!Number.isFinite(startedAt) || Date.now() - startedAt < 60_000) {
       throw new WorkspaceServerError("runtime_recovery_run_not_stale", 409);
@@ -764,6 +831,45 @@ export class PostgresRuntimeChat {
     });
   }
 
+  /** Rebuilds the minimum trusted BackendRunInput needed when a control route
+   * replays a provider stream. Tool execution receives the same Room, message,
+   * locale, and capability context as a new Chat turn without exposing the
+   * control transport's raw input as a new user instruction. */
+  private backendRunInputForControl(admission: RuntimeAdmission): BackendRunInput {
+    const roomId = admission.run.room_id ?? admission.session.room_id;
+    if (!roomId) throw new WorkspaceServerError(`runtime_run_room_missing:${admission.run.id}`, 409);
+    const envelope = admission.userMessage.envelope ?? MessageEnvelopeSchema.parse({
+      id: createId("envelope"),
+      source: channelForSource(admission.run.source),
+      actor_identity: actorIdentityForSource(admission.run.source),
+      session_key: admission.session.session_key,
+      user_intent: "chat",
+      attachments: [],
+      input_locale: admission.userMessage.input_locale,
+      output_locale: admission.userMessage.output_locale,
+      metadata: {},
+      received_at: admission.userMessage.created_at
+    });
+    return {
+      run_id: admission.run.id,
+      session_id: admission.session.id,
+      room_id: roomId,
+      ...(admission.run.backend_session_id ? { backend_session_id: admission.run.backend_session_id } : {}),
+      input_message_id: admission.userMessage.id,
+      workspace_root: this.agentWorktreeRoot,
+      working_directory: this.agentWorktreeRoot,
+      envelope,
+      user_input: admission.userMessage.content,
+      input_locale: admission.userMessage.input_locale,
+      output_locale: admission.userMessage.output_locale,
+      active_memory: [],
+      available_tools: [...this.availableTools],
+      recent_messages: [],
+      metadata: envelope.metadata,
+      context_intent: "light_chat"
+    };
+  }
+
   private async markCancelling(run: BackendRunRecord): Promise<BackendRunRecord> {
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, run.room_id!);
@@ -868,6 +974,18 @@ export class PostgresRuntimeChat {
     if (isSettled(run)) await this.notifyCompletionActivity(await this.project(run), admission.userMessage.content);
   }
 
+  /**
+   * Control operations may race with a backend settlement. Rebuild the
+   * canonical admission/projected result and retry only the Completion
+   * projection; never re-run the provider for an already settled Run.
+   */
+  private async reprojectSettledRun(run: BackendRunRecord): Promise<BackendRunRecord> {
+    if (!isSettled(run) || !this.onCompletionActivity) return run;
+    const admission = await this.admissionForRun(run);
+    await this.notifyCompletionActivity(await this.project(run), admission.userMessage.content);
+    return run;
+  }
+
   async listWorkspaceChanges(sessionId?: string): Promise<WorkspaceChangeRecord[]> {
     if (sessionId !== undefined) requireId(sessionId, "session_id_required");
     return this.database.withContext(this.context(), async (sql) => {
@@ -894,7 +1012,7 @@ export class PostgresRuntimeChat {
         summary: row.summary,
         ...(row.legacy_operation_id ? { legacy_operation_id: row.legacy_operation_id } : {}),
         ...(row.correlation_id ? { correlation_id: row.correlation_id } : {}),
-        created_at: row.created_at
+        created_at: isoTimestamp(row.created_at)
       }));
     });
   }
@@ -1083,10 +1201,12 @@ export class PostgresRuntimeChat {
         } : {}),
         metadata: input.metadata ?? {},
         context_intent: "light_chat",
+        available_tools: [...this.availableTools],
         ...(input.signal ? { abort_signal: input.signal } : {})
       };
       const settled = await this.executeBackendStream({
         admission,
+        runInput: inputForBackend,
         stream: backend.runTurn(inputForBackend)
       });
       const result = await this.project(settled);
@@ -1339,11 +1459,36 @@ export class PostgresRuntimeChat {
         if (!raced.rows[0]) throw new WorkspaceServerError("runtime_idempotency_race_unresolved", 500);
         return replayAdmission(sql, runFromRow(raced.rows[0]));
       }
-      await sql.query(
+      const reservation = await sql.query<{ run_id: string; status: "held" | "released" }>(
         `INSERT INTO workspace_runtime_reservations(workspace_id, session_id, run_id, version, status, created_at, updated_at)
-         VALUES ($1, $2, $3, 1, 'held', $4, $4)`,
+         VALUES ($1, $2, $3, 1, 'held', $4, $4)
+         ON CONFLICT (workspace_id, session_id) DO UPDATE
+         SET run_id = EXCLUDED.run_id,
+             status = 'held',
+             version = workspace_runtime_reservations.version + 1,
+             updated_at = EXCLUDED.updated_at
+         WHERE workspace_runtime_reservations.status = 'released'
+         RETURNING run_id, status`,
         [this.workspaceId, input.session.id, run.id, now]
       );
+      if (!reservation.rows[0]) {
+        // A competing request can win the released-row upsert after the
+        // initial held check. Surface the same stable 409 and let the
+        // transaction roll back the provisional message/run rows.
+        const conflicting = await sql.query<{ run_id: string; status: "held" | "released" }>(
+          `SELECT run_id, status FROM workspace_runtime_reservations
+           WHERE workspace_id = $1 AND session_id = $2
+           FOR UPDATE`,
+          [this.workspaceId, input.session.id]
+        );
+        const heldRunId = conflicting.rows[0]?.status === "held" ? conflicting.rows[0].run_id : undefined;
+        throw new WorkspaceServerError(
+          heldRunId
+            ? `runtime_session_run_in_progress:${heldRunId}`
+            : `runtime_reservation_conflict:${input.session.id}`,
+          409
+        );
+      }
       await sql.query(
         `INSERT INTO workspace_runtime_operations(
            workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
@@ -1361,6 +1506,7 @@ export class PostgresRuntimeChat {
 
   private async executeBackendStream(input: {
     admission: RuntimeAdmission;
+    runInput?: BackendRunInput;
     stream: AsyncIterable<BackendOutputEvent>;
     unknownOnError?: boolean;
   }): Promise<BackendRunRecord> {
@@ -1379,6 +1525,32 @@ export class PostgresRuntimeChat {
         if (projection.terminal) {
           terminal = projection.record;
           if (projection.terminal === "completed") output = this.collectText(output, projection.record);
+          continue;
+        }
+        if (projection.record.event_type === "tool_call_started") {
+          const started = projection.record;
+          const savedStarted = await this.appendEvent(started);
+          if (!savedStarted) continue;
+          await this.notifyEvent(savedStarted, admission.session.room_id!);
+          const toolOutcome = await this.executeToolCall({
+            admission,
+            ...(input.runInput ? { runInput: input.runInput } : {}),
+            started,
+            eventBridge
+          });
+          const outputEvent = this.toolOutputEvent(eventBridge, started, toolOutcome);
+          const savedOutput = await this.appendEvent(outputEvent);
+          if (savedOutput) await this.notifyEvent(savedOutput, admission.session.room_id!);
+          if (toolOutcome.status === "failed") {
+            throw new WorkspaceServerError(toolOutcome.errorCode ?? "runtime_tool_execution_failed", 500);
+          }
+          if (toolOutcome.status === "completed") {
+            const artifactEvent = this.artifactCreatedEvent(eventBridge, started, toolOutcome);
+            if (artifactEvent) {
+              const savedArtifact = await this.appendEvent(artifactEvent);
+              if (savedArtifact) await this.notifyEvent(savedArtifact, admission.session.room_id!);
+            }
+          }
           continue;
         }
         output = this.collectText(output, projection.record);
@@ -1410,6 +1582,311 @@ export class PostgresRuntimeChat {
       await this.notifyEvent(terminal, admission.session.room_id!);
     }
     return settled;
+  }
+
+  /**
+   * Provider tool calls enter the Runtime as events.  Only the canonical
+   * artifact command is executable in this adapter. Every other provider tool
+   * fails closed so an unknown tool can never cross the Workspace boundary or
+   * make its parent Run look successful.
+   */
+  private async executeToolCall(input: {
+    admission: RuntimeAdmission;
+    runInput?: BackendRunInput;
+    started: BackendEventRecord;
+    eventBridge: BackendEventBridge;
+  }): Promise<RuntimeToolOutcome> {
+    const started = input.started;
+    const toolCallId = stringPayload(started.payload.tool_call_id);
+    if (!toolCallId) return { status: "failed", summary: "Tool call ID is missing.", errorCode: "tool_call_id_required" };
+    const providerToolName = stringPayload(started.payload.provider_tool_name);
+    const actionId = stringPayload(started.payload.action_id);
+    const isArtifactCreate = providerToolName === "create_artifact" || actionId === "artifact.create";
+    if (!isArtifactCreate) {
+      return {
+        status: "failed",
+        providerToolName: providerToolName ?? "unknown_tool",
+        actionId,
+        summary: "This provider tool is not supported by the PostgreSQL Runtime boundary.",
+        reason: "unsupported_tool",
+        errorCode: "runtime_tool_unsupported"
+      };
+    }
+    if (!this.toolExecution || !input.runInput) {
+      return {
+        status: "failed",
+        providerToolName: providerToolName ?? "create_artifact",
+        actionId: actionId ?? "artifact.create",
+        summary: "Artifact creation is unavailable because the Host tool port is not configured.",
+        reason: "runtime_tool_execution_unavailable",
+        errorCode: "runtime_tool_execution_unavailable"
+      };
+    }
+
+    const event: PostgresRuntimeToolCallEvent = {
+      tool_call_id: toolCallId,
+      ...(providerToolName ? { provider_tool_name: providerToolName } : {}),
+      ...(actionId ? { action_id: actionId } : {}),
+      arguments: jsonRecord(started.payload.arguments ?? started.payload.input ?? {}),
+      payload: started.payload
+    };
+    let operation: OperationRecord | undefined;
+    try {
+      operation = await this.ensureToolOperation(input.admission, event);
+      if (operation.status === "completed" && operation.result_ref) {
+        const replayedRefs = ResourceRefSchema.array().parse([operation.result_ref]);
+        return {
+          status: "completed",
+          providerToolName: providerToolName ?? "create_artifact",
+          actionId: actionId ?? "artifact.create",
+          operationId: operation.id,
+          resourceRefs: replayedRefs,
+          summary: "Artifact creation was already completed for this tool call.",
+          output: { replayed: true, resource_ref: operation.result_ref }
+        };
+      }
+      const result = await this.toolExecution.execute({
+        run: input.admission.run,
+        runInput: input.runInput,
+        event,
+        operation
+      });
+      const resourceRefs = uniqueResourceRefs(ResourceRefSchema.array().max(32).parse(result.resourceRefs));
+      const artifactRef = resourceRefs.find((ref) => ref.kind === "artifact");
+      if (!artifactRef) throw new WorkspaceServerError("runtime_tool_result_artifact_missing", 500);
+      const canonicalResourceRefs = uniqueResourceRefs([artifactRef, ...resourceRefs]);
+      const evidence = await this.settleToolExecution({
+        admission: input.admission,
+        operation,
+        status: "completed",
+        summary: result.summary,
+        resourceRefs: canonicalResourceRefs
+      });
+      const refs = [...canonicalResourceRefs, evidence.activityRef, ...(evidence.changeRef ? [evidence.changeRef] : [])];
+      return {
+        status: "completed",
+        providerToolName: providerToolName ?? "create_artifact",
+        actionId: actionId ?? "artifact.create",
+        operationId: operation.id,
+        resourceRefs: refs,
+        summary: result.summary,
+        ...(result.output !== undefined ? { output: result.output } : {})
+      };
+    } catch (error) {
+      const errorCode = toolErrorCode(error);
+      const summary = toolErrorSummary(error);
+      if (operation) {
+        try {
+          await this.settleToolExecution({
+            admission: input.admission,
+            operation,
+            status: "failed",
+            summary,
+            errorCode,
+            resourceRefs: []
+          });
+        } catch {
+          // The outer Runtime settlement still records a failed Run.  Never
+          // turn an evidence failure into a successful tool result.
+        }
+      }
+      return {
+        status: "failed",
+        providerToolName: providerToolName ?? "create_artifact",
+        actionId: actionId ?? "artifact.create",
+        ...(operation ? { operationId: operation.id } : {}),
+        summary,
+        errorCode,
+        reason: "tool_execution_failed"
+      };
+    }
+  }
+
+  private toolOutputEvent(
+    bridge: BackendEventBridge,
+    started: BackendEventRecord,
+    outcome: RuntimeToolOutcome
+  ): BackendEventRecord {
+    const toolCallId = requireId(stringPayload(started.payload.tool_call_id), "tool_call_id_required");
+    const resourceRefs = outcome.resourceRefs ?? [];
+    const payload: Record<string, JsonValue> = {
+      tool_call_id: toolCallId,
+      provider_tool_name: outcome.providerToolName ?? stringPayload(started.payload.provider_tool_name) ?? "unknown_tool",
+      ...(outcome.actionId || stringPayload(started.payload.action_id) ? { action_id: outcome.actionId ?? stringPayload(started.payload.action_id)! } : {}),
+      status: outcome.status,
+      ok: outcome.status === "completed",
+      summary: summarize(outcome.summary, 2_000),
+      ...(outcome.reason ? { reason: outcome.reason } : {}),
+      ...(outcome.errorCode ? { error_code: outcome.errorCode } : {}),
+      ...(outcome.operationId ? { operation_id: outcome.operationId } : {}),
+      ...(outcome.output !== undefined ? { output: outcome.output } : {}),
+      ...(resourceRefs.length > 0 ? { resource_refs: resourceRefs } : {})
+    };
+    return bridge.project({
+      event_type: "tool_call_output",
+      tool_call_id: toolCallId,
+      source_event_id: `runtime:tool-output:${started.run_id}:${toolCallId}`,
+      payload: payload as never,
+      resource_refs: resourceRefs
+    }).record;
+  }
+
+  private artifactCreatedEvent(
+    bridge: BackendEventBridge,
+    started: BackendEventRecord,
+    outcome: RuntimeToolOutcome
+  ): BackendEventRecord | undefined {
+    const artifactRef = outcome.resourceRefs?.find((ref) => ref.kind === "artifact");
+    if (!artifactRef) return undefined;
+    const output = outcome.output && typeof outcome.output === "object" && !Array.isArray(outcome.output)
+      ? outcome.output as Record<string, JsonValue>
+      : undefined;
+    return bridge.project({
+      event_type: "artifact_created",
+      source_event_id: `runtime:artifact-created:${started.run_id}:${requireId(stringPayload(started.payload.tool_call_id), "tool_call_id_required")}`,
+      payload: {
+        artifact_id: artifactRef.id,
+        resource_id: artifactRef.id,
+        resource_kind: artifactRef.kind,
+        resource_ref: artifactRef,
+        resource_refs: [artifactRef],
+        tool_call_id: stringPayload(started.payload.tool_call_id),
+        ...(typeof output?.title === "string" ? { title: output.title } : {})
+      }
+    } as never).record;
+  }
+
+  private async ensureToolOperation(
+    admission: RuntimeAdmission,
+    event: PostgresRuntimeToolCallEvent
+  ): Promise<OperationRecord> {
+    const operationId = runtimeToolOperationId(admission.run.id, event.tool_call_id);
+    const inputHash = stableHash({
+      provider_tool_name: event.provider_tool_name ?? "create_artifact",
+      action_id: event.action_id ?? "artifact.create",
+      arguments: event.arguments
+    });
+    return this.database.withContext(this.context(), async (sql) => {
+      await this.assertRoomCanExecute(sql, admission.run.room_id!);
+      const existing = await sql.query<RuntimeOperationRow>(
+        `SELECT workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
+         FROM workspace_runtime_operations WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [this.workspaceId, operationId]
+      );
+      if (existing.rows[0]) {
+        const operation = operationFromRow(existing.rows[0]);
+        if (operation.input_hash !== inputHash) throw new WorkspaceServerError("runtime_tool_operation_conflict", 409);
+        return operation;
+      }
+      const operation = buildToolOperation({
+        id: operationId,
+        run: admission.run,
+        inputHash,
+        inputMessageId: admission.userMessage.id,
+        now: nowIso()
+      });
+      await sql.query(
+        `INSERT INTO workspace_runtime_operations(
+           workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB, $8, $8)
+         ON CONFLICT (workspace_id, id) DO NOTHING`,
+        [this.workspaceId, operation.id, operation.session_id ?? null, operation.room_id ?? null, operation.operation, operation.status, jsonText(operation), operation.created_at]
+      );
+      const saved = await sql.query<RuntimeOperationRow>(
+        `SELECT workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
+         FROM workspace_runtime_operations WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, operationId]
+      );
+      if (!saved.rows[0]) throw new WorkspaceServerError("runtime_tool_operation_persistence_failed", 500);
+      const savedOperation = operationFromRow(saved.rows[0]);
+      if (savedOperation.input_hash !== inputHash) throw new WorkspaceServerError("runtime_tool_operation_conflict", 409);
+      return savedOperation;
+    });
+  }
+
+  private async settleToolExecution(input: {
+    admission: RuntimeAdmission;
+    operation: OperationRecord;
+    status: "completed" | "failed";
+    summary: string;
+    resourceRefs: ResourceRef[];
+    errorCode?: string;
+  }): Promise<{ operation: OperationRecord; activityRef: ResourceRef; changeRef?: ResourceRef }> {
+    return this.database.withContext(this.context(), async (sql) => {
+      await this.assertRoomCanExecute(sql, input.admission.run.room_id!);
+      const activity = await this.activityForRun(sql, input.admission.run.id, input.admission.run.room_id!);
+      if (!activity) throw new WorkspaceServerError("runtime_tool_activity_missing", 500);
+      const now = nowIso();
+      const settledOperation = await this.updateRuntimeOperation(sql, input.operation, {
+        status: input.status,
+        ...(input.status === "completed" && input.resourceRefs[0] ? { resultRef: input.resourceRefs[0] } : {}),
+        ...(input.status === "failed" ? { error: input.errorCode ?? "runtime_tool_execution_failed" } : {})
+      });
+      const verificationId = `tool_verification:${input.operation.id}`;
+      const verification = activity.verification.some((item) => item.id === verificationId)
+        ? activity.verification
+        : [
+            ...activity.verification,
+            {
+              id: verificationId,
+              kind: "backend" as const,
+              status: input.status === "completed" ? "passed" as const : "failed" as const,
+              summary: summarize(input.summary, 2_000),
+              source_operation_id: input.operation.id,
+              recorded_at: now
+            }
+          ];
+      const updatedActivity = ActivityRecordSchema.parse({
+        ...activity,
+        verification,
+        domain_operation_ids: [...new Set([...activity.domain_operation_ids, input.operation.id])],
+        updated_at: now
+      });
+      await sql.query(
+        `UPDATE workspace_runtime_activities SET record = $3::JSONB, updated_at = $4
+         WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, activity.id, jsonText(updatedActivity), now]
+      );
+
+      let changeRef: ResourceRef | undefined;
+      if (input.status === "completed") {
+        const resourceRef = input.resourceRefs[0];
+        if (!resourceRef) throw new WorkspaceServerError("runtime_tool_result_resource_missing", 500);
+        const changeId = runtimeToolChangeId(input.admission.run.id, input.operation.id, resourceRef.id);
+        const change = WorkspaceChangeRecordSchema.parse({
+          id: changeId,
+          run_id: input.admission.run.id,
+          ...(input.admission.run.session_id ? { session_id: input.admission.run.session_id } : {}),
+          room_id: input.admission.run.room_id,
+          activity_id: activity.id,
+          domain_operation_id: input.operation.id,
+          ...(input.admission.run.session_ref ? { session_ref: input.admission.run.session_ref } : {}),
+          resource_ref: resourceRef,
+          change_type: "artifact_created",
+          summary: summarize(input.summary, 2_000),
+          correlation_id: input.operation.correlation_id,
+          created_at: now
+        });
+        await sql.query(
+          `INSERT INTO workspace_runtime_changes(
+             workspace_id, id, run_id, session_id, room_id, activity_id,
+             domain_operation_id, session_ref, resource_ref, change_type,
+             summary, correlation_id, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::JSONB, $9::JSONB, $10, $11, $12, $13)
+           ON CONFLICT (workspace_id, id) DO NOTHING`,
+          [this.workspaceId, change.id, change.run_id ?? null, change.session_id ?? null, change.room_id ?? null, change.activity_id ?? null, change.domain_operation_id ?? null, jsonText(change.session_ref), jsonText(change.resource_ref), change.change_type, change.summary, change.correlation_id ?? null, change.created_at]
+        );
+        changeRef = ResourceRefSchema.parse({ kind: "workspace_change", id: change.id, uri: `runtime://changes/${change.id}` });
+        await this.appendRuntimeAudit(sql, settledOperation, "completed", input.summary, input.resourceRefs);
+      } else {
+        await this.appendRuntimeAudit(sql, settledOperation, "failed", input.summary);
+      }
+      return {
+        operation: settledOperation,
+        activityRef: ResourceRefSchema.parse({ kind: "activity", id: activity.id, uri: `runtime://activities/${activity.id}` }),
+        ...(changeRef ? { changeRef } : {})
+      };
+    });
   }
 
   private async ensureRuntimeOperation(
@@ -1651,6 +2128,15 @@ export class PostgresRuntimeChat {
         [this.workspaceId, event.id]
       );
       if (existing.rows[0]) return eventFromRow(existing.rows[0]);
+      if (event.source_event_id) {
+        const existingSource = await sql.query<RuntimeEventRow>(
+          `SELECT * FROM workspace_runtime_events
+           WHERE workspace_id = $1 AND run_id = $2 AND source_event_id = $3
+           LIMIT 1`,
+          [this.workspaceId, event.run_id, event.source_event_id]
+        );
+        if (existingSource.rows[0]) return eventFromRow(existingSource.rows[0]);
+      }
       await sql.query(
         `INSERT INTO workspace_runtime_events(
            workspace_id, id, run_id, session_id, backend_session_id, event_type, sequence,
@@ -1660,8 +2146,14 @@ export class PostgresRuntimeChat {
         [this.workspaceId, event.id, event.run_id, event.session_id ?? null, event.backend_session_id ?? null, event.event_type, event.sequence, event.attempt_no ?? null, event.source_event_id ?? null, event.source_sequence ?? null, jsonText(event.payload), jsonText(event.resource_refs), event.created_at]
       );
       const saved = await sql.query<RuntimeEventRow>(
-        `SELECT * FROM workspace_runtime_events WHERE workspace_id = $1 AND id = $2`,
-        [this.workspaceId, event.id]
+        event.source_event_id
+          ? `SELECT * FROM workspace_runtime_events
+             WHERE workspace_id = $1 AND run_id = $2 AND source_event_id = $3
+             LIMIT 1`
+          : `SELECT * FROM workspace_runtime_events WHERE workspace_id = $1 AND id = $2`,
+        event.source_event_id
+          ? [this.workspaceId, event.run_id, event.source_event_id]
+          : [this.workspaceId, event.id]
       );
       if (!saved.rows[0]) throw new WorkspaceServerError("runtime_event_persistence_failed", 500);
       return eventFromRow(saved.rows[0]);
@@ -1916,7 +2408,7 @@ export class PostgresRuntimeChat {
         summary: row.summary,
         ...(row.legacy_operation_id ? { legacy_operation_id: row.legacy_operation_id } : {}),
         ...(row.correlation_id ? { correlation_id: row.correlation_id } : {}),
-        created_at: row.created_at
+        created_at: isoTimestamp(row.created_at)
       }));
     });
   }
@@ -2043,18 +2535,21 @@ export class PostgresRuntimeChat {
     }
   ): BackendEventRecord {
     const message = error instanceof Error ? error.message : String(error);
+    const fallbackErrorCode = terminalEvidence.kind === "failed" ? terminalEvidence.error.code : "runtime_backend_failure";
+    const errorCode = error instanceof WorkspaceServerError ? error.code : fallbackErrorCode;
+    const normalizedTerminalEvidence = terminalEvidence.kind === "failed"
+      ? { ...terminalEvidence, error: { ...terminalEvidence.error, code: errorCode, message: summarize(terminalEvidence.error.message, 240) } }
+      : terminalEvidence;
     const event = bridge.project({
-      event_type: terminalEvidence.kind === "completed" ? "run_completed" : "run_failed",
+      event_type: normalizedTerminalEvidence.kind === "completed" ? "run_completed" : "run_failed",
       payload: {
-        error_code: "runtime_backend_failure",
+        error_code: errorCode,
         message: summarize(message, 240),
         reason: "runtime",
         retryable: false,
         cause_category: "runtime"
       },
-      terminal_evidence: terminalEvidence.kind === "failed"
-        ? { ...terminalEvidence, error: { ...terminalEvidence.error, message: summarize(terminalEvidence.error.message, 240) } }
-        : terminalEvidence
+      terminal_evidence: normalizedTerminalEvidence
     });
     return event.record;
   }
@@ -2075,13 +2570,27 @@ export class PostgresRuntimeChat {
   private async notifyCompletionActivity(result: RunChatTurnResult, instructionSummary: string): Promise<void> {
     if (!this.onCompletionActivity) return;
     const operation = result.operations.find((candidate) => candidate.run_id === result.backendRun.id);
-    await this.onCompletionActivity({
+    const resourceRefs = uniqueResourceRefs([
+      ...(operation?.result_ref ? [operation.result_ref] : []),
+      ...result.workspaceChanges
+        .filter((change) => change.run_id === result.backendRun.id)
+        .map((change) => change.resource_ref)
+    ]);
+    const completion = {
       session: result.session,
       run: result.backendRun,
       ...(operation ? { operation } : {}),
       instructionSummary,
-      ...(result.backendRun.output_summary ? { resultSummary: result.backendRun.output_summary } : {})
-    });
+      ...(result.backendRun.output_summary ? { resultSummary: result.backendRun.output_summary } : {}),
+      ...(resourceRefs.length > 0 ? { resourceRefs } : {})
+    } satisfies PostgresRuntimeChatCompletionEvent;
+    // A Runtime result may be reported as successful only after its required
+    // Completion evidence is durable. When no independently configured
+    // maintenance identity is available, swallowing a projection failure
+    // would leave a settled Run with no recoverable Activity. The caller gets
+    // a retryable failure and can safely repeat the same idempotent request;
+    // configured maintenance workers additionally reconcile after a restart.
+    await this.onCompletionActivity(completion);
   }
 
   private context() {
@@ -2246,11 +2755,53 @@ interface RuntimeEventRow {
   source_sequence: number | string | null;
   payload: unknown;
   resource_refs: unknown;
-  created_at: string;
+  created_at: Date | string;
 }
 
 function runtimeOperationId(runId: string): string {
   return `operation:${runId}`;
+}
+
+function runtimeToolOperationId(runId: string, toolCallId: string): string {
+  return `operation:${runId}:tool:${stableHash(toolCallId).slice(0, 40)}`;
+}
+
+function runtimeToolChangeId(runId: string, operationId: string, resourceId: string): string {
+  return `change:${stableHash({ runId, operationId, resourceId }).slice(0, 48)}`;
+}
+
+function buildToolOperation(input: {
+  id: string;
+  run: BackendRunRecord;
+  inputHash: string;
+  inputMessageId: string;
+  now: string;
+}): OperationRecord {
+  return OperationRecordSchema.parse({
+    id: input.id,
+    ...(input.run.session_id ? { session_id: input.run.session_id } : {}),
+    run_id: input.run.id,
+    capability_id: "artifact.create",
+    operation: "artifact.create",
+    actor_identity: actorIdentityForSource(input.run.source),
+    ...(principalParticipantId(input.run.principal) ? { participant_id: principalParticipantId(input.run.principal) } : {}),
+    ...(input.run.principal ? { participant_kind: input.run.principal.kind, principal: input.run.principal } : {}),
+    ...(input.run.requested_by_participant_id ? { requested_by_participant_id: input.run.requested_by_participant_id } : {}),
+    ...(input.run.room_id ? { room_id: input.run.room_id } : {}),
+    ...(input.run.source ? { source: input.run.source } : {}),
+    ...(input.run.session_ref ? { session_ref: input.run.session_ref } : {}),
+    instruction_source: "tool_output",
+    instruction_authority: "room_execute",
+    channel: channelForSource(input.run.source),
+    input_hash: input.inputHash,
+    input_ref: messageResourceRef(input.inputMessageId),
+    target_resource_refs: [],
+    proposed_effects: ["Create a local workspace artifact draft."],
+    status: "created",
+    correlation_id: `${input.run.id}:${input.id}`,
+    created_at: input.now,
+    updated_at: input.now
+  });
 }
 
 function buildRuntimeOperation(input: {
@@ -2293,6 +2844,40 @@ function buildRuntimeOperation(input: {
   });
 }
 
+function buildSessionCreateOperation(input: {
+  id: string;
+  correlationId: string;
+  session: SessionRecord;
+  inputHash: string;
+  now: string;
+  principal?: PostgresRuntimeChatOptions["principal"];
+  source?: PostgresRuntimeChatOptions["source"];
+}): OperationRecord {
+  const sessionRef = { kind: "session", id: input.session.id, uri: `runtime://sessions/${input.session.id}` };
+  return OperationRecordSchema.parse({
+    id: input.id,
+    session_id: input.session.id,
+    capability_id: "runtime.chat",
+    operation: "runtime.chat.session.create",
+    actor_identity: actorIdentityForSource(input.source),
+    ...(principalParticipantId(input.principal) ? { participant_id: principalParticipantId(input.principal) } : {}),
+    ...(input.principal ? { participant_kind: input.principal.kind, principal: input.principal } : {}),
+    ...(input.session.room_id ? { room_id: input.session.room_id } : {}),
+    ...(input.source ? { source: input.source } : {}),
+    instruction_source: instructionSourceFor(input.source, input.principal),
+    instruction_authority: "room_execute",
+    channel: channelForSource(input.source),
+    input_hash: input.inputHash,
+    target_resource_refs: [sessionRef],
+    proposed_effects: ["runtime.chat.session.create"],
+    status: "completed",
+    result_ref: sessionRef,
+    correlation_id: input.correlationId,
+    created_at: input.now,
+    updated_at: input.now
+  });
+}
+
 function operationStatusForRun(run: BackendRunRecord): OperationRecord["status"] {
   if (run.status === "completed") return "completed";
   if (run.status === "waiting_for_backend_input") return "deferred";
@@ -2308,6 +2893,18 @@ function instructionSourceFor(
   if (source?.kind === "host") return "scheduled_context";
   if (source?.kind === "system" || principal?.kind === "system") return "system_policy";
   return "owner_instruction";
+}
+
+function actorIdentityForSource(source: PostgresRuntimeChatOptions["source"]): MessageEnvelope["actor_identity"] {
+  if (source?.kind === "external_app") return "external_app";
+  if (source?.kind === "host") return "owner_scheduled";
+  return "owner";
+}
+
+function channelForSource(source: PostgresRuntimeChatOptions["source"]): MessageEnvelope["source"] {
+  if (source?.kind === "external_app") return "webhook";
+  if (source?.kind === "host") return "cron";
+  return "web";
 }
 
 function principalParticipantId(principal: BackendRunRecord["principal"]): string | undefined {
@@ -2330,17 +2927,57 @@ function sessionFromRow(row: RuntimeSessionRow): SessionRecord {
     title: row.title,
     ui_locale: row.ui_locale,
     output_locale: row.output_locale,
-    created_at: row.created_at,
-    updated_at: row.updated_at
+    created_at: isoTimestamp(row.created_at),
+    updated_at: isoTimestamp(row.updated_at)
   });
 }
 
+function isoTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
 function operationFromRow(row: RuntimeOperationRow): OperationRecord {
-  const operation = OperationRecordSchema.parse(jsonValue(row.payload));
+  const payload = jsonValue(row.payload);
+  const operation = isLegacySessionCreatePayload(row, payload)
+    ? legacySessionCreateOperationFromRow(row, payload)
+    : OperationRecordSchema.parse(payload);
   if (operation.id !== row.id || operation.operation !== row.operation || operation.status !== row.status) {
     throw new WorkspaceServerError(`runtime_operation_projection_mismatch:${row.id}`, 500);
   }
   return operation;
+}
+
+function isLegacySessionCreatePayload(row: RuntimeOperationRow, payload: JsonValue): payload is Record<string, JsonValue> {
+  if (row.operation !== "runtime.chat.session.create" || !row.session_id || !payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const record = payload as Record<string, JsonValue>;
+  return record.session_id === row.session_id
+    && typeof record.input_hash === "string"
+    && Object.keys(record).every((key) => key === "input_hash" || key === "session_id");
+}
+
+function legacySessionCreateOperationFromRow(row: RuntimeOperationRow, payload: Record<string, JsonValue>): OperationRecord {
+  const sessionId = row.session_id;
+  if (!sessionId || typeof payload.input_hash !== "string") throw new WorkspaceServerError(`runtime_session_operation_invalid:${row.id}`, 500);
+  const sessionRef = { kind: "session", id: sessionId, uri: `runtime://sessions/${sessionId}` };
+  return OperationRecordSchema.parse({
+    id: row.id,
+    session_id: sessionId,
+    ...(row.room_id ? { room_id: row.room_id } : {}),
+    capability_id: "runtime.chat",
+    operation: row.operation,
+    actor_identity: "owner",
+    instruction_source: "owner_instruction",
+    instruction_authority: "room_execute",
+    channel: "web",
+    input_hash: payload.input_hash,
+    target_resource_refs: [sessionRef],
+    proposed_effects: ["runtime.chat.session.create"],
+    status: row.status,
+    result_ref: sessionRef,
+    correlation_id: row.id,
+    created_at: isoTimestamp(row.created_at),
+    updated_at: isoTimestamp(row.updated_at)
+  });
 }
 
 function messageFromRow(row: RuntimeMessageRow): MessageRecord {
@@ -2352,7 +2989,7 @@ function messageFromRow(row: RuntimeMessageRow): MessageRecord {
     input_locale: row.input_locale,
     output_locale: row.output_locale,
     ...(row.envelope ? { envelope: jsonValue(row.envelope) } : {}),
-    created_at: row.created_at
+    created_at: isoTimestamp(row.created_at)
   });
 }
 
@@ -2376,8 +3013,8 @@ function runFromRow(row: RuntimeRunRow): BackendRunRecord {
     ...(row.current_attempt !== null ? { current_attempt: Number(row.current_attempt) } : {}),
     ...(row.request_idempotency_key ? { request_idempotency_key: row.request_idempotency_key } : {}),
     ...(row.request_hash ? { request_hash: row.request_hash } : {}),
-    started_at: row.started_at,
-    ...(row.completed_at ? { completed_at: row.completed_at } : {}),
+    started_at: isoTimestamp(row.started_at),
+    ...(row.completed_at ? { completed_at: isoTimestamp(row.completed_at) } : {}),
     input_summary: row.input_summary,
     ...(row.output_summary ? { output_summary: row.output_summary } : {}),
     ...(row.error_code ? { error_code: row.error_code } : {}),
@@ -2398,7 +3035,7 @@ function eventFromRow(row: RuntimeEventRow): BackendEventRecord {
     ...(row.source_sequence !== null ? { source_sequence: Number(row.source_sequence) } : {}),
     payload: jsonRecord(row.payload),
     resource_refs: jsonArray(row.resource_refs),
-    created_at: row.created_at
+    created_at: isoTimestamp(row.created_at)
   });
 }
 
@@ -2477,6 +3114,25 @@ function firstPayloadValue(payload: Record<string, JsonValue> | undefined, keys:
 
 function stringPayload(value: JsonValue | undefined): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function toolErrorCode(error: unknown): string {
+  return error instanceof WorkspaceServerError ? error.code : "runtime_tool_execution_failed";
+}
+
+function toolErrorSummary(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return summarize(message, 2_000);
+}
+
+function uniqueResourceRefs(refs: ResourceRef[]): ResourceRef[] {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = `${ref.kind}:${ref.id}:${ref.version ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function summarizePayload(value: JsonValue | undefined): string {

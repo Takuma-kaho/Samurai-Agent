@@ -29,10 +29,11 @@ interface ClientEventRow {
   status: string;
   payload: unknown;
   resource_refs: unknown;
-  created_at: string;
-  delivered_at: string | null;
-  acked_at: string | null;
-  expires_at: string | null;
+  /** node-postgres returns PostgreSQL TIMESTAMPTZ columns as Date by default. */
+  created_at: Date | string;
+  delivered_at: Date | string | null;
+  acked_at: Date | string | null;
+  expires_at: Date | string | null;
   error_code: string | null;
 }
 
@@ -294,12 +295,19 @@ function clientEventFromRow(row: ClientEventRow): ClientEventRecord {
     status: row.status,
     payload: jsonRecord(row.payload),
     resource_refs: jsonArray(row.resource_refs),
-    created_at: row.created_at,
-    ...(row.delivered_at ? { delivered_at: row.delivered_at } : {}),
-    ...(row.acked_at ? { acked_at: row.acked_at } : {}),
-    ...(row.expires_at ? { expires_at: row.expires_at } : {}),
+    created_at: clientEventTimestamp(row.created_at),
+    ...(row.delivered_at ? { delivered_at: clientEventTimestamp(row.delivered_at) } : {}),
+    ...(row.acked_at ? { acked_at: clientEventTimestamp(row.acked_at) } : {}),
+    ...(row.expires_at ? { expires_at: clientEventTimestamp(row.expires_at) } : {}),
     ...(row.error_code ? { error_code: row.error_code } : {})
   });
+}
+
+/** Normalize both node-postgres Date values and compatibility string rows. */
+function clientEventTimestamp(value: Date | string): string {
+  const timestamp = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) throw new WorkspaceServerError("client_event_timestamp_invalid", 500);
+  return timestamp.toISOString();
 }
 
 function jsonRecord(value: unknown): Record<string, unknown> {

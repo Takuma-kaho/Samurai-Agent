@@ -6,6 +6,12 @@ import {
   workspaceGeneratedSurfaceRoomRequest,
   workspaceGeneratedSurfaceStateRequest
 } from "./workspace-generated-surface-requests.js";
+import {
+  sanitizeWorkspaceBundleExportInput,
+  sanitizeWorkspaceBundleRestoreInput,
+  sanitizeWorkspaceChatSessionInput,
+  sanitizeWorkspaceCreateInput
+} from "./preload-sanitizers.js";
 
 const apiBaseUrl = readArg("--samurai-api-base-url=");
 const workspaceServerUrl = readArg("--samurai-workspace-server-url=");
@@ -19,11 +25,52 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   accountId,
   getStatus: () => ipcRenderer.invoke("samurai:get-status"),
   listWorkspaceConnections: () => ipcRenderer.invoke("samurai:workspace-connections:list"),
+  listWorkspaceDirectory: () => ipcRenderer.invoke("samurai:workspace-directory:list"),
+  createWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:workspace:create", sanitizeWorkspaceCreateInput(input)),
+  exportWorkspaceBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:bundle:export", sanitizeWorkspaceBundleExportInput(input)),
+  restoreWorkspaceBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:bundle:restore", sanitizeWorkspaceBundleRestoreInput(input)),
+  cutoverWorkspaceTarget: (input: unknown) => ipcRenderer.invoke("samurai:workspace-connections:cutover", sanitizeWorkspaceTargetCutoverInput(input)),
+  preflightWorkspaceTransfer: (input: unknown) => ipcRenderer.invoke("samurai:workspace-transfer:preflight", sanitizeWorkspaceTransferInput(input)),
+  executeWorkspaceTransfer: (input: unknown) => ipcRenderer.invoke("samurai:workspace-transfer:execute", sanitizeWorkspaceTransferInput(input)),
+  getWorkspaceTransferStatus: (input: unknown) => ipcRenderer.invoke("samurai:workspace-transfer:status", sanitizeWorkspaceTransferInput(input)),
+  listWorkspaceTransfers: () => ipcRenderer.invoke("samurai:workspace-transfer:list"),
   upsertWorkspaceConnection: (input: unknown) => ipcRenderer.invoke("samurai:workspace-connections:upsert", sanitizeWorkspaceConnectionInput(input)),
   selectWorkspaceConnection: (connectionId: unknown) => ipcRenderer.invoke("samurai:workspace-connections:select", typeof connectionId === "string" ? connectionId.slice(0, 160) : ""),
+  selectOrganizationCandidate: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:selection:organization", sanitizeWorkspaceSelectionInput(input, "organization")),
+  selectWorkspaceCandidate: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:selection:workspace", sanitizeWorkspaceSelectionInput(input, "workspace")),
+  selectWorkspaceTarget: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:selection:workspace", sanitizeWorkspaceSelectionInput(input, "workspace")),
+  selectRoomCandidate: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:selection:room", sanitizeWorkspaceSelectionInput(input, "room")),
   importActiveWorkspaceIdentityFromClipboard: () => ipcRenderer.invoke("samurai:workspace-identity:import-active-from-clipboard"),
   registerWorkspaceServerAccount: (displayName: unknown) => ipcRenderer.invoke("samurai:workspace-server:register-active-account", typeof displayName === "string" ? displayName.slice(0, 160) : ""),
-  getWorkspaceServerStatus: () => ipcRenderer.invoke("samurai:workspace-server:status"),
+  getWorkspaceServerStatus: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:status", sanitizeWorkspaceTargetInput(input)),
+  listOrganizations: () => ipcRenderer.invoke("samurai:workspace-server:organization:list"),
+  getOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:get", sanitizeOrganizationIdInput(input)),
+  createOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:create", sanitizeOrganizationMutationInput(input, ["name", "description", "icon", "operationId"])),
+  patchOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:patch", sanitizeOrganizationMutationInput(input, ["organizationId", "name", "description", "icon", "operationId", "expectedVersion"])),
+  deleteOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:delete", sanitizeOrganizationMutationInput(input, ["organizationId", "confirm", "expectedVersion", "operationId"])),
+  listOrganizationMembers: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:members:list", sanitizeOrganizationIdInput(input)),
+  changeOrganizationMemberRole: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:member:role", sanitizeOrganizationMutationInput(input, ["organizationId", "accountId", "role", "expectedVersion", "operationId"])),
+  removeOrganizationMember: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:member:remove", sanitizeOrganizationMutationInput(input, ["organizationId", "accountId", "expectedVersion", "operationId"])),
+  leaveOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:member:leave", sanitizeOrganizationMutationInput(input, ["organizationId", "expectedVersion", "operationId"])),
+  listOrganizationInvitations: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:invitations:list", sanitizeOrganizationIdInput(input)),
+  createOrganizationInvitation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:invitation:create", sanitizeOrganizationInvitationInput(input)),
+  acceptOrganizationInvitation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:invitation:accept", sanitizeOrganizationInvitationAcceptInput(input)),
+  revokeOrganizationInvitation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:invitation:revoke", sanitizeOrganizationMutationInput(input, ["organizationId", "invitationId", "operationId", "expectedVersion"])),
+  reissueOrganizationInvitation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:invitation:reissue", sanitizeOrganizationMutationInput(input, ["organizationId", "invitationId", "expectedVersion", "operationId"])),
+  extendOrganizationInvitation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:invitation:extend", sanitizeOrganizationMutationInput(input, ["organizationId", "invitationId", "operationId", "expiresAt", "expectedVersion"])),
+  listOrganizationWorkspaces: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspaces:list", sanitizeOrganizationIdInput(input)),
+  createOrganizationWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:create", sanitizeOrganizationMutationInput(input, ["organizationId", "name", "operationId"])),
+  attachWorkspaceToOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:attach", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "expectedWorkspaceVersion", "confirmGuestMemberships", "operationId"])),
+  detachWorkspaceFromOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:detach", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "expectedWorkspaceVersion", "operationId"])),
+  patchOrganizationWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:patch", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "name", "operationId", "expectedVersion"])),
+  grantOrganizationWorkspaceMember: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:member:grant", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "accountId", "role", "operationId"])),
+  revokeOrganizationWorkspaceMember: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:member:revoke", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "accountId", "operationId", "expectedVersion"])),
+  setOrganizationWorkspaceLifecycle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:lifecycle", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "lifecycle", "confirm", "expectedVersion", "operationId"])),
+  previewOrganizationWorkspaceMove: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:move-preview", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "targetOrganizationId", "operationId", "expectedWorkspaceVersion"])),
+  moveOrganizationWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:move", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "targetOrganizationId", "operationId", "preflightId", "confirmGuestMembership", "expectedWorkspaceVersion"])),
+  getOrganizationWorkspaceMoveStatus: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:move-status", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "operationId"])),
+  exportOrganizationWorkspaceBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:bundle:export", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "operationId", "expectedWorkspaceVersion"])),
+  restoreOrganizationBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:bundle:restore", sanitizeOrganizationBundleRestoreInput(input)),
   listWorkspaceRooms: () => ipcRenderer.invoke("samurai:workspace-server:rooms:list"),
   listWorkspaceAgentBackends: () => ipcRenderer.invoke("samurai:workspace-server:chat:backends"),
   getWorkspaceSettings: () => ipcRenderer.invoke("samurai:workspace-server:settings:get"),
@@ -40,6 +87,11 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   listWorkspaceBackendEvents: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:events:list", sanitizeWorkspaceRuntimeQuery(input)),
   listWorkspaceChanges: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:changes:list", sanitizeWorkspaceRuntimeQuery(input)),
   listWorkspaceActivity: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:activity:list", sanitizeWorkspaceRuntimeQuery(input)),
+  cancelWorkspaceBackendRun: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:run:cancel", sanitizeWorkspaceRunControlInput(input)),
+  stopWorkspaceChatRun: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:run:stop", sanitizeWorkspaceRunControlInput(input)),
+  retryWorkspaceBackendRun: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:run:retry", sanitizeWorkspaceRunControlInput(input)),
+  reconnectWorkspaceServer: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:reconnect", sanitizeWorkspaceReconnectInput(input)),
+  readWorkspaceEvidence: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:evidence:read", sanitizeWorkspaceEvidenceInput(input)),
   getWorkspaceAudit: () => ipcRenderer.invoke("samurai:workspace-server:audit:get"),
   listWorkspaceCompletionResources: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resources:list", sanitizeWorkspaceCompletionOperation(input)),
   getWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:get", sanitizeWorkspaceCompletionOperation(input)),
@@ -128,22 +180,174 @@ function sanitizeAppShotInput(input: unknown): { sourceId: string; content: stri
   };
 }
 
-function sanitizeWorkspaceConnectionInput(input: unknown): Record<string, string> {
+function sanitizeWorkspaceConnectionInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object") return {};
   const value = input as Record<string, unknown>;
-  const output: Record<string, string> = {};
-  for (const key of ["id", "label", "serverUrl", "workspaceId", "accountId"]) {
+  const output: Record<string, unknown> = {};
+  for (const key of ["id", "label", "serverUrl", "workspaceId", "accountId", "lastOrganizationId", "lastWorkspaceId", "lastRoomId"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "label" ? 100 : 500);
+  }
+  if (Array.isArray(value.targets)) {
+    output.targets = value.targets.slice(0, 500).flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const target = item as Record<string, unknown>;
+      if (typeof target.connectionId !== "string" || typeof target.workspaceId !== "string") return [];
+      return [{
+        connectionId: target.connectionId.slice(0, 160),
+        workspaceId: target.workspaceId.slice(0, 128),
+        ...(typeof target.lastOrganizationId === "string" ? { lastOrganizationId: target.lastOrganizationId.slice(0, 128) } : {}),
+        ...(typeof target.lastRoomId === "string" ? { lastRoomId: target.lastRoomId.slice(0, 128) } : {})
+      }];
+    });
   }
   return output;
 }
 
-function sanitizeWorkspaceChatSessionInput(input: unknown): Record<string, unknown> {
+function sanitizeWorkspaceSelectionInput(input: unknown, kind: "organization" | "workspace" | "room"): Record<string, string> {
+  if (typeof input === "string") {
+    const key = kind === "organization" ? "organizationId" : kind === "workspace" ? "workspaceId" : "roomId";
+    return { [key]: input.slice(0, 128) };
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const output: Record<string, string> = {};
+  for (const key of ["connectionId", "organizationId", "workspaceId", "roomId"]) {
+    if (typeof value[key] === "string") output[key] = value[key].slice(0, 128);
+  }
+  return output;
+}
+
+function sanitizeWorkspaceTargetInput(input: unknown): { connectionId: string; workspaceId: string } | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { connectionId: "", workspaceId: "" };
+  const value = input as Record<string, unknown>;
+  return {
+    connectionId: typeof value.connectionId === "string" ? value.connectionId.slice(0, 128) : "",
+    workspaceId: typeof value.workspaceId === "string" ? value.workspaceId.slice(0, 128) : ""
+  };
+}
+
+function sanitizeWorkspaceTargetCutoverInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const target = (candidate: unknown): Record<string, string> => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return {};
+    const item = candidate as Record<string, unknown>;
+    return {
+      connectionId: typeof item.connectionId === "string" ? item.connectionId.slice(0, 128) : "",
+      workspaceId: typeof item.workspaceId === "string" ? item.workspaceId.slice(0, 128) : ""
+    };
+  };
+  const output: Record<string, unknown> = {
+    source: target(value.source),
+    destination: target(value.destination)
+  };
+  for (const key of ["lastOrganizationId", "lastRoomId"]) {
+    if (typeof value[key] === "string") output[key] = value[key].slice(0, 128);
+  }
+  return output;
+}
+
+function sanitizeWorkspaceTransferInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const target = (candidate: unknown): Record<string, string> => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return {};
+    const item = candidate as Record<string, unknown>;
+    return {
+      connectionId: typeof item.connectionId === "string" ? item.connectionId.slice(0, 128) : "",
+      workspaceId: typeof item.workspaceId === "string" ? item.workspaceId.slice(0, 128) : ""
+    };
+  };
+  const output: Record<string, unknown> = {
+    source: target(value.source),
+    destination: target(value.destination)
+  };
+  for (const key of ["operationId", "transferId", "lastRoomId"]) {
+    if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
+  }
+  if (typeof value.targetWorkspaceName === "string") output.targetWorkspaceName = value.targetWorkspaceName.slice(0, 500);
+  return output;
+}
+
+function sanitizeOrganizationIdInput(input: unknown): Record<string, string> {
+  return sanitizeWorkspaceSelectionInput(input, "organization");
+}
+
+function sanitizeOrganizationMutationInput(input: unknown, keys: string[]): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
-  for (const key of ["roomId", "operationId", "title", "uiLocale", "outputLocale"]) {
-    if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "title" ? 240 : 32);
+  for (const key of keys) {
+    if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "name" ? 240 : key === "description" ? 20_000 : 160);
+    if ((key === "description" || key === "icon") && value[key] === null) output[key] = null;
+    if (typeof value[key] === "boolean") output[key] = value[key];
+    if (typeof value[key] === "number" && Number.isSafeInteger(value[key])) output[key] = value[key];
+  }
+  return output;
+}
+
+function sanitizeOrganizationInvitationInput(input: unknown): Record<string, unknown> {
+  const output = sanitizeOrganizationMutationInput(input, ["organizationId", "accountId", "role", "operationId", "expiresAt"]);
+  if (!input || typeof input !== "object" || Array.isArray(input)) return output;
+  const value = input as Record<string, unknown>;
+  if (Array.isArray(value.workspaceGrants)) {
+    output.workspaceGrants = value.workspaceGrants.slice(0, 100).flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const grant = item as Record<string, unknown>;
+      if (typeof grant.workspaceId !== "string" || typeof grant.role !== "string") return [];
+      return [{
+        workspaceId: grant.workspaceId.slice(0, 128),
+        role: grant.role.slice(0, 16),
+        ...(Array.isArray(grant.roomIds) ? { roomIds: grant.roomIds.filter((roomId): roomId is string => typeof roomId === "string").slice(0, 500).map((roomId) => roomId.slice(0, 128)) } : {})
+      }];
+    });
+  }
+  return output;
+}
+
+function sanitizeOrganizationInvitationAcceptInput(input: unknown): Record<string, string> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  return {
+    token: typeof value.token === "string" ? value.token.slice(0, 512) : "",
+    operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : ""
+  };
+}
+
+function sanitizeOrganizationBundleRestoreInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ["organizationId", "bundleId", "operationId"]) {
+    if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
+  }
+  if (typeof value.confirm === "boolean") output.confirm = value.confirm;
+  return output;
+}
+
+function sanitizeWorkspaceRunControlInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  return {
+    runId: typeof value.runId === "string" ? value.runId.slice(0, 128) : "",
+    operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : "",
+    ...(typeof value.confirmUnknown === "boolean" ? { confirmUnknown: value.confirmUnknown } : {})
+  };
+}
+
+function sanitizeWorkspaceReconnectInput(input: unknown): Record<string, string> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  return typeof value.connectionId === "string" ? { connectionId: value.connectionId.slice(0, 160) } : {};
+}
+
+function sanitizeWorkspaceEvidenceInput(input: unknown): Record<string, string> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const output: Record<string, string> = {};
+  for (const key of ["workspaceId", "roomId", "messageId", "runId"]) {
+    if (typeof value[key] === "string") output[key] = value[key].slice(0, 128);
   }
   return output;
 }
@@ -229,7 +433,7 @@ function sanitizeWorkspaceAttachmentInput(input: unknown): Record<string, unknow
   };
 }
 
-function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; workspaceId: string; roomId?: string; kind?: string; eventId?: string; cursor?: string } | undefined {
+function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; workspaceId: string; connectionId?: string; roomId?: string; kind?: string; eventId?: string; cursor?: string } | undefined {
   if (!input || typeof input !== "object") return undefined;
   const value = input as Record<string, unknown>;
   const type = typeof value.type === "string" && /^(?:event|access_changed|access_revoked|room_access_changed|room_access_revoked)$/.test(value.type)
@@ -237,7 +441,8 @@ function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; worksp
     : undefined;
   const workspaceId = typeof value.workspaceId === "string" && opaque(value.workspaceId) ? value.workspaceId : undefined;
   if (!type || !workspaceId) return undefined;
-  const output: { type: string; workspaceId: string; roomId?: string; kind?: string; eventId?: string; cursor?: string } = { type, workspaceId };
+  const output: { type: string; workspaceId: string; connectionId?: string; roomId?: string; kind?: string; eventId?: string; cursor?: string } = { type, workspaceId };
+  if (typeof value.connectionId === "string" && opaque(value.connectionId)) output.connectionId = value.connectionId;
   if (typeof value.roomId === "string" && opaque(value.roomId)) output.roomId = value.roomId;
   if (typeof value.kind === "string" && /^[a-z][a-z0-9._-]{0,80}$/.test(value.kind)) output.kind = value.kind;
   if (typeof value.eventId === "string" && opaque(value.eventId)) output.eventId = value.eventId;

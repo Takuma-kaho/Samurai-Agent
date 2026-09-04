@@ -91,7 +91,7 @@ export async function createPostgresExternalIntegrationRuntime(
   });
   retentionWorker.start();
 
-  const publicBaseUrl = options.config.publicBaseUrl ?? `http://${options.config.bindAddress}:${options.config.port}`;
+  const publicBaseUrl = resolveExternalIntegrationPublicBaseUrl(options.config);
   const protectedResourceUrl = new URL("/mcp", publicBaseUrl).toString();
   const oauth = new OAuthService({
     store,
@@ -130,6 +130,15 @@ export async function createPostgresExternalIntegrationRuntime(
   };
 }
 
+export function resolveExternalIntegrationPublicBaseUrl(
+  config: Pick<WorkspaceServerConfig, "publicBaseUrl" | "mode" | "publicNetwork" | "bindAddress" | "port">
+): string {
+  return config.publicBaseUrl
+    ?? (config.mode === "self_host" && !config.publicNetwork
+      ? `http://127.0.0.1:${config.port}`
+      : `http://${config.bindAddress}:${config.port}`);
+}
+
 export function isPostgresExternalIntegrationPath(pathname: string): boolean {
   return pathname === "/mcp"
     || pathname === "/.well-known/oauth-authorization-server"
@@ -143,9 +152,11 @@ export function isPostgresExternalIntegrationPath(pathname: string): boolean {
 
 export function externalIntegrationRequestWorkspaceId(
   request: { query?: Record<string, unknown>; body?: unknown; headers?: Record<string, unknown> },
-  config: Pick<WorkspaceServerConfig, "mode" | "selfHostWorkspaceId">
+  _config: Pick<WorkspaceServerConfig, "mode" | "selfHostWorkspaceId">
 ): string | undefined {
-  if (config.mode === "self_host") return config.selfHostWorkspaceId;
+  // Self-host is a deployment mode, not a tenant selector.  Resolve the
+  // requested Workspace through the same authenticated authorization path as
+  // Hosted; a legacy configured Workspace ID is never a request fallback.
   const header = request.headers?.["x-samurai-workspace-id"];
   if (typeof header === "string" && header.trim()) return header.trim();
   const query = request.query?.workspace_id;

@@ -307,21 +307,34 @@ export class WorkspaceFileStore {
           throw error;
         });
         if (current) {
-          if (hashBytes(current) !== expected.sha256) {
-            throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: transaction.target_path });
-          }
-          await rm(source, { force: true });
-        } else {
-          try {
-            await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-            await rename(source, destination);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            const recovered = await readFile(destination).catch(() => undefined);
-            if (!recovered || hashBytes(recovered) !== expected.sha256) {
+          const currentHash = hashBytes(current);
+          if (currentHash === expected.sha256) {
+            // The physical rename completed before the process stopped. Only
+            // remove a leftover staging file after verifying that it is the
+            // same new content; a changed staging file must remain visible for
+            // a later, safe recovery attempt.
+            const staged = await readFile(source).catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return undefined;
+              throw error;
+            });
+            if (staged && hashBytes(staged) !== expected.sha256) {
               throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: transaction.target_path });
             }
+            await rm(source, { force: true });
+          } else {
+            // A versioned update may have committed its DB row while the
+            // previous physical version was still at the destination. It is
+            // safe to atomically replace it only when its hash is exactly the
+            // previous DB value. Any third value is an unexplained edit and
+            // must stop without deleting either file.
+            const previous = transaction.previous_file ? jsonObject(transaction.previous_file) : undefined;
+            if (!previous || typeof previous.sha256 !== "string" || currentHash !== previous.sha256) {
+              throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: transaction.target_path });
+            }
+            await replaceStagedFile(source, destination, expected.sha256, transaction.target_path);
           }
+        } else {
+          await replaceStagedFile(source, destination, expected.sha256, transaction.target_path);
         }
       }
 
@@ -422,6 +435,36 @@ async function assertNoSymlinkPath(root: string, relativePath: string): Promise<
     });
     if (!stat) break;
     if (stat.isSymbolicLink()) throw new WorkspaceServerError("workspace_file_symlink_path_rejected", 409, { path: relativePath });
+  }
+}
+
+async function assertStagedHash(source: string, expectedHash: unknown, targetPath: string): Promise<void> {
+  if (typeof expectedHash !== "string") {
+    throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: targetPath });
+  }
+  const staged = await readFile(source).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!staged || hashBytes(staged) !== expectedHash) {
+    throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: targetPath });
+  }
+}
+
+/** Replace an already-verified destination atomically. `rename` replaces the
+ * old file without an intermediate missing-file window; if it reports that a
+ * concurrent recovery won the race, accept only the fully verified new file. */
+async function replaceStagedFile(source: string, destination: string, expectedHash: string, targetPath: string): Promise<void> {
+  await assertStagedHash(source, expectedHash, targetPath);
+  try {
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await rename(source, destination);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const recovered = await readFile(destination).catch(() => undefined);
+    if (!recovered || hashBytes(recovered) !== expectedHash) {
+      throw new WorkspaceServerError("workspace_file_rename_recovery_required", 500, { path: targetPath });
+    }
   }
 }
 
