@@ -10,8 +10,10 @@
 
 ## 現在の設計書
 
-- `organization.md`：任意のOrganization設計。Workspaceとの責務分離、Membership、招待、追加・解除、移行を扱う。
-- `native-app.md`：Workspace-firstのNative App設計。React、Chat、Electron、実機確認を扱う。
+- [organization.md](organization.md)：任意のOrganization設計。Workspaceとの責務分離、Membership、招待、追加・解除、移行を扱う。
+- [native-app.md](native-app.md)：Workspace-firstのNative App設計。既定Agentとの仕事、専門Agentの制御、コメント、Agent一覧・Room作成・DM、Electron、実機確認を扱う。
+- [room-agent-work.md](room-agent-work.md)：RoomとAgentの共同作業設計。既定Agent、仕事と担当、依頼とコメントの区別、委譲・停止・指示変更、DMと共有を扱う。目標設計であり未実装部分を含む。
+- [agent-backends.md](agent-backends.md)：Samurai Native / Codex / Claude Codeの接続設計。provider選択・認証、共通契約、文脈の分離、継続・停止・承認、実行先と復旧、検証担当を扱う。目標設計であり実Agentの完成確認は別途必要。
 
 ## 作成候補
 

@@ -1,14 +1,16 @@
 # Native App 製品設計
 
-- 状態: 合意済みの現在設計。現在の未コミット実装は必須Organization前提のため、後続の実装修正が必要
-- 対象: React移行、Electron、Workspace / Roomナビゲーション、任意Organization管理、Chat、証拠確認、再接続
+- 状態: 合意済みの目標設計。Phase 3・4・6の未実装部分を含み、実機確認の完了を意味しない
+- 対象: React、Electron、Workspace / Roomナビゲーション、既定Agentとの仕事、専門Agent、仕事のコメント、Agent DM、任意Organization管理、証拠確認、再接続
 - 正本: [PRODUCT.md](../../PRODUCT.md)、[ARCHITECTURE.md](../../ARCHITECTURE.md)
-- 関連設計: [Organization 製品設計](organization.md)
-- 実装計画: [Workspace-first・Organization再設計マスタープラン](../../plans/workspace-first-organization-realignment-master-plan.md)
+- 関連設計: [Organization](organization.md)、[RoomとAgentの共同作業](room-agent-work.md)、[Agent Backend](agent-backends.md)
+- 実装計画: [Phase 3・4・6統合プラン](../../plans/room-agent-collaboration-plan-phase3-4-6.md)、[Workspace-first・Organization再設計マスタープラン](../../plans/workspace-first-organization-realignment-master-plan.md)
 
 ## 1. 目的
 
-Native Appは、Samuraiの完成体験を実際に操作・確認するためのChat-first clientである。利用者はWorkspaceとRoomを選び、外部Agentへ依頼し、実行証拠と再利用されたKnowledgeを確認・修正する。
+Native Appは、Samuraiの完成体験を実際に操作・確認するためのChat-first clientである。利用者はWorkspaceとRoomを選び、既定Agentへ依頼し、必要に応じて専門Agentや他の人と同じ仕事を進める。実行証拠と再利用されたKnowledgeを確認・修正できる。
+
+最初に一人でAgentへ仕事を依頼でき、その仕事へ他の人が参加できる体験を基本とする。中央の会話はAgentへの指示と結果、人間同士の相談は仕事ごとのコメント欄で扱う。
 
 Organizationはこの基本体験の前提ではない。複数Workspaceをまとめて管理する必要がある利用者だけが、同一Server内で任意のOrganizationを作成・利用する。
 
@@ -28,23 +30,19 @@ Workspace switcherを開く
 
 Organizationを使う場合は、この体験を壊さず、Workspaceのグループ表示と管理操作だけを追加する。
 
-## 2. 現在との差分
+## 2. 設計の範囲
 
-現在の未コミット実装は、Organizationを先に選び、その配下のWorkspaceとRoomを開く構造である。この設計では、次をWorkspace-firstへ変更する。
+この文書は画面構成、利用者の操作、表示状態を定義する。仕事のデータ・制御権限・委譲・停止は[RoomとAgentの共同作業設計](room-agent-work.md)、エンジン接続は[Agent Backend設計](agent-backends.md)を参照する。
 
-- Account作成時のOrganization自動生成を前提にしない。
-- zero Organizationを利用不能な空状態として扱わない。
-- Server selectorやOrganization switcherを必須の最上位ナビゲーションにしない。
-- 登録済みの全Serverを横断するWorkspace switcherを主導線にする。
-- Workspace APIと画面をOrganization配下に固定しない。
-- Organizationを使う場合だけ、グループ表示と管理画面を有効にする。
-
-この文書は目標設計であり、React UIやOrganization APIがこの設計どおり実装済みであることを意味しない。
+Workspace-firstと任意Organizationの境界を維持しながら、既定Agentとの仕事、専門Agent、コメント、DMを同じNative Appへ組み込む。現在のコードとの差分・実装順序・検証の到達点は実装計画とreportsで管理する。
 
 ## 3. 体験の原則
 
 - Workspace-first: WorkspaceはOrganizationなしで作成、招待、Room、Chat、証拠確認、export / restoreまで完結する。
 - Chat-first: 見た目の独自性より、迷わず依頼・確認・修正できることを優先する。
+- 依頼の窓口: Roomには既定Agentを一つ置き、通常の送信をそのAgentへの依頼にする。
+- 人間の介入: 仕事全体と個々の担当を確認し、権限に応じて停止・追加指示・担当変更できる。
+- 相談と指示: コメントだけではAgentを動かさず、人間の明示操作で仕事へ反映する。
 - Serverは配置先: ServerはWorkspaceを配置する接続先であり、利用者向けの主な切替単位にしない。
 - Workspace switcher: 登録済みの全Serverにある認可済みWorkspaceを一つの一覧にまとめ、Workspaceを利用者向けの切替単位にする。
 - Workspace target: 少なくともServer connectionとworkspace IDの組で識別し、workspace ID単独で接続先を決めない。
@@ -61,8 +59,12 @@ flowchart LR
   T --> A[対象Serverで再認可]
   A --> W[Workspace navigator]
   W --> R[Room navigator]
-  R --> CH[Chat surface]
+  R --> CH[既定Agentとの仕事]
   CH --> E[Evidence inspector]
+  CH --> C[仕事のコメント]
+  CH --> P[専門Agentの担当と制御]
+  W --> B[Agent一覧]
+  B --> DM[Agent DM]
   S[Server<br/>配置先] -.-> T
   O[Optional Organization management<br/>same Server only] -.-> W
 ~~~
@@ -72,8 +74,12 @@ flowchart LR
 | Workspace switcher | 登録済みの全ServerにあるWorkspaceを横断して選択する | Serverを先に選ぶ二段階導線、非許可Workspaceのcontent |
 | Workspace navigator | 選択したWorkspaceを開く・作成する | workspace ID単独の接続先、非許可Workspaceのcontent |
 | Server connection settings | HostedまたはSelf-hostの接続を追加・復旧する | Server内部の資格情報 |
-| Room navigator | 許可済みRoomを選択する | Session、内部run |
-| Chat surface | Message送信、stream確認、stop、retry、添付 | Agent runtimeの内部管理UI |
+| Room navigator / 作成 | 許可済みRoomを選択し、既存または新規Agentを既定にしてRoomを作る | Session、内部run |
+| Agent一覧・選択 | 専門性、Backend、利用可否を見て作成・編集・選択する | 資格情報の本文 |
+| Chat surface | 依頼、仕事への追加指示、stream確認、添付、結果確認 | Session管理、無関係なAgent間連絡 |
+| 仕事の担当・制御 | 担当作業、全体停止、個別停止、指示変更、担当変更を確認・操作する | 停止要求を停止完了に見せる表示 |
+| 仕事のコメント | 人間同士で相談し、選んだ内容をAgentへ反映する | 投稿による自動実行 |
+| Agent DM | 選んだAgentとの個人的な依頼と継続 | 他人のDM、共有Roomへの自動公開 |
 | Evidence inspector | Activity、実行証拠、実ファイル、再利用Knowledgeを確認する | 許可外Workspaceの情報 |
 | Organization management | Organization、Member、招待、Workspace追加・解除を管理する | contentの自動閲覧、課金、Compute、SSO |
 
@@ -86,6 +92,7 @@ flowchart LR
 5. 選択したWorkspaceの下に、許可済みRoomだけを表示する。Organization MemberでもWorkspace Membershipがなければ、Room、Message、Activity、Knowledgeを表示しない。
 6. archive Workspaceにはread-only表示を出す。
 7. SessionはSidebar、deep link、URL、管理画面に出さない。
+8. Agent一覧と、自分が開けるAgent DMへの導線を設ける。RoomとDMの公開範囲を判別できるようにする。
 
 ### 4.2 Workspace作成とOrganization利用
 
@@ -104,13 +111,18 @@ flowchart LR
 
 ### 4.4 中央Chat
 
-Chat surfaceはRoomの既定Agentと会話する場所である。Agent実行の基盤を確認することを優先し、複雑な複数Agent編成UIは作らない。
+Roomのヘッダーに既定Agentを示す。通常の入力から送信すると新しい仕事を作り、Agentの応答と結果を中央に表示する。`@`は専門Agentを明示指名するときに使う。
 
-- Messageを送信し、streamを表示する。
-- 送信中はstopを実行できる。
-- 通信・Agent failureは、原因、送信済みか、retryできるかを区別して表示する。
-- reconnect / replay後に同じMessageを重複表示・重複送信しない。
-- 添付と既存Artifactは必要時に開く / ダウンロードできればよい。
+- 仕事ごとに依頼者、担当、状態を示し、結果の近くに「いいね」「この仕事に返信」「コメント」を置く。
+- 「この仕事に返信」を押すと、入力欄に対象の仕事を表示する。返信先を解除すれば新しい仕事を依頼できる。
+- 専門Agentの作業は仕事の下で折り畳んで示す。担当名、何をしているか、待っている理由、結果を確認できる。
+- 仕事全体の停止と、特定の担当作業の停止を区別する。操作後はServerが返した停止確認の状態を表示する。
+- 指示変更は受付と反映を分けて表示し、反映待ち・失敗の担当を確認できる。
+- 依頼者とRoom Owner / Adminに制御操作を出す。他のメンバーはコメントで提案し、自分の新しい仕事を依頼できる。
+- 通信・Agent failureは、原因、送信済みか、retryできるかを区別して表示する。reconnect / replayで同じ依頼や結果を重複させない。
+- 添付は依頼・追加指示・コメントの入力位置から追加できる。アップロード中・失敗・Agentが参照できない形式を区別する。
+
+主画面に汎用のフローチャート編集やAgent同士の全会話を要求しない。必要な委譲と介入を、仕事の担当一覧と操作で行えるようにする。
 
 ### 4.5 Evidence inspector
 
@@ -122,6 +134,28 @@ Chat surfaceはRoomの既定Agentと会話する場所である。Agent実行の
 - 次の実行で再利用されたKnowledgeの識別子と選択根拠
 
 モデル出力の文章だけで、学習された、再利用されたとは扱わない。Serverが返したActivity / Knowledge referenceとPostgreSQLの記録をE2Eで照合できる形にする。
+
+### 4.6 人間のコメント
+
+仕事の「コメント」から専用欄を開く。コメント入力は中央の依頼入力と分け、「投稿してもAgentには指示されない」と判別できる表示にする。狭い画面では同じ機能をdrawerまたは専用表示へ移す。
+
+コメントを選択して「Agentに反映」を押すと、反映先の仕事、選択した本文・添付を表示する。制御権限のある人が送信すると、その内容を追加指示として保存する。元コメントに反映済みの参照を付けるが、その後の編集は自動で再反映しない。
+
+コメント、専門Agentの詳細、Evidenceは必要時に開く。同時に全てを常設して、中央の依頼と結果を狭くしない。
+
+### 4.7 Agent一覧・Room作成・Agent DM
+
+- Agent一覧では、名前、専門性、使用するBackend、利用可否を表示し、作成・編集・「会話する」へ進める。Roomで指名する選択肢は、そのRoomで実行できるAgentに絞る。
+- BackendはSamurai Native / Codex / Claude Codeから選べる。NativeではGemini・OpenAI・AnthropicなどのproviderとAPIキー設定、Codex / Claude Codeでは本人の公式ログインによるサブスク利用を基本にAPIキー利用も選べる導線を設ける。資格情報の本文をAgentプロフィールや会話へ保存しない。
+- Room作成では名前と既定Agentを選ぶ。「新しく作る」ではAgent設定を同じ流れで入力し、Room作成と合わせて確定する。
+- Room設定から専門Agentを追加・解除し、閲覧・編集・実行の権限を管理する。既定Agentの変更もここで行い、管理権限のない人には選択結果と利用可否を表示する。
+- 既定Agentがない既存Roomでは履歴を開き、実行前に設定する導線を出す。Agent一覧の先頭を暗黙に既定にしない。
+- Agent DMは同じ仕事の操作を使い、本人とAgentの非公開の会話として表示する。「Roomへ共有」は選んだ結果と資料だけを共有する操作にする。
+- Roomのメンバー追加は既存の認可と招待を通す。仕事へのリンクだけでアクセスを与えない。
+
+### 4.8 将来の実行画面
+
+仕事または担当作業から、実行先の画面を開ける配置上の余地を残す。Computer Useのライブ表示、操作引継ぎ、VMの作成は今回の画面へダミー機能として入れない。対応する実行先が実装された時点で、その能力に応じて表示する。
 
 ## 5. 起動、選択、再認可
 
@@ -187,6 +221,9 @@ flowchart LR
 - Organization APIは任意の管理操作を扱い、Workspaceの通常操作を包む必須経路にしない。
 - Event historyとrealtime notificationを組み合わせ、切断後はServerの履歴から状態を復元する。
 - 全てのmutationにoperation IDとidempotencyを持たせ、retryが二重実行にならないようにする。
+- Roomと仕事の参照で通常操作を完結させる。Sessionの選択・新規作成・外部Session IDの受渡しをReactの送信前提にしない。
+- 通常の公開catalogと生成ClientもRoom / 仕事の契約を使う。旧Session入力の互換入口は非推奨として分け、通常UIや新規Clientの契約へ含めない。互換入口も同じ認可・仕事の制御を通す。
+- コメント、指示、制御は別の型・操作として扱い、本文中の`@`や画面表示だけで実行可否を決めない。
 
 ## 8. 状態と失敗表示
 
@@ -201,12 +238,21 @@ flowchart LR
 | 一部Server offline | そのServerのWorkspaceだけ状態を示し、ほかのServerのWorkspaceは利用可能にする |
 | network disconnect | 送信中 / 未送信を区別し、勝手に成功表示しない |
 | Agent failure | 実行失敗をMessage成功と混同せず、retry可能性とevidenceを表示する |
+| 既定Agentなし・実行不能 | 履歴を残し、既定Agentの設定または接続復旧へ案内する |
+| 停止要求中 | 対象の仕事と担当を示し、確認を待つ |
+| 停止未確認 | 未確認の担当と理由を表示し、仕事全体を停止済みにしない |
+| 指示の反映待ち | 受け付けた指示と未反映の担当を示す |
+| 別の人が指示を変更した | 最新の版を取得し、入力を保存したまま再確認できるようにする |
+| 書込み競合 | 待機理由と先行する作業を示し、同じ成果物を上書きしない |
+| DMから共有 | 共有先と対象の結果・資料を示し、元DM全体を公開しない |
 | Organization解除・削除 | Workspace一覧を再取得し、独立Workspaceを選び直せるようにする |
 | Server / App restart | local candidateを使うが、Server再認可後にだけ画面を復元する |
 
 ## 9. 実機確認
 
 macOS Electron Native App、実PostgreSQL、実Agent、実Workspace file storageを使う。HostedとSelf-hostの両方で、少なくとも二つのAccountにより次を確認する。
+
+Phase 3・4・6では、実装担当はSamurai Nativeと利用者が以前共有したGemini APIキーの無料枠で実機検証する。Codex / Claude Codeは利用者が実機検証し、実装担当は実CLIを起動しない。製品のprovider選択をGeminiへ限定せず、確認結果はBackend・provider・認証方式ごとに区別する。
 
 1. OrganizationなしでWorkspaceを作成し、Workspace直接招待、Room選択、Chat、Activity、実ファイル、Knowledge確認を行う。
 2. 人間がKnowledgeを確認・修正し、次の実行で再利用されたreferenceを確認する。
@@ -217,12 +263,20 @@ macOS Electron Native App、実PostgreSQL、実Agent、実Workspace file storage
 7. Organizationを削除し、所属していた全Workspaceが独立して残ることを確認する。
 8. 複数ServerのWorkspaceを一つのWorkspace switcherから選択し、対象Serverの自動接続・再認可、Workspace targetの衝突回避、Server単位のoffline分離を確認する。
 9. Workspaceを別Serverへ移転した後、移転先を再認可して開き、移転元がarchiveとして残ることを確認する。
+10. 既存 / 新規Agentを選んだRoom作成、通常の依頼、仕事への返信、専門Agentの明示指名と自動委譲を行う。
+11. 別Accountが仕事へコメントしてもAgentが動かず、権限のある人の「Agentに反映」でだけ指示が変わることを確認する。
+12. 仕事全体・個別担当の停止、指示変更、担当変更を実Agentで行い、残った子作業・未確認の停止・書込み競合を正しく表示する。
+13. 同じAgentを別Room・別AccountのDMで使い、履歴が混ざらず、選択した結果だけを共有できることを確認する。
 
 実際に実行した環境、手順、画面、DB、ファイル、未検証範囲はreports配下へ記録する。画面mock、HTTP mock、単体testだけでは実機確認の代わりにならない。
 
+これは製品全体の検証条件である。各変更で実行する確認は実装計画の影響範囲に従い、既存の重い確認を変更のたびに全て繰り返さない。
+
 ## 10. 将来の完成形と対象外
 
-今後扱うのは、実使用に基づくUI磨き込み、ACP実Agent、複数Agent、Artifact / Surface UI、学習・評価の高度化、MCP / 外部Client、Computeと配布である。
+実Agent接続と複数Agentの共同作業はPhase 3・4・6の現在の対象である。接続方式はAgent Backend設計に従う。
+
+後続で扱うのは、Artifact / Surface UIの本格化、学習・評価の高度化、外部Client向け接続の拡充、Computer Use、Computeと配布である。実使用に基づくUI調整は継続する。
 
 現段階では、決済、課金、SSO、SCIM、SMTP、詳細な利用量、複雑な企業監査、専用Compute、Compute共有、複数Server横断Organization、署名・Installer・自動更新を実装しない。
 
