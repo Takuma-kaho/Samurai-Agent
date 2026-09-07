@@ -591,6 +591,47 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(queriedRoomIds).toEqual([canonicalRoomId, canonicalRoomId]);
   });
 
+  it("passes the legacy bridge binding id before the legacy Session id", async () => {
+    const workspaceId = "workspace_store_legacy_bridge_order";
+    const roomId = "room_store_legacy_bridge_order";
+    const sessionId = "session_store_legacy_bridge_order";
+    const workId = "room_work_store_legacy_bridge_order";
+    const operationId = "operation_store_legacy_bridge_order";
+    const agentId = "agent_store_legacy_bridge_order";
+    let bindValues: readonly unknown[] | undefined;
+    const store = storeWithQuery(async (text, values) => {
+      if (text.includes("INSERT INTO workspace_operations")) return { rows: [{ id: operationId }] };
+      if (text.includes("SAVEPOINT") || text.includes("RELEASE SAVEPOINT")) return { rows: [] };
+      if (text.includes("FROM workspace_runtime_sessions")) return { rows: [{ id: sessionId, room_id: roomId }] };
+      if (text.includes("FROM workspace_human_work_legacy_sessions")) return { rows: [] };
+      if (text.includes("FROM samurai_lock_room_default_agent")) {
+        return { rows: [{ default_agent_id: agentId, default_agent_version: 1 }] };
+      }
+      if (text.includes("FROM workspace_agents")) {
+        return { rows: [{ version: "1", status: "active", enabled: true }] };
+      }
+      if (text.includes("samurai_create_human_work")) return { rows: [] };
+      if (text.includes("samurai_bind_human_work_legacy_session")) {
+        bindValues = values;
+        throw new Error("legacy_session_work_conflict");
+      }
+      return { rows: [] };
+    });
+
+    await expect(store.migrateLegacyChatTurn(
+      { workspaceId, accountId: "account_store_legacy_bridge_order", operationId, requestId: "request_store_legacy_bridge_order" },
+      { roomId, sessionId, instruction: "Continue the legacy Room work" }
+    )).rejects.toMatchObject({ code: "legacy_session_work_conflict", status: 409 });
+
+    expect(bindValues?.[0]).toBe(workspaceId);
+    expect(bindValues?.[1]).toEqual(expect.stringMatching(/^legacy_session_/));
+    expect(bindValues?.[1]).not.toBe(sessionId);
+    expect(bindValues?.[2]).toBe(sessionId);
+    expect(bindValues?.[3]).toBe(roomId);
+    expect(bindValues?.[4]).toEqual(expect.stringMatching(/^room_work_/));
+    expect(bindValues?.[5]).toBe(operationId);
+  });
+
   it("keeps an ordinary failed operation terminal", async () => {
     const operationId = "operation_store_regular_failure";
     const context = { workspaceId: "workspace_store_regular", accountId: "account_store_owner", operationId };
@@ -748,6 +789,60 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(executionCall?.text).toContain("workspace_runtime_runs AS parent_run");
     expect(executionCall?.text).toContain("workspace_runtime_sessions AS parent_session");
     expect(calls.some(({ text }) => text.includes("FOR UPDATE"))).toBe(false);
+  });
+
+  it("reclaims an expired no-Run lease before issuing the next worker token", async () => {
+    const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
+    const store = storeWithQuery(async (text, values) => {
+      calls.push({ text, values });
+      if (text.includes("samurai_recover_human_work_launch")) {
+        return { rows: [{ recovery: { kind: "requeued", reservation_id: "reservation_store_recovered" } }] };
+      }
+      if (text.includes("SELECT samurai_claim_human_work_launch")) {
+        return { rows: [{ claim: { reservation_id: "reservation_store_recovered" } }] };
+      }
+      if (text.includes("FROM workspace_human_work_launch_reservations AS reservation")) {
+        return { rows: [{
+          workspace_id: "workspace_store_recovery",
+          reservation_id: "reservation_store_recovered",
+          work_id: "work_store_recovery",
+          assignment_id: "assignment_store_recovery",
+          room_id: "room_store_recovery",
+          generation: "2",
+          scheduled_at: "2026-09-07T00:00:00.000Z",
+          control_generation: "2",
+          instruction_version: "1",
+          agent_id: "agent_store_recovery",
+          agent_configuration_version: "1",
+          current_run_id: null,
+          parent_assignment_id: null,
+          parent_backend_id: null,
+          parent_agent_id: null,
+          parent_backend_session_id: null,
+          parent_runtime_binding: null,
+          session_id: null,
+          instruction: "Retry the recovered work",
+          attachments: []
+        }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await store.claimRoomWorkReservation(
+      { workspaceId: "workspace_store_recovery", accountId: "account_store_recovery" },
+      { workerId: "worker_store_recovery", leaseMs: 1_000, now: "2026-09-07T00:00:00.000Z", limit: 1 }
+    );
+
+    expect(result).toMatchObject({
+      reservationId: "reservation_store_recovered",
+      workId: "work_store_recovery",
+      assignmentId: "assignment_store_recovery"
+    });
+    const recoveryIndex = calls.findIndex(({ text }) => text.includes("samurai_recover_human_work_launch"));
+    const claimIndex = calls.findIndex(({ text }) => text.includes("SELECT samurai_claim_human_work_launch"));
+    expect(recoveryIndex).toBeGreaterThanOrEqual(0);
+    expect(claimIndex).toBeGreaterThan(recoveryIndex);
+    expect(calls[claimIndex]?.values?.[1]).toBe("reservation_store_recovered");
   });
 
   it("terminally fails a claimed launch with unresolved legacy attachments", async () => {

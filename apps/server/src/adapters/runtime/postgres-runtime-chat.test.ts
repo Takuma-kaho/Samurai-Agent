@@ -1521,12 +1521,16 @@ describe("PostgresRuntimeChat session projections", () => {
 
   it("revalidates Room Work attachment hash before any Runtime admission insert", async () => {
     const statements: string[] = [];
+    let admissionValues: readonly unknown[] | undefined;
     const database = {
       withContext: async (_context: unknown, action: (sql: { query: (text: string, values?: readonly unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => action({
-        query: async (text: string) => {
+        query: async (text: string, values: readonly unknown[] = []) => {
           statements.push(text);
           if (text.includes("samurai_can_room")) return { rows: [{ allowed: true }] };
-          if (text.includes("samurai_assert_human_work_runtime_admission")) return { rows: [] };
+          if (text.includes("samurai_assert_human_work_runtime_admission")) {
+            admissionValues = values;
+            return { rows: [] };
+          }
           if (text.startsWith("SELECT * FROM workspace_runtime_runs")) return { rows: [] };
           if (text.startsWith("SELECT run_id FROM workspace_runtime_reservations")) return { rows: [] };
           if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
@@ -1572,9 +1576,13 @@ describe("PostgresRuntimeChat session projections", () => {
         backendId: "samurai-native",
         generation: 0,
         agentConfigurationVersion: 1,
+        reservationId: "reservation-a",
+        leaseOwner: "worker-a",
         agent: { name: "Writer", role: "drafting", instructions: "Write.", enabled: true }
       }
     })).rejects.toMatchObject({ code: "runtime_workspace_attachment_reference_mismatch", status: 409 });
+    expect(statements.some((text) => text.includes("samurai_assert_human_work_runtime_admission_v2"))).toBe(true);
+    expect(admissionValues).toEqual(["workspace-a", "work-a", "assignment-a", 0, "reservation-a", "worker-a"]);
     expect(statements.some((text) => text.startsWith("INSERT INTO workspace_runtime_messages"))).toBe(false);
     expect(statements.some((text) => text.startsWith("INSERT INTO workspace_runtime_runs"))).toBe(false);
     expect(statements.some((text) => text.startsWith("INSERT INTO workspace_runtime_activities"))).toBe(false);
@@ -1583,6 +1591,7 @@ describe("PostgresRuntimeChat session projections", () => {
 
   it("reuses a released session reservation for a new idempotent run", async () => {
     const reservationStatements: string[] = [];
+    let persistedRunMetadata: Record<string, unknown> | undefined;
     const database = {
       withContext: async (_context: unknown, action: (sql: { query: (text: string, values?: readonly unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => action({
         query: async (text: string, values: readonly unknown[] = []) => {
@@ -1590,7 +1599,10 @@ describe("PostgresRuntimeChat session projections", () => {
           if (text.startsWith("SELECT * FROM workspace_runtime_runs") && text.includes("request_idempotency_key = $3")) return { rows: [] };
           if (text.startsWith("SELECT run_id FROM workspace_runtime_reservations")) return { rows: [] };
           if (text.startsWith("INSERT INTO workspace_runtime_messages")) return { rows: [] };
-          if (text.startsWith("INSERT INTO workspace_runtime_runs")) return { rows: [{}] };
+          if (text.startsWith("INSERT INTO workspace_runtime_runs")) {
+            persistedRunMetadata = JSON.parse(String(values[19])) as Record<string, unknown>;
+            return { rows: [{}] };
+          }
           if (text.startsWith("INSERT INTO workspace_runtime_reservations")) {
             reservationStatements.push(text);
             return { rows: [{ run_id: String(values[2]), status: "held" }] };
@@ -1616,11 +1628,29 @@ describe("PostgresRuntimeChat session projections", () => {
       content: "Second request",
       requestHash: "request-hash-2",
       idempotencyKey: "request-2",
-      outputLocale: "ja"
+      outputLocale: "ja",
+      executionBinding: {
+        workspaceId: "workspace-a",
+        roomId: "room-a",
+        sessionId: "session-a",
+        workId: "work-a",
+        assigneeId: "assignment-a",
+        agentId: "agent-a",
+        backendId: "samurai-native",
+        generation: 0,
+        agentConfigurationVersion: 1,
+        reservationId: "reservation-a",
+        leaseOwner: "worker-a",
+        agent: { name: "Writer", role: "drafting", instructions: "Write.", enabled: true }
+      }
     });
 
     expect(admitted.replay).toBe(false);
     expect(admitted.run.id).toMatch(/^run_/);
+    expect(persistedRunMetadata?.runtime_binding).toMatchObject({
+      reservation_id: "reservation-a",
+      lease_owner: "worker-a"
+    });
     expect(reservationStatements).toHaveLength(1);
     expect(reservationStatements[0]).toContain("ON CONFLICT (workspace_id, session_id)");
     expect(reservationStatements[0]).toContain("WHERE workspace_runtime_reservations.status = 'released'");

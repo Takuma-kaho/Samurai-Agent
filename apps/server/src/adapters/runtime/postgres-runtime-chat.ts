@@ -232,6 +232,9 @@ export interface PostgresRuntimeExecutionBinding {
   parentAssigneeId?: string;
   generation?: number;
   agentConfigurationVersion?: number;
+  /** Server-issued claim token used to fence a delayed pre-admission worker. */
+  reservationId?: string;
+  leaseOwner?: string;
 }
 
 /**
@@ -297,6 +300,8 @@ interface RuntimeExecutionBinding {
   agentConfigurationVersion: number;
   backendId: string;
   generation: number;
+  reservationId?: string;
+  leaseOwner?: string;
   agent: {
     name: string;
     role: string;
@@ -1424,7 +1429,10 @@ export class PostgresRuntimeChat {
       room_id: session.room_id,
       agent_id: agent.id,
       backend_id: backend.id,
-      execution_binding: executionBinding,
+      // The lease owner/reservation are a short-lived admission fence, not
+      // the logical request identity. A recovered worker must be able to
+      // reconcile/replay the same Run after the lease changes hands.
+      execution_binding: runtimeBindingHashMetadata(executionBinding),
       content,
       input_locale: inputLocale,
       output_locale: outputLocale,
@@ -2026,9 +2034,21 @@ export class PostgresRuntimeChat {
       // dispatcher to cancel and reconcile.
       if (input.executionBinding?.workId && input.executionBinding.assigneeId) {
         try {
+          const hasLeaseFence = Boolean(input.executionBinding.reservationId && input.executionBinding.leaseOwner);
           await sql.query(
-            "SELECT samurai_assert_human_work_runtime_admission($1, $2, $3, $4)",
-            [this.workspaceId, input.executionBinding.workId, input.executionBinding.assigneeId, input.executionBinding.generation]
+            hasLeaseFence
+              ? "SELECT samurai_assert_human_work_runtime_admission_v2($1, $2, $3, $4, $5, $6)"
+              : "SELECT samurai_assert_human_work_runtime_admission($1, $2, $3, $4)",
+            hasLeaseFence
+              ? [
+                this.workspaceId,
+                input.executionBinding.workId,
+                input.executionBinding.assigneeId,
+                input.executionBinding.generation,
+                input.executionBinding.reservationId,
+                input.executionBinding.leaseOwner
+              ]
+              : [this.workspaceId, input.executionBinding.workId, input.executionBinding.assigneeId, input.executionBinding.generation]
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
@@ -4015,10 +4035,14 @@ function buildRuntimeExecutionBinding(input: {
   const workId = input.input?.workId?.trim() || undefined;
   const assigneeId = input.input?.assigneeId?.trim() || undefined;
   const parentAssigneeId = input.input?.parentAssigneeId?.trim() || undefined;
+  const reservationId = input.input?.reservationId?.trim() || undefined;
+  const leaseOwner = input.input?.leaseOwner?.trim() || undefined;
   const hasWorkBinding = workId !== undefined || assigneeId !== undefined;
   if ((input.input?.workId !== undefined && !workId)
     || (input.input?.assigneeId !== undefined && !assigneeId)
-    || (input.input?.parentAssigneeId !== undefined && !parentAssigneeId)) {
+    || (input.input?.parentAssigneeId !== undefined && !parentAssigneeId)
+    || (input.input?.reservationId !== undefined && !reservationId)
+    || (input.input?.leaseOwner !== undefined && !leaseOwner)) {
     throw new WorkspaceServerError("runtime_execution_binding_incomplete", 400);
   }
   const generationValue = input.input?.generation ?? (hasWorkBinding ? undefined : 1);
@@ -4046,6 +4070,9 @@ function buildRuntimeExecutionBinding(input: {
   if (parentAssigneeId && !workId) {
     throw new WorkspaceServerError("runtime_execution_binding_incomplete", 400);
   }
+  if ((reservationId && !leaseOwner) || (!reservationId && leaseOwner) || ((reservationId || leaseOwner) && !hasWorkBinding)) {
+    throw new WorkspaceServerError("runtime_execution_binding_incomplete", 400);
+  }
   return {
     workspaceId: input.workspaceId,
     roomId: input.roomId,
@@ -4053,6 +4080,8 @@ function buildRuntimeExecutionBinding(input: {
     ...(workId ? { workId } : {}),
     ...(assigneeId ? { assigneeId } : {}),
     ...(parentAssigneeId ? { parentAssigneeId } : {}),
+    ...(reservationId ? { reservationId } : {}),
+    ...(leaseOwner ? { leaseOwner } : {}),
     agentId: input.agent.id,
     agentConfigurationVersion,
     backendId: input.agent.backendId,
@@ -4125,6 +4154,8 @@ function runtimeBindingMetadata(binding: RuntimeExecutionBinding): Record<string
     ...(binding.workId ? { work_id: binding.workId } : {}),
     ...(binding.assigneeId ? { assignee_id: binding.assigneeId } : {}),
     ...(binding.parentAssigneeId ? { parent_assignee_id: binding.parentAssigneeId } : {}),
+    ...(binding.reservationId ? { reservation_id: binding.reservationId } : {}),
+    ...(binding.leaseOwner ? { lease_owner: binding.leaseOwner } : {}),
     agent_id: binding.agentId,
     agent_configuration_version: binding.agentConfigurationVersion,
     backend_id: binding.backendId,
@@ -4138,6 +4169,17 @@ function runtimeBindingMetadata(binding: RuntimeExecutionBinding): Record<string
       config_version: String(binding.agentConfigurationVersion)
     }
   };
+}
+
+function runtimeBindingHashMetadata(binding: RuntimeExecutionBinding): Record<string, JsonValue> {
+  // The claim token is persisted as reconciliation/audit metadata, but it is
+  // intentionally excluded from request identity. A recovered lease owner
+  // must be able to replay the same logical request without an idempotency
+  // conflict caused only by the worker hand-off.
+  const metadata = runtimeBindingMetadata(binding);
+  delete metadata.reservation_id;
+  delete metadata.lease_owner;
+  return metadata;
 }
 
 function runtimeMetadataForBackend(metadata: Record<string, JsonValue>): Record<string, JsonValue> {

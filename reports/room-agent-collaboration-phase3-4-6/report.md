@@ -83,6 +83,8 @@
 - 画面の明示委譲は、Renderer・Electron main・browser bridgeで、`parent_assignee_id`が省略された公開応答を不正扱いしていた。Work/Agent/子Assignmentを必須照合し、親IDが返る場合だけ一致確認するよう統一した。異常な親・子の応答を拒否する回帰testを追加した。初回の再検証で古い`apps/desktop/dist`を起動していたため、Desktop bundleを再生成してから上記の実画面再確認を行った。
 - PR CIのarchitecture boundaryで、Room Work workerがRuntimeの可変メソッドを直接呼んでいることを検出した。`runDomainCommand`と`executeRunControlAction`の正式なRuntime facade経路へ接続し、worker focused testとarchitecture verifierを再実行して通過した。
 - PR CIのHosted Room hierarchy probeで、存在しない別WorkspaceのRoom IDにOwner/Admin権限が返り、同一Workspace親FKに違反する問題を検出した。対象Roomの存在を先に確認して存在しない場合は`NULL`を返すmigration v122を追加し、Hosted/Self-host probeとschema testを再実行して通過した。
+- 追加レビューで、legacy Session互換呼び出しの引数順、Agent DMへの別人間追加、Room Workの期限切れclaim復旧を検出した。legacy bridgeの引数をv90署名へ合わせ、Agent DMの人間メンバー追加を共有SQL認可で拒否するmigration v123を追加した。
+- migration v124で、Server再起動後の期限切れRoom Work claimをWork→Assignment→Reservationの順で復旧し、Runtime Runが既に存在する場合は再実行せず終端結果または`outcome_unknown`としてAssignmentへ反映するようにした。reservation／lease tokenをRuntime admissionで検証し、旧workerの遅延Run作成もDB triggerで拒否する。focused test、全migration適用、実PostgreSQLの`requeued → claim`を確認した。
 
 ## 未検証範囲
 

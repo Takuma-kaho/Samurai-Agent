@@ -2042,7 +2042,7 @@ export class WorkspaceServerStore {
           );
           await sql.query(
             "SELECT samurai_bind_human_work_legacy_session($1, $2, $3, $4, $5, $6)",
-            [context.workspaceId, input.sessionId, input.roomId, workId, context.operationId, legacyMapId]
+            [context.workspaceId, legacyMapId, input.sessionId, input.roomId, workId, context.operationId]
           );
         } catch (error) {
           throw mapRoomWorkPostgresError(error, "room_work_creation_failed");
@@ -2840,14 +2840,52 @@ export class WorkspaceServerStore {
         `${input.reservationId ?? "next"}:${input.workerId}:${now.toISOString()}`
       );
       let claim: Record<string, unknown>;
+      let claimPhase: "recovery" | "claim" = "recovery";
       try {
-        const claimResult = await sql.query<{ claim: unknown }>(
-          "SELECT samurai_claim_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ, $5) AS claim",
-          [context.workspaceId, input.reservationId ?? null, input.workerId, leaseExpiresAt.toISOString(), claimOperationId]
+        // A worker can disappear after the claim transaction commits but
+        // before Runtime admission. Reconcile one expired claimed token
+        // under the same transaction before asking the normal claim function
+        // for a new reservation. The SQL function owns the lock order and
+        // returns either a fresh-claim marker or a recovery marker; a stop or
+        // an already running Run is never treated as a new launch.
+        const recoveryResult = await sql.query<{ recovery: unknown }>(
+          "SELECT samurai_recover_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ) AS recovery",
+          [context.workspaceId, input.reservationId ?? null, input.workerId, leaseExpiresAt.toISOString()]
         );
-        claim = jsonObjectOrEmpty(claimResult.rows[0]?.claim);
+        const recovery = jsonObjectOrEmpty(recoveryResult.rows[0]?.recovery);
+        const recoveryKind = typeof recovery.kind === "string" ? recovery.kind : undefined;
+        if (recoveryKind === "skip") {
+          // Stop/reassignment won the Work lock. Leave a linked Run for the
+          // dedicated stop dispatcher; the launch lane must not reconcile it
+          // as a normal work completion.
+          return undefined;
+        } else if (recoveryKind === "recovery") {
+          claim = recovery;
+        } else if (recoveryKind === "requeued") {
+          const recoveredReservationId = typeof recovery.reservation_id === "string"
+            ? recovery.reservation_id
+            : undefined;
+          if (!recoveredReservationId) return undefined;
+          claimPhase = "claim";
+          const claimResult = await sql.query<{ claim: unknown }>(
+            "SELECT samurai_claim_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ, $5) AS claim",
+            [context.workspaceId, recoveredReservationId, input.workerId, leaseExpiresAt.toISOString(), claimOperationId]
+          );
+          claim = jsonObjectOrEmpty(claimResult.rows[0]?.claim);
+        } else if (recoveryKind === "cancelled") {
+          return undefined;
+        } else {
+          claimPhase = "claim";
+          const claimResult = await sql.query<{ claim: unknown }>(
+            "SELECT samurai_claim_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ, $5) AS claim",
+            [context.workspaceId, input.reservationId ?? null, input.workerId, leaseExpiresAt.toISOString(), claimOperationId]
+          );
+          claim = jsonObjectOrEmpty(claimResult.rows[0]?.claim);
+        }
       } catch (error) {
-        throw mapRoomWorkPostgresError(error, "room_work_launch_claim_failed");
+        throw mapRoomWorkPostgresError(error, claimPhase === "recovery"
+          ? "room_work_launch_recovery_failed"
+          : "room_work_launch_claim_failed");
       }
       const reservationId = typeof claim.reservation_id === "string" ? claim.reservation_id : undefined;
       if (!reservationId) return undefined;
@@ -2856,6 +2894,7 @@ export class WorkspaceServerStore {
                 reservation.assignment_id, reservation.room_id, reservation.generation,
                 reservation.scheduled_at, work.control_generation, work.instruction_version,
                 assignment.agent_id, assignment.agent_version AS agent_configuration_version,
+                assignment.current_run_id,
                 assignment.origin_kind,
                 CASE WHEN parent_assignment.id IS NOT NULL
                   THEN samurai_human_work_assignment_is_superseded(parent_assignment.workspace_id, parent_assignment.id)
@@ -2985,6 +3024,7 @@ export class WorkspaceServerStore {
           agentConfigurationVersion: Number(claimed.agent_configuration_version),
           agent_configuration_version: Number(claimed.agent_configuration_version)
         }),
+        ...(claimed.current_run_id ? { currentRunId: claimed.current_run_id, current_run_id: claimed.current_run_id } : {}),
         ...(claimed.origin_kind ? { originKind: claimed.origin_kind, origin_kind: claimed.origin_kind } : {}),
         ...(parentContinuation?.sessionId ? { sessionId: parentContinuation.sessionId, session_id: parentContinuation.sessionId } : {}),
         ...(parentContinuation?.parentAssigneeId ? {
@@ -5397,6 +5437,7 @@ interface HumanWorkExecutionRow {
   instruction_version: number | string;
   agent_id: string;
   agent_configuration_version: number | string | null;
+  current_run_id?: string | null;
   origin_kind: "normal" | "delegated" | "parent_continuation" | string | null;
   /** Server SQL filters reassigned parents; mocks may provide this guard directly. */
   parent_assignment_superseded?: boolean | null;

@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 122 }, (_, index) => index + 1));
+    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 124 }, (_, index) => index + 1));
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -728,6 +728,19 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_bind_human_work_legacy_session");
   });
 
+  it("keeps the legacy bridge binding id before the Session id", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 90);
+    const sql = migration?.statements.join("\n") ?? "";
+    const start = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_bind_human_work_legacy_session(");
+    const end = sql.indexOf(") RETURNS JSONB", start);
+    const signature = sql.slice(start, end);
+
+    expect(signature.indexOf("target_binding_id TEXT")).toBeLessThan(signature.indexOf("target_legacy_session_id TEXT"));
+    expect(signature.indexOf("target_legacy_session_id TEXT")).toBeLessThan(signature.indexOf("target_room_id TEXT"));
+    expect(signature.indexOf("target_room_id TEXT")).toBeLessThan(signature.indexOf("target_work_id TEXT"));
+    expect(signature.indexOf("target_work_id TEXT")).toBeLessThan(signature.indexOf("target_operation_id TEXT"));
+  });
+
   it("keeps Room-work reservation candidate locking inside the server-owned claim function in v91", () => {
     const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 91);
     expect(migration?.name).toBe("workspace_server_human_work_server_owned_claim");
@@ -1169,6 +1182,47 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(sql).toContain("NOT EXISTS (\n            SELECT 1 FROM stopped_tree");
     expect(sql).toContain("DROP TRIGGER IF EXISTS workspace_human_work_assignment_sibling_generation");
     expect(sql).toContain("CREATE TRIGGER workspace_human_work_assignment_sibling_generation");
+  });
+
+  it("rejects a second human in an Agent DM through the shared preview/mutation guard in v123", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 123);
+    expect(migration?.name).toBe("workspace_server_agent_dm_human_membership_guard");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_room_member_change_impact(");
+    expect(sql).toContain("target_room_kind TEXT");
+    expect(sql).toContain("target_dm_account_id TEXT");
+    expect(sql).toContain("target_account_id IS DISTINCT FROM target_dm_account_id");
+    expect(sql).toContain("agent_dm_human_membership_forbidden");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_room_member_change_impact");
+
+    const preview = workspaceServerMigrationDefinitions()
+      .find((entry) => entry.version === 23)?.statements.join("\n") ?? "";
+    expect(preview).toContain("impact := samurai_room_member_change_impact(");
+    expect(preview).toContain("CREATE OR REPLACE FUNCTION samurai_set_room_member_with_impact(");
+    expect(preview).toContain("impact := samurai_room_member_change_impact(");
+  });
+
+  it("recovers expired Room-work claims without relaunching an existing Runtime Run", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 124);
+    expect(migration?.name).toBe("workspace_server_human_work_lease_recovery_and_runtime_fence");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_recover_human_work_launch(");
+    expect(sql).toContain("reservation.status = 'claimed'");
+    expect(sql).toContain("current_run_id");
+    expect(sql).toContain("'kind', 'requeued'");
+    expect(sql).toContain("'kind', 'recovery'");
+    expect(sql).toContain("'kind', 'skip'");
+    expect(sql).toContain("samurai_human_work_assignment_is_superseded");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_assert_human_work_runtime_admission_v2(");
+    expect(sql).toContain("reservation_row.lease_owner IS DISTINCT FROM btrim(target_lease_owner)");
+    expect(sql).toContain("reservation_row.lease_expires_at <= NOW()");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_require_human_work_runtime_fence()");
+    expect(sql).toContain("workspace_human_work_runtime_fence");
+    expect(sql).toContain("binding ->> 'reservation_id'");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_recover_human_work_launch");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_assert_human_work_runtime_admission_v2");
   });
 
 });

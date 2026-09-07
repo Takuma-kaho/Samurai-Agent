@@ -20795,6 +20795,491 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "REVOKE EXECUTE ON FUNCTION samurai_room_role(TEXT, TEXT) FROM PUBLIC"
     ]
   },
+  {
+    // An Agent DM is a private two-party Room: its human owner is stored in
+    // rooms.dm_account_id and must be the only human Room membership.  Keep
+    // this check in the shared impact function so both the preview and the
+    // locked mutation path reject the same request.  A UI-only guard would
+    // still allow a direct SQL/API caller to turn a DM into a shared Room.
+    version: 123,
+    name: "workspace_server_agent_dm_human_membership_guard",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_room_member_change_impact(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_account_id TEXT,
+        target_role TEXT,
+        target_state TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE existing_member room_members%ROWTYPE;
+      DECLARE has_existing BOOLEAN;
+      DECLARE target_room_kind TEXT;
+      DECLARE target_dm_account_id TEXT;
+      DECLARE blocking_owner_room_ids TEXT[];
+      DECLARE affected_room_ids TEXT[];
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_can_room(target_workspace_id, target_room_id, 'manage') THEN
+          RAISE EXCEPTION 'room_not_available';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+        SELECT room.room_kind, room.dm_account_id
+        INTO target_room_kind, target_dm_account_id
+        FROM rooms AS room
+        WHERE room.workspace_id = target_workspace_id AND room.id = target_room_id;
+        IF NOT FOUND THEN RAISE EXCEPTION 'room_not_available'; END IF;
+        IF target_room_kind = 'agent_dm'
+          AND target_account_id IS DISTINCT FROM target_dm_account_id THEN
+          RAISE EXCEPTION 'agent_dm_human_membership_forbidden';
+        END IF;
+        IF target_role NOT IN ('owner', 'admin', 'member', 'guest')
+          OR target_state NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'room_membership_invalid';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = target_account_id
+        ) THEN RAISE EXCEPTION 'workspace_account_not_active'; END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM accounts
+          WHERE id = target_account_id AND status = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_account_not_active'; END IF;
+        IF target_state = 'active' AND NOT EXISTS (
+          SELECT 1 FROM workspace_members
+          WHERE workspace_id = target_workspace_id
+            AND account_id = target_account_id
+            AND state = 'active'
+        ) THEN RAISE EXCEPTION 'workspace_membership_required'; END IF;
+        SELECT * INTO existing_member
+        FROM room_members
+        WHERE workspace_id = target_workspace_id
+          AND room_id = target_room_id
+          AND account_id = target_account_id;
+        has_existing := FOUND;
+        IF target_role = 'owner'
+          AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF has_existing AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND (target_role <> 'owner' OR target_state <> 'active')
+          AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF target_state = 'active' AND EXISTS (
+          WITH RECURSIVE ancestors(room_id, parent_room_id) AS (
+            SELECT parent.id, parent.parent_room_id
+            FROM rooms AS room
+            JOIN rooms AS parent
+              ON parent.workspace_id = room.workspace_id
+             AND parent.id = room.parent_room_id
+            WHERE room.workspace_id = target_workspace_id AND room.id = target_room_id
+            UNION ALL
+            SELECT parent.id, parent.parent_room_id
+            FROM rooms AS parent
+            JOIN ancestors ON ancestors.parent_room_id = parent.id
+            WHERE parent.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM ancestors
+          WHERE NOT EXISTS (
+            SELECT 1 FROM room_members
+            WHERE workspace_id = target_workspace_id
+              AND room_id = ancestors.room_id
+              AND account_id = target_account_id
+              AND state = 'active'
+          )
+        ) THEN RAISE EXCEPTION 'room_parent_membership_required'; END IF;
+        IF target_state = 'revoked' AND EXISTS (
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT 1 FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+            AND member.role = 'owner'
+        ) AND NOT samurai_can_workspace(target_workspace_id, 'owner') THEN
+          RAISE EXCEPTION 'workspace_owner_permission_required';
+        END IF;
+        IF target_state = 'revoked' THEN
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT COALESCE(array_agg(member.room_id ORDER BY member.room_id), ARRAY[]::TEXT[])
+          INTO blocking_owner_room_ids
+          FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active'
+            AND member.role = 'owner'
+            AND NOT EXISTS (
+              SELECT 1 FROM room_members AS another_owner
+              WHERE another_owner.workspace_id = member.workspace_id
+                AND another_owner.room_id = member.room_id
+                AND another_owner.account_id <> target_account_id
+                AND another_owner.role = 'owner'
+                AND another_owner.state = 'active'
+            );
+          WITH RECURSIVE descendants(room_id) AS (
+            SELECT target_room_id
+            UNION ALL
+            SELECT room.id FROM rooms AS room
+            JOIN descendants ON room.parent_room_id = descendants.room_id
+            WHERE room.workspace_id = target_workspace_id
+          )
+          SELECT COALESCE(array_agg(member.room_id ORDER BY member.room_id), ARRAY[target_room_id])
+          INTO affected_room_ids
+          FROM room_members AS member
+          JOIN descendants ON descendants.room_id = member.room_id
+          WHERE member.workspace_id = target_workspace_id
+            AND member.account_id = target_account_id
+            AND member.state = 'active';
+        ELSIF has_existing AND existing_member.role = 'owner' AND existing_member.state = 'active'
+          AND target_role <> 'owner'
+          AND NOT EXISTS (
+            SELECT 1 FROM room_members AS another_owner
+            WHERE another_owner.workspace_id = target_workspace_id
+              AND another_owner.room_id = target_room_id
+              AND another_owner.account_id <> target_account_id
+              AND another_owner.role = 'owner'
+              AND another_owner.state = 'active'
+          ) THEN
+          blocking_owner_room_ids := ARRAY[target_room_id];
+          affected_room_ids := ARRAY[target_room_id];
+        ELSE
+          blocking_owner_room_ids := ARRAY[]::TEXT[];
+          affected_room_ids := ARRAY[target_room_id];
+        END IF;
+        RETURN jsonb_build_object(
+          'allowed', cardinality(blocking_owner_room_ids) = 0,
+          'reason', CASE WHEN cardinality(blocking_owner_room_ids) = 0 THEN NULL ELSE 'room_last_owner_cannot_be_removed' END,
+          'affected_room_ids', to_jsonb(affected_room_ids),
+          'blocking_owner_room_ids', to_jsonb(blocking_owner_room_ids)
+        );
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_room_member_change_impact(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // v124 recovers a claimed Room-work launch after a worker restart.  The
+    // recovery function owns the Work -> Assignment -> Reservation lock
+    // order, never infers that an expired lease stopped an external Run, and
+    // returns an explicit marker for the worker to reconcile.  A reservation
+    // without a proven Runtime Run can be safely requeued; a linked or
+    // discoverable Run is handed to the worker for terminal/unknown settle.
+    version: 124,
+    name: "workspace_server_human_work_lease_recovery_and_runtime_fence",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_recover_human_work_launch(
+        target_workspace_id TEXT,
+        target_reservation_id TEXT,
+        target_lease_owner TEXT,
+        target_lease_expires_at TIMESTAMPTZ
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE candidate_work_id TEXT;
+      DECLARE candidate_assignment_id TEXT;
+      DECLARE candidate_reservation_id TEXT;
+      DECLARE work_row workspace_human_works%ROWTYPE;
+      DECLARE assignment_row workspace_human_work_assignments%ROWTYPE;
+      DECLARE reservation_row workspace_human_work_launch_reservations%ROWTYPE;
+      DECLARE runtime_run_id TEXT;
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR (target_reservation_id IS NOT NULL AND btrim(target_reservation_id) = '')
+          OR btrim(COALESCE(target_lease_owner, '')) = ''
+          OR target_lease_expires_at IS NULL THEN
+          RAISE EXCEPTION 'human_work_launch_recovery_input_invalid';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+
+        -- Resolve a candidate without taking the Reservation lock first.
+        -- The subsequent lock sequence is Work -> Assignment -> Reservation,
+        -- shared with stop, admission, and settlement.
+        IF target_reservation_id IS NULL THEN
+          SELECT work.id, assignment.id, reservation.id
+          INTO candidate_work_id, candidate_assignment_id, candidate_reservation_id
+          FROM workspace_human_work_launch_reservations AS reservation
+          JOIN workspace_human_work_assignments AS assignment
+            ON assignment.workspace_id = reservation.workspace_id
+           AND assignment.id = reservation.assignment_id
+           AND assignment.work_id = reservation.work_id
+          JOIN workspace_human_works AS work
+            ON work.workspace_id = reservation.workspace_id
+           AND work.id = reservation.work_id
+          WHERE reservation.workspace_id = target_workspace_id
+            AND reservation.status = 'claimed'
+            AND assignment.status = 'running'
+            AND (
+              reservation.lease_expires_at IS NULL
+              OR reservation.lease_expires_at <= NOW()
+              OR assignment.lease_expires_at IS NULL
+              OR assignment.lease_expires_at <= NOW()
+            )
+            AND samurai_can_room(target_workspace_id, work.room_id, 'execute')
+          ORDER BY COALESCE(reservation.lease_expires_at, reservation.claimed_at, reservation.updated_at),
+                   reservation.id
+          LIMIT 1;
+          IF NOT FOUND THEN RETURN NULL; END IF;
+        ELSE
+          SELECT reservation.work_id, reservation.assignment_id, reservation.id
+          INTO candidate_work_id, candidate_assignment_id, candidate_reservation_id
+          FROM workspace_human_work_launch_reservations AS reservation
+          WHERE reservation.workspace_id = target_workspace_id
+            AND reservation.id = btrim(target_reservation_id)
+            AND reservation.status = 'claimed';
+          IF NOT FOUND THEN RETURN NULL; END IF;
+        END IF;
+
+        SELECT * INTO work_row
+        FROM workspace_human_works AS work
+        WHERE work.workspace_id = target_workspace_id AND work.id = candidate_work_id
+        FOR UPDATE SKIP LOCKED;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+
+        SELECT * INTO assignment_row
+        FROM workspace_human_work_assignments AS assignment
+        WHERE assignment.workspace_id = target_workspace_id
+          AND assignment.id = candidate_assignment_id
+          AND assignment.work_id = candidate_work_id
+        FOR UPDATE SKIP LOCKED;
+        IF NOT FOUND OR assignment_row.status <> 'running' THEN RETURN NULL; END IF;
+
+        SELECT * INTO reservation_row
+        FROM workspace_human_work_launch_reservations AS reservation
+        WHERE reservation.workspace_id = target_workspace_id
+          AND reservation.id = candidate_reservation_id
+          AND reservation.work_id = candidate_work_id
+          AND reservation.assignment_id = candidate_assignment_id
+        FOR UPDATE SKIP LOCKED;
+        IF NOT FOUND OR reservation_row.status <> 'claimed' THEN RETURN NULL; END IF;
+        IF reservation_row.lease_expires_at IS NOT NULL
+          AND reservation_row.lease_expires_at > NOW()
+          AND assignment_row.lease_expires_at IS NOT NULL
+          AND assignment_row.lease_expires_at > NOW() THEN
+          RETURN NULL;
+        END IF;
+        IF NOT samurai_can_room(target_workspace_id, work_row.room_id, 'execute') THEN
+          RAISE EXCEPTION 'room_execute_permission_denied';
+        END IF;
+
+        -- Assignment.current_run_id is authoritative when present.  For
+        -- older rows whose trigger link was not written, discover a single
+        -- Run by the complete server-owned runtime binding before requeueing.
+        runtime_run_id := assignment_row.current_run_id;
+        IF runtime_run_id IS NULL THEN
+          SELECT run.id INTO runtime_run_id
+          FROM workspace_runtime_runs AS run
+          WHERE run.workspace_id = target_workspace_id
+            AND run.room_id = assignment_row.room_id
+            AND run.agent_id = assignment_row.agent_id
+            AND run.metadata -> 'runtime_binding' ->> 'workspace_id' = target_workspace_id
+            AND run.metadata -> 'runtime_binding' ->> 'room_id' = assignment_row.room_id
+            AND run.metadata -> 'runtime_binding' ->> 'work_id' = assignment_row.work_id
+            AND run.metadata -> 'runtime_binding' ->> 'assignee_id' = assignment_row.id
+            AND (run.metadata -> 'runtime_binding' ->> 'generation') ~ '^[0-9]+$'
+            AND (run.metadata -> 'runtime_binding' ->> 'generation')::BIGINT = reservation_row.generation
+            AND (run.metadata -> 'runtime_binding' ->> 'agent_configuration_version') ~ '^[0-9]+$'
+            AND (run.metadata -> 'runtime_binding' ->> 'agent_configuration_version')::BIGINT = assignment_row.agent_version
+          ORDER BY run.started_at DESC, run.id DESC
+          LIMIT 1;
+        END IF;
+
+        -- Stop and reassignment always win over lease recovery.  A missing
+        -- Run can be cancelled because admission happens before an external
+        -- Backend starts; a linked Run remains for the stop dispatcher and is
+        -- never silently relaunched.
+        IF work_row.stop_state <> 'none'
+          OR EXISTS (
+            WITH RECURSIVE assignment_tree(id, parent_assignment_id) AS (
+              SELECT assignment.id, assignment.parent_assignment_id
+              FROM workspace_human_work_assignments AS assignment
+              WHERE assignment.workspace_id = target_workspace_id
+                AND assignment.id = assignment_row.id
+              UNION ALL
+              SELECT parent.id, parent.parent_assignment_id
+              FROM workspace_human_work_assignments AS parent
+              JOIN assignment_tree AS child ON child.parent_assignment_id = parent.id
+              WHERE parent.workspace_id = target_workspace_id
+            )
+            SELECT 1
+            FROM workspace_human_work_controls AS control
+            JOIN assignment_tree ON assignment_tree.id = control.assignment_id
+            WHERE control.workspace_id = target_workspace_id
+              AND control.work_id = assignment_row.work_id
+              AND control.action = 'assignment_stop'
+              AND control.state IN ('accepted', 'pending', 'unconfirmed')
+          )
+          OR reservation_row.generation <> work_row.control_generation
+          OR samurai_human_work_assignment_is_superseded(target_workspace_id, assignment_row.id) THEN
+          IF runtime_run_id IS NOT NULL THEN
+            RETURN jsonb_build_object(
+              'kind', 'skip', 'work_id', work_row.id,
+              'assignment_id', assignment_row.id,
+              'reservation_id', reservation_row.id,
+              'current_run_id', runtime_run_id,
+              'generation', reservation_row.generation
+            );
+          END IF;
+          UPDATE workspace_human_work_assignments
+          SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()),
+              lease_owner = NULL, lease_expires_at = NULL,
+              result = COALESCE(result, '{}'::JSONB) || jsonb_build_object(
+                'status', 'cancelled', 'reason',
+                CASE
+                  WHEN work_row.stop_state <> 'none' THEN 'stop_requested'
+                  WHEN reservation_row.generation <> work_row.control_generation THEN 'generation_stale'
+                  ELSE 'superseded'
+                END
+              ),
+              updated_at = NOW()
+          WHERE workspace_id = target_workspace_id AND id = assignment_row.id;
+          UPDATE workspace_human_work_launch_reservations
+          SET status = 'cancelled', released_at = COALESCE(released_at, NOW()),
+              lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+          WHERE workspace_id = target_workspace_id AND id = reservation_row.id;
+          RETURN jsonb_build_object(
+            'kind', 'cancelled', 'work_id', work_row.id,
+            'assignment_id', assignment_row.id,
+            'reservation_id', reservation_row.id,
+            'generation', reservation_row.generation
+          );
+        END IF;
+
+        IF runtime_run_id IS NOT NULL THEN
+          UPDATE workspace_human_work_assignments
+          SET current_run_id = runtime_run_id,
+              lease_owner = btrim(target_lease_owner),
+              lease_expires_at = target_lease_expires_at,
+              updated_at = NOW()
+          WHERE workspace_id = target_workspace_id AND id = assignment_row.id;
+          UPDATE workspace_human_work_launch_reservations
+          SET lease_owner = btrim(target_lease_owner),
+              lease_expires_at = target_lease_expires_at,
+              updated_at = NOW()
+          WHERE workspace_id = target_workspace_id AND id = reservation_row.id;
+          RETURN jsonb_build_object(
+            'kind', 'recovery', 'work_id', work_row.id,
+            'assignment_id', assignment_row.id,
+            'reservation_id', reservation_row.id,
+            'current_run_id', runtime_run_id,
+            'generation', reservation_row.generation
+          );
+        END IF;
+
+        -- No server-owned Run exists. Reset the claim to a due reservation
+        -- while still holding all three rows; the Store immediately claims it
+        -- for the new worker in this transaction. The old worker's token is
+        -- fenced by the v2 admission function below.
+        UPDATE workspace_human_work_assignments
+        SET status = 'ready', current_run_id = NULL,
+            lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = assignment_row.id;
+        UPDATE workspace_human_work_launch_reservations
+        SET status = 'reserved', scheduled_at = NOW(), claimed_at = NULL,
+            lease_owner = NULL, lease_expires_at = NULL, released_at = NULL,
+            updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = reservation_row.id;
+        RETURN jsonb_build_object(
+          'kind', 'requeued', 'work_id', work_row.id,
+          'assignment_id', assignment_row.id,
+          'reservation_id', reservation_row.id,
+          'generation', reservation_row.generation
+        );
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_assert_human_work_runtime_admission_v2(
+        target_workspace_id TEXT,
+        target_work_id TEXT,
+        target_assignment_id TEXT,
+        target_expected_generation BIGINT,
+        target_reservation_id TEXT,
+        target_lease_owner TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE assignment_row workspace_human_work_assignments%ROWTYPE;
+      DECLARE reservation_row workspace_human_work_launch_reservations%ROWTYPE;
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR btrim(COALESCE(target_reservation_id, '')) = ''
+          OR btrim(COALESCE(target_lease_owner, '')) = '' THEN
+          RAISE EXCEPTION 'human_work_execution_admission_closed';
+        END IF;
+        -- This function takes the existing Work -> Assignment locks first,
+        -- including stop/generation/assignment-stop checks.
+        PERFORM samurai_assert_human_work_runtime_admission(
+          target_workspace_id, target_work_id, target_assignment_id,
+          target_expected_generation
+        );
+        SELECT * INTO assignment_row
+        FROM workspace_human_work_assignments AS assignment
+        WHERE assignment.workspace_id = target_workspace_id
+          AND assignment.id = target_assignment_id
+          AND assignment.work_id = target_work_id
+        FOR UPDATE;
+        SELECT * INTO reservation_row
+        FROM workspace_human_work_launch_reservations AS reservation
+        WHERE reservation.workspace_id = target_workspace_id
+          AND reservation.id = btrim(target_reservation_id)
+          AND reservation.work_id = target_work_id
+          AND reservation.assignment_id = target_assignment_id
+        FOR UPDATE;
+        IF NOT FOUND
+          OR assignment_row.status <> 'running'
+          OR assignment_row.current_run_id IS NOT NULL
+          OR assignment_row.lease_owner IS DISTINCT FROM btrim(target_lease_owner)
+          OR assignment_row.lease_expires_at IS NULL
+          OR assignment_row.lease_expires_at <= NOW()
+          OR reservation_row.status <> 'claimed'
+          OR reservation_row.generation <> target_expected_generation
+          OR reservation_row.lease_owner IS DISTINCT FROM btrim(target_lease_owner)
+          OR reservation_row.lease_expires_at IS NULL
+          OR reservation_row.lease_expires_at <= NOW() THEN
+          RAISE EXCEPTION 'human_work_execution_admission_closed';
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_require_human_work_runtime_fence()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE binding JSONB;
+      BEGIN
+        binding := CASE WHEN jsonb_typeof(NEW.metadata -> 'runtime_binding') = 'object'
+          THEN NEW.metadata -> 'runtime_binding' ELSE NULL END;
+        -- A pre-v124 binary can still call the four-argument admission
+        -- helper, but it cannot carry the reservation/lease token. Reject the
+        -- INSERT itself so such a delayed worker can never start a Backend
+        -- process after its claim was handed to another worker.
+        IF binding IS NOT NULL
+          AND NULLIF(btrim(COALESCE(binding ->> 'work_id', '')), '') IS NOT NULL
+          AND (
+            NULLIF(btrim(COALESCE(binding ->> 'reservation_id', '')), '') IS NULL
+            OR NULLIF(btrim(COALESCE(binding ->> 'lease_owner', '')), '') IS NULL
+          ) THEN
+          RAISE EXCEPTION 'human_work_runtime_binding_invalid';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_human_work_runtime_fence ON workspace_runtime_runs",
+      `CREATE TRIGGER workspace_human_work_runtime_fence
+       BEFORE INSERT ON workspace_runtime_runs
+       FOR EACH ROW EXECUTE FUNCTION samurai_require_human_work_runtime_fence()`,
+      "REVOKE EXECUTE ON FUNCTION samurai_recover_human_work_launch(TEXT, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_assert_human_work_runtime_admission_v2(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_require_human_work_runtime_fence() FROM PUBLIC"
+    ]
+  },
 ];
 
 function workspaceGatewayRlsStatements(): string[] {
@@ -21428,6 +21913,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_reflect_human_work_comment(TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, JSONB, BIGINT, TEXT)",
     "samurai_control_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, JSONB)",
     "samurai_assert_human_work_runtime_admission(TEXT, TEXT, TEXT, BIGINT)",
+    "samurai_assert_human_work_runtime_admission_v2(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT)",
     "samurai_discard_human_work_runtime_admission(TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT)",
     "samurai_project_human_work_attachment_refs(TEXT, TEXT, JSONB)",
     "samurai_resolve_human_work_attachment_refs(TEXT, TEXT, JSONB)",
@@ -21436,6 +21922,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_claim_human_work_stop_dispatch(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT)",
     "samurai_reconcile_human_work_stop_dispatch(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_claim_human_work_launch(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT)",
+    "samurai_recover_human_work_launch(TEXT, TEXT, TEXT, TIMESTAMPTZ)",
     "samurai_delegate_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, JSONB, BIGINT, TEXT, TEXT)",
     "samurai_restore_human_work_assignment_dependencies(TEXT, JSONB)",
     "samurai_restore_human_work_assignment_origins(TEXT, JSONB)",

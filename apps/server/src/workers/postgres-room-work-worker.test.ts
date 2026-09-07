@@ -95,7 +95,9 @@ describe("PostgresRoomWorkWorker", () => {
         workId: "work_one",
         assigneeId: "assignee_one",
         generation: 2,
-        agentConfigurationVersion: 4
+        agentConfigurationVersion: 4,
+        reservationId: "reservation_one",
+        leaseOwner: "worker_one"
       },
       signal: expect.any(AbortSignal)
     }));
@@ -108,7 +110,9 @@ describe("PostgresRoomWorkWorker", () => {
         workId: "work_one",
         assigneeId: "assignee_one",
         generation: 2,
-        agentConfigurationVersion: 4
+        agentConfigurationVersion: 4,
+        reservationId: "reservation_one",
+        leaseOwner: "worker_one"
       }
     }));
     expect(settle).toHaveBeenCalledWith(expect.objectContaining({
@@ -124,6 +128,68 @@ describe("PostgresRoomWorkWorker", () => {
       leaseOwner: "worker_one",
       runId: "run_one",
       status: "completed"
+    }));
+  });
+
+  it("reconciles a recovered terminal Runtime Run without launching it again", async () => {
+    const settle = vi.fn(async () => undefined);
+    const getBackendRun = vi.fn(async (runId: string) => ({
+      id: runId,
+      status: "completed",
+      output_summary: "recovered result"
+    }));
+    const runDomainCommand = vi.fn();
+    const runtime = { getBackendRun, runDomainCommand } as unknown as PostgresRuntimeCommandService;
+    const store = {
+      claimRoomWorkReservation: vi.fn().mockResolvedValueOnce({
+        ...reservation(),
+        current_run_id: "run_recovered"
+      }),
+      settleRoomWorkAssignment: settle
+    } as unknown as WorkspaceServerStore;
+    const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
+
+    const result = await worker.runTick(context, {
+      workerId: "worker_one",
+      maxRuns: 1,
+      signal: new AbortController().signal
+    });
+
+    expect(result).toEqual({ claimed: 1, completed: 1, outcomeUnknown: 0 });
+    expect(getBackendRun).toHaveBeenCalledWith("run_recovered");
+    expect(runDomainCommand).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      status: "completed",
+      runId: "run_recovered",
+      result: expect.objectContaining({ recovery: true, runtime_run_id: "run_recovered" })
+    }));
+  });
+
+  it("keeps a recovered non-terminal Runtime Run outcome_unknown and does not relaunch", async () => {
+    const settle = vi.fn(async () => undefined);
+    const getBackendRun = vi.fn(async (runId: string) => ({ id: runId, status: "running", output_summary: null }));
+    const runDomainCommand = vi.fn();
+    const runtime = { getBackendRun, runDomainCommand } as unknown as PostgresRuntimeCommandService;
+    const store = {
+      claimRoomWorkReservation: vi.fn().mockResolvedValueOnce({
+        ...reservation(),
+        current_run_id: "run_still_running"
+      }),
+      settleRoomWorkAssignment: settle
+    } as unknown as WorkspaceServerStore;
+    const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
+
+    const result = await worker.runTick(context, {
+      workerId: "worker_one",
+      maxRuns: 1,
+      signal: new AbortController().signal
+    });
+
+    expect(result).toEqual({ claimed: 1, completed: 0, outcomeUnknown: 1 });
+    expect(runDomainCommand).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      status: "outcome_unknown",
+      runId: "run_still_running"
     }));
   });
 

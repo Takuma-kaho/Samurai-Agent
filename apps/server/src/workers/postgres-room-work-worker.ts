@@ -39,6 +39,8 @@ interface RoomWorkReservation {
   generation: number;
   reservationId?: string;
   leaseOwner?: string;
+  /** Existing Runtime Run found during lease recovery; never launch twice. */
+  currentRunId?: string;
   originKind?: "normal" | "delegated" | "parent_continuation";
   agentConfigurationVersion?: number;
   sessionId?: string;
@@ -134,6 +136,45 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           throw new WorkspaceServerError(reservation.attachmentError, 400);
         }
         const runtime = this.options.runtimeFor(runContext, operationId);
+        if (claimedReservation.currentRunId) {
+          // A claimed lease can expire while its Runtime Run is still
+          // progressing (or while its terminal row is becoming visible).
+          // Recovery must reconcile that Run and must never call chat.turn.run
+          // a second time. Missing/unknown evidence stays outcome_unknown so
+          // the stop/confirmation lane can decide what to do next.
+          let existingRun: { id?: string; status?: string; output_summary?: string | null } | undefined;
+          try {
+            const getBackendRun = runtime.getBackendRun;
+            existingRun = typeof getBackendRun === "function"
+              ? await getBackendRun.call(runtime, claimedReservation.currentRunId)
+              : undefined;
+          } catch {
+            existingRun = undefined;
+          }
+          const recoveredStatus = recoveryTerminalStatus(existingRun?.status);
+          const recoveredRunId = existingRun?.id === claimedReservation.currentRunId
+            ? existingRun.id
+            : undefined;
+          settlementAttempted = true;
+          await this.settle(runContext, claimedReservation, {
+            status: recoveredStatus,
+            ...(recoveredRunId ? { runId: recoveredRunId } : {}),
+            ...(recoveredStatus === "completed" && existingRun?.output_summary
+              ? { outputSummary: existingRun.output_summary }
+              : {}),
+            result: {
+              status: recoveredStatus,
+              recovery: true,
+              runtime_run_id: claimedReservation.currentRunId,
+              ...(existingRun?.status ? { runtime_status: existingRun.status } : {}),
+              ...(existingRun?.output_summary ? { output_summary: existingRun.output_summary } : {})
+            },
+            now: nowIso()
+          });
+          if (recoveredStatus === "outcome_unknown") outcomeUnknown += 1;
+          else if (recoveredStatus === "completed") completed += 1;
+          continue;
+        }
         const sessionId = await this.ensureInternalSession(runtime, runContext, reservation, operationId, input.signal);
         const agentConfigurationVersion = await this.resolveAgentConfigurationVersion(context, reservation);
         const executionBinding: PostgresRuntimeExecutionBinding = {
@@ -141,7 +182,9 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           assigneeId: reservation.assigneeId,
           ...(reservation.parentAssigneeId ? { parentAssigneeId: reservation.parentAssigneeId } : {}),
           generation: reservation.generation,
-          agentConfigurationVersion
+          agentConfigurationVersion,
+          reservationId: reservation.reservationId,
+          leaseOwner: reservation.leaseOwner
         };
         const result = await runtime.runDomainCommand({
           operationId: "chat.turn.run",
@@ -514,6 +557,7 @@ function normalizeReservation(value: unknown): RoomWorkReservation | undefined {
       : { agentConfigurationVersion: numberValue(candidate, "agent_configuration_version", "agentConfigurationVersion", "configuration_version", "agent_version") }),
     ...(stringValue(candidate, "reservation_id", "reservationId") ? { reservationId: stringValue(candidate, "reservation_id", "reservationId") } : {}),
     ...(stringValue(candidate, "lease_owner", "leaseOwner") ? { leaseOwner: stringValue(candidate, "lease_owner", "leaseOwner") } : {}),
+    ...(stringValue(candidate, "current_run_id", "currentRunId") ? { currentRunId: stringValue(candidate, "current_run_id", "currentRunId") } : {}),
     ...(originKind ? { originKind } : {}),
     ...(!delegatedChild && stringValue(candidate, "session_id", "sessionId") ? { sessionId: stringValue(candidate, "session_id", "sessionId") } : {}),
     ...(!delegatedChild && stringValue(candidate, "parent_assignee_id", "parentAssigneeId")
@@ -565,6 +609,16 @@ function roomWorkRuntimeOperationId(reservation: RoomWorkReservation): string {
     .digest("hex")
     .slice(0, 48);
   return `room_work_run_${digest}`;
+}
+
+function recoveryTerminalStatus(status: string | undefined): "completed" | "failed" | "cancelled" | "outcome_unknown" {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "cancelled" || status === "canceled") return "cancelled";
+  // queued/running/waiting/outcome_unknown, a missing Run, or an unfamiliar
+  // provider status all require explicit confirmation and must not be
+  // converted into a fresh launch.
+  return "outcome_unknown";
 }
 
 function terminalStatus(status: string): "completed" | "failed" | "cancelled" | "waiting" | "outcome_unknown" {
