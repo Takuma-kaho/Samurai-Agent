@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { io, type Socket } from "socket.io-client";
-import { DomainApiClient, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
+import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkAttachmentSchema, type DomainApiRequest, type DomainApiTransportRequest, type PublicAgentRecord, type PublicRoomRecord } from "@samurai-agent/domain-api";
 import {
   app,
   BrowserWindow,
@@ -49,7 +49,17 @@ import { createWorkspaceIdentityStore, type WorkspaceIdentityStore } from "./wor
 import { createWorkspaceAccountSignaturePayload, workspaceAccountIdFromPublicKey } from "./workspace-request-signing.js";
 import {
   requiredWorkspaceOpaqueField,
+  workspaceAgentBackendBindRequest,
+  workspaceAgentCreateRequest,
+  workspaceAgentDmRequest,
+  workspaceAgentListRequest,
+  workspaceAgentPatchRequest,
+  workspaceAgentViewRequest,
   workspaceRoomCreateRequest,
+  workspaceRoomAgentMemberListRequest,
+  workspaceRoomAgentPermissionRequest,
+  workspaceRoomAgentRemoveRequest,
+  workspaceRoomDefaultAgentRequest,
   workspaceRoomMemberPreviewRequest,
   workspaceRoomMemberRequest,
   workspaceRoomMovePreviewRequest,
@@ -841,9 +851,322 @@ function registerIpcHandlers(): void {
   // These are deliberate, purpose-specific signed operations.  The renderer
   // never receives a generic signed-request capability or this private key.
   ipcMain.handle("samurai:workspace-server:rooms:list", async () => {
-    const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeQuery<PublicRoomRecord[]>(requireActiveWorkspaceId(), "room.list", { context: {}, input: {} });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await activeWorkspaceDomainApiClient().executeQuery<PublicRoomRecord[]>(workspaceSnapshot.workspaceId, "room.list", { context: {}, input: {} });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return { rooms: response.result.map(toDesktopWorkspaceRoom) };
+  });
+  ipcMain.handle("samurai:workspace-server:agents:list", async () => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await activeWorkspaceDomainApiClient().executeQuery<PublicAgentRecord[]>(workspaceSnapshot.workspaceId, "agent.list", { context: {}, input: {} });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return { agents: sanitizeWorkspaceAgentListPayload(response.result, workspaceSnapshot.workspaceId) };
+  });
+  ipcMain.handle("samurai:workspace-server:agents:list-target", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentListRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<PublicAgentRecord[]>(workspaceSnapshot.workspaceId, "agent.list", { context: {}, input: {} });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return { agents: sanitizeWorkspaceAgentListPayload(response.result, workspaceSnapshot.workspaceId) };
+  });
+  ipcMain.handle("samurai:workspace-server:agent-backends:list-target", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentListRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<unknown>(workspaceSnapshot.workspaceId, "agent.backend.list", { context: {}, input: {} });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceAgentBackendListPayload(response.result);
+  });
+  ipcMain.handle("samurai:workspace-server:agent:view", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentViewRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<PublicAgentRecord>(workspaceSnapshot.workspaceId, "agent.view", { context: {}, input: { id: request.agentId } });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const agent = sanitizeWorkspaceAgentDetailPayload(response.result, workspaceSnapshot.workspaceId);
+    if (agent.id !== request.agentId) throw new Error("workspace_agent_response_scope_invalid");
+    return agent;
+  });
+  ipcMain.handle("samurai:workspace-server:agent:create", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentCreateRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<PublicAgentRecord>(workspaceSnapshot.workspaceId, "agent.create", { context: {}, input: request.body }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const agent = sanitizeWorkspaceAgentDetailPayload(response.result, workspaceSnapshot.workspaceId);
+    return { ...agent, replayed: response.replayed };
+  });
+  ipcMain.handle("samurai:workspace-server:agent:patch", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentPatchRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<PublicAgentRecord>(workspaceSnapshot.workspaceId, "agent.patch", { context: {}, input: request.body }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const agent = sanitizeWorkspaceAgentDetailPayload(response.result, workspaceSnapshot.workspaceId);
+    if (agent.id !== request.body.id) throw new Error("workspace_agent_response_scope_invalid");
+    return { ...agent, replayed: response.replayed };
+  });
+  ipcMain.handle("samurai:workspace-server:agent:backend-bind", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentBackendBindRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<PublicAgentRecord>(workspaceSnapshot.workspaceId, "agent.backend.bind", { context: {}, input: request.body }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const agent = sanitizeWorkspaceAgentDetailPayload(response.result, workspaceSnapshot.workspaceId);
+    if (agent.id !== request.body.id) throw new Error("workspace_agent_response_scope_invalid");
+    return { ...agent, replayed: response.replayed };
+  });
+  ipcMain.handle("samurai:workspace-server:room-agent-members:list", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceRoomAgentMemberListRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<unknown>(workspaceSnapshot.workspaceId, "room.member.list", { context: { room_id: request.roomId }, input: {} });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceRoomAgentMemberListPayload(response.result, request.roomId);
+  });
+  ipcMain.handle("samurai:workspace-server:room-agent-permission:set", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceRoomAgentPermissionRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.agent.permission.set", { context: { room_id: request.roomId }, input: request.body }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const permission = sanitizeWorkspaceRoomAgentPermissionPayload(response.result, request.roomId);
+    if (permission.agentId !== request.agentId) throw new Error("workspace_room_agent_response_scope_invalid");
+    return { ...permission, replayed: response.replayed };
+  });
+  ipcMain.handle("samurai:workspace-server:room-agent:remove", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceRoomAgentRemoveRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.agent.remove", { context: { room_id: request.roomId }, input: request.body }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const permission = sanitizeWorkspaceRoomAgentPermissionPayload(response.result, request.roomId);
+    if (permission.agentId !== request.agentId) throw new Error("workspace_room_agent_response_scope_invalid");
+    return { ...permission, replayed: response.replayed };
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:list", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const value = publicRoomWorkInput(input);
+    const response = await activeWorkspaceDomainApiClient().executeQuery<unknown>(workspaceSnapshot.workspaceId, "room.work.list", {
+      context: { room_id: roomId },
+      input: {
+        ...(typeof value.status === "string" ? { status: value.status } : {}),
+        ...(typeof value.cursor === "string" ? { cursor: value.cursor } : {}),
+        ...(typeof value.limit === "number" ? { limit: value.limit } : {})
+      }
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkListResponseScope(response.result, roomId);
+    return sanitizeRoomWorkListPayload(response.result, roomId);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:view", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const response = await activeWorkspaceDomainApiClient().executeQuery<unknown>(workspaceSnapshot.workspaceId, "room.work.view", {
+      context: { room_id: roomId },
+        input: { work_id: workId }
+      });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    return sanitizeRoomWorkPayload(response.result);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:create", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.create", {
+      context: { room_id: roomId },
+      input: {
+        ...(typeof value.instruction === "string" ? { instruction: value.instruction } : {}),
+        ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
+        ...(typeof value.agentId === "string" ? { agent_id: value.agentId } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:reply", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.reply", {
+      context: { room_id: roomId },
+      input: {
+        work_id: workId,
+        ...(typeof value.assigneeId === "string" ? { assignee_id: value.assigneeId } : {}),
+        ...(typeof value.instruction === "string" ? { instruction: value.instruction } : {}),
+        ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
+        ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {}),
+        ...(typeof value.expectedGeneration === "number" ? { expected_generation: value.expectedGeneration } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:comment:create", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.comment.create", {
+      context: { room_id: roomId },
+      input: {
+        work_id: workId,
+        ...(typeof value.body === "string" ? { body: value.body } : {}),
+        ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
+        ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:comment:apply", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const commentId = requiredWorkspaceOpaqueField(input, "commentId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    if (typeof value.commentVersion !== "number") throw new Error("commentVersion_invalid");
+    const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.comment.apply", {
+      context: { room_id: roomId },
+      input: {
+        work_id: workId,
+        comment_id: commentId,
+        comment_version: value.commentVersion,
+        ...(typeof value.assigneeId === "string" ? { assignee_id: value.assigneeId } : {}),
+        ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {}),
+        ...(typeof value.expectedGeneration === "number" ? { expected_generation: value.expectedGeneration } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:comment:reaction", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const commentId = requiredWorkspaceOpaqueField(input, "commentId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    if (value.reaction !== undefined && value.reaction !== "like") throw new Error("reaction_invalid");
+    const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.comment.reaction.set", {
+      context: { room_id: roomId },
+      input: {
+        work_id: workId,
+        comment_id: commentId,
+        reaction: "like",
+        enabled: value.enabled !== false,
+        ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:stop", async (_event, input: unknown) => {
+    return executeRoomWorkControlIpc("room.work.stop", input, { workOnly: true });
+  });
+  ipcMain.handle("samurai:workspace-server:room-work:assignee:stop", async (_event, input: unknown) => {
+    return executeRoomWorkControlIpc("room.work.assignee.stop", input, { workOnly: false });
+  });
+  const reassignWorkspaceRoomWorkHandler = async (_event: unknown, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const assigneeId = requiredWorkspaceOpaqueField(input, "assigneeId");
+    const agentId = requiredWorkspaceOpaqueField(input, "agentId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.assignee.reassign", {
+      context: { room_id: roomId },
+      input: {
+        work_id: workId,
+        assignee_id: assigneeId,
+        agent_id: agentId,
+        ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {}),
+        ...(typeof value.expectedGeneration === "number" ? { expected_generation: value.expectedGeneration } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  };
+  ipcMain.handle("samurai:workspace-server:room-work:assignee:reassign", reassignWorkspaceRoomWorkHandler);
+  ipcMain.handle("samurai:workspace-server:room-work:assignee:delegate", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workId = requiredWorkspaceOpaqueField(input, "workId");
+    const assigneeId = requiredWorkspaceOpaqueField(input, "assigneeId");
+    const agentId = requiredWorkspaceOpaqueField(input, "agentId");
+    const operationId = requiredWorkspaceOpaqueField(input, "operationId");
+    const value = publicRoomWorkInput(input);
+    const dependencyAssigneeIds = Array.isArray(value.dependencyAssigneeIds)
+      ? value.dependencyAssigneeIds.filter((item): item is string => typeof item === "string").slice(0, 100)
+      : [];
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.assignee.delegate", {
+      context: { room_id: roomId },
+      input: {
+        work_id: workId,
+        assignee_id: assigneeId,
+        agent_id: agentId,
+        ...(typeof value.instruction === "string" ? { instruction: value.instruction } : {}),
+        ...(dependencyAssigneeIds.length ? { dependency_assignee_ids: dependencyAssigneeIds } : {}),
+        ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
+        ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {}),
+        ...(typeof value.expectedGeneration === "number" ? { expected_generation: value.expectedGeneration } : {})
+      }
+    }, { operationId, idempotencyKey: operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomWorkResponseScope(response.result, roomId, workId);
+    assertRoomWorkDelegateResponseScope(response.result, workId, assigneeId, agentId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:room:default-agent:set", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceRoomDefaultAgentRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.default_agent.set", {
+      context: { room_id: request.roomId },
+      input: request.body
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertRoomDefaultAgentResponseScope(response.result, request.roomId, request.agentId, workspaceSnapshot.workspaceId);
+    return roomWorkReplayPayload(response.result, response.replayed);
+  });
+  ipcMain.handle("samurai:workspace-server:agent:dm:open", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const request = workspaceAgentDmRequest(input);
+    assertWorkspaceAgentTarget(workspaceSnapshot, request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<unknown>(workspaceSnapshot.workspaceId, "agent.dm.open", {
+      context: {},
+      input: request.body
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertAgentDmResponseScope(response.result, request.agentId, workspaceSnapshot.workspaceId);
+    return roomWorkReplayPayload(response.result, response.replayed, agentDmPublicPayloadKeys);
+  });
+  ipcMain.handle("samurai:workspace-server:events:list", async (_event, input: unknown) => {
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const value = publicRoomWorkInput(input);
+    const page = await activeWorkspaceDomainApiClient().listEvents(workspaceSnapshot.workspaceId, {
+      ...(typeof value.roomId === "string" ? { roomId: requiredWorkspaceOpaqueField(value, "roomId") } : {}),
+      ...(typeof value.afterCursor === "string" ? { afterCursor: value.afterCursor } : {}),
+      ...(typeof value.limit === "number" ? { limit: value.limit } : {})
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceEventPage(page);
   });
   ipcMain.handle("samurai:workspace-server:settings:get", async () => {
     return activeWorkspaceServerRequest({
@@ -860,13 +1183,6 @@ function registerIpcHandlers(): void {
       workspaceScoped: true,
       operationId: request.operationId,
       body: workspaceSettingsPatchJson(request.body)
-    });
-  });
-  ipcMain.handle("samurai:workspace-server:chat:backends", async () => {
-    return activeWorkspaceServerRequest({
-      method: "GET",
-      path: `${activeWorkspaceChatPath().replace(/\/chat$/, "")}/agent-backends`,
-      workspaceScoped: true
     });
   });
   ipcMain.handle("samurai:workspace-server:surface:contract", async (_event, source: unknown) => {
@@ -913,13 +1229,19 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:files:attachment:write", async (_event, input: unknown) => {
     const request = workspaceAttachmentRequest(input);
-    return activeWorkspaceServerRequest({
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    if (request.target && (request.target.connectionId !== workspaceSnapshot.connectionId || request.target.workspaceId !== workspaceSnapshot.workspaceId)) {
+      throw new Error("workspace_navigation_changed");
+    }
+    const result = await activeWorkspaceServerRequest({
       method: "PUT",
       path: `${activeWorkspaceFilesPath()}/${request.filePath.split("/").map((part) => encodeURIComponent(part)).join("/")}`,
       workspaceScoped: true,
       operationId: request.operationId,
       body: request.body
     });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return result;
   });
   ipcMain.handle("samurai:workspace-server:chat:search", async (_event, input: unknown) => {
     const roomId = requiredWorkspaceOpaqueField(input, "roomId");
@@ -1339,21 +1661,28 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:room:create", async (_event, input: unknown) => {
     const request = workspaceRoomCreateRequest(input);
-    if (!request.body.parent_room_id) {
-      const connection = requireActiveWorkspaceConnection();
-      const response = await activeWorkspaceDomainApiClient().executeOperation<PublicRoomRecord>(requireActiveWorkspaceId(), "room.create", {
-        context: {},
-        input: { name: request.body.name }
-      }, { operationId: request.operationId, idempotencyKey: request.operationId });
-      return { room: toDesktopWorkspaceRoom(response.result), replayed: response.replayed };
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    if (request.target && (request.target.connectionId !== workspaceSnapshot.connectionId || request.target.workspaceId !== workspaceSnapshot.workspaceId)) {
+      throw new Error("workspace_navigation_changed");
     }
-    return activeWorkspaceServerRequest({
-      method: "POST",
-      path: activeWorkspaceRoomsPath(),
-      workspaceScoped: true,
-      operationId: request.operationId,
-      body: request.body
-    });
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<PublicRoomRecord>(workspaceSnapshot.workspaceId, "room.create", {
+      context: {},
+      input: {
+        name: request.body.name,
+        ...(request.body.parent_room_id === undefined ? {} : { parent_room_id: request.body.parent_room_id }),
+        ...(request.body.default_agent_id === undefined ? {} : { default_agent_id: request.body.default_agent_id }),
+        ...(request.body.default_agent_version === undefined ? {} : { default_agent_version: request.body.default_agent_version }),
+        ...(request.body.new_agent === undefined ? {} : { new_agent: request.body.new_agent }),
+        ...(request.body.agent_permission === undefined ? {} : { agent_permission: request.body.agent_permission })
+      } as unknown as DomainApiRequest["input"]
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    if (response.result.workspace_id !== workspaceSnapshot.workspaceId) throw new Error("workspace_room_response_scope_invalid");
+    return {
+      room: toDesktopWorkspaceRoom(response.result),
+      target: { connectionId: workspaceSnapshot.connectionId, workspaceId: workspaceSnapshot.workspaceId },
+      replayed: response.replayed
+    };
   });
   ipcMain.handle("samurai:workspace-server:room:move-preview", async (_event, input: unknown) => {
     const request = workspaceRoomMovePreviewRequest(input);
@@ -3203,7 +3532,10 @@ type WorkspaceRealtimeNotice = {
   roomId?: string;
   kind?: string;
   eventId?: string;
+  eventVersion?: string;
   cursor?: string;
+  operationId?: string;
+  correlationId?: string;
 };
 
 function requireWorkspaceIdentityStore(): WorkspaceIdentityStore {
@@ -3228,6 +3560,24 @@ function requireActiveWorkspaceId(): string {
   const workspaceId = workspaceIdForConnection(connection);
   if (!workspaceId) throw new Error("workspace_selection_required");
   return workspaceId;
+}
+
+type ActiveWorkspaceSnapshot = { connectionId: string; workspaceId: string; selectionGeneration: number };
+
+function captureActiveWorkspaceSnapshot(): ActiveWorkspaceSnapshot {
+  const connection = requireActiveWorkspaceConnection();
+  const workspaceId = workspaceIdForConnection(connection);
+  if (!workspaceId) throw new Error("workspace_selection_required");
+  return { connectionId: connection.id, workspaceId, selectionGeneration: workspaceSelectionGeneration };
+}
+
+function assertActiveWorkspaceSnapshot(snapshot: ActiveWorkspaceSnapshot): void {
+  const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
+  const workspaceId = connection ? workspaceIdForConnection(connection) : undefined;
+  if (!connection || connection.id !== snapshot.connectionId || workspaceId !== snapshot.workspaceId
+    || workspaceSelectionGeneration !== snapshot.selectionGeneration) {
+    throw new Error("workspace_navigation_changed");
+  }
 }
 
 async function requireActiveWorkspacePrivateKey(connection: WorkspaceConnection): Promise<string> {
@@ -3577,6 +3927,331 @@ function sanitizeEvidencePayload(value: unknown): unknown {
   return sanitizePublicValue(value, {}, 0);
 }
 
+const roomWorkPublicPayloadKeys = new Set([
+  "id", "room_id", "workspace_id", "work_id", "requester_id", "default_agent_id", "agent_id", "target_agent_id",
+  "parent_assignee_id", "assignee_id", "title", "objective", "status", "kind", "instruction", "body", "attachments",
+  "assignees", "instructions", "comments", "controls", "operation_id", "source_comment_id", "created_by", "action",
+  "enabled", "can_execute", "agent_version", "instruction_version", "generation", "version", "reaction_count",
+  "applied_instruction_ids", "unconfirmed_assignee_ids", "reaction", "created_at", "updated_at", "completed_at",
+  "objective_id", "front_agent_id", "default_agent_version", "completion_criteria", "stop_state", "execution_reservations",
+  "accepted_at", "delivered_at", "applied_at", "stop_request_status", "terminal_status", "assignment_id", "scheduled_at",
+  "claimed_at", "released_at"
+]);
+
+const agentDmPublicPayloadKeys = new Set([
+  "id", "room_id", "workspace_id", "kind", "agent_id", "agent_version", "version", "visibility", "membership_mode", "created_at", "updated_at"
+]);
+
+/** Renderer-safe Agent directory fields. Instructions, descriptions,
+ * credentials, and runtime Session references are deliberately absent. */
+const workspaceAgentPublicPayloadKeys = new Set([
+  "id", "workspace_id", "workspaceId", "name", "display_name", "displayName", "role", "backend_id", "backendId", "enabled", "status", "can_execute", "canExecute", "version"
+]);
+
+const publicPayloadSensitiveKey = /(?:private|secret|credential|password|token|authorization|api[_-]?key|session)/i;
+const publicPayloadBodyKey = /^(?:content|body|prompt|message|text)$/i;
+
+function publicRoomWorkInput(input: unknown): Record<string, unknown> {
+  return input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+}
+
+function sanitizeRoomWorkPayload(value: unknown, depth = 0, keys = roomWorkPublicPayloadKeys, fieldKey?: string): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") {
+    const max = fieldKey === "instruction" ? 1_000_000 : fieldKey === "body" ? 100_000 : 20_000;
+    return value.slice(0, max);
+  }
+  if (depth > 8) return undefined;
+  if (Array.isArray(value)) return value.slice(0, 1_000).map((item) => sanitizeRoomWorkPayload(item, depth + 1, keys, fieldKey)).filter((item) => item !== undefined);
+  if (!value || typeof value !== "object") return undefined;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (publicPayloadSensitiveKey.test(key) || !keys.has(key)) continue;
+    const sanitized = key === "attachments" || key === "resources"
+      ? sanitizeRoomWorkResources(item)
+      : sanitizeRoomWorkPayload(item, depth + 1, keys, key);
+    if (sanitized !== undefined) output[key] = sanitized;
+  }
+  return output;
+}
+
+function sanitizeRoomWorkResources(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  return value.slice(0, 100).flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const resource = item as Record<string, unknown>;
+    if (typeof resource.kind !== "string" || typeof resource.id !== "string" || typeof resource.uri !== "string") return [];
+    if (!resource.kind || !resource.id || !resource.uri) return [];
+    if (resource.kind === "file") {
+      const parsed = PublicRoomWorkAttachmentSchema.safeParse(resource);
+      if (!parsed.success) return [];
+      return [{
+        kind: parsed.data.kind,
+        id: parsed.data.id,
+        uri: parsed.data.uri,
+        version: parsed.data.version,
+        ...(parsed.data.label === undefined ? {} : { label: parsed.data.label })
+      }];
+    }
+    if ((resource.version !== undefined && typeof resource.version !== "string")
+      || (resource.label !== undefined && typeof resource.label !== "string")) return [];
+    return [{
+      kind: resource.kind.slice(0, 256),
+      id: resource.id.slice(0, 512),
+      uri: resource.uri.slice(0, 4_096),
+      ...(typeof resource.version === "string" ? { version: resource.version.slice(0, 128) } : {}),
+      ...(typeof resource.label === "string" ? { label: resource.label.slice(0, 4_096) } : {})
+    }];
+  });
+}
+
+function sanitizeAgentDmPayload(value: unknown): unknown {
+  return sanitizeRoomWorkPayload(value, 0, agentDmPublicPayloadKeys);
+}
+
+function roomWorkReplayPayload(value: unknown, replayed: boolean, keys = roomWorkPublicPayloadKeys): unknown {
+  const sanitized = sanitizeRoomWorkPayload(value, 0, keys);
+  if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) return sanitized;
+  return { ...(sanitized as Record<string, unknown>), replayed };
+}
+
+function sanitizeRoomWorkListPayload(value: unknown, roomId?: string): unknown {
+  if (Array.isArray(value)) return { ...(roomId ? { roomId } : {}), works: value.map((item) => sanitizeRoomWorkPayload(item)).filter((item) => item !== undefined) };
+  const record = publicRoomWorkInput(value);
+  const rawWorks = Array.isArray(record.works) ? record.works : Array.isArray(record.room_works) ? record.room_works : [];
+  return {
+    ...(roomId ? { roomId } : {}),
+    works: rawWorks.map((item) => sanitizeRoomWorkPayload(item)).filter((item) => item !== undefined),
+    ...(typeof record.next_cursor === "string" ? { next_cursor: record.next_cursor.slice(0, 512) } : {})
+  };
+}
+
+function sanitizeWorkspaceAgentListPayload(value: unknown, workspaceId: string): Array<Record<string, unknown>> {
+  const record = publicRoomWorkInput(value);
+  const rows = Array.isArray(value)
+    ? value
+    : Array.isArray(record.agents) ? record.agents : [];
+  return rows.map((item) => sanitizeWorkspaceAgentPayload(item, workspaceId));
+}
+
+function sanitizeWorkspaceAgentBackendListPayload(value: unknown): Array<Record<string, unknown>> {
+  const parsed = PublicAgentBackendRecordSchema.array().max(100).safeParse(value);
+  if (!parsed.success) throw new Error("workspace_agent_backend_response_invalid");
+  return parsed.data;
+}
+
+function assertWorkspaceAgentTarget(snapshot: ActiveWorkspaceSnapshot, target?: { connectionId: string; workspaceId: string }): void {
+  if (!target) return;
+  if (target.connectionId !== snapshot.connectionId || target.workspaceId !== snapshot.workspaceId) throw new Error("workspace_navigation_changed");
+}
+
+/** Explicit agent.view/editor projection. Never include credentials or
+ * backend runtime/session details in a renderer response. */
+function sanitizeWorkspaceAgentDetailPayload(value: unknown, workspaceId: string): Record<string, unknown> {
+  const record = publicRoomWorkInput(value);
+  const responseWorkspaceId = typeof record.workspace_id === "string" ? record.workspace_id : typeof record.workspaceId === "string" ? record.workspaceId : workspaceId;
+  if (responseWorkspaceId !== workspaceId) throw new Error("workspace_agent_workspace_scope_invalid");
+  const id = typeof record.id === "string" ? record.id.trim().slice(0, 512) : "";
+  const displayName = typeof record.name === "string" ? record.name : typeof record.display_name === "string" ? record.display_name : typeof record.displayName === "string" ? record.displayName : "";
+  if (!id || !displayName.trim() || typeof record.enabled !== "boolean") throw new Error("workspace_agent_response_invalid");
+  const output: Record<string, unknown> = { id, workspaceId, displayName: displayName.trim().slice(0, 200), enabled: record.enabled };
+  if (typeof record.description === "string") output.description = record.description.slice(0, 2_000);
+  if (typeof record.role === "string") output.role = record.role.slice(0, 500);
+  if (typeof record.instructions === "string") output.instructions = record.instructions.slice(0, 20_000);
+  if (typeof record.backend_id === "string") output.backendId = record.backend_id.slice(0, 512);
+  else if (typeof record.backendId === "string") output.backendId = record.backendId.slice(0, 512);
+  if (typeof record.status === "string") output.status = record.status.slice(0, 128);
+  if (typeof record.can_execute === "boolean") output.canExecute = record.can_execute;
+  else if (typeof record.canExecute === "boolean") output.canExecute = record.canExecute;
+  if (typeof record.version === "number" && Number.isSafeInteger(record.version)) output.version = record.version;
+  if (typeof record.created_by === "string") output.createdBy = record.created_by.slice(0, 512);
+  if (typeof record.created_at === "string") output.createdAt = record.created_at.slice(0, 64);
+  if (typeof record.updated_at === "string") output.updatedAt = record.updated_at.slice(0, 64);
+  return output;
+}
+
+function sanitizeWorkspaceRoomAgentPermissionPayload(value: unknown, roomId: string): Record<string, unknown> {
+  const body = publicRoomWorkInput(value);
+  const permission = body.permission && typeof body.permission === "object" && !Array.isArray(body.permission) ? body.permission as Record<string, unknown> : body;
+  const actualRoomId = typeof permission.room_id === "string" ? permission.room_id : typeof permission.roomId === "string" ? permission.roomId : "";
+  const agentId = typeof permission.agent_id === "string" ? permission.agent_id : typeof permission.agentId === "string" ? permission.agentId : "";
+  if (actualRoomId !== roomId || !agentId || typeof permission.can_view !== "boolean" || typeof permission.can_edit !== "boolean" || typeof permission.can_execute !== "boolean") throw new Error("workspace_room_agent_response_invalid");
+  return {
+    id: typeof permission.id === "string" ? permission.id.slice(0, 512) : `room_agent:${roomId}:${agentId}`,
+    roomId,
+    agentId: agentId.slice(0, 512),
+    canView: permission.can_view,
+    canEdit: permission.can_edit,
+    canExecute: permission.can_execute,
+    version: typeof permission.version === "number" && Number.isSafeInteger(permission.version) ? permission.version : 1,
+    ...(typeof permission.created_by === "string" ? { createdBy: permission.created_by.slice(0, 512) } : {}),
+    ...(typeof permission.created_at === "string" ? { createdAt: permission.created_at.slice(0, 64) } : {}),
+    ...(typeof permission.updated_at === "string" ? { updatedAt: permission.updated_at.slice(0, 64) } : {}),
+    removed: permission.removed === true || (!permission.can_view && !permission.can_edit && !permission.can_execute)
+  };
+}
+
+function sanitizeWorkspaceRoomAgentMemberListPayload(value: unknown, roomId: string): Record<string, unknown> {
+  const body = publicRoomWorkInput(value);
+  const rows = Array.isArray(body.agents) ? body.agents : [];
+  return { roomId, agents: rows.map((entry) => sanitizeWorkspaceRoomAgentPermissionPayload(entry, roomId)) };
+}
+
+function sanitizeWorkspaceAgentPayload(value: unknown, workspaceId: string): Record<string, unknown> {
+  const record = publicRoomWorkInput(value);
+  const publicRecord = Object.fromEntries(Object.entries(record).filter(([key]) => workspaceAgentPublicPayloadKeys.has(key)));
+  const responseWorkspaceId = typeof publicRecord.workspace_id === "string"
+    ? publicRecord.workspace_id
+    : typeof publicRecord.workspaceId === "string" ? publicRecord.workspaceId : workspaceId;
+  if (responseWorkspaceId !== workspaceId) throw new Error("workspace_agent_workspace_scope_invalid");
+  const id = typeof publicRecord.id === "string" ? publicRecord.id.trim().slice(0, 512) : "";
+  const displayName = typeof publicRecord.name === "string"
+    ? publicRecord.name
+    : typeof publicRecord.display_name === "string"
+      ? publicRecord.display_name
+      : typeof publicRecord.displayName === "string" ? publicRecord.displayName : "";
+  if (!id || !displayName.trim() || typeof publicRecord.enabled !== "boolean") throw new Error("workspace_agent_response_invalid");
+  const output: Record<string, unknown> = {
+    id,
+    workspaceId,
+    displayName: displayName.trim().slice(0, 200),
+    enabled: publicRecord.enabled
+  };
+  if (typeof publicRecord.role === "string") output.role = publicRecord.role.slice(0, 500);
+  if (typeof publicRecord.backend_id === "string") output.backendId = publicRecord.backend_id.slice(0, 512);
+  else if (typeof publicRecord.backendId === "string") output.backendId = publicRecord.backendId.slice(0, 512);
+  if (typeof publicRecord.status === "string") output.status = publicRecord.status.slice(0, 128);
+  if (typeof publicRecord.can_execute === "boolean") output.canExecute = publicRecord.can_execute;
+  else if (typeof publicRecord.canExecute === "boolean") output.canExecute = publicRecord.canExecute;
+  if (typeof publicRecord.version === "number" && Number.isSafeInteger(publicRecord.version)) output.version = publicRecord.version;
+  return output;
+}
+
+function assertRoomWorkListResponseScope(value: unknown, roomId: string): void {
+  const record = publicRoomWorkInput(value);
+  const works = Array.isArray(value) ? value : Array.isArray(record.works) ? record.works : Array.isArray(record.room_works) ? record.room_works : [];
+  for (const work of works) assertRoomWorkResponseScope(work, roomId);
+}
+
+function assertRoomWorkResponseScope(value: unknown, roomId: string, workId?: string): void {
+  const record = publicRoomWorkInput(value);
+  if (typeof record.room_id === "string" && record.room_id !== roomId) throw new Error("room_work_room_scope_invalid");
+  const actualWorkId = typeof record.work_id === "string" ? record.work_id : typeof record.id === "string" ? record.id : undefined;
+  if (workId !== undefined && actualWorkId !== undefined && actualWorkId !== workId) throw new Error("room_work_scope_invalid");
+}
+
+function assertRoomWorkDelegateResponseScope(value: unknown, workId: string, parentAssigneeId: string, agentId: string): void {
+  const record = publicRoomWorkInput(value);
+  if (record.id === parentAssigneeId
+    || record.work_id !== workId
+    || record.agent_id !== agentId
+    || (record.parent_assignee_id !== undefined && record.parent_assignee_id !== null && record.parent_assignee_id !== parentAssigneeId)) {
+    throw new Error("room_work_delegate_response_scope_invalid");
+  }
+}
+
+function assertRoomDefaultAgentResponseScope(value: unknown, roomId: string, agentId?: string, workspaceId?: string): void {
+  const record = publicRoomWorkInput(value);
+  if (record.room_id !== roomId) throw new Error("room_default_agent_scope_invalid");
+  if (agentId !== undefined && record.agent_id !== agentId) throw new Error("room_default_agent_agent_scope_invalid");
+  if (workspaceId !== undefined && record.workspace_id !== undefined && record.workspace_id !== workspaceId) {
+    throw new Error("room_default_agent_workspace_scope_invalid");
+  }
+}
+
+function assertAgentDmResponseScope(value: unknown, agentId: string, workspaceId: string): void {
+  const record = publicRoomWorkInput(value);
+  if (record.kind !== "agent_dm") throw new Error("agent_dm_kind_scope_invalid");
+  if (record.agent_id !== agentId) throw new Error("agent_dm_agent_scope_invalid");
+  if (record.workspace_id !== workspaceId) throw new Error("agent_dm_workspace_scope_invalid");
+}
+
+function sanitizeWorkspaceEventPage(value: unknown): unknown {
+  const record = publicRoomWorkInput(value);
+  const events = Array.isArray(record.events) ? record.events.map(sanitizeWorkspaceEvent).filter((item) => item !== undefined) : [];
+  return {
+    events,
+    ...(typeof record.next_cursor === "string" ? { next_cursor: record.next_cursor.slice(0, 512) } : {}),
+    has_more: record.has_more === true
+  };
+}
+
+function sanitizeWorkspaceEvent(value: unknown): unknown {
+  const record = publicRoomWorkInput(value);
+  const eventId = typeof record.event_id === "string" ? record.event_id.trim().slice(0, 512) : "";
+  const eventType = typeof record.event_type === "string" ? record.event_type.trim().slice(0, 128) : "";
+  const eventVersion = typeof record.event_version === "string" ? record.event_version.trim().slice(0, 32) : "";
+  const cursor = typeof record.cursor === "string" ? record.cursor.trim().slice(0, 512) : "";
+  const occurredAt = typeof record.occurred_at === "string" ? record.occurred_at.trim().slice(0, 64) : "";
+  if (!eventId || !/^[a-z][a-z0-9._-]{0,127}$/.test(eventType) || !/^\d+\.\d+$/.test(eventVersion) || !cursor || !occurredAt) return undefined;
+  const actor = publicRoomWorkInput(record.actor);
+  const scope = publicRoomWorkInput(record.scope);
+  const actorKind = actor.kind === "human" || actor.kind === "agent" || actor.kind === "system" ? actor.kind : undefined;
+  const workspaceId = typeof scope.workspace_id === "string" ? scope.workspace_id.trim().slice(0, 512) : "";
+  const resources = sanitizeRoomWorkResources(record.resources);
+  if (!actorKind || !workspaceId || !resources) return undefined;
+  return {
+    event_id: eventId,
+    event_type: eventType,
+    event_version: eventVersion,
+    cursor,
+    occurred_at: occurredAt,
+    actor: {
+      kind: actorKind,
+      ...(typeof actor.id === "string" ? { id: actor.id.slice(0, 512) } : {})
+    },
+    scope: {
+      workspace_id: workspaceId,
+      ...(typeof scope.room_id === "string" ? { room_id: scope.room_id.slice(0, 512) } : {})
+    },
+    resources,
+    ...(typeof record.operation_id === "string" ? { operation_id: record.operation_id.slice(0, 512) } : {}),
+    ...(typeof record.correlation_id === "string" ? { correlation_id: record.correlation_id.slice(0, 512) } : {}),
+    payload: sanitizeWorkspaceEventPayload(record.payload)
+  };
+}
+
+function sanitizeWorkspaceEventPayload(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return value.slice(0, 4_096);
+  if (depth > 6) return undefined;
+  if (Array.isArray(value)) return value.slice(0, 100).map((item) => sanitizeWorkspaceEventPayload(item, depth + 1)).filter((item) => item !== undefined);
+  if (!value || typeof value !== "object") return undefined;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (publicPayloadSensitiveKey.test(key) || publicPayloadBodyKey.test(key)) continue;
+    const sanitized = sanitizeWorkspaceEventPayload(item, depth + 1);
+    if (sanitized !== undefined) output[key.slice(0, 128)] = sanitized;
+  }
+  return output;
+}
+
+async function executeRoomWorkControlIpc(
+  operationId: "room.work.stop" | "room.work.assignee.stop",
+  input: unknown,
+  options: { workOnly: boolean }
+): Promise<unknown> {
+  const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+  const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+  const workId = requiredWorkspaceOpaqueField(input, "workId");
+  const operationRequestId = requiredWorkspaceOpaqueField(input, "operationId");
+  const value = publicRoomWorkInput(input);
+  const assigneeId = options.workOnly ? undefined : requiredWorkspaceOpaqueField(input, "assigneeId");
+  const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, operationId, {
+    context: { room_id: roomId },
+    input: {
+      work_id: workId,
+      ...(assigneeId ? { assignee_id: assigneeId } : {}),
+      ...(typeof value.reason === "string" ? { reason: value.reason } : {}),
+      ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {}),
+      ...(typeof value.expectedGeneration === "number" ? { expected_generation: value.expectedGeneration } : {})
+    }
+  }, { operationId: operationRequestId, idempotencyKey: operationRequestId });
+  assertActiveWorkspaceSnapshot(workspaceSnapshot);
+  assertRoomWorkResponseScope(response.result, roomId, workId);
+  return roomWorkReplayPayload(response.result, response.replayed);
+}
+
 function sanitizePublicValue(value: unknown, options: { includeInvitationToken?: boolean }, depth: number): unknown {
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") return value.slice(0, 20_000);
@@ -3607,23 +4282,84 @@ function activeWorkspaceDomainApiClient(): DomainApiClient {
   });
 }
 
+/**
+ * Room creation is bound to the renderer's target snapshot.  Do not resolve
+ * the active connection again after the operation has started: a navigation
+ * during the transport must either use this exact connection or fail before
+ * the request is signed.
+ */
+function snapshotWorkspaceDomainApiClient(snapshot: ActiveWorkspaceSnapshot): DomainApiClient {
+  return new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+    assertActiveWorkspaceSnapshot(snapshot);
+    const connection = workspaceConnectionRegistry.connections.find((candidate) => candidate.id === snapshot.connectionId);
+    if (!connection || workspaceIdForConnection(connection) !== snapshot.workspaceId) throw new Error("workspace_navigation_changed");
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    assertActiveWorkspaceSnapshot(snapshot);
+    const result = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: request.method,
+      path: request.path,
+      workspaceScoped: true,
+      workspaceId: snapshot.workspaceId,
+      ...(request.operationId ? { operationId: request.operationId } : {}),
+      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+      ...(request.body === undefined ? {} : { body: request.body })
+    });
+    assertActiveWorkspaceSnapshot(snapshot);
+    if (result.status < 200 || result.status >= 300) {
+      const body = result.body;
+      const errorValue = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+      const code = typeof errorValue === "string"
+        ? errorValue
+        : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
+          ? (errorValue as { code: string }).code
+          : "workspace_server_request_failed";
+      throw new Error(`${code}:${result.status}`);
+    }
+    return result.body as T;
+  });
+}
+
 function toDesktopWorkspaceRoom(room: PublicRoomRecord): {
   id: string;
   workspaceId: string;
   parentRoomId?: string;
   name: string;
   version: number;
+  kind?: "normal" | "agent_dm";
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
+  defaultAgentEnabled?: boolean;
+  defaultAgentCanExecute?: boolean;
   canManage?: boolean;
   canExecute?: boolean;
   createdAt: string;
   updatedAt: string;
 } {
+  const extendedRoom = room as PublicRoomRecord & {
+    default_agent_enabled?: unknown;
+    default_agent_can_execute?: unknown;
+    default_agent?: unknown;
+  };
+  const defaultAgent = extendedRoom.default_agent && typeof extendedRoom.default_agent === "object" && !Array.isArray(extendedRoom.default_agent)
+    ? extendedRoom.default_agent as Record<string, unknown>
+    : {};
+  const defaultAgentEnabled = typeof extendedRoom.default_agent_enabled === "boolean"
+    ? extendedRoom.default_agent_enabled
+    : typeof defaultAgent.enabled === "boolean" ? defaultAgent.enabled : undefined;
+  const defaultAgentCanExecute = typeof extendedRoom.default_agent_can_execute === "boolean"
+    ? extendedRoom.default_agent_can_execute
+    : typeof defaultAgent.can_execute === "boolean" ? defaultAgent.can_execute : undefined;
   return {
     id: room.id,
     workspaceId: room.workspace_id,
     ...(room.parent_room_id ? { parentRoomId: room.parent_room_id } : {}),
     name: room.name,
     version: room.version,
+    kind: room.kind ?? "normal",
+    ...(room.default_agent_id ? { defaultAgentId: room.default_agent_id } : {}),
+    ...(room.default_agent_version === undefined ? {} : { defaultAgentVersion: room.default_agent_version }),
+    ...(defaultAgentEnabled === undefined ? {} : { defaultAgentEnabled }),
+    ...(defaultAgentCanExecute === undefined ? {} : { defaultAgentCanExecute }),
     ...(room.can_manage === undefined ? {} : { canManage: room.can_manage }),
     ...(room.can_execute === undefined ? {} : { canExecute: room.can_execute }),
     createdAt: room.created_at,
@@ -3837,6 +4573,9 @@ function forwardWorkspaceRealtimeNotice(type: WorkspaceRealtimeNotice["type"], c
     event_id?: unknown;
     cursor?: unknown;
     event_type?: unknown;
+    event_version?: unknown;
+    operation_id?: unknown;
+    correlation_id?: unknown;
     scope?: { workspace_id?: unknown; room_id?: unknown };
   };
   const workspaceId = value.workspaceId ?? value.scope?.workspace_id;
@@ -3847,7 +4586,10 @@ function forwardWorkspaceRealtimeNotice(type: WorkspaceRealtimeNotice["type"], c
   const kind = value.kind ?? value.event_type;
   if (typeof kind === "string" && /^[a-z][a-z0-9._-]{0,127}$/.test(kind)) notice.kind = kind;
   if (typeof value.event_id === "string" && isWorkspaceOpaqueId(value.event_id)) notice.eventId = value.event_id;
+  if (typeof value.event_version === "string" && /^\d+\.\d+$/.test(value.event_version)) notice.eventVersion = value.event_version;
   if (typeof value.cursor === "string" && value.cursor.length <= 512) notice.cursor = value.cursor;
+  if (typeof value.operation_id === "string" && isWorkspaceOpaqueId(value.operation_id)) notice.operationId = value.operation_id;
+  if (typeof value.correlation_id === "string" && isWorkspaceOpaqueId(value.correlation_id)) notice.correlationId = value.correlation_id;
   mainWindow.webContents.send("samurai:workspace-server:event", notice);
 }
 

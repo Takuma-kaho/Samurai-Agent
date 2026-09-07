@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ActivityInboxItem, ArtifactRecord, BackendEventRecord, BackendRunRecord, MemoryFrontmatter, MessageRecord } from "@samurai-agent/core-schemas";
+import { WorkspaceFileResourceRefSchema, type ActivityInboxItem, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type MemoryFrontmatter, type MessageRecord, type ResourceRef } from "@samurai-agent/core-schemas";
 import {
   api,
   createIdempotencyKey,
@@ -9,6 +9,7 @@ import {
   type DesktopWorkspaceConnectionState,
   type DesktopWorkspaceDirectoryEntry,
   type DesktopWorkspaceDirectoryResult,
+  type DesktopWorkspaceRealtimeEvent,
   type DesktopWorkspaceTarget,
   type DesktopWorkspaceRoom,
   type ChatTurnResult,
@@ -23,6 +24,22 @@ import type {
   NativeOrganizationInvitation,
   NativeOrganizationMember,
   NativeRoom,
+  NativeRoomWork,
+  NativeRoomWorkAssignee,
+  NativeRoomWorkAssigneeStatus,
+  NativeRoomWorkComment,
+  NativeRoomWorkControl,
+  NativeRoomWorkInstruction,
+  NativeRoomWorkReaction,
+  NativeRoomWorkStatus,
+  NativeRoomDefaultAgent,
+  NativeRoomAgentMember,
+  NativeAgentDm,
+  NativeAgentBackend,
+  NativeRoomCreateInput,
+  NativeRoomWorkBridge,
+  NativeRoomCapabilities,
+  NativeAgent,
   NativeWorkspace,
   NativeWorkspaceBundleExport,
   NativeWorkspaceBundleRestoreResult,
@@ -53,6 +70,13 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function optionalBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === "boolean") return value;
+  }
+  return undefined;
+}
+
 function errorCode(error: unknown): string {
   if (error instanceof OrganizationApiError) return error.code;
   if (error instanceof Error) return error.message;
@@ -72,6 +96,60 @@ function isPermissionError(error: unknown): boolean {
     || /permission|forbidden|not.?found|access|unauthori[sz]ed|403|401|revoke|denied/.test(message);
 }
 
+const explicitRoomWorkFailureCodes = new Set([
+  "room_work_assignee_required",
+  "room_work_assignee_invalid",
+  "room_work_assignee_unavailable",
+  "room_work_dependency_invalid",
+  "room_work_delegate_input_invalid",
+  "room_work_delegate_identity_missing",
+  "room_work_delegate_operation_conflict",
+  "room_work_delegate_scope_invalid",
+  "room_work_assignment_limit_exceeded",
+  "room_work_concurrency_limit_exceeded",
+  "room_work_duration_limit_exceeded",
+  "room_work_depth_limit_exceeded",
+  "room_work_dependency_limit_exceeded",
+  "room_work_control_forbidden",
+  "room_work_execute_forbidden",
+  "room_work_edit_forbidden",
+  "room_work_instruction_required",
+  "room_work_comment_required",
+  "room_default_agent_unavailable"
+]);
+
+const explicitRoomCreateFailureCodes = new Set([
+  "room_default_agent_unavailable",
+  "room_agent_backend_unavailable",
+  "room_default_agent_enabled_required",
+  "room_create_target_mismatch"
+]);
+
+/**
+ * A mutation may be retried with the same operation ID after an unknown
+ * transport failure.  Only a known validation/authorization response is a
+ * definitive failure that should retire that operation ID in the UI.
+ */
+export function nativeRoomWorkErrorIsExplicitServerFailure(error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status !== undefined) return status >= 400 && status < 600;
+  const message = errorCode(error);
+  if (/(?:^|:)(?:4|5)\d{2}$/.test(message)) return true;
+  return explicitRoomWorkFailureCodes.has(message);
+}
+
+/** A known create/validation failure retires the current operation ID. */
+export function nativeRoomCreateErrorIsExplicitServerFailure(error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status !== undefined) return status >= 400 && status < 500;
+  const message = errorCode(error);
+  if (/(?:^|:)4\d{2}$/.test(message)) return true;
+  const code = message.split(":", 1)[0] ?? message;
+  if (code === "workspace_room_response_scope_invalid") return false;
+  return explicitRoomCreateFailureCodes.has(code)
+    || /(?:_invalid|_required|_conflict|_unavailable|_enabled_required|_permission_required)$/.test(code);
+}
+
 /**
  * A denied or deleted Workspace target is no longer a valid navigation hint.
  * Transport outages and a missing local identity remain retryable so an
@@ -81,6 +159,97 @@ export function shouldDiscardWorkspaceTargetAfterReauthorizationFailure(error: u
   if (isPermissionError(error)) return true;
   const code = errorCode(error).toLowerCase();
   return /workspace_(?:re)?authorization|workspace_selection_(?:denied|invalid)|workspace_target_(?:not_found|superseded)|workspace_not_found/.test(code);
+}
+
+export type NativeWorkspaceRealtimeEventAction = "refresh_content" | "reauthorize_workspace" | "close_workspace";
+
+/**
+ * A persisted Workspace event is a content notification. It must not cross
+ * the Workspace selection boundary again. Access changes still require the
+ * existing re-authorization path, while a revoke closes protected content.
+ */
+export function nativeWorkspaceRealtimeEventAction(type: DesktopWorkspaceRealtimeEvent["type"]): NativeWorkspaceRealtimeEventAction {
+  if (type === "access_revoked") return "close_workspace";
+  if (type === "access_changed" || type === "room_access_changed" || type === "room_access_revoked") return "reauthorize_workspace";
+  return "refresh_content";
+}
+
+export interface NativeWorkspaceContentRefreshCoordinator {
+  request: () => void;
+  whenIdle: () => Promise<void>;
+}
+
+/** Coalesce a burst of realtime notifications into one refresh plus one dirty pass. */
+export function createNativeWorkspaceContentRefreshCoordinator(
+  refresh: () => Promise<void>
+): NativeWorkspaceContentRefreshCoordinator {
+  let running = false;
+  let dirty = false;
+  let idleWaiters: Array<() => void> = [];
+
+  const request = (): void => {
+    dirty = true;
+    if (running) return;
+    running = true;
+    void (async () => {
+      while (dirty) {
+        dirty = false;
+        try {
+          await refresh();
+        } catch {
+          // The refresh owns its user-facing error state. A failed pass still
+          // must release the lane so a later notification can retry safely.
+        }
+      }
+      running = false;
+      const waiters = idleWaiters;
+      idleWaiters = [];
+      waiters.forEach((resolve) => resolve());
+    })();
+  };
+
+  return {
+    request,
+    whenIdle: () => running
+      ? new Promise<void>((resolve) => idleWaiters.push(resolve))
+      : Promise.resolve()
+  };
+}
+
+export interface NativeRoomWorkListRequestStamp {
+  sequence: number;
+  roomOpenId: number;
+  roomId: string;
+  workspaceTargetKey?: string;
+}
+
+/** A late Work list response cannot overwrite a newer request or navigation. */
+export function nativeRoomWorkListRequestIsCurrent(
+  request: NativeRoomWorkListRequestStamp,
+  current: NativeRoomWorkListRequestStamp
+): boolean {
+  return request.sequence === current.sequence
+    && request.roomOpenId === current.roomOpenId
+    && request.roomId === current.roomId
+    && request.workspaceTargetKey === current.workspaceTargetKey;
+}
+
+export interface NativeWorkspaceContentRefreshRequestStamp {
+  roomOpenId: number;
+  roomId?: string;
+  workspaceTargetKey?: string;
+  workListSequence?: number;
+}
+
+/** A failed refresh may update UI only while its Room and list generation remain current. */
+export function nativeWorkspaceContentRefreshRequestIsCurrent(
+  request: NativeWorkspaceContentRefreshRequestStamp,
+  current: NativeWorkspaceContentRefreshRequestStamp
+): boolean {
+  return request.roomOpenId === current.roomOpenId
+    && request.roomId === current.roomId
+    && request.workspaceTargetKey === current.workspaceTargetKey
+    && (request.workListSequence === undefined || request.workListSequence === current.workListSequence);
 }
 
 function userFacingError(error: unknown, fallback: string): string {
@@ -549,15 +718,59 @@ export function workspaceDirectoryRequestIsCurrent(
     && request.stateFingerprint === workspaceDirectoryStateFingerprint(currentState);
 }
 
+export interface NativeDraftRequestStamp {
+  key: string;
+  roomOpenId: number;
+}
+
+/** A late send/comment completion may only clear the draft context it started in. */
+export function nativeDraftRequestIsCurrent(request: NativeDraftRequestStamp, current: NativeDraftRequestStamp): boolean {
+  return request.key === current.key && request.roomOpenId === current.roomOpenId;
+}
+
+function nativeRoomCapabilityFields(value: Record<string, unknown>): Pick<NativeRoom, "canView" | "canEdit" | "canExecute" | "canManage" | "canStop" | "capabilities"> {
+  const nested = record(value.capabilities ?? value.room_capabilities ?? value.permissions);
+  const canView = optionalBoolean(value.canView, value.can_view, nested.canView, nested.can_view);
+  const canEdit = optionalBoolean(value.canEdit, value.can_edit, nested.canEdit, nested.can_edit);
+  const canExecute = optionalBoolean(value.canExecute, value.can_execute, nested.canExecute, nested.can_execute);
+  const canManage = optionalBoolean(value.canManage, value.can_manage, nested.canManage, nested.can_manage);
+  const canStop = optionalBoolean(value.canStop, value.can_stop, nested.canStop, nested.can_stop);
+  const normalized = {
+    ...(canView === undefined ? {} : { canView }),
+    ...(canEdit === undefined ? {} : { canEdit }),
+    ...(canExecute === undefined ? {} : { canExecute }),
+    ...(canManage === undefined ? {} : { canManage }),
+    ...(canStop === undefined ? {} : { canStop })
+  };
+  return Object.keys(normalized).length > 0 ? { ...normalized, capabilities: normalized } : normalized;
+}
+
 function nativeRoom(room: DesktopWorkspaceRoom): NativeRoom {
-  const roomCapabilities = room as DesktopWorkspaceRoom & { canExecute?: boolean };
+  const roomCapabilities = room as DesktopWorkspaceRoom & Record<string, unknown>;
+  const capabilityFields = nativeRoomCapabilityFields(roomCapabilities);
+  const rawDefaultAgent = roomCapabilities.default_agent && typeof roomCapabilities.default_agent === "object" && !Array.isArray(roomCapabilities.default_agent)
+    ? roomCapabilities.default_agent as Record<string, unknown>
+    : {};
+  const defaultAgentId = optionalString(roomCapabilities.defaultAgentId ?? roomCapabilities.default_agent_id ?? rawDefaultAgent.agentId ?? rawDefaultAgent.agent_id);
+  const defaultAgentVersion = typeof roomCapabilities.defaultAgentVersion === "number"
+    ? roomCapabilities.defaultAgentVersion
+    : typeof roomCapabilities.default_agent_version === "number"
+      ? roomCapabilities.default_agent_version
+      : typeof rawDefaultAgent.agentVersion === "number"
+        ? rawDefaultAgent.agentVersion
+        : typeof rawDefaultAgent.agent_version === "number"
+          ? rawDefaultAgent.agent_version
+          : undefined;
+  const kind = roomCapabilities.kind === "agent_dm" || roomCapabilities.room_kind === "agent_dm" ? "agent_dm" : "normal";
   return {
     id: room.id,
     workspaceId: room.workspaceId,
     name: room.name,
     ...(room.parentRoomId ? { parentRoomId: room.parentRoomId } : {}),
-    ...(roomCapabilities.canExecute === undefined ? {} : { canExecute: roomCapabilities.canExecute }),
-    ...(room.canManage === undefined ? {} : { canManage: room.canManage }),
+    ...capabilityFields,
+    kind,
+    ...(defaultAgentId ? { defaultAgentId } : {}),
+    ...(defaultAgentVersion === undefined ? {} : { defaultAgentVersion }),
     version: room.version,
     createdAt: room.createdAt,
     updatedAt: room.updatedAt
@@ -569,18 +782,27 @@ function nativeRooms(value: unknown): NativeRoom[] {
   const rows = Array.isArray(value) ? value : Array.isArray(body.rooms) ? body.rooms : [];
   return rows.map((entry) => {
     const room = record(entry);
+    const capabilityFields = nativeRoomCapabilityFields(room);
     return {
       id: stringValue(room.id ?? room.room_id),
       workspaceId: stringValue(room.workspace_id),
       name: stringValue(room.name, "名称未設定のRoom"),
       ...(optionalString(room.parent_room_id ?? room.parentRoomId) ? { parentRoomId: optionalString(room.parent_room_id ?? room.parentRoomId) } : {}),
-      ...(typeof room.can_execute === "boolean" ? { canExecute: room.can_execute } : {}),
-      ...(typeof room.can_manage === "boolean" ? { canManage: room.can_manage } : {}),
+      ...capabilityFields,
+      ...(room.kind === "agent_dm" || room.room_kind === "agent_dm" ? { kind: "agent_dm" as const } : {}),
+      ...(optionalString(room.default_agent_id ?? room.defaultAgentId) ? { defaultAgentId: optionalString(room.default_agent_id ?? room.defaultAgentId) } : {}),
+      ...(typeof room.default_agent_version === "number" || typeof room.defaultAgentVersion === "number" ? { defaultAgentVersion: (room.default_agent_version ?? room.defaultAgentVersion) as number } : {}),
       ...(typeof room.version === "number" ? { version: room.version } : {}),
       ...(optionalString(room.created_at) ? { createdAt: optionalString(room.created_at) } : {}),
       ...(optionalString(room.updated_at) ? { updatedAt: optionalString(room.updated_at) } : {})
     } satisfies NativeRoom;
   }).filter((room) => room.id.length > 0);
+}
+
+function sameNativeRoomList(left: NativeRoom[], right: NativeRoom[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightById = new Map(right.map((room) => [room.id, room]));
+  return left.every((room) => JSON.stringify(room) === JSON.stringify(rightById.get(room.id)));
 }
 
 function legacyWorkspace(status: unknown, connection: DesktopWorkspaceConnection): NativeWorkspace {
@@ -616,6 +838,600 @@ function nativeMessage(message: MessageRecord): NativeChatMessage {
     role: message.role,
     content: message.content,
     createdAt: message.created_at
+  };
+}
+
+function roomWorkPayload(value: unknown): Record<string, unknown> {
+  const body = record(value);
+  const nested = body.work ?? body.view ?? body.workView ?? body.roomWork ?? body.result ?? body.data ?? body.value;
+  if (!nested || typeof nested !== "object" || Array.isArray(nested)) return body;
+  const nestedRecord = nested as Record<string, unknown>;
+  // Some bridges wrap a detailed view as an aggregate plus sibling
+  // instructions/comments/controls. Preserve those projections.
+  return {
+    ...nestedRecord,
+    ...(nestedRecord.instructions === undefined && body.instructions !== undefined ? { instructions: body.instructions } : {}),
+    ...(nestedRecord.comments === undefined && body.comments !== undefined ? { comments: body.comments } : {}),
+    ...(nestedRecord.reactions === undefined && body.reactions !== undefined ? { reactions: body.reactions } : {}),
+    ...(nestedRecord.controls === undefined && body.controls !== undefined ? { controls: body.controls } : {})
+  };
+}
+
+function roomWorkRows(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const body = record(value);
+  for (const key of ["works", "room_works", "items", "result", "data", "value"]) {
+    if (Array.isArray(body[key])) return body[key] as unknown[];
+  }
+  return [];
+}
+
+const nativeRoomWorkStatuses: readonly NativeRoomWorkStatus[] = [
+  "queued", "running", "waiting", "blocked", "completed", "failed", "stopping", "cancelled", "outcome_unknown"
+];
+
+function nativeRoomWorkStatus(value: unknown): NativeRoomWorkStatus {
+  return typeof value === "string" && nativeRoomWorkStatuses.includes(value as NativeRoomWorkStatus)
+    ? value as NativeRoomWorkStatus
+    : "outcome_unknown";
+}
+
+const nativeRoomWorkAssigneeStatuses: readonly NativeRoomWorkAssigneeStatus[] = [
+  "queued", "ready", "running", "waiting", "blocked", "completed", "failed", "stopping", "cancelled", "outcome_unknown"
+];
+
+function nativeRoomWorkAssigneeStatus(value: unknown): NativeRoomWorkAssigneeStatus {
+  return typeof value === "string" && nativeRoomWorkAssigneeStatuses.includes(value as NativeRoomWorkAssigneeStatus)
+    ? value as NativeRoomWorkAssigneeStatus
+    : "outcome_unknown";
+}
+
+function positiveVersion(value: unknown, fallback = 1): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function nonNegativeGeneration(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function nativeAssignee(value: unknown): NativeRoomWorkAssignee | undefined {
+  const item = record(value);
+  const id = optionalString(item.id ?? item.assignee_id);
+  const workId = optionalString(item.work_id ?? item.workId);
+  const agentId = optionalString(item.agent_id ?? item.agentId);
+  if (!id || !workId || !agentId) return undefined;
+  return {
+    id,
+    workId,
+    agentId,
+    ...(optionalString(item.parent_assignee_id ?? item.parentAssigneeId) ? { parentAssigneeId: optionalString(item.parent_assignee_id ?? item.parentAssigneeId) } : {}),
+    status: nativeRoomWorkAssigneeStatus(item.status),
+    instructionVersion: positiveVersion(item.instruction_version ?? item.instructionVersion),
+    generation: nonNegativeGeneration(item.generation),
+    version: positiveVersion(item.version),
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+/** Only accept server-issued, relative Workspace attachment references. */
+function nativeAttachmentRefs(value: unknown): ResourceRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry): ResourceRef => {
+    const parsed = WorkspaceFileResourceRefSchema.safeParse(entry);
+    if (!parsed.success) {
+      throw new Error("room_work_attachment_response_invalid");
+    }
+    return { ...parsed.data, label: parsed.data.label ?? parsed.data.uri };
+  });
+}
+
+function nativeInstruction(value: unknown): NativeRoomWorkInstruction | undefined {
+  const item = record(value);
+  const id = optionalString(item.id);
+  const workId = optionalString(item.work_id ?? item.workId);
+  const instruction = typeof (item.instruction ?? item.body) === "string" ? String(item.instruction ?? item.body) : "";
+  const attachments = nativeAttachmentRefs(item.attachments);
+  if (!id || !workId || (!instruction && attachments.length === 0)) return undefined;
+  const kind = item.kind === "reply" || item.kind === "comment_apply" || item.kind === "delegated" ? item.kind : "initial";
+  const instructionStatuses: NativeRoomWorkInstruction["status"][] = ["pending", "accepted", "queued", "delivered", "applied", "failed", "rejected"];
+  if (!instructionStatuses.includes(item.status as NativeRoomWorkInstruction["status"])) return undefined;
+  const status = item.status as NativeRoomWorkInstruction["status"];
+  return {
+    id,
+    workId,
+    ...(optionalString(item.assignee_id ?? item.assigneeId) ? { assigneeId: optionalString(item.assignee_id ?? item.assigneeId) } : {}),
+    kind,
+    instruction,
+    attachments,
+    version: positiveVersion(item.version),
+    generation: nonNegativeGeneration(item.generation),
+    status,
+    createdBy: optionalString(item.created_by ?? item.createdBy) ?? "unknown",
+    ...(optionalString(item.source_comment_id ?? item.sourceCommentId) ? { sourceCommentId: optionalString(item.source_comment_id ?? item.sourceCommentId) } : {}),
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+function nativeComment(value: unknown): NativeRoomWorkComment | undefined {
+  const item = record(value);
+  const id = optionalString(item.id ?? item.comment_id);
+  const workId = optionalString(item.work_id ?? item.workId);
+  const authorId = optionalString(item.author_id ?? item.authorId);
+  if (!id || !workId || !authorId) return undefined;
+  return {
+    id,
+    workId,
+    authorId,
+    body: typeof item.body === "string" ? item.body : "",
+    attachments: nativeAttachmentRefs(item.attachments),
+    version: positiveVersion(item.version),
+    ...(typeof item.reaction_count === "number" || typeof item.reactionCount === "number" ? { reactionCount: (item.reaction_count ?? item.reactionCount) as number } : {}),
+    appliedInstructionIds: Array.isArray(item.applied_instruction_ids ?? item.appliedInstructionIds)
+      ? ((item.applied_instruction_ids ?? item.appliedInstructionIds) as unknown[]).filter((entry): entry is string => typeof entry === "string")
+      : [],
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+function nativeReaction(value: unknown): NativeRoomWorkReaction | undefined {
+  const item = record(value);
+  const id = optionalString(item.id ?? item.reaction_id ?? item.reactionId);
+  const workId = optionalString(item.work_id ?? item.workId);
+  const commentId = optionalString(item.comment_id ?? item.commentId);
+  if (!id || !workId || !commentId) return undefined;
+  return {
+    id,
+    workId,
+    commentId,
+    reaction: "like",
+    enabled: item.enabled === true,
+    version: positiveVersion(item.version),
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+function nativeControl(value: unknown): NativeRoomWorkControl | undefined {
+  const item = record(value);
+  const id = optionalString(item.id ?? item.control_id);
+  const workId = optionalString(item.work_id ?? item.workId);
+  if (!id || !workId) return undefined;
+  const action = item.action === "assignee.stop" || item.action === "assignee.reassign" ? item.action : "stop";
+  const statuses: NativeRoomWorkControl["status"][] = ["pending", "requested", "accepted", "running", "completed", "confirmed", "failed", "unconfirmed", "rejected"];
+  const terminalStatus = item.terminal_status ?? item.terminalStatus;
+  const parsedStatus = statuses.includes(item.status as NativeRoomWorkControl["status"]) ? item.status as NativeRoomWorkControl["status"] : "unconfirmed";
+  const status = terminalStatus === "unconfirmed"
+    ? "unconfirmed"
+    : terminalStatus === "confirmed" && (parsedStatus === "completed" || parsedStatus === "confirmed")
+      ? "confirmed"
+      : parsedStatus;
+  const unconfirmed = item.unconfirmed_assignee_ids ?? item.unconfirmedAssigneeIds;
+  return {
+    id,
+    ...(optionalString(item.operation_id ?? item.operationId) ? { operationId: optionalString(item.operation_id ?? item.operationId) } : {}),
+    workId,
+    ...(optionalString(item.assignee_id ?? item.assigneeId) ? { assigneeId: optionalString(item.assignee_id ?? item.assigneeId) } : {}),
+    ...(optionalString(item.target_agent_id ?? item.targetAgentId) ? { targetAgentId: optionalString(item.target_agent_id ?? item.targetAgentId) } : {}),
+    action,
+    status,
+    generation: nonNegativeGeneration(item.generation),
+    version: positiveVersion(item.version),
+    unconfirmedAssigneeIds: Array.isArray(unconfirmed) ? (unconfirmed as unknown[]).filter((entry): entry is string => typeof entry === "string") : [],
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {}),
+    ...(optionalString(item.completed_at ?? item.completedAt) ? { completedAt: optionalString(item.completed_at ?? item.completedAt) } : {})
+  };
+}
+
+export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
+  const item = roomWorkPayload(value);
+  const id = optionalString(item.id ?? item.work_id ?? item.workId);
+  const roomId = optionalString(item.room_id ?? item.roomId);
+  const requesterId = optionalString(item.requester_id ?? item.requesterId);
+  const defaultAgentId = optionalString(item.default_agent_id ?? item.defaultAgentId);
+  if (!id || !roomId || !requesterId || !defaultAgentId) throw new Error("room_work_response_invalid");
+  const assigneeRows = Array.isArray(item.assignees) ? item.assignees : Array.isArray(item.assignments) ? item.assignments : [];
+  const instructions = Array.isArray(item.instructions) ? item.instructions.flatMap((entry) => { const parsed = nativeInstruction(entry); return parsed ? [parsed] : []; }) : undefined;
+  const comments = Array.isArray(item.comments) ? item.comments.flatMap((entry) => { const parsed = nativeComment(entry); return parsed ? [parsed] : []; }) : undefined;
+  const reactions = Array.isArray(item.reactions) ? item.reactions.flatMap((entry) => { const parsed = nativeReaction(entry); return parsed ? [parsed] : []; }) : undefined;
+  const controls = Array.isArray(item.controls) ? item.controls.flatMap((entry) => { const parsed = nativeControl(entry); return parsed ? [parsed] : []; }) : undefined;
+  const resultSummary = optionalString(item.result_summary ?? item.resultSummary ?? item.output ?? item.answer);
+  const stopState = item.stop_state === "requested" || item.stopState === "requested"
+    ? "requested"
+    : item.stop_state === "confirmed" || item.stopState === "confirmed"
+      ? "confirmed"
+      : item.stop_state === "unconfirmed" || item.stopState === "unconfirmed"
+        ? "unconfirmed"
+        : item.stop_state === "none" || item.stopState === "none" ? "none" : undefined;
+  return {
+    id,
+    roomId,
+    requesterId,
+    defaultAgentId,
+    title: stringValue(item.title, stringValue(item.objective, "Room work")),
+    objective: stringValue(item.objective, stringValue(item.title, "依頼")),
+    status: nativeRoomWorkStatus(item.status),
+    instructionVersion: positiveVersion(item.instruction_version ?? item.instructionVersion),
+    generation: nonNegativeGeneration(item.generation),
+    version: positiveVersion(item.version),
+    assignees: assigneeRows.flatMap((entry) => { const parsed = nativeAssignee(entry); return parsed ? [parsed] : []; }),
+    ...(stopState ? { stopState } : {}),
+    ...(instructions ? { instructions } : {}),
+    ...(comments ? { comments } : {}),
+    ...(reactions ? { reactions } : {}),
+    ...(controls ? { controls } : {}),
+    ...(resultSummary ? { resultSummary } : {}),
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+function nativeDefaultAgentFromUnknown(value: unknown): NativeRoomDefaultAgent | undefined {
+  const item = roomWorkPayload(value);
+  const roomId = optionalString(item.room_id ?? item.roomId);
+  const agentId = optionalString(item.agent_id ?? item.agentId);
+  if (!roomId || !agentId || typeof item.enabled !== "boolean" || (typeof item.can_execute !== "boolean" && typeof item.canExecute !== "boolean")) return undefined;
+  return {
+    roomId,
+    agentId,
+    ...(typeof item.agent_version === "number" || typeof item.agentVersion === "number" ? { agentVersion: (item.agent_version ?? item.agentVersion) as number } : {}),
+    enabled: item.enabled,
+    canExecute: (item.can_execute ?? item.canExecute) as boolean,
+    ...(typeof item.version === "number" ? { version: item.version } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+function nativeAgentsFromUnknown(value: unknown): NativeAgent[] {
+  const body = record(value);
+  const rows = Array.isArray(value) ? value : Array.isArray(body.agents) ? body.agents : Array.isArray(body.items) ? body.items : [];
+  return rows.flatMap((entry) => {
+    const item = record(entry);
+    const id = optionalString(item.id ?? item.agent_id);
+    if (!id) return [];
+    return [{
+      id,
+      displayName: stringValue(item.display_name ?? item.displayName ?? item.name, id),
+      ...(optionalString(item.role) ? { role: optionalString(item.role) } : {}),
+      ...(optionalString(item.backend_id ?? item.backendId ?? item.backend) ? { backendId: optionalString(item.backend_id ?? item.backendId ?? item.backend) } : {}),
+      enabled: item.enabled === true,
+      ...(optionalString(item.status) ? { status: optionalString(item.status) } : {}),
+      ...(typeof item.can_execute === "boolean" || typeof item.canExecute === "boolean" ? { canExecute: (item.can_execute ?? item.canExecute) as boolean } : {}),
+      ...(typeof item.version === "number" ? { version: item.version } : {})
+    } satisfies NativeAgent];
+  });
+}
+
+function nativeAgentDetailFromUnknown(value: unknown): NativeAgent {
+  const item = record(value);
+  const nested = item.agent && typeof item.agent === "object" && !Array.isArray(item.agent) ? item.agent as Record<string, unknown> : item;
+  const rows = nativeAgentsFromUnknown([nested]);
+  const agent = rows[0];
+  if (!agent || !agent.id) throw new Error("workspace_agent_response_invalid");
+  if (typeof nested.instructions !== "string" || !nested.instructions.trim()) throw new Error("workspace_agent_detail_missing");
+  return {
+    ...agent,
+    instructions: nested.instructions.slice(0, 20_000),
+    ...(typeof nested.description === "string" ? { description: nested.description.slice(0, 2_000) } : {}),
+    ...(optionalString(nested.created_by ?? nested.createdBy) ? { createdBy: optionalString(nested.created_by ?? nested.createdBy) } : {}),
+    ...(optionalString(nested.created_at ?? nested.createdAt) ? { createdAt: optionalString(nested.created_at ?? nested.createdAt) } : {}),
+    ...(optionalString(nested.updated_at ?? nested.updatedAt) ? { updatedAt: optionalString(nested.updated_at ?? nested.updatedAt) } : {})
+  };
+}
+
+function nativeRoomAgentMembersFromUnknown(value: unknown, roomId: string): NativeRoomAgentMember[] {
+  const body = record(value);
+  const rows = Array.isArray(body.agents) ? body.agents : Array.isArray(value) ? value : body.agent_id || body.agentId ? [value] : [];
+  return rows.flatMap((entry) => {
+    const item = record(entry);
+    const actualRoomId = optionalString(item.room_id ?? item.roomId);
+    const agentId = optionalString(item.agent_id ?? item.agentId);
+    if (
+      actualRoomId !== roomId
+      || !agentId
+      || (typeof item.can_view !== "boolean" && typeof item.canView !== "boolean")
+      || (typeof item.can_edit !== "boolean" && typeof item.canEdit !== "boolean")
+      || (typeof item.can_execute !== "boolean" && typeof item.canExecute !== "boolean")
+    ) return [];
+    const canView = (item.can_view ?? item.canView) as boolean;
+    const canEdit = (item.can_edit ?? item.canEdit) as boolean;
+    const canExecute = (item.can_execute ?? item.canExecute) as boolean;
+    return [{
+      id: optionalString(item.id) ?? `room_agent:${roomId}:${agentId}`,
+      roomId,
+      agentId,
+      canView,
+      canEdit,
+      canExecute,
+      version: positiveVersion(item.version),
+      ...(optionalString(item.created_by ?? item.createdBy) ? { createdBy: optionalString(item.created_by ?? item.createdBy) } : {}),
+      ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+      ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {}),
+      removed: item.removed === true || (!canView && !canEdit && !canExecute)
+    } satisfies NativeRoomAgentMember];
+  });
+}
+
+/** Keep only the Server's public backend availability projection. */
+export function nativeAgentBackendsFromUnknown(value: unknown): NativeAgentBackend[] {
+  const body = record(value);
+  const rows = Array.isArray(value)
+    ? value
+    : Array.isArray(body.backends) ? body.backends
+      : Array.isArray(body.items) ? body.items : [];
+  return rows.flatMap((entry) => {
+    const item = record(entry);
+    const id = optionalString(item.id ?? item.backend_id);
+    if (!id) return [];
+    const label = optionalString(item.label ?? item.name) ?? id;
+    const connectionState = item.connection_state ?? item.connectionState;
+    const normalizedConnectionState = connectionState === "ready" || connectionState === "unconfigured"
+      || connectionState === "disabled" || connectionState === "degraded" || connectionState === "unverified"
+      ? connectionState : undefined;
+    return [{
+      id,
+      label,
+      ...(optionalString(item.kind) ? { kind: optionalString(item.kind) } : {}),
+      configured: item.configured === true,
+      enabled: item.enabled !== false,
+      ...(normalizedConnectionState ? { connectionState: normalizedConnectionState } : {}),
+      ...(optionalString(item.reason) ? { reason: optionalString(item.reason) } : {})
+    } satisfies NativeAgentBackend];
+  });
+}
+
+function nativeRoomCapability(room: NativeRoom | undefined, capability: keyof NativeRoomCapabilities): boolean {
+  return room?.[capability] === true || room?.capabilities?.[capability] === true;
+}
+
+function nativeAgentIsAvailable(agent: NativeAgent | undefined): boolean {
+  return agent?.enabled === true && agent.status === "active" && agent.canExecute !== false;
+}
+
+function nativeAgentBackendIsAvailable(agent: NativeAgent | undefined, backends: NativeAgentBackend[]): boolean {
+  const backendId = agent?.backendId;
+  return typeof backendId === "string" && backends.some((backend) => backend.id === backendId
+    && backend.configured && backend.enabled && backend.connectionState === "ready");
+}
+
+export function nativeRoomAgentIsAvailable(agent: NativeAgent | undefined, backends: NativeAgentBackend[]): boolean {
+  return nativeAgentIsAvailable(agent) && nativeAgentBackendIsAvailable(agent, backends);
+}
+
+export function nativeRoomCreateOperationId(operationId?: string): string {
+  return operationId ?? createIdempotencyKey();
+}
+
+function nativeAgentMutationFailureIsExplicit(error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status !== undefined) return status >= 400 && status < 500;
+  const code = errorCode(error).split(":", 1)[0] ?? errorCode(error);
+  return /(?:_invalid|_required|_forbidden|_unavailable|_not_found|_conflict|_rejected|_mismatch)$/.test(code)
+    || /^4\d{2}$/.test(code);
+}
+
+export function nativeRoomCreateResponseIsCurrent(
+  result: unknown,
+  expectedTarget: NativeWorkspaceTarget,
+  currentTarget?: NativeWorkspaceTarget
+): boolean {
+  if (!currentTarget || nativeWorkspaceTargetKey(currentTarget) !== nativeWorkspaceTargetKey(expectedTarget)) return false;
+  const envelope = record(result);
+  const room = record(envelope.room);
+  const responseTarget = record(envelope.target ?? envelope.workspaceTarget);
+  const responseConnectionId = stringValue(responseTarget.connectionId);
+  const responseWorkspaceId = stringValue(responseTarget.workspaceId);
+  const roomWorkspaceId = stringValue(room.workspaceId ?? room.workspace_id);
+  return responseConnectionId === expectedTarget.connectionId
+    && responseWorkspaceId === expectedTarget.workspaceId
+    && roomWorkspaceId === expectedTarget.workspaceId;
+}
+
+export function nativeRoomsAfterRoomCreate(current: NativeRoom[], created: NativeRoom): NativeRoom[] {
+  return [...current.filter((room) => room.id !== created.id), created];
+}
+
+function nativeDefaultAgentIsReady(room: NativeRoom | undefined, agents: NativeAgent[], backends: NativeAgentBackend[], roomAgentMembers?: NativeRoomAgentMember[]): boolean {
+  if (!room?.defaultAgentId || !nativeRoomCapability(room, "canExecute")) return false;
+  if (roomAgentMembers !== undefined && !roomAgentMembers.some((member) => member.agentId === room.defaultAgentId && !member.removed && member.canExecute)) return false;
+  return nativeRoomAgentIsAvailable(agents.find((agent) => agent.id === room.defaultAgentId), backends);
+}
+
+function nativeRoomWorkControlAllowed(room: NativeRoom | undefined, work: NativeRoomWork, accountId: string | undefined): boolean {
+  if (!nativeRoomCapability(room, "canExecute") || !accountId) return false;
+  return work.requesterId === accountId || nativeRoomCapability(room, "canManage");
+}
+
+function nativeRoomWorkAssigneeIsTerminal(assignee: NativeRoomWorkAssignee): boolean {
+  return assignee.status === "completed" || assignee.status === "failed" || assignee.status === "cancelled";
+}
+
+function nativeRoomWorkStopAllowed(room: NativeRoom | undefined, work: NativeRoomWork, accountId: string | undefined): boolean {
+  const explicit = room?.canStop ?? room?.capabilities?.canStop;
+  if (typeof explicit === "boolean") return explicit;
+  if (!accountId) return false;
+  return work.requesterId === accountId || nativeRoomCapability(room, "canManage");
+}
+
+function nativeAgentDmFromUnknown(value: unknown): NativeAgentDm {
+  const item = roomWorkPayload(value);
+  const id = optionalString(item.id ?? item.dm_id);
+  const roomId = optionalString(item.room_id ?? item.roomId);
+  const workspaceId = optionalString(item.workspace_id ?? item.workspaceId);
+  const agentId = optionalString(item.agent_id ?? item.agentId);
+  if (!id || !roomId || !workspaceId || !agentId || item.kind !== "agent_dm") throw new Error("agent_dm_response_invalid");
+  return {
+    id,
+    roomId,
+    workspaceId,
+    kind: "agent_dm",
+    agentId,
+    ...(optionalString(item.room_name ?? item.roomName) ? { roomName: optionalString(item.room_name ?? item.roomName) } : {}),
+    ...(typeof item.agent_version === "number" || typeof item.agentVersion === "number" ? { agentVersion: (item.agent_version ?? item.agentVersion) as number } : {}),
+    ...(typeof item.version === "number" ? { version: item.version } : {}),
+    ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
+    ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
+  };
+}
+
+export interface NativeRoomWorkClient {
+  list: (roomId: string) => Promise<NativeRoomWork[]>;
+  view: (roomId: string, workId: string) => Promise<NativeRoomWork>;
+  create: (input: { roomId: string; instruction?: string; attachments?: NativeRoomWorkInstruction["attachments"]; agentId?: string; operationId: string }) => Promise<NativeRoomWork>;
+  reply: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: NativeRoomWorkInstruction["attachments"]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkInstruction>;
+  comment: (input: { roomId: string; workId: string; body?: string; attachments?: NativeRoomWorkComment["attachments"]; expectedVersion?: number; operationId: string }) => Promise<NativeRoomWorkComment>;
+  applyComment: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string; operationId: string }) => Promise<NativeRoomWorkInstruction>;
+  reactComment: (input: { roomId: string; workId: string; commentId: string; expectedVersion?: number; operationId: string }) => Promise<unknown>;
+  setDefaultAgent: (input: { roomId: string; agentId: string; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<NativeRoomDefaultAgent>;
+  stop: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkControl>;
+  stopAssignee: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkControl>;
+  reassign: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkAssignee>;
+  delegate: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; instruction: string; dependencyAssigneeIds?: string[]; attachments?: NativeRoomWorkInstruction["attachments"]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkAssignee>;
+  openDm: (agentId: string, operationId: string, target?: NativeWorkspaceTarget) => Promise<NativeAgentDm>;
+}
+
+export interface NativeRoomWorkMutationResult {
+  operationId: string;
+  /** False means the mutation may have succeeded but the Room projection was not refreshed. */
+  refreshed: boolean;
+}
+
+type RoomWorkOperation = (operation: string, roomId: string, payload: Record<string, unknown>, operationId: string) => Promise<unknown>;
+
+function roomWorkOperation(bridge: NativeRoomWorkBridge): RoomWorkOperation | undefined {
+  return bridge.runWorkspaceRoomWorkOperation
+    ? (input, roomId, payload, operationId) => bridge.runWorkspaceRoomWorkOperation!({ operation: input, roomId, payload, operationId })
+    : undefined;
+}
+
+/** Build an adapter around either specific bridge methods or one generic operation endpoint. */
+export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClient | undefined {
+  if (!bridge || typeof bridge !== "object") return undefined;
+  const candidate = bridge as NativeRoomWorkBridge;
+  const generic = roomWorkOperation(candidate);
+  const hasRead = Boolean(candidate.listWorkspaceRoomWorks || candidate.getWorkspaceRoomWork || generic);
+  if (!hasRead) return undefined;
+  const call = (operation: string, roomId: string, payload: Record<string, unknown>, operationId: string, specific?: () => Promise<unknown>): Promise<unknown> => specific ? specific() : generic ? generic(operation, roomId, payload, operationId) : Promise.reject(new Error("room_work_api_unavailable"));
+  return {
+    list: async (roomId) => roomWorkRows(await call("room.work.list", roomId, { limit: 100 }, createIdempotencyKey(), candidate.listWorkspaceRoomWorks ? () => candidate.listWorkspaceRoomWorks!({ roomId, limit: 100 }) : undefined)).map(nativeRoomWorkFromUnknown),
+    view: async (roomId, workId) => nativeRoomWorkFromUnknown(await call("room.work.view", roomId, { work_id: workId }, createIdempotencyKey(), candidate.getWorkspaceRoomWork ? () => candidate.getWorkspaceRoomWork!({ roomId, workId }) : undefined)),
+    create: async (input) => nativeRoomWorkFromUnknown(await call("room.work.create", input.roomId, {
+      ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      ...(input.agentId ? { agent_id: input.agentId } : {})
+    }, input.operationId, candidate.createWorkspaceRoomWork ? () => candidate.createWorkspaceRoomWork!(input) : undefined)),
+    reply: async (input) => {
+      const value = await call("room.work.reply", input.roomId, {
+        work_id: input.workId,
+        ...(input.assigneeId ? { assignee_id: input.assigneeId } : {}),
+        ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
+        ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
+      }, input.operationId, candidate.replyWorkspaceRoomWork ? () => candidate.replyWorkspaceRoomWork!(input) : undefined);
+      const item = roomWorkPayload(value);
+      const parsed = nativeInstruction(item);
+      if (!parsed) throw new Error("room_work_reply_response_invalid");
+      return parsed;
+    },
+    comment: async (input) => {
+      const value = await call("room.work.comment.create", input.roomId, {
+        work_id: input.workId,
+        ...(input.body === undefined ? {} : { body: input.body }),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion })
+      }, input.operationId, candidate.createWorkspaceRoomWorkComment ? () => candidate.createWorkspaceRoomWorkComment!(input) : undefined);
+      const parsed = nativeComment(value);
+      if (!parsed) throw new Error("room_work_comment_response_invalid");
+      return parsed;
+    },
+    applyComment: async (input) => {
+      const value = await call("room.work.comment.apply", input.roomId, {
+        work_id: input.workId,
+        comment_id: input.commentId,
+        comment_version: input.commentVersion,
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
+        ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }),
+        ...(input.assigneeId ? { assignee_id: input.assigneeId } : {})
+      }, input.operationId, candidate.applyWorkspaceRoomWorkComment ? () => candidate.applyWorkspaceRoomWorkComment!(input) : undefined);
+      const parsed = nativeInstruction(roomWorkPayload(value));
+      if (!parsed) throw new Error("room_work_comment_apply_response_invalid");
+      return parsed;
+    },
+    reactComment: (input) => call("room.work.comment.reaction.set", input.roomId, {
+      work_id: input.workId,
+      comment_id: input.commentId,
+      reaction: "like",
+      enabled: true,
+      ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion })
+    }, input.operationId, candidate.reactWorkspaceRoomWorkComment ? () => candidate.reactWorkspaceRoomWorkComment!({ ...input, reaction: "like", enabled: true }) : undefined),
+    setDefaultAgent: async (input) => {
+      const value = await call("room.default_agent.set", input.roomId, {
+        agent_id: input.agentId,
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
+        ...(input.target ? { target: input.target } : {})
+      }, input.operationId, candidate.setWorkspaceRoomDefaultAgent ? () => candidate.setWorkspaceRoomDefaultAgent!(input) : undefined);
+      const parsed = nativeDefaultAgentFromUnknown(value);
+      if (!parsed) throw new Error("room_default_agent_response_invalid");
+      if (parsed.roomId !== input.roomId || parsed.agentId !== input.agentId) throw new Error("room_default_agent_response_scope_invalid");
+      return parsed;
+    },
+    stop: async (input) => {
+      const value = await call("room.work.stop", input.roomId, { work_id: input.workId, ...(input.reason ? { reason: input.reason } : {}), ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }), ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }) }, input.operationId, candidate.stopWorkspaceRoomWork ? () => candidate.stopWorkspaceRoomWork!(input) : undefined);
+      const parsed = nativeControl(value);
+      if (!parsed) throw new Error("room_work_stop_response_invalid");
+      return parsed;
+    },
+    stopAssignee: async (input) => {
+      const value = await call("room.work.assignee.stop", input.roomId, { work_id: input.workId, assignee_id: input.assigneeId, ...(input.reason ? { reason: input.reason } : {}), ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }), ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }) }, input.operationId, candidate.stopWorkspaceRoomWorkAssignee ? () => candidate.stopWorkspaceRoomWorkAssignee!(input) : undefined);
+      const parsed = nativeControl(value);
+      if (!parsed) throw new Error("room_work_assignee_stop_response_invalid");
+      return parsed;
+    },
+    reassign: async (input) => {
+      const value = await call("room.work.assignee.reassign", input.roomId, { work_id: input.workId, assignee_id: input.assigneeId, agent_id: input.agentId, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }), ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }) }, input.operationId, candidate.reassignWorkspaceRoomWorkAssignee ? () => candidate.reassignWorkspaceRoomWorkAssignee!(input) : undefined);
+      const parsed = nativeAssignee(roomWorkPayload(value));
+      if (!parsed) throw new Error("room_work_reassign_response_invalid");
+      return parsed;
+    },
+    delegate: async (input) => {
+      const value = await call("room.work.assignee.delegate", input.roomId, {
+        work_id: input.workId,
+        assignee_id: input.assigneeId,
+        agent_id: input.agentId,
+        instruction: input.instruction,
+        ...(input.dependencyAssigneeIds?.length ? { dependency_assignee_ids: input.dependencyAssigneeIds } : {}),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
+        ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
+      }, input.operationId, candidate.delegateWorkspaceRoomWorkAssignee ? () => candidate.delegateWorkspaceRoomWorkAssignee!(input) : undefined);
+      const parsed = nativeAssignee(roomWorkPayload(value));
+      if (!parsed) throw new Error("room_work_delegate_response_invalid");
+      // `parent_assignee_id` is optional in the public assignment projection.
+      // When it is present, it must identify the requested parent; when it is
+      // omitted, the child identity, Work, and Agent still provide the public
+      // scope that can be checked by the renderer.
+      if (parsed.id === input.assigneeId
+        || parsed.workId !== input.workId
+        || parsed.agentId !== input.agentId
+        || parsed.parentAssigneeId !== undefined && parsed.parentAssigneeId !== input.assigneeId) {
+        throw new Error("room_work_delegate_response_scope_invalid");
+      }
+      return parsed;
+    },
+    openDm: async (agentId, operationId, target) => {
+      if (!candidate.openWorkspaceAgentDm && !generic) throw new Error("agent_dm_api_unavailable");
+      const value = candidate.openWorkspaceAgentDm
+        ? await candidate.openWorkspaceAgentDm({ agentId, operationId, ...(target ? { target } : {}) })
+        : await generic!("agent.dm.open", "", { agent_id: agentId, ...(target ? { target } : {}) }, operationId);
+      const dm = nativeAgentDmFromUnknown(value);
+      if (dm.agentId !== agentId || dm.kind !== "agent_dm") throw new Error("agent_dm_response_scope_invalid");
+      if (target && dm.workspaceId !== target.workspaceId) throw new Error("agent_dm_workspace_scope_invalid");
+      return dm;
+    }
   };
 }
 
@@ -707,6 +1523,7 @@ function evidenceFromResult(result: { activity: ActivityInboxItem[]; backendRun:
 
 export function useNativeApp() {
   const bridge = useMemo(() => getWorkspaceClientBridge(), []);
+  const roomWorkClient = useMemo(() => createNativeRoomWorkClient(bridge), [bridge]);
   const organizationApi = useMemo(() => createOrganizationApi(), []);
   const browserMode = typeof window !== "undefined" && !window.samuraiDesktop;
 
@@ -730,6 +1547,25 @@ export function useNativeApp() {
   const [roomLoading, setRoomLoading] = useState(false);
   const [roomError, setRoomError] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
+  const [agents, setAgents] = useState<NativeAgent[]>([]);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentBackends, setAgentBackends] = useState<NativeAgentBackend[]>([]);
+  const [agentBackendLoading, setAgentBackendLoading] = useState(false);
+  const [agentBackendError, setAgentBackendError] = useState<string | null>(null);
+  const [roomAgentMembers, setRoomAgentMembers] = useState<NativeRoomAgentMember[]>([]);
+  const [roomAgentMembersLoading, setRoomAgentMembersLoading] = useState(false);
+  const [roomAgentMembersError, setRoomAgentMembersError] = useState<string | null>(null);
+  const [works, setWorks] = useState<NativeRoomWork[]>([]);
+  const [workLoading, setWorkLoading] = useState(false);
+  const [workError, setWorkError] = useState<string | null>(null);
+  const [selectedWorkId, setSelectedWorkId] = useState<string>();
+  const [selectedWorkDetail, setSelectedWorkDetail] = useState<NativeRoomWork>();
+  const [workDetailLoading, setWorkDetailLoading] = useState(false);
+  const [workDetailError, setWorkDetailError] = useState<string | null>(null);
+  const [replyWorkId, setReplyWorkId] = useState<string>();
+  const [workDraft, setWorkDraftState] = useState("");
+  const [workCommentDraft, setWorkCommentDraftState] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [messages, setMessages] = useState<NativeChatMessage[]>([]);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -747,8 +1583,14 @@ export function useNativeApp() {
   const [workspaceTransferStatus, setWorkspaceTransferStatus] = useState<NativeWorkspaceTransferStatus>();
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [workspaceRefreshNonce, setWorkspaceRefreshNonce] = useState(0);
+  const workDrafts = useRef(new Map<string, string>());
+  const workCommentDrafts = useRef(new Map<string, string>());
+  const draftContextRef = useRef<{ workKey: string; commentKey: string; roomOpenId: number }>({ workKey: "", commentKey: "", roomOpenId: 0 });
   const initializedConnection = useRef(false);
   const activationSequence = useRef(0);
+  const roomOpenSequence = useRef(0);
+  const workDetailSequence = useRef(0);
+  const roomWorkListSequence = useRef(0);
   const workspaceDirectoryGeneration = useRef(0);
   const connectionOperationGeneration = useRef(0);
   const connectionStateRef = useRef(connectionState);
@@ -756,6 +1598,10 @@ export function useNativeApp() {
   const activeRunIdRef = useRef<string | undefined>(undefined);
   const chatStreamGeneration = useRef(0);
   const chatStreamPolling = useRef<{ stop: () => void } | undefined>(undefined);
+  const refreshWorkspaceContentRef = useRef<(() => Promise<void>) | undefined>(undefined);
+  const workspaceContentRefreshCoordinatorRef = useRef<NativeWorkspaceContentRefreshCoordinator | undefined>(undefined);
+  const agentMutationOperationIds = useRef(new Map<string, string>());
+  const roomAgentOperationIds = useRef(new Map<string, string>());
   connectionStateRef.current = connectionState;
   connectionRef.current = connection;
 
@@ -767,7 +1613,16 @@ export function useNativeApp() {
       : workspace.id === selectedWorkspaceId;
   });
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId);
+  const selectedWorkSummary = works.find((work) => work.id === selectedWorkId);
+  const hasCurrentWorkDetail = selectedWorkDetail !== undefined
+    && selectedWorkDetail.id === selectedWorkSummary?.id
+    && selectedWorkDetail.version >= (selectedWorkSummary?.version ?? selectedWorkDetail.version);
+  const selectedWork = hasCurrentWorkDetail
+    ? selectedWorkDetail
+    : selectedWorkSummary;
   const selectedWorkspaceTarget = selectedWorkspace ? targetForWorkspace(selectedWorkspace, connectionRef.current) : undefined;
+  const selectedWorkspaceTargetRef = useRef<NativeWorkspaceTarget | undefined>(selectedWorkspaceTarget);
+  selectedWorkspaceTargetRef.current = selectedWorkspaceTarget;
   const chatContextTargetKey = selectedWorkspaceTargetKey
     ?? (selectedWorkspaceTarget ? nativeWorkspaceTargetKey(selectedWorkspaceTarget) : undefined);
   const chatContextRef = useRef<{ workspaceTargetKey?: string; roomId?: string }>({});
@@ -775,6 +1630,40 @@ export function useNativeApp() {
     workspaceTargetKey: chatContextTargetKey,
     roomId: selectedRoomId
   };
+  const workContextKey = `${chatContextTargetKey ?? "unknown"}\n${selectedRoomId ?? "none"}`;
+  const workDraftContextKey = `${workContextKey}\n${replyWorkId ?? "new"}`;
+  const workCommentDraftContextKey = `${workContextKey}\ncomment\n${selectedWorkId ?? "none"}`;
+  const draftContextRoomOpenId = roomOpenSequence.current;
+  draftContextRef.current = { workKey: workDraftContextKey, commentKey: workCommentDraftContextKey, roomOpenId: draftContextRoomOpenId };
+
+  useEffect(() => {
+    setWorkDraftState(workDrafts.current.get(workDraftContextKey) ?? "");
+    setWorkCommentDraftState(workCommentDrafts.current.get(workCommentDraftContextKey) ?? "");
+  }, [workCommentDraftContextKey, workDraftContextKey]);
+
+  const setWorkDraft = useCallback((value: string): void => {
+    const draftKey = workDraftContextKey;
+    workDrafts.current.set(draftKey, value);
+    if (nativeDraftRequestIsCurrent({ key: draftKey, roomOpenId: draftContextRoomOpenId }, { key: draftContextRef.current.workKey, roomOpenId: draftContextRef.current.roomOpenId })) setWorkDraftState(value);
+  }, [draftContextRoomOpenId, workDraftContextKey]);
+
+  const setWorkCommentDraft = useCallback((value: string): void => {
+    const draftKey = workCommentDraftContextKey;
+    workCommentDrafts.current.set(draftKey, value);
+    if (nativeDraftRequestIsCurrent({ key: draftKey, roomOpenId: draftContextRoomOpenId }, { key: draftContextRef.current.commentKey, roomOpenId: draftContextRef.current.roomOpenId })) setWorkCommentDraftState(value);
+  }, [draftContextRoomOpenId, workCommentDraftContextKey, workDraftContextKey]);
+
+  const clearWorkDraft = useCallback((): void => {
+    if (!nativeDraftRequestIsCurrent({ key: workDraftContextKey, roomOpenId: draftContextRoomOpenId }, { key: draftContextRef.current.workKey, roomOpenId: draftContextRef.current.roomOpenId })) return;
+    workDrafts.current.delete(workDraftContextKey);
+    setWorkDraftState("");
+  }, [draftContextRoomOpenId, workDraftContextKey]);
+
+  const clearWorkCommentDraft = useCallback((): void => {
+    if (!nativeDraftRequestIsCurrent({ key: workCommentDraftContextKey, roomOpenId: draftContextRoomOpenId }, { key: draftContextRef.current.commentKey, roomOpenId: draftContextRef.current.roomOpenId })) return;
+    workCommentDrafts.current.delete(workCommentDraftContextKey);
+    setWorkCommentDraftState("");
+  }, [draftContextRoomOpenId, workCommentDraftContextKey, workDraftContextKey]);
 
   const stopChatStreamPolling = useCallback((): void => {
     const polling = chatStreamPolling.current;
@@ -819,6 +1708,8 @@ export function useNativeApp() {
     // A manually chosen Server must not be overwritten by a late Room or
     // Workspace activation from the previously selected Server.
     activationSequence.current += 1;
+    roomOpenSequence.current += 1;
+    workDetailSequence.current += 1;
     invalidateChatStream();
     invalidateWorkspaceDirectory();
     setSending(false);
@@ -831,7 +1722,16 @@ export function useNativeApp() {
     setRooms([]);
     setSelectedRoomId(undefined);
     setActiveWorkspaceRoomId(undefined);
+    setAgents([]);
+    setAgentError(null);
     setRoomError(null);
+    setWorks([]);
+    setWorkError(null);
+    setSelectedWorkId(undefined);
+    setSelectedWorkDetail(undefined);
+    setWorkDetailLoading(false);
+    setWorkDetailError(null);
+    setReplyWorkId(undefined);
     setMessages([]);
     setSessionId(undefined);
     setChatError(null);
@@ -1112,11 +2012,90 @@ export function useNativeApp() {
     };
   }, [connection, organizationApi, selectedOrganizationId, refreshNonce]);
 
+  const loadWorkspaceAgents = useCallback(async (expectedActivationId?: number, expectedTarget?: NativeWorkspaceTarget): Promise<void> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    if (!roomWorkBridge?.listWorkspaceAgents) {
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      setAgents([]);
+      setAgentError(null);
+      return;
+    }
+    setAgentLoading(true);
+    setAgentError(null);
+    try {
+      const listed = nativeAgentsFromUnknown(await roomWorkBridge.listWorkspaceAgents({ target: expectedTarget ?? selectedWorkspaceTargetRef.current }));
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      setAgents(listed);
+    } catch (error) {
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      setAgents([]);
+      setAgentError(userFacingError(error, "Agent一覧を確認できませんでした。"));
+    } finally {
+      if (expectedActivationId === undefined || expectedActivationId === activationSequence.current) setAgentLoading(false);
+    }
+  }, [bridge]);
+
+  const loadWorkspaceAgentBackends = useCallback(async (expectedActivationId?: number, expectedTarget?: NativeWorkspaceTarget): Promise<void> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const isCurrentTarget = (): boolean => {
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return false;
+      if (!expectedTarget) return true;
+      const currentTarget = selectedWorkspaceTargetRef.current;
+      return Boolean(currentTarget && nativeWorkspaceTargetKey(currentTarget) === nativeWorkspaceTargetKey(expectedTarget));
+    };
+    if (!roomWorkBridge?.listWorkspaceAgentBackends) {
+      if (!isCurrentTarget()) return;
+      setAgentBackends([]);
+      setAgentBackendError(null);
+      return;
+    }
+    setAgentBackendLoading(true);
+    setAgentBackendError(null);
+    try {
+      const listed = nativeAgentBackendsFromUnknown(await roomWorkBridge.listWorkspaceAgentBackends({
+        ...(expectedTarget ? { target: expectedTarget } : {})
+      }));
+      if (!isCurrentTarget()) return;
+      setAgentBackends(listed);
+    } catch (error) {
+      if (!isCurrentTarget()) return;
+      setAgentBackends([]);
+      setAgentBackendError(userFacingError(error, "利用できるBackendを確認できませんでした。"));
+    } finally {
+      if (isCurrentTarget()) setAgentBackendLoading(false);
+    }
+  }, [bridge]);
+
+  const loadRoomAgentMembers = useCallback(async (roomId: string, expectedActivationId?: number, expectedTarget?: NativeWorkspaceTarget): Promise<void> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    if (!roomWorkBridge?.listWorkspaceRoomAgentMembers) {
+      if (expectedActivationId === undefined || expectedActivationId === activationSequence.current) setRoomAgentMembers([]);
+      return;
+    }
+    setRoomAgentMembersLoading(true);
+    setRoomAgentMembersError(null);
+    try {
+      const listed = nativeRoomAgentMembersFromUnknown(await roomWorkBridge.listWorkspaceRoomAgentMembers({ roomId, target: expectedTarget ?? selectedWorkspaceTargetRef.current }), roomId);
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      if (chatContextRef.current.roomId !== roomId) return;
+      setRoomAgentMembers(listed);
+    } catch (error) {
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      if (chatContextRef.current.roomId !== roomId) return;
+      setRoomAgentMembers([]);
+      setRoomAgentMembersError(userFacingError(error, "RoomのAgent設定を確認できませんでした。"));
+    } finally {
+      if (expectedActivationId === undefined || expectedActivationId === activationSequence.current) setRoomAgentMembersLoading(false);
+    }
+  }, [bridge]);
+
   const activateWorkspace = useCallback(async (workspace: NativeWorkspace): Promise<void> => {
     const activeConnection = connectionRef.current;
     const target = targetForWorkspace(workspace, activeConnection);
     if (!bridge || !target || workspace.access !== "granted") return;
     const activationId = ++activationSequence.current;
+    roomOpenSequence.current += 1;
+    workDetailSequence.current += 1;
     invalidateChatStream();
     setSending(false);
     setRoomLoading(true);
@@ -1127,6 +2106,19 @@ export function useNativeApp() {
     setRooms([]);
     setSelectedRoomId(undefined);
     setActiveWorkspaceRoomId(undefined);
+    setAgents([]);
+    setAgentError(null);
+    setAgentBackends([]);
+    setAgentBackendError(null);
+    setRoomAgentMembers([]);
+    setRoomAgentMembersError(null);
+    setWorks([]);
+    setWorkError(null);
+    setSelectedWorkId(undefined);
+    setSelectedWorkDetail(undefined);
+    setWorkDetailLoading(false);
+    setWorkDetailError(null);
+    setReplyWorkId(undefined);
     setMessages([]);
     setSessionId(undefined);
     setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
@@ -1158,7 +2150,10 @@ export function useNativeApp() {
       const candidate = readNativeSelectionCandidate(authorizedConnection, target);
       const selected = listed.find((room) => room.id === candidate?.roomId) ?? listed[0];
       setRooms(listed);
+      void loadWorkspaceAgents(activationId, target);
+      void loadWorkspaceAgentBackends(activationId, target);
       setSelectedRoomId(selected?.id);
+      if (selected) void loadRoomAgentMembers(selected.id, activationId, target);
       writeNativeSelectionCandidate({
         connectionId: target.connectionId,
         ...(workspace.organizationId ? { organizationId: workspace.organizationId } : {}),
@@ -1190,7 +2185,59 @@ export function useNativeApp() {
     } finally {
       if (activationId === activationSequence.current) setRoomLoading(false);
     }
-  }, [bridge, invalidateChatStream, invalidateWorkspaceDirectory]);
+  }, [bridge, invalidateChatStream, invalidateWorkspaceDirectory, loadRoomAgentMembers, loadWorkspaceAgentBackends, loadWorkspaceAgents]);
+
+  const loadRoomWorks = useCallback(async (roomId: string, activationId?: number, preserveExistingOnError = false): Promise<NativeRoomWork[]> => {
+    if (!roomWorkClient) return [];
+    const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const request: NativeRoomWorkListRequestStamp = {
+      sequence: ++roomWorkListSequence.current,
+      roomOpenId: roomOpenSequence.current,
+      roomId,
+      workspaceTargetKey: requestTargetKey
+    };
+    setWorkLoading(true);
+    setWorkError(null);
+    try {
+      const listed = await roomWorkClient.list(roomId);
+      const isCurrent = (): boolean => (activationId === undefined || activationId === activationSequence.current)
+        && nativeRoomWorkListRequestIsCurrent(request, {
+          sequence: roomWorkListSequence.current,
+          roomOpenId: roomOpenSequence.current,
+          roomId: chatContextRef.current.roomId ?? "",
+          workspaceTargetKey: chatContextRef.current.workspaceTargetKey
+        });
+      if (!isCurrent()) return [];
+      setWorks(listed);
+      setSelectedWorkDetail((current) => current && listed.some((work) => work.id === current.id && work.version === current.version) ? current : undefined);
+      setSelectedWorkId((current) => listed.some((work) => work.id === current) ? current : listed[0]?.id);
+      return listed;
+    } catch (error) {
+      if ((activationId === undefined || activationId === activationSequence.current)
+        && nativeRoomWorkListRequestIsCurrent(request, {
+          sequence: roomWorkListSequence.current,
+          roomOpenId: roomOpenSequence.current,
+          roomId: chatContextRef.current.roomId ?? "",
+          workspaceTargetKey: chatContextRef.current.workspaceTargetKey
+        })) {
+        if (!preserveExistingOnError) {
+          setWorks([]);
+          setSelectedWorkDetail(undefined);
+          setSelectedWorkId(undefined);
+        }
+        setWorkError(userFacingError(error, "このRoomの仕事を読み込めませんでした。"));
+      }
+      throw error;
+    } finally {
+      if ((activationId === undefined || activationId === activationSequence.current)
+        && nativeRoomWorkListRequestIsCurrent(request, {
+          sequence: roomWorkListSequence.current,
+          roomOpenId: roomOpenSequence.current,
+          roomId: chatContextRef.current.roomId ?? "",
+          workspaceTargetKey: chatContextRef.current.workspaceTargetKey
+        })) setWorkLoading(false);
+    }
+  }, [roomWorkClient]);
 
   const preflightWorkspaceTransfer = useCallback(async (workspace: NativeWorkspace, destination: NativeWorkspace): Promise<NativeWorkspaceTransferPreflight> => {
     if (!bridge?.preflightWorkspaceTransfer) throw new Error("workspace_transfer_unavailable");
@@ -1297,8 +2344,10 @@ export function useNativeApp() {
     if (!bridge || !selectedWorkspace || selectedWorkspace.access !== "granted") return;
     invalidateChatStream();
     setSending(false);
+    const roomOpenId = ++roomOpenSequence.current;
     const target = targetForWorkspace(selectedWorkspace, connectionRef.current);
     const targetConnection = target ? connectionForTarget(connectionStateRef.current, target) ?? connectionRef.current : connectionRef.current;
+    void loadRoomAgentMembers(room.id, undefined, target);
     setSelectedRoomId(room.id);
     setActiveWorkspaceRoomId(room.id);
     if (target && targetConnection) writeNativeSelectionCandidate({
@@ -1310,40 +2359,104 @@ export function useNativeApp() {
     setChatLoading(true);
     setChatError(null);
     setMessages([]);
+    setWorks([]);
+    setWorkError(null);
+    setSelectedWorkId(undefined);
+    setSelectedWorkDetail(undefined);
+    setWorkDetailLoading(false);
+    setWorkDetailError(null);
+    workDetailSequence.current += 1;
+    setReplyWorkId(undefined);
     setSessionId(undefined);
     setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
     try {
+      if (roomWorkClient) {
+        const listed = await roomWorkClient.list(room.id);
+        if (roomOpenId !== roomOpenSequence.current) return;
+        setWorks(listed);
+        setSelectedWorkId(listed[0]?.id);
+        setTransportState("connected");
+        return;
+      }
+      // Compatibility only: old bridges still expose the Session-backed
+      // history. The Session never reaches the new Room work surface or any
+      // normal work operation.
       const sessions = bridge.listWorkspaceChatSessions ? await bridge.listWorkspaceChatSessions() : [];
       const roomSession = sessions
         .filter((session) => session.room_id === room.id)
         .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0];
       const session = roomSession ?? (bridge.createWorkspaceChatSession ? await bridge.createWorkspaceChatSession({ roomId: room.id, operationId: createIdempotencyKey() }) : undefined);
       if (!session) throw new Error("chat_session_unavailable");
+      if (roomOpenId !== roomOpenSequence.current) return;
       setSessionId(session.id);
       const detail = bridge.getWorkspaceChatSession ? await bridge.getWorkspaceChatSession({ sessionId: session.id }) : await api.getSession(session.id);
+      if (roomOpenId !== roomOpenSequence.current) return;
       const nextEvidence = evidenceFromDetail(detail);
       setEvidence(nextEvidence);
       setMessages(withEvidence(detail.messages.map(nativeMessage), nextEvidence));
       setTransportState("connected");
     } catch (error) {
+      if (roomOpenId !== roomOpenSequence.current) return;
+      if (roomWorkClient) setWorkError(userFacingError(error, "このRoomの仕事を読み込めませんでした。"));
       setChatError(userFacingError(error, "会話を読み込めませんでした。"));
       setTransportState(isPermissionError(error) ? "offline" : "reconnecting");
     } finally {
-      setChatLoading(false);
+      if (roomOpenId === roomOpenSequence.current) setChatLoading(false);
     }
-  }, [bridge, invalidateChatStream, selectedWorkspace]);
+  }, [bridge, invalidateChatStream, loadRoomAgentMembers, roomWorkClient, selectedWorkspace]);
 
   useEffect(() => {
     const room = rooms.find((candidate) => candidate.id === selectedRoomId);
     if (room) void openRoom(room);
     else {
+      roomOpenSequence.current += 1;
+      workDetailSequence.current += 1;
       invalidateChatStream();
       setSending(false);
       setMessages([]);
+      setWorks([]);
+      setWorkError(null);
+      setSelectedWorkId(undefined);
+      setSelectedWorkDetail(undefined);
+      setWorkDetailLoading(false);
+      setWorkDetailError(null);
+      workDetailSequence.current += 1;
+      setReplyWorkId(undefined);
       setSessionId(undefined);
       setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
     }
   }, [invalidateChatStream, openRoom, rooms, selectedRoomId]);
+
+  useEffect(() => {
+    const roomId = selectedRoom?.id;
+    const workId = selectedWorkSummary?.id;
+    const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const requestId = ++workDetailSequence.current;
+    if (!roomWorkClient || !roomId || !workId) {
+      setSelectedWorkDetail(undefined);
+      setWorkDetailLoading(false);
+      setWorkDetailError(null);
+      return;
+    }
+    setWorkDetailLoading(true);
+    setWorkDetailError(null);
+    void roomWorkClient.view(roomId, workId).then((detail) => {
+      if (requestId !== workDetailSequence.current
+        || chatContextRef.current.roomId !== roomId
+        || chatContextRef.current.workspaceTargetKey !== requestTargetKey) return;
+      setSelectedWorkDetail(detail);
+    }).catch((error) => {
+      if (requestId !== workDetailSequence.current
+        || chatContextRef.current.roomId !== roomId
+        || chatContextRef.current.workspaceTargetKey !== requestTargetKey) return;
+      setSelectedWorkDetail(undefined);
+      setWorkDetailError(userFacingError(error, "この仕事の詳細を読み込めませんでした。"));
+    }).finally(() => {
+      if (requestId === workDetailSequence.current
+        && chatContextRef.current.roomId === roomId
+        && chatContextRef.current.workspaceTargetKey === requestTargetKey) setWorkDetailLoading(false);
+    });
+  }, [roomWorkClient, selectedRoom?.id, selectedWorkSummary?.id, selectedWorkSummary?.version]);
 
   useEffect(() => () => {
     chatStreamGeneration.current += 1;
@@ -1358,6 +2471,538 @@ export function useNativeApp() {
     setSessionId(created.id);
     return created.id;
   }, [selectedRoom, sessionId]);
+
+  const refreshRoomWorkList = useCallback(async (roomId = selectedRoom?.id): Promise<NativeRoomWork[]> => {
+    if (!roomId || !roomWorkClient) return [];
+    return loadRoomWorks(roomId, undefined, true);
+  }, [loadRoomWorks, roomWorkClient, selectedRoom?.id]);
+
+  const refreshWorkspaceContent = useCallback(async (): Promise<void> => {
+    const activeWorkspace = selectedWorkspace;
+    const target = activeWorkspace ? targetForWorkspace(activeWorkspace, connectionRef.current) : undefined;
+    if (!bridge || !activeWorkspace || activeWorkspace.access !== "granted" || !target) return;
+    const targetKey = nativeWorkspaceTargetKey(target);
+    const roomId = selectedRoomId;
+    const requestRoomOpenId = roomOpenSequence.current;
+    let requestWorkListSequence: number | undefined;
+    const isCurrentRefresh = (): boolean => nativeWorkspaceContentRefreshRequestIsCurrent(
+      {
+        roomOpenId: requestRoomOpenId,
+        roomId,
+        workspaceTargetKey: targetKey,
+        workListSequence: requestWorkListSequence
+      },
+      {
+        roomOpenId: roomOpenSequence.current,
+        roomId: chatContextRef.current.roomId,
+        workspaceTargetKey: chatContextRef.current.workspaceTargetKey,
+        workListSequence: roomWorkListSequence.current
+      }
+    );
+    try {
+      const listed = bridge.listWorkspaceRooms
+        ? (await bridge.listWorkspaceRooms()).rooms.map(nativeRoom)
+        : undefined;
+      if (chatContextRef.current.workspaceTargetKey !== targetKey) return;
+      if (listed) {
+        const roomStillAvailable = !roomId || listed.some((room) => room.id === roomId);
+        setRooms((current) => sameNativeRoomList(current, listed) ? current : listed);
+        if (!roomStillAvailable) {
+          roomOpenSequence.current += 1;
+          workDetailSequence.current += 1;
+          invalidateChatStream();
+          setSelectedRoomId(undefined);
+          setActiveWorkspaceRoomId(undefined);
+          setWorks([]);
+          setSelectedWorkId(undefined);
+          setSelectedWorkDetail(undefined);
+          setMessages([]);
+          setSessionId(undefined);
+          setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
+          return;
+        }
+      }
+      if (roomId) {
+        requestWorkListSequence = roomWorkClient ? roomWorkListSequence.current + 1 : undefined;
+        await refreshRoomWorkList(roomId);
+      }
+    } catch (error) {
+      if (!isCurrentRefresh()) return;
+      setWorkError(userFacingError(error, "このRoomの更新を確認できませんでした。"));
+      setTransportState(isPermissionError(error) ? "offline" : "reconnecting");
+    }
+  }, [bridge, invalidateChatStream, refreshRoomWorkList, selectedRoomId, selectedWorkspace]);
+
+  refreshWorkspaceContentRef.current = refreshWorkspaceContent;
+  if (!workspaceContentRefreshCoordinatorRef.current) {
+    workspaceContentRefreshCoordinatorRef.current = createNativeWorkspaceContentRefreshCoordinator(
+      () => refreshWorkspaceContentRef.current?.() ?? Promise.resolve()
+    );
+  }
+  const requestWorkspaceContentRefresh = useCallback((): void => {
+    workspaceContentRefreshCoordinatorRef.current?.request();
+  }, []);
+
+  const sendRoomWork = useCallback(async (content: string, targetWorkId?: string, targetAssigneeId?: string, operationId?: string, attachments?: ResourceRef[]): Promise<NativeRoomWorkMutationResult> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") {
+      throw new Error("room_work_api_unavailable");
+    }
+    if (!nativeRoomCapability(selectedRoom, "canExecute")) throw new Error("room_work_execute_forbidden");
+    const instruction = content.trim();
+    const attachmentRefs = attachments?.length ? attachments : [];
+    if (!instruction && attachmentRefs.length === 0) throw new Error("room_work_instruction_required");
+    if (!targetWorkId && targetAssigneeId) throw new Error("room_work_assignee_invalid");
+    const requestRoomId = selectedRoom.id;
+    const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const requestOpenId = roomOpenSequence.current;
+    const requestOperationId = operationId || createIdempotencyKey();
+    setSending(true);
+    setWorkError(null);
+    setChatError(null);
+    try {
+      try {
+        if (targetWorkId) {
+          const work = selectedWork?.id === targetWorkId ? selectedWork : works.find((candidate) => candidate.id === targetWorkId);
+          if (!work || !nativeRoomWorkControlAllowed(selectedRoom, work, connectionRef.current?.accountId)) throw new Error("room_work_control_forbidden");
+          const activeAssignees = work.assignees.filter((assignee) => !nativeRoomWorkAssigneeIsTerminal(assignee));
+          if (activeAssignees.length > 1 && !targetAssigneeId) throw new Error("room_work_assignee_required");
+          if (targetAssigneeId && !activeAssignees.some((assignee) => assignee.id === targetAssigneeId)) throw new Error("room_work_assignee_invalid");
+          await roomWorkClient.reply({
+            roomId: requestRoomId,
+            workId: targetWorkId,
+            ...(targetAssigneeId ? { assigneeId: targetAssigneeId } : {}),
+            ...(instruction ? { instruction } : {}),
+            ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+            ...(work?.version === undefined ? {} : { expectedVersion: work.version }),
+            ...(work?.generation === undefined ? {} : { expectedGeneration: work.generation }),
+            operationId: requestOperationId
+          });
+        } else {
+          if (!nativeDefaultAgentIsReady(selectedRoom, agents, agentBackends, roomAgentMembers)) throw new Error("room_default_agent_unavailable");
+          await roomWorkClient.create({
+            roomId: requestRoomId,
+            ...(instruction ? { instruction } : {}),
+            ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+            ...(selectedRoom.defaultAgentId ? { agentId: selectedRoom.defaultAgentId } : {}),
+            operationId: requestOperationId
+          });
+        }
+      } catch (error) {
+        if (requestOpenId === roomOpenSequence.current
+          && chatContextRef.current.roomId === requestRoomId
+          && chatContextRef.current.workspaceTargetKey === requestTargetKey) {
+          setWorkError(userFacingError(error, "仕事を送信できませんでした。送信済みかを確認してから再試行してください。"));
+          setChatError(userFacingError(error, "仕事を送信できませんでした。送信済みかを確認してから再試行してください。"));
+        }
+        throw error;
+      }
+      if (requestOpenId !== roomOpenSequence.current
+        || chatContextRef.current.roomId !== requestRoomId
+        || chatContextRef.current.workspaceTargetKey !== requestTargetKey) {
+        return { operationId: requestOperationId, refreshed: false };
+      }
+      // The work record returned by create/reply is authoritative only after
+      // it can be read back from the Room projection. Do not render a local
+      // success state while the list is stale or unavailable.
+      try {
+        await refreshRoomWorkList(requestRoomId);
+        return {
+          operationId: requestOperationId,
+          refreshed: requestOpenId === roomOpenSequence.current
+            && chatContextRef.current.roomId === requestRoomId
+            && chatContextRef.current.workspaceTargetKey === requestTargetKey
+        };
+      } catch (error) {
+        if (requestOpenId === roomOpenSequence.current
+          && chatContextRef.current.roomId === requestRoomId
+          && chatContextRef.current.workspaceTargetKey === requestTargetKey) {
+          setChatError(userFacingError(error, "仕事は受付済みかもしれませんが、一覧を再取得できませんでした。同じ操作で再試行してください。"));
+        }
+        return { operationId: requestOperationId, refreshed: false };
+      }
+    } finally {
+      if (requestOpenId === roomOpenSequence.current
+        && chatContextRef.current.roomId === requestRoomId
+        && chatContextRef.current.workspaceTargetKey === requestTargetKey) setSending(false);
+    }
+  }, [agentBackends, agents, refreshRoomWorkList, roomAgentMembers, roomWorkClient, selectedRoom, selectedWork, selectedWorkspace, works]);
+
+  const createRoomWorkComment = useCallback(async (workId: string, body?: string, attachments?: ResourceRef[]): Promise<void> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomCapability(selectedRoom, "canEdit")) throw new Error("room_work_edit_forbidden");
+    const work = works.find((candidate) => candidate.id === workId);
+    const normalizedBody = body?.trim() ?? "";
+    const attachmentRefs = attachments?.length ? attachments : [];
+    if (!normalizedBody && attachmentRefs.length === 0) throw new Error("room_work_comment_required");
+    await roomWorkClient.comment({
+      roomId: selectedRoom.id,
+      workId,
+      ...(normalizedBody ? { body: normalizedBody } : {}),
+      ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+      ...(work?.version === undefined ? {} : { expectedVersion: work.version }),
+      operationId: createIdempotencyKey()
+    });
+    await refreshRoomWorkList(selectedRoom.id);
+  }, [refreshRoomWorkList, roomWorkClient, selectedRoom, selectedWorkspace, works]);
+
+  const applyRoomWorkComment = useCallback(async (workId: string, comment: NativeRoomWorkComment, assigneeId?: string, operationId?: string): Promise<NativeRoomWorkMutationResult> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    const work = selectedWork?.id === workId ? selectedWork : works.find((candidate) => candidate.id === workId);
+    if (!work || comment.workId !== workId || !nativeRoomWorkControlAllowed(selectedRoom, work, connectionRef.current?.accountId)) throw new Error("room_work_control_forbidden");
+    const activeAssignees = work.assignees.filter((assignee) => !nativeRoomWorkAssigneeIsTerminal(assignee));
+    if (activeAssignees.length === 0) throw new Error("room_work_assignee_unavailable");
+    if (activeAssignees.length > 1 && !assigneeId) throw new Error("room_work_assignee_required");
+    if (assigneeId && !activeAssignees.some((assignee) => assignee.id === assigneeId)) throw new Error("room_work_assignee_invalid");
+    const requestRoomId = selectedRoom.id;
+    const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const requestOpenId = roomOpenSequence.current;
+    const requestOperationId = operationId || createIdempotencyKey();
+    await roomWorkClient.applyComment({
+      roomId: requestRoomId,
+      workId,
+      commentId: comment.id,
+      commentVersion: comment.version,
+      ...(work?.version === undefined ? {} : { expectedVersion: work.version }),
+      ...(work?.generation === undefined ? {} : { expectedGeneration: work.generation }),
+      ...(assigneeId ? { assigneeId } : {}),
+      operationId: requestOperationId
+    });
+    if (requestOpenId !== roomOpenSequence.current
+      || chatContextRef.current.roomId !== requestRoomId
+      || chatContextRef.current.workspaceTargetKey !== requestTargetKey) {
+      return { operationId: requestOperationId, refreshed: false };
+    }
+    try {
+      await refreshRoomWorkList(requestRoomId);
+      return {
+        operationId: requestOperationId,
+        refreshed: requestOpenId === roomOpenSequence.current
+          && chatContextRef.current.roomId === requestRoomId
+          && chatContextRef.current.workspaceTargetKey === requestTargetKey
+      };
+    } catch (error) {
+      if (requestOpenId === roomOpenSequence.current
+        && chatContextRef.current.roomId === requestRoomId
+        && chatContextRef.current.workspaceTargetKey === requestTargetKey) {
+        setChatError(userFacingError(error, "コメントは反映済みかもしれませんが、一覧を再取得できませんでした。同じ操作で再試行してください。"));
+      }
+      return { operationId: requestOperationId, refreshed: false };
+    }
+  }, [refreshRoomWorkList, roomWorkClient, selectedRoom, selectedWork, selectedWorkspace, works]);
+
+  const likeRoomWorkComment = useCallback(async (workId: string, commentId: string): Promise<void> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomCapability(selectedRoom, "canEdit")) throw new Error("room_work_edit_forbidden");
+    const work = works.find((candidate) => candidate.id === workId);
+    await roomWorkClient.reactComment({
+      roomId: selectedRoom.id,
+      workId,
+      commentId,
+      ...(work?.version === undefined ? {} : { expectedVersion: work.version }),
+      operationId: createIdempotencyKey()
+    });
+    await refreshRoomWorkList(selectedRoom.id);
+  }, [refreshRoomWorkList, roomWorkClient, selectedRoom, selectedWorkspace, works]);
+
+  const stopRoomWork = useCallback(async (work: NativeRoomWork): Promise<void> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomWorkStopAllowed(selectedRoom, work, connectionRef.current?.accountId)) throw new Error("room_work_stop_forbidden");
+    await roomWorkClient.stop({
+      roomId: selectedRoom.id,
+      workId: work.id,
+      expectedVersion: work.version,
+      expectedGeneration: work.generation,
+      operationId: createIdempotencyKey()
+    });
+    await refreshRoomWorkList(selectedRoom.id);
+  }, [refreshRoomWorkList, roomWorkClient, selectedRoom, selectedWorkspace]);
+
+  const stopRoomWorkAssignee = useCallback(async (work: NativeRoomWork, assignee: NativeRoomWorkAssignee): Promise<void> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomWorkStopAllowed(selectedRoom, work, connectionRef.current?.accountId)) throw new Error("room_work_stop_forbidden");
+    await roomWorkClient.stopAssignee({
+      roomId: selectedRoom.id,
+      workId: work.id,
+      assigneeId: assignee.id,
+      expectedVersion: work.version,
+      expectedGeneration: assignee.generation,
+      operationId: createIdempotencyKey()
+    });
+    await refreshRoomWorkList(selectedRoom.id);
+  }, [refreshRoomWorkList, roomWorkClient, selectedRoom, selectedWorkspace]);
+
+  const reassignRoomWorkAssignee = useCallback(async (work: NativeRoomWork, assignee: NativeRoomWorkAssignee, agentId: string): Promise<void> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomWorkControlAllowed(selectedRoom, work, connectionRef.current?.accountId)) throw new Error("room_work_control_forbidden");
+    await roomWorkClient.reassign({
+      roomId: selectedRoom.id,
+      workId: work.id,
+      assigneeId: assignee.id,
+      agentId,
+      expectedVersion: work.version,
+      expectedGeneration: assignee.generation,
+      operationId: createIdempotencyKey()
+    });
+    await refreshRoomWorkList(selectedRoom.id);
+  }, [refreshRoomWorkList, roomWorkClient, selectedRoom, selectedWorkspace]);
+
+  const delegateRoomWorkAssignee = useCallback(async (
+    work: NativeRoomWork,
+    assignee: NativeRoomWorkAssignee,
+    agentId: string,
+    instruction: string,
+    dependencyAssigneeIds: string[] = [],
+    operationId?: string,
+    attachments: NativeRoomWorkInstruction["attachments"] = []
+  ): Promise<NativeRoomWorkMutationResult> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomWorkControlAllowed(selectedRoom, work, connectionRef.current?.accountId)) throw new Error("room_work_control_forbidden");
+    if (work.roomId !== selectedRoom.id || assignee.workId !== work.id || !work.assignees.some((candidate) => candidate.id === assignee.id)) throw new Error("room_work_delegate_scope_invalid");
+    if (nativeRoomWorkAssigneeIsTerminal(assignee)) throw new Error("room_work_assignee_unavailable");
+    if (!instruction.trim()) throw new Error("room_work_instruction_required");
+    if (work.assignees.some((candidate) => candidate.agentId === agentId)) throw new Error("room_work_assignee_invalid");
+    const targetAgent = agents.find((candidate) => candidate.id === agentId);
+    const targetMember = roomAgentMembers?.find((member) => member.agentId === agentId);
+    if (!nativeRoomAgentIsAvailable(targetAgent, agentBackends)
+      || (roomAgentMembers !== undefined && (!targetMember || targetMember.removed || !targetMember.canExecute))) {
+      throw new Error("room_work_assignee_unavailable");
+    }
+    const activeAssigneeIds = new Set(work.assignees.filter((candidate) => !nativeRoomWorkAssigneeIsTerminal(candidate)).map((candidate) => candidate.id));
+    if (dependencyAssigneeIds.some((dependencyId) => dependencyId === assignee.id || !activeAssigneeIds.has(dependencyId))) throw new Error("room_work_dependency_invalid");
+    const requestRoomId = selectedRoom.id;
+    const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const requestOpenId = roomOpenSequence.current;
+    const requestOperationId = operationId || createIdempotencyKey();
+    await roomWorkClient.delegate({
+      roomId: requestRoomId,
+      workId: work.id,
+      assigneeId: assignee.id,
+      agentId,
+      instruction: instruction.trim(),
+      ...(dependencyAssigneeIds.length ? { dependencyAssigneeIds } : {}),
+      ...(attachments.length ? { attachments } : {}),
+      ...(work.version === undefined ? {} : { expectedVersion: work.version }),
+      ...(assignee.generation === undefined ? {} : { expectedGeneration: assignee.generation }),
+      operationId: requestOperationId
+    });
+    if (requestOpenId !== roomOpenSequence.current
+      || chatContextRef.current.roomId !== requestRoomId
+      || chatContextRef.current.workspaceTargetKey !== requestTargetKey) {
+      return { operationId: requestOperationId, refreshed: false };
+    }
+    try {
+      await refreshRoomWorkList(requestRoomId);
+      return {
+        operationId: requestOperationId,
+        refreshed: requestOpenId === roomOpenSequence.current
+          && chatContextRef.current.roomId === requestRoomId
+          && chatContextRef.current.workspaceTargetKey === requestTargetKey
+      };
+    } catch (error) {
+      if (requestOpenId === roomOpenSequence.current
+        && chatContextRef.current.roomId === requestRoomId
+        && chatContextRef.current.workspaceTargetKey === requestTargetKey) {
+        setChatError(userFacingError(error, "委譲は受付済みかもしれませんが、仕事一覧を再取得できませんでした。同じ操作で再試行してください。"));
+      }
+      return { operationId: requestOperationId, refreshed: false };
+    }
+  }, [agentBackends, agents, refreshRoomWorkList, roomAgentMembers, roomWorkClient, selectedRoom, selectedWorkspace]);
+
+  const setRoomDefaultAgent = useCallback(async (agentId: string): Promise<void> => {
+    if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("room_work_api_unavailable");
+    if (!nativeRoomCapability(selectedRoom, "canManage") || !nativeRoomCapability(selectedRoom, "canExecute")) throw new Error("room_default_agent_forbidden");
+    if (!nativeDefaultAgentIsReady({ ...selectedRoom, defaultAgentId: agentId }, agents, agentBackends, roomAgentMembers)) throw new Error("room_default_agent_unavailable");
+    const target = selectedWorkspaceTargetRef.current;
+    if (!target) throw new Error("workspace_agent_api_unavailable");
+    const key = `default\n${nativeWorkspaceTargetKey(target)}\n${selectedRoom.id}\n${agentId}`;
+    const operationId = roomAgentOperationIds.current.get(key) ?? createIdempotencyKey();
+    roomAgentOperationIds.current.set(key, operationId);
+    try {
+      const result = await roomWorkClient.setDefaultAgent({
+        roomId: selectedRoom.id,
+        agentId,
+        ...(selectedRoom.version === undefined ? {} : { expectedVersion: selectedRoom.version }),
+        operationId,
+        target
+      });
+      if (result.roomId !== selectedRoom.id || result.agentId !== agentId) throw new Error("room_default_agent_response_scope_invalid");
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target) || selectedRoomId !== selectedRoom.id) throw new Error("workspace_navigation_changed");
+      setRooms((current) => current.map((room) => room.id === selectedRoom.id
+        ? {
+          ...room,
+          defaultAgentId: result.agentId,
+          ...(result.agentVersion === undefined ? {} : { defaultAgentVersion: result.agentVersion }),
+          ...(result.version === undefined ? {} : { version: result.version })
+        }
+        : room));
+      roomAgentOperationIds.current.delete(key);
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) roomAgentOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [agentBackends, agents, roomAgentMembers, roomWorkClient, selectedRoom, selectedRoomId, selectedWorkspace]);
+
+  const openAgentDm = useCallback(async (agentId: string): Promise<void> => {
+    if (!roomWorkClient || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") throw new Error("agent_dm_api_unavailable");
+    if (!nativeRoomAgentIsAvailable(agents.find((agent) => agent.id === agentId), agentBackends)) throw new Error("agent_dm_unavailable");
+    const target = selectedWorkspaceTargetRef.current;
+    if (!target) throw new Error("agent_dm_api_unavailable");
+    const key = `dm\n${nativeWorkspaceTargetKey(target)}\n${agentId}`;
+    const operationId = roomAgentOperationIds.current.get(key) ?? createIdempotencyKey();
+    roomAgentOperationIds.current.set(key, operationId);
+    try {
+      const dm = await roomWorkClient.openDm(agentId, operationId, target);
+      if (dm.kind !== "agent_dm" || dm.agentId !== agentId) throw new Error("agent_dm_response_scope_invalid");
+      if (dm.workspaceId !== target.workspaceId || dm.workspaceId !== selectedWorkspace.id) throw new Error("agent_dm_workspace_mismatch");
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target)) throw new Error("workspace_navigation_changed");
+      const dmRoom: NativeRoom = {
+        id: dm.roomId,
+        workspaceId: dm.workspaceId,
+        name: dm.roomName ?? "Agent DM",
+        kind: "agent_dm",
+        canView: true,
+        canEdit: true,
+        canExecute: true,
+        canStop: true,
+        capabilities: { canView: true, canEdit: true, canExecute: true, canStop: true },
+        defaultAgentId: dm.agentId,
+        ...(dm.agentVersion === undefined ? {} : { defaultAgentVersion: dm.agentVersion }),
+        ...(dm.version === undefined ? {} : { version: dm.version })
+      };
+      setRooms((current) => current.some((room) => room.id === dmRoom.id)
+        ? current.map((room) => room.id === dmRoom.id ? { ...room, ...dmRoom } : room)
+        : [...current, dmRoom]);
+      setSelectedRoomId(dmRoom.id);
+      roomAgentOperationIds.current.delete(key);
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) roomAgentOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [agentBackends, agents, roomWorkClient, selectedWorkspace]);
+
+  const viewWorkspaceAgent = useCallback(async (agentId: string): Promise<NativeAgent> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const target = selectedWorkspaceTargetRef.current;
+    if (!roomWorkBridge?.viewWorkspaceAgent || !target) throw new Error("workspace_agent_api_unavailable");
+    const result = await roomWorkBridge.viewWorkspaceAgent({ agentId, target });
+    if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target)) throw new Error("workspace_navigation_changed");
+    const agent = nativeAgentDetailFromUnknown(result);
+    if (agent.id !== agentId) throw new Error("workspace_agent_response_scope_invalid");
+    return agent;
+  }, [bridge]);
+
+  const createWorkspaceAgent = useCallback(async (input: { name: string; role: string; instructions: string; backendId: string; enabled: boolean; operationId?: string }): Promise<NativeAgent> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const target = selectedWorkspaceTargetRef.current;
+    if (!roomWorkBridge?.createWorkspaceAgent || !target) throw new Error("workspace_agent_api_unavailable");
+    const backend = agentBackends.find((candidate) => candidate.id === input.backendId);
+    if (!backend || !backend.configured || !backend.enabled || backend.connectionState !== "ready") throw new Error("room_agent_backend_unavailable");
+    const key = `create\n${nativeWorkspaceTargetKey(target)}`;
+    const operationId = input.operationId ?? agentMutationOperationIds.current.get(key) ?? createIdempotencyKey();
+    agentMutationOperationIds.current.set(key, operationId);
+    try {
+      const result = await roomWorkBridge.createWorkspaceAgent({ ...input, operationId, target });
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target)) throw new Error("workspace_navigation_changed");
+      const agent = nativeAgentDetailFromUnknown(result);
+      setAgents((current) => [...current.filter((candidate) => candidate.id !== agent.id), agent]);
+      agentMutationOperationIds.current.delete(key);
+      return agent;
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) agentMutationOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [agentBackends, bridge]);
+
+  const patchWorkspaceAgent = useCallback(async (input: { agentId: string; name?: string; role?: string; instructions?: string; enabled?: boolean; expectedVersion?: number; operationId?: string }): Promise<NativeAgent> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const target = selectedWorkspaceTargetRef.current;
+    if (!roomWorkBridge?.patchWorkspaceAgent || !target) throw new Error("workspace_agent_api_unavailable");
+    const key = `patch\n${nativeWorkspaceTargetKey(target)}\n${input.agentId}`;
+    const operationId = input.operationId ?? agentMutationOperationIds.current.get(key) ?? createIdempotencyKey();
+    agentMutationOperationIds.current.set(key, operationId);
+    try {
+      const result = await roomWorkBridge.patchWorkspaceAgent({ ...input, operationId, target });
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target)) throw new Error("workspace_navigation_changed");
+      const agent = nativeAgentDetailFromUnknown(result);
+      if (agent.id !== input.agentId) throw new Error("workspace_agent_response_scope_invalid");
+      setAgents((current) => [...current.filter((candidate) => candidate.id !== agent.id), agent]);
+      agentMutationOperationIds.current.delete(key);
+      return agent;
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) agentMutationOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [bridge]);
+
+  const bindWorkspaceAgentBackend = useCallback(async (input: { agentId: string; backendId: string; expectedVersion?: number; operationId?: string }): Promise<NativeAgent> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const target = selectedWorkspaceTargetRef.current;
+    if (!roomWorkBridge?.bindWorkspaceAgentBackend || !target) throw new Error("workspace_agent_api_unavailable");
+    const backend = agentBackends.find((candidate) => candidate.id === input.backendId);
+    if (!backend || !backend.configured || !backend.enabled || backend.connectionState !== "ready") throw new Error("room_agent_backend_unavailable");
+    const key = `backend\n${nativeWorkspaceTargetKey(target)}\n${input.agentId}`;
+    const operationId = input.operationId ?? agentMutationOperationIds.current.get(key) ?? createIdempotencyKey();
+    agentMutationOperationIds.current.set(key, operationId);
+    try {
+      const result = await roomWorkBridge.bindWorkspaceAgentBackend({ ...input, operationId, target });
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target)) throw new Error("workspace_navigation_changed");
+      const agent = nativeAgentDetailFromUnknown(result);
+      if (agent.id !== input.agentId) throw new Error("workspace_agent_response_scope_invalid");
+      setAgents((current) => [...current.filter((candidate) => candidate.id !== agent.id), agent]);
+      agentMutationOperationIds.current.delete(key);
+      return agent;
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) agentMutationOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [agentBackends, bridge]);
+
+  const setRoomAgentPermission = useCallback(async (input: { agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean; operationId?: string }): Promise<NativeRoomAgentMember> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const target = selectedWorkspaceTargetRef.current;
+    const room = selectedRoom;
+    if (!roomWorkBridge?.setWorkspaceRoomAgentPermission || !target || !room) throw new Error("room_agent_api_unavailable");
+    if (!nativeRoomCapability(room, "canManage")) throw new Error("room_agent_permission_forbidden");
+    if ((input.canEdit || input.canExecute) && !input.canView) throw new Error("room_agent_view_required");
+    const key = `permission\n${nativeWorkspaceTargetKey(target)}\n${room.id}\n${input.agentId}`;
+    const operationId = input.operationId ?? agentMutationOperationIds.current.get(key) ?? createIdempotencyKey();
+    agentMutationOperationIds.current.set(key, operationId);
+    try {
+      const result = await roomWorkBridge.setWorkspaceRoomAgentPermission({ ...input, roomId: room.id, operationId, target });
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target) || selectedRoomId !== room.id) throw new Error("workspace_navigation_changed");
+      const member = nativeRoomAgentMembersFromUnknown(result, room.id)[0];
+      if (!member || member.agentId !== input.agentId) throw new Error("workspace_room_agent_response_scope_invalid");
+    setRoomAgentMembers((current) => [...current.filter((candidate) => candidate.agentId !== member.agentId), member]);
+      agentMutationOperationIds.current.delete(key);
+      return member;
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) agentMutationOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [bridge, selectedRoom, selectedRoomId]);
+
+  const removeRoomAgent = useCallback(async (agentId: string): Promise<NativeRoomAgentMember> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const target = selectedWorkspaceTargetRef.current;
+    const room = selectedRoom;
+    if (!roomWorkBridge?.removeWorkspaceRoomAgent || !target || !room) throw new Error("room_agent_api_unavailable");
+    if (!nativeRoomCapability(room, "canManage")) throw new Error("room_agent_permission_forbidden");
+    const key = `remove\n${nativeWorkspaceTargetKey(target)}\n${room.id}\n${agentId}`;
+    const operationId = agentMutationOperationIds.current.get(key) ?? createIdempotencyKey();
+    agentMutationOperationIds.current.set(key, operationId);
+    try {
+      const result = await roomWorkBridge.removeWorkspaceRoomAgent({ roomId: room.id, agentId, operationId, target });
+      if (!selectedWorkspaceTargetRef.current || nativeWorkspaceTargetKey(selectedWorkspaceTargetRef.current) !== nativeWorkspaceTargetKey(target) || selectedRoomId !== room.id) throw new Error("workspace_navigation_changed");
+      const member = nativeRoomAgentMembersFromUnknown(result, room.id)[0];
+      if (!member || member.agentId !== agentId) throw new Error("workspace_room_agent_response_scope_invalid");
+    setRoomAgentMembers((current) => [...current.filter((candidate) => candidate.agentId !== member.agentId), member]);
+      agentMutationOperationIds.current.delete(key);
+      return member;
+    } catch (error) {
+      if (nativeAgentMutationFailureIsExplicit(error)) agentMutationOperationIds.current.delete(key);
+      throw error;
+    }
+  }, [bridge, selectedRoom, selectedRoomId]);
 
   const startChatStreamPolling = useCallback((input: {
     sessionId: string;
@@ -1586,8 +3231,15 @@ export function useNativeApp() {
       const selectedTarget = selectedWorkspace ? targetForWorkspace(selectedWorkspace, connectionRef.current) : undefined;
       if (!event || (selectedWorkspaceId && event.workspaceId !== selectedWorkspaceId)) return;
       if (event.connectionId && selectedTarget && event.connectionId !== selectedTarget.connectionId) return;
-      if (event.type === "access_revoked") {
+      const action = nativeWorkspaceRealtimeEventAction(event.type);
+      if (action === "close_workspace") {
+        roomOpenSequence.current += 1;
+        workDetailSequence.current += 1;
         setMessages([]);
+        setWorks([]);
+        setWorkError(null);
+        setSelectedWorkId(undefined);
+        setReplyWorkId(undefined);
         setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
         setSessionId(undefined);
         setSelectedRoomId(undefined);
@@ -1608,18 +3260,28 @@ export function useNativeApp() {
         setChatError("権限が変更されたため、保護された内容を閉じました。");
         setTransportState("offline");
       } else if (event.type === "room_access_revoked") {
+        roomOpenSequence.current += 1;
+        workDetailSequence.current += 1;
         setMessages([]);
+        setWorks([]);
+        setWorkError(null);
+        setSelectedWorkId(undefined);
+        setReplyWorkId(undefined);
         setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
         setSessionId(undefined);
         setSelectedRoomId(undefined);
         setActiveWorkspaceRoomId(undefined);
         setChatError("Roomの権限が変更されたため、保護された内容を閉じました。");
         setWorkspaceRefreshNonce((value) => value + 1);
-      } else {
+      } else if (action === "reauthorize_workspace") {
         setWorkspaceRefreshNonce((value) => value + 1);
+      } else {
+        // Persisted content notifications must not re-select the same
+        // Workspace. Refresh the already-authorized Room/Work view only.
+        requestWorkspaceContentRefresh();
       }
     });
-  }, [bridge, selectedWorkspace, selectedWorkspaceId]);
+  }, [bridge, requestWorkspaceContentRefresh, selectedWorkspace, selectedWorkspaceId]);
 
   const selectOrganization = useCallback((organizationId: string): void => {
     if (!organizations.some((organization) => organization.id === organizationId)) return;
@@ -1716,13 +3378,40 @@ export function useNativeApp() {
     writeNativeSelectionCandidate({ connectionId: targetConnection.id, organizationId: selectedOrganizationId, workspaceId: created.id }, targetConnection);
   }, [bridge, organizationApi, selectedOrganizationId]);
 
-  const createRoom = useCallback(async (name: string): Promise<void> => {
-    if (!bridge?.createWorkspaceRoom || !selectedWorkspace) throw new Error("room_create_unavailable");
-    const result = await bridge.createWorkspaceRoom({ name, expectedWorkspaceVersion: selectedWorkspace.version ?? 0, operationId: createIdempotencyKey() });
-    const created = nativeRoom(result.room);
-    setRooms((current) => [...current, created]);
+  const createRoom = useCallback(async (input: Omit<NativeRoomCreateInput, "expectedWorkspaceVersion">): Promise<void> => {
+    const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    if (!roomWorkBridge?.createWorkspaceRoom || !selectedWorkspace) throw new Error("room_create_unavailable");
+    const target = selectedWorkspaceTargetRef.current;
+    if (!target || !input.target
+      || nativeWorkspaceTargetKey(input.target) !== nativeWorkspaceTargetKey(target)) {
+      throw new Error("room_create_target_mismatch");
+    }
+    const selectedAgent = input.defaultAgentId ? agents.find((agent) => agent.id === input.defaultAgentId) : undefined;
+    if (input.defaultAgentId && !nativeRoomAgentIsAvailable(selectedAgent, agentBackends)) throw new Error("room_default_agent_unavailable");
+    const selectedBackend = input.newAgent ? agentBackends.find((backend) => backend.id === input.newAgent?.backendId) : undefined;
+    if (input.newAgent && (!selectedBackend || !selectedBackend.configured || !selectedBackend.enabled || selectedBackend.connectionState !== "ready")) {
+      throw new Error("room_agent_backend_unavailable");
+    }
+    if (input.newAgent?.enabled === false) throw new Error("room_default_agent_enabled_required");
+    const permission = input.agentPermission ?? { canView: true, canEdit: true, canExecute: true };
+    const result = await roomWorkBridge.createWorkspaceRoom({
+      ...input,
+      ...(input.defaultAgentId && input.defaultAgentVersion === undefined && selectedAgent?.version !== undefined
+        ? { defaultAgentVersion: selectedAgent.version }
+        : {}),
+      expectedWorkspaceVersion: selectedWorkspace.version ?? 1,
+      agentPermission: permission,
+      operationId: nativeRoomCreateOperationId(input.operationId)
+    });
+    if (!nativeRoomCreateResponseIsCurrent(result, target, selectedWorkspaceTargetRef.current)) {
+      throw new Error("workspace_room_response_scope_invalid");
+    }
+    const resultRecord = record(result);
+    const created = nativeRoom(resultRecord.room as DesktopWorkspaceRoom);
+    if (created.workspaceId !== target.workspaceId) throw new Error("workspace_room_response_scope_invalid");
+    setRooms((current) => nativeRoomsAfterRoomCreate(current, created));
     setSelectedRoomId(created.id);
-  }, [bridge, selectedWorkspace]);
+  }, [agentBackends, agents, bridge, selectedWorkspace]);
 
   const loadManagement = useCallback(async (): Promise<void> => {
     if (!selectedOrganizationId || selectedOrganizationId === legacyOrganizationId) {
@@ -2012,6 +3701,7 @@ export function useNativeApp() {
     workspaceTransferStatus,
     workspaceTransferSupported: Boolean(bridge?.preflightWorkspaceTransfer && bridge?.executeWorkspaceTransfer && bridge?.cutoverWorkspaceTarget),
     selectedWorkspace,
+    selectedWorkspaceTarget,
     selectedWorkspaceId,
     selectedWorkspaceTargetKey,
     rooms,
@@ -2019,6 +3709,32 @@ export function useNativeApp() {
     roomError,
     selectedRoom,
     selectedRoomId,
+    agents,
+    agentLoading,
+    agentError,
+    agentBackends,
+    agentBackendLoading,
+    agentBackendError,
+    roomAgentMembers,
+    roomAgentMembersLoading,
+    roomAgentMembersError,
+    roomWorkSupported: Boolean(roomWorkClient),
+    works,
+    workLoading,
+    workError,
+    workDetailLoading,
+    workDetailError,
+    selectedWork,
+    selectedWorkId,
+    setSelectedWorkId,
+    replyWorkId,
+    setReplyWorkId,
+    workDraft,
+    setWorkDraft,
+    clearWorkDraft,
+    workCommentDraft,
+    setWorkCommentDraft,
+    clearWorkCommentDraft,
     chatLoading,
     messages,
     chatError,
@@ -2040,6 +3756,23 @@ export function useNativeApp() {
     selectOrganization,
     selectWorkspace,
     openRoom,
+    refreshRoomWorkList,
+    sendRoomWork,
+    createRoomWorkComment,
+    applyRoomWorkComment,
+    likeRoomWorkComment,
+    stopRoomWork,
+    stopRoomWorkAssignee,
+    reassignRoomWorkAssignee,
+    delegateRoomWorkAssignee,
+    setRoomDefaultAgent,
+    openAgentDm,
+    viewWorkspaceAgent,
+    createWorkspaceAgent,
+    patchWorkspaceAgent,
+    bindWorkspaceAgentBackend,
+    setRoomAgentPermission,
+    removeRoomAgent,
     sendMessage,
     stopMessage,
     retryMessage,

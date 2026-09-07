@@ -129,6 +129,36 @@ describe("provider profiles", () => {
     }
   });
 
+  it("publishes Native delegation with only child intent fields", () => {
+    const tools = providerTools("openai", ["subagent_delegate"]) as Array<{
+      name: string;
+      parameters: {
+        properties?: Record<string, unknown>;
+        required?: string[];
+        additionalProperties?: boolean;
+      };
+    }>;
+    const delegation = tools.find((tool) => tool.name === "subagent_delegate");
+
+    expect(delegation).toBeDefined();
+    expect(delegation?.parameters.required).toEqual(["agent_id", "instruction"]);
+    expect(delegation?.parameters.additionalProperties).toBe(false);
+    expect(Object.keys(delegation?.parameters.properties ?? {}).sort()).toEqual([
+      "agent_id",
+      "attachments",
+      "dependency_assignee_ids",
+      "instruction"
+    ]);
+    const serialized = JSON.stringify(delegation);
+    expect(serialized).not.toContain('"work_id"');
+    expect(serialized).not.toContain('"room_id"');
+    expect(serialized).not.toContain('"assignee_id"');
+    expect(serialized).not.toContain('"requested_by_participant_id"');
+    expect(serialized).not.toContain('"expected_generation"');
+    expect(providerTools("gemini", ["room.work.assignee.delegate"])).toEqual(expect.any(Array));
+    expect(JSON.stringify(providerTools("gemini", ["room.work.assignee.delegate"]))).toContain("subagent_delegate");
+  });
+
   it("uses Gemini's official streamGenerateContent SSE endpoint", () => {
     const request = providerProfiles.gemini.buildStreamRequest?.("gemini-test", { apiKey: "gemini-key" }, providerInput);
 

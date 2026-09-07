@@ -375,7 +375,11 @@ export class AgentHost {
   private async syncWorkspaceRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.ports.store.getBackendRun(runId);
     if (!run) throw new Error(`run_not_found:${runId}`);
-    if (isSettled(run)) return run;
+    // `outcome_unknown` is a durable uncertainty marker, not proof that the
+    // provider stopped.  An explicit sync may therefore consume late stream
+    // evidence and settle it.  All other terminal states are immutable here;
+    // this path never starts a new Backend turn.
+    if (isSettled(run) && run.status !== "outcome_unknown") return run;
     await this.ports.assertRunAccess?.(run);
     const backend = this.registry.get(run.backend_id);
     if (!backend?.streamEvents) {
@@ -399,7 +403,7 @@ export class AgentHost {
   private async recoverWorkspaceRuns(): Promise<void> {
     const candidates = await this.ports.store.listCore02RecoveryCandidates();
     for (const run of candidates) {
-      if (run.session_id || isSettled(run) || !run.room_id || !run.principal) continue;
+      if (run.session_id || (isSettled(run) && run.status !== "outcome_unknown") || !run.room_id || !run.principal) continue;
       try {
         if (run.status === "queued") {
           const outcome = await this.runWorkspaceExecution({
@@ -418,7 +422,7 @@ export class AgentHost {
             metadata: run.metadata
           });
           await this.ports.recoveredRunObserver?.(outcome.run);
-        } else if (run.status === "running" || run.status === "waiting_for_backend_input") {
+        } else if (run.status === "running" || run.status === "waiting_for_backend_input" || run.status === "outcome_unknown") {
           const recovered = await this.syncWorkspaceRun(run.id);
           await this.ports.recoveredRunObserver?.(recovered);
         }

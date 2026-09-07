@@ -1,4 +1,4 @@
-import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
+import type { AgentBackend, AgentBackendRegistry, BackendExecutionContext, BackendOutputEvent, BackendRunInput, BackendToolCallStartedEvent } from "@samurai-agent/agent-backends";
 import {
   nowIso,
   stableHash,
@@ -8,6 +8,7 @@ import {
   type ExternalAssistRecord,
   type GatewayBoundaryPolicy,
   type JsonValue,
+  type AgentRecord,
   type SessionRecord
 } from "@samurai-agent/core-schemas";
 import type { RuntimeEventSink } from "@samurai-agent/ui-protocol";
@@ -152,6 +153,21 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
     },
     handoff: async ({ turn, candidates, assembly }) => {
       await deps.preparation.assertCurrentRunAccess(turn);
+      const executionBinding = runtimeBindingFromRunMetadata(turn.run.metadata, {
+        // Session handoff may use the persisted Workspace identity. A legacy
+        // Session request has no trusted Workspace ID in this layer.
+        roomId: turn.session.room_id ?? turn.run.room_id,
+        sessionId: turn.session.id,
+        agent: turn.request.agent,
+        agentId: turn.run.agent_id ?? turn.request.agent?.id,
+        backendId: turn.binding.id
+      });
+      const executionContext = executionBinding
+        ? runtimeExecutionContextForBackend(executionBinding, turn.binding.backend)
+        : undefined;
+      const agentSnapshot = executionBinding
+        ? { id: executionBinding.agentId, ...executionBinding.agent }
+        : turn.request.agent;
       const contextIntent = classifyBackendContextIntent(turn.request.content);
       const expectedOutputs = expectedBackendOutputs(turn.request.content);
       const handoff = buildContextHandoffForBackend({
@@ -177,7 +193,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         : deps.preparation.workingDirectory();
       const boundaryMetadata = assembly.gatewayBoundary ? gatewayBoundaryRuntimeMetadata(assembly.gatewayBoundary) : {};
       const metadata: Record<string, JsonValue> = {
-        ...(turn.request.metadata ?? {}),
+        ...runtimeMetadataForBackend(turn.request.metadata ?? {}),
         context_intent: contextIntent,
         ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
         workspace_root: workspaceRoot,
@@ -208,19 +224,22 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         run_id: turn.run.id,
         session_id: turn.session.id,
         ...(turn.session.room_id ? { room_id: turn.session.room_id } : {}),
-        ...(turn.request.agent ? {
+        ...(agentSnapshot ? {
           agent_context: {
-            id: turn.request.agent.id,
-            name: turn.request.agent.name,
-            role: turn.request.agent.role,
-            instructions: turn.request.agent.instructions,
+            id: executionBinding?.agentId ?? agentSnapshot.id,
+            name: agentSnapshot.name,
+            role: agentSnapshot.role,
+            instructions: agentSnapshot.instructions,
             authority: "supporting_context" as const
           }
         } : {}),
         input_message_id: turn.userMessage.id,
         workspace_root: workspaceRoot,
         working_directory: workingDirectory,
-        envelope: turn.request.envelope,
+        envelope: {
+          ...turn.request.envelope,
+          metadata: runtimeMetadataForBackend(turn.request.envelope.metadata)
+        },
         user_input: turn.request.content,
         input_locale: turn.request.envelope.input_locale,
         output_locale: turn.session.output_locale,
@@ -250,7 +269,8 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         temporary_context: turn.request.temporaryContext,
         metadata,
         context_intent: contextIntent,
-        expected_outputs: expectedOutputs
+        expected_outputs: expectedOutputs,
+        ...(executionContext ? { execution_context: executionContext } : {})
       };
       return { handoff, backendInput };
     },
@@ -292,6 +312,19 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
       // request. A SessionRef never replaces this current Room decision.
       await deps.preparation.assertRunAccess(run);
       await deps.preparation.linkWorkspaceActivityToRun({ context: request.context, run });
+      const persistedAgent = run.agent_id ? await deps.core.store.getAgent(run.agent_id) : undefined;
+      const executionBinding = runtimeBindingFromRunMetadata(run.metadata, {
+        workspaceId: request.context.workspace_id,
+        roomId: request.context.room_id,
+        sessionId: run.session_id,
+        agent: persistedAgent,
+        agentId: run.agent_id ?? request.agent_id,
+        backendId: binding.id
+      });
+      const executionContext = executionBinding
+        ? runtimeExecutionContextForBackend(executionBinding, binding.backend)
+        : undefined;
+      const agentSnapshot = executionBinding?.agent;
       const userInput = request.input_summary?.trim() || run.input_summary || "Workspace execution";
       const contextIntent = classifyBackendContextIntent(userInput);
       const expectedOutputs = expectedBackendOutputs(userInput);
@@ -309,7 +342,7 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
         ? backendExecutionRoot
         : deps.preparation.workingDirectory();
       const metadata: Record<string, JsonValue> = {
-        ...backendInput.metadata,
+        ...runtimeMetadataForBackend(backendInput.metadata),
         context_intent: contextIntent,
         backend_workspace_root_role: "isolated_agent_worktree",
         ...(expectedOutputs.length > 0 ? { expected_outputs: expectedOutputs } : {}),
@@ -322,10 +355,23 @@ export function createRuntimeAgentHost(deps: RuntimeHostCompositionDependencies)
           ...backendInput,
           workspace_root: backendExecutionRoot,
           working_directory: workingDirectory,
-          envelope: { ...backendInput.envelope, metadata: { ...backendInput.envelope.metadata, ...metadata } },
+          ...(agentSnapshot ? {
+            agent_context: {
+              id: executionBinding.agentId,
+              name: agentSnapshot.name,
+              role: agentSnapshot.role,
+              instructions: agentSnapshot.instructions,
+              authority: "supporting_context" as const
+            }
+          } : {}),
+          envelope: {
+            ...backendInput.envelope,
+            metadata: { ...runtimeMetadataForBackend(backendInput.envelope.metadata), ...metadata }
+          },
           metadata,
           context_intent: contextIntent,
           expected_outputs: expectedOutputs,
+          ...(executionContext ? { execution_context: executionContext } : {}),
           ...(activeToolBridge ? { tool_bridge: activeToolBridge } : {})
         }
       };
@@ -412,4 +458,231 @@ function isSettledRun(run: BackendRunRecord): boolean {
     || run.status === "failed"
     || run.status === "cancelled"
     || run.status === "outcome_unknown";
+}
+
+/**
+ * Durable association used to construct the additive Backend execution
+ * context.  `sessionId` is intentionally optional: Room work does not need a
+ * Chat Session to identify its execution boundary.
+ */
+export interface RuntimeExecutionBindingSnapshot {
+  workspaceId: string;
+  roomId: string;
+  sessionId?: string;
+  workId?: string;
+  assigneeId?: string;
+  agentId: string;
+  agentConfigurationVersion: number;
+  backendId: string;
+  generation: number;
+  agent: {
+    name: string;
+    role: string;
+    instructions: string;
+    enabled: boolean;
+  };
+}
+
+interface RuntimeExecutionBindingFallback {
+  workspaceId?: string;
+  roomId?: string;
+  sessionId?: string;
+  agent?: AgentRecord;
+  agentId?: string;
+  backendId: string;
+  generation?: number;
+}
+
+/**
+ * Rebuild a binding from persisted Run metadata.  The persisted record wins
+ * over a live Agent lookup; a changed Agent therefore cannot silently alter a
+ * continuation.  A legacy run without this metadata keeps the old input
+ * shape and returns a binding only when its fallback snapshot is complete.
+ */
+export function runtimeBindingFromRunMetadata(
+  metadata: Record<string, JsonValue>,
+  fallback: RuntimeExecutionBindingFallback
+): RuntimeExecutionBindingSnapshot | undefined {
+  const raw = metadata.runtime_binding;
+  if (raw === undefined) {
+    const agent = fallback.agent;
+    const agentId = fallback.agentId ?? agent?.id;
+    const workspaceId = fallback.workspaceId?.trim();
+    const roomId = fallback.roomId?.trim();
+    if (!agent || !agentId || !workspaceId || !roomId) return undefined;
+    return {
+      workspaceId,
+      roomId,
+      ...(fallback.sessionId?.trim() ? { sessionId: fallback.sessionId.trim() } : {}),
+      // A legacy/no-binding fallback keeps the previous safe default.  Zero
+      // is meaningful only when an explicit Human Work association is
+      // present; it must not become a legacy generation accidentally.
+      ...(fallback.generation ? { generation: requirePositiveInteger(fallback.generation, "generation") } : { generation: 1 }),
+      agentId: agentId.trim(),
+      agentConfigurationVersion: requirePositiveInteger(agent.configuration_version, "agent_configuration_version"),
+      backendId: fallback.backendId.trim(),
+      agent: {
+        name: agent.name,
+        role: agent.role,
+        instructions: agent.instructions,
+        enabled: agent.enabled
+      }
+    };
+  }
+  if (!isRecord(raw)) throw new Error("runtime_execution_binding_invalid");
+
+  const record = raw;
+  const rawAgent = record.agent;
+  const agentRecord = rawAgent === undefined
+    ? undefined
+    : isRecord(rawAgent) ? rawAgent : invalidBinding();
+  const workId = readOptionalString(record, "workId", "work_id");
+  const assigneeId = readOptionalString(record, "assigneeId", "assignee_id");
+  const hasWorkBinding = workId !== undefined || assigneeId !== undefined;
+  if ((workId === undefined) !== (assigneeId === undefined)) invalidBinding();
+
+  const workspaceId = readOptionalString(record, "workspaceId", "workspace_id") ?? normalizedFallback(fallback.workspaceId);
+  const roomId = readOptionalString(record, "roomId", "room_id") ?? normalizedFallback(fallback.roomId);
+  const sessionId = readOptionalString(record, "sessionId", "session_id") ?? normalizedFallback(fallback.sessionId);
+  const agentId = readOptionalString(record, "agentId", "agent_id") ?? normalizedFallback(fallback.agentId ?? fallback.agent?.id);
+  const backendId = readOptionalString(record, "backendId", "backend_id")
+    ?? readOptionalString(agentRecord, "backend_id")
+    ?? normalizedFallback(fallback.backendId);
+  const generation = readOptionalGeneration(record, hasWorkBinding)
+    ?? (hasWorkBinding ? undefined : fallback.generation ?? 1);
+  const agentConfigurationVersion = readOptionalPositiveInteger(record, "agentConfigurationVersion", "agent_configuration_version")
+    ?? readOptionalPositiveInteger(agentRecord, "config_version", "configuration_version")
+    ?? (fallback.agent ? requirePositiveInteger(fallback.agent.configuration_version, "agent_configuration_version") : undefined);
+  const name = readOptionalString(agentRecord, "name") ?? fallback.agent?.name;
+  const role = readOptionalString(agentRecord, "role") ?? fallback.agent?.role;
+  const instructions = readOptionalString(agentRecord, "instructions") ?? fallback.agent?.instructions;
+  const enabled = readOptionalBoolean(agentRecord, "enabled") ?? fallback.agent?.enabled;
+
+  if (!workspaceId || !roomId || !agentId || !backendId || generation === undefined || !agentConfigurationVersion
+    || !name?.trim() || !role?.trim() || !instructions?.trim() || enabled === undefined
+    || (hasWorkBinding && (!workId || !assigneeId))) {
+    invalidBinding();
+  }
+  if (fallback.workspaceId && workspaceId !== fallback.workspaceId.trim()) invalidBindingMismatch();
+  if (fallback.roomId && roomId !== fallback.roomId.trim()) invalidBindingMismatch();
+  if (fallback.sessionId && sessionId && sessionId !== fallback.sessionId.trim()) invalidBindingMismatch();
+  if (fallback.agentId && agentId !== fallback.agentId.trim()) invalidBindingMismatch();
+  if (backendId !== fallback.backendId.trim()) invalidBindingMismatch();
+
+  return {
+    workspaceId,
+    roomId,
+    ...(sessionId ? { sessionId } : {}),
+    ...(workId ? { workId } : {}),
+    ...(assigneeId ? { assigneeId } : {}),
+    agentId,
+    agentConfigurationVersion,
+    backendId,
+    generation,
+    agent: { name: name.trim(), role: role.trim(), instructions: instructions.trim(), enabled }
+  };
+}
+
+/** Convert a persisted binding into the typed Backend boundary. */
+export function runtimeExecutionContextForBackend(
+  binding: RuntimeExecutionBindingSnapshot,
+  backend: Pick<AgentBackend, "id" | "kind">
+): BackendExecutionContext | undefined {
+  if (!binding.workId && !binding.assigneeId) return undefined;
+  if (!binding.workId || !binding.assigneeId) throw new Error("runtime_execution_binding_incomplete");
+  if (binding.backendId !== backend.id) throw new Error("runtime_execution_binding_backend_mismatch");
+  if (!Number.isSafeInteger(binding.generation) || binding.generation < 0) {
+    throw new Error("runtime_execution_generation_invalid");
+  }
+  return {
+    agent: {
+      id: binding.agentId,
+      name: binding.agent.name,
+      role: binding.agent.role,
+      instructions: binding.agent.instructions,
+      enabled: binding.agent.enabled,
+      backend_id: binding.backendId,
+      config_version: String(binding.agentConfigurationVersion)
+    },
+    association: {
+      workspace_id: binding.workspaceId,
+      room_id: binding.roomId,
+      work_id: binding.workId,
+      assignee_id: binding.assigneeId,
+      backend_id: binding.backendId,
+      generation: binding.generation
+    },
+    credential_boundary: backend.kind === "samurai_native" ? "provider_api" : "external_cli",
+    continuity: backend.kind === "samurai_native" ? "samurai_context" : "external_session"
+  };
+}
+
+/** Keep the typed association out of generic provider/user metadata. */
+export function runtimeMetadataForBackend(metadata: Record<string, JsonValue>): Record<string, JsonValue> {
+  const { runtime_binding: _runtimeBinding, ...safeMetadata } = metadata;
+  return safeMetadata;
+}
+
+function isRecord(value: JsonValue | undefined): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalidBinding(): never {
+  throw new Error("runtime_execution_binding_invalid");
+}
+
+function invalidBindingMismatch(): never {
+  throw new Error("runtime_execution_binding_mismatch");
+}
+
+function normalizedFallback(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+function readOptionalString(record: Record<string, JsonValue> | undefined, ...keys: string[]): string | undefined {
+  if (!record) return undefined;
+  const value = keys.map((key) => record[key]).find((candidate) => candidate !== undefined);
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) invalidBinding();
+  return value.trim();
+}
+
+function readOptionalBoolean(record: Record<string, JsonValue> | undefined, key: string): boolean | undefined {
+  if (!record || record[key] === undefined) return undefined;
+  if (typeof record[key] !== "boolean") invalidBinding();
+  return record[key] as boolean;
+}
+
+function readOptionalPositiveInteger(record: Record<string, JsonValue> | undefined, ...keys: string[]): number | undefined {
+  if (!record) return undefined;
+  const value = keys.map((key) => record[key]).find((candidate) => candidate !== undefined);
+  if (value === undefined) return undefined;
+  const field = keys[0] ?? "value";
+  if (typeof value === "number") return requirePositiveInteger(value, field);
+  if (typeof value === "string" && /^[1-9][0-9]*$/.test(value)) return requirePositiveInteger(Number(value), field);
+  invalidBinding();
+}
+
+function readOptionalGeneration(record: Record<string, JsonValue>, allowZero: boolean): number | undefined {
+  const value = record.generation;
+  if (value === undefined) return undefined;
+  if (typeof value === "number") return requireGeneration(value, allowZero);
+  if (typeof value === "string" && (allowZero ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(value)) {
+    return requireGeneration(Number(value), allowZero);
+  }
+  invalidBinding();
+}
+
+function requireGeneration(value: number, allowZero: boolean): number {
+  if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
+    throw new Error("runtime_execution_generation_invalid");
+  }
+  return value;
+}
+
+function requirePositiveInteger(value: number, field: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`runtime_execution_${field}_invalid`);
+  return value;
 }

@@ -19,6 +19,108 @@ describe("SamuraiNativeBackend components", () => {
     expect(context.availableTools).toEqual(["create_artifact"]);
   });
 
+  it("uses the Samurai-owned Agent snapshot for Native context", () => {
+    const context = new NativeContextBuilder().build({
+      ...backendRunInput(),
+      agent_context: {
+        id: "stale-agent",
+        name: "Stale Agent",
+        role: "stale role",
+        instructions: "stale instructions",
+        authority: "supporting_context"
+      },
+      execution_context: nativeExecutionContext()
+    });
+
+    expect(context.agentContext).toEqual({
+      id: "agent_1",
+      name: "Writer",
+      role: "drafting",
+      instructions: "Write concise drafts.",
+      authority: "supporting_context"
+    });
+  });
+
+  it("rejects an external-session or CLI credential binding before provider execution", async () => {
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/native",
+      async generate() {
+        providerCalls += 1;
+        return { content: "must not run", toolCalls: [] };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn({
+      ...backendRunInput(),
+      execution_context: {
+        ...nativeExecutionContext(),
+        credential_boundary: "external_cli",
+        continuity: "external_session"
+      }
+    }));
+
+    expect(providerCalls).toBe(0);
+    expect(events.at(-1)).toMatchObject({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
+      payload: { error_code: "native_execution_context_rejected", reason: "credential_boundary_mismatch" }
+    });
+  });
+
+  it("accepts generation zero for the initial Human Work association", async () => {
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/native",
+      async generate() {
+        providerCalls += 1;
+        return { content: "initial work completed", toolCalls: [] };
+      }
+    };
+
+    const context = nativeExecutionContext();
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn({
+      ...backendRunInput(),
+      room_id: "room_1",
+      execution_context: {
+        ...context,
+        association: { ...context.association, generation: 0 }
+      }
+    }));
+
+    expect(providerCalls).toBe(1);
+    expect(events.at(-1)).toMatchObject({ event_type: "run_completed" });
+    expect(events.some((event) => event.payload && "error_code" in event.payload && event.payload.error_code === "native_execution_context_rejected")).toBe(false);
+  });
+
+  it("does not resume a provider Session when Native uses Samurai continuity", async () => {
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/native",
+      async generate() {
+        providerCalls += 1;
+        return { content: "must not run", toolCalls: [] };
+      }
+    };
+
+    const events = await collectEvents(new SamuraiNativeBackend(provider).runTurn({
+      ...backendRunInput(),
+      room_id: "room_1",
+      backend_session_id: "provider-session-from-an-old-association",
+      execution_context: nativeExecutionContext()
+    }));
+
+    expect(providerCalls).toBe(0);
+    expect(events.at(-1)).toMatchObject({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
+      payload: { error_code: "native_execution_context_rejected", reason: "external_session_id_not_allowed" }
+    });
+  });
+
   it("keeps prompt, provider, and tool event responsibilities separate", async () => {
     const backend = new SamuraiNativeBackend({
       provider: new FakeProviderAdapter("fake/native", {
@@ -329,6 +431,25 @@ describe("SamuraiNativeBackend components", () => {
     });
   });
 
+  it("maps Native delegation to the canonical Room-work operation", () => {
+    const plan = new NativeToolExecutor().planToolCall({
+      id: "delegate-tool-1",
+      name: "subagent_delegate",
+      arguments: {
+        agent_id: "specialist-agent",
+        instruction: "Review the draft",
+        room_id: "model-must-not-control-room"
+      }
+    });
+
+    expect(plan).toMatchObject({
+      provider_tool_name: "subagent_delegate",
+      action_id: "room.work.assignee.delegate",
+      execution_boundary: "host_runtime",
+      requires_host_execution: true
+    });
+  });
+
   it("classifies provider termination evidence without guessing from run_failed", async () => {
     const abortError = new Error("Aborted");
     abortError.name = "AbortError";
@@ -424,6 +545,102 @@ describe("SamuraiNativeBackend components", () => {
     expect((await iterator.next()).done).toBe(true);
   });
 
+  it("requests cancellation through the native controller and cleans up tracking", async () => {
+    const caller = new AbortController();
+    const providerStarted = deferred<AbortSignal>();
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/cancellable",
+      async generate(input) {
+        const signal = input.abortSignal;
+        if (!signal) throw new Error("provider_signal_missing");
+        providerStarted.resolve(signal);
+        return new Promise((_, reject) => {
+          signal.addEventListener("abort", () => {
+            const error = new Error("provider request aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      }
+    };
+    const backend = new SamuraiNativeBackend(provider);
+    const eventsPromise = collectEvents(backend.runTurn({ ...backendRunInput(), abort_signal: caller.signal }));
+    const providerSignal = await providerStarted.promise;
+
+    expect(providerSignal).not.toBe(caller.signal);
+    await expect(backend.cancelRun("run_1")).resolves.toEqual({ kind: "requested" });
+    expect(providerSignal.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+
+    const events = await eventsPromise;
+    expect(events.at(-1)).toMatchObject({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "indeterminate", reason: "cancel_unconfirmed", providerStarted: true, mayHaveSideEffects: true }
+    });
+    await expect(backend.cancelRun("run_1")).resolves.toEqual({
+      kind: "unsupported",
+      state: "unknown",
+      reason: "active_run_not_tracked"
+    });
+  });
+
+  it("composes caller cancellation into the provider signal and does not leak the native controller", async () => {
+    const caller = new AbortController();
+    const providerStarted = deferred<AbortSignal>();
+    const provider: ProviderAdapter = {
+      id: "fake",
+      model: "fake/caller-abort",
+      async generate(input) {
+        const signal = input.abortSignal;
+        if (!signal) throw new Error("provider_signal_missing");
+        providerStarted.resolve(signal);
+        return new Promise((_, reject) => {
+          signal.addEventListener("abort", () => {
+            const error = new Error("provider request aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      }
+    };
+    const backend = new SamuraiNativeBackend(provider);
+    const eventsPromise = collectEvents(backend.runTurn({ ...backendRunInput(), abort_signal: caller.signal }));
+    const providerSignal = await providerStarted.promise;
+
+    caller.abort();
+    expect(providerSignal.aborted).toBe(true);
+    const events = await eventsPromise;
+
+    expect(events.at(-1)).toMatchObject({
+      event_type: "run_failed",
+      terminal_evidence: { kind: "indeterminate", reason: "cancel_unconfirmed", providerStarted: true, mayHaveSideEffects: true }
+    });
+    await expect(backend.cancelRun("run_1")).resolves.toEqual({
+      kind: "unsupported",
+      state: "unknown",
+      reason: "active_run_not_tracked"
+    });
+  });
+
+  it("cleans tracking on an early return and provider exception", async () => {
+    const missingProvider = new SamuraiNativeBackend();
+    await collectEvents(missingProvider.runTurn(backendRunInput()));
+    await expect(missingProvider.cancelRun("run_1")).resolves.toEqual({
+      kind: "unsupported",
+      state: "unknown",
+      reason: "active_run_not_tracked"
+    });
+
+    const failingProvider = new SamuraiNativeBackend(providerThrowing(new Error("provider failed")));
+    await collectEvents(failingProvider.runTurn(backendRunInput()));
+    await expect(failingProvider.cancelRun("run_1")).resolves.toEqual({
+      kind: "unsupported",
+      state: "unknown",
+      reason: "active_run_not_tracked"
+    });
+  });
+
   it("does not start a fallback when cancellation follows a confirmed provider failure", async () => {
     const controller = new AbortController();
     let fallbackCalls = 0;
@@ -495,6 +712,14 @@ async function collectEvents(stream: AsyncIterable<BackendOutputEvent>): Promise
   const events: BackendOutputEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 function backendRunInput(): BackendRunInput {
@@ -574,5 +799,29 @@ function backendRunInput(): BackendRunInput {
     available_tools: ["create_artifact"],
     recent_messages: [],
     metadata: {}
+  };
+}
+
+function nativeExecutionContext(): NonNullable<BackendRunInput["execution_context"]> {
+  return {
+    agent: {
+      id: "agent_1",
+      name: "Writer",
+      role: "drafting",
+      instructions: "Write concise drafts.",
+      enabled: true,
+      backend_id: "samurai-native",
+      config_version: "7"
+    },
+    association: {
+      workspace_id: "workspace_1",
+      room_id: "room_1",
+      work_id: "work_1",
+      assignee_id: "assignment_1",
+      backend_id: "samurai-native",
+      generation: 2
+    },
+    credential_boundary: "provider_api",
+    continuity: "samurai_context"
   };
 }

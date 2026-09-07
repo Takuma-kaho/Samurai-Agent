@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workspaceAttachmentRequest } from "./workspace-attachment-requests";
+import { workspaceAttachmentRequest, workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests";
 
 describe("Desktop workspace attachment boundary", () => {
   it("accepts only an attachment path and preserves the Room write contract", () => {
@@ -27,5 +27,52 @@ describe("Desktop workspace attachment boundary", () => {
     expect(() => workspaceAttachmentRequest({ roomId: "room_product", path: "profile/secret.md", contentBase64: "aGk=", expectedVersion: 0, operationId: "attachment_write_1" })).toThrow("path_invalid");
     expect(() => workspaceAttachmentRequest({ roomId: "room_product", path: "attachments/file", contentBase64: "not-base64", expectedVersion: 0, operationId: "attachment_write_1" })).toThrow("contentBase64_invalid");
     expect(() => workspaceAttachmentRequest({ roomId: "room_product", path: "attachments/file", contentBase64: "aGk=", expectedVersion: -1, operationId: "attachment_write_1" })).toThrow("expectedVersion_invalid");
+  });
+
+  it("requires a server-issued immutable file reference", () => {
+    const sha256 = "a".repeat(64);
+    expect(workspaceAttachmentResourceRef({
+      kind: "file",
+      id: sha256,
+      uri: "notes/brief.md",
+      version: "1",
+      label: "Brief document"
+    })).toEqual({
+      kind: "file",
+      id: sha256,
+      uri: "notes/brief.md",
+      version: "1",
+      label: "Brief document"
+    });
+    expect(() => workspaceAttachmentResourceRef({
+      kind: "file",
+      id: sha256,
+      uri: "notes/brief.md"
+    })).toThrow("workspace_attachment_ref_invalid");
+    expect(() => workspaceAttachmentResourceRef({
+      kind: "file",
+      id: "not-a-sha256",
+      uri: "notes/brief.md",
+      version: "1"
+    })).toThrow("workspace_attachment_ref_invalid");
+    for (const uri of ["/notes/brief.md", "notes/../secret.md", "notes//brief.md", "notes/./brief.md", "notes\\brief.md"]) {
+      expect(() => workspaceAttachmentResourceRef({ kind: "file", id: sha256, uri, version: "1" })).toThrow("workspace_attachment_ref_invalid");
+    }
+  });
+
+  it("rejects inconsistent upload metadata instead of returning a partial reference", () => {
+    const sha256 = "b".repeat(64);
+    expect(workspaceAttachmentUploadResult({
+      file: { path: "notes/brief.md", version: 2, sha256, size: 2 },
+      resource_ref: { kind: "file", id: sha256, uri: "notes/brief.md", version: "2" }
+    })).toMatchObject({ resource_ref: { id: sha256, uri: "notes/brief.md", version: "2" } });
+    expect(() => workspaceAttachmentUploadResult({
+      file: { path: "attachments/image-1.png", version: 2, sha256, size: 2 },
+      resource_ref: { kind: "file", id: sha256, uri: "attachments/other.png", version: "2" }
+    })).toThrow("workspace_attachment_response_invalid");
+    expect(() => workspaceAttachmentUploadResult({
+      file: { path: "../secret.md", version: 2, sha256, size: 2 },
+      resource_ref: { kind: "file", id: sha256, uri: "../secret.md", version: "2" }
+    })).toThrow("workspace_attachment_response_invalid");
   });
 });

@@ -101,7 +101,10 @@ const portableSchema: Readonly<Record<string, { required: readonly string[]; all
     required: ["workspace_id", "id", "name", "version", "created_by", "created_at", "updated_at"],
     // parent_room_id is optional so a pre-hierarchy Bundle restores all of
     // its Rooms directly under the Workspace.
-    allowed: ["workspace_id", "id", "parent_room_id", "name", "version", "created_by", "created_at", "updated_at"]
+    // Room defaults and Agent-DM participant identity were added after the
+    // original V3 contract. Keep all four fields optional so old V3 files
+    // continue to verify unchanged.
+    allowed: ["workspace_id", "id", "parent_room_id", "name", "default_agent_id", "default_agent_version", "room_kind", "dm_account_id", "version", "created_by", "created_at", "updated_at"]
   },
   "memberships.jsonl": {
     required: ["workspace_id", "account_id", "role", "state", "version", "created_at", "updated_at", "revoked_at"],
@@ -865,7 +868,7 @@ export class WorkspaceBundleV3Service {
         "SELECT MAX(version)::TEXT AS revision FROM samurai_server_schema_migrations"
       );
       const accounts = await sql.query<Record<string, unknown>>("SELECT id, public_key, display_name, status, created_at, updated_at FROM samurai_list_workspace_account_identities($1) ORDER BY id", [context.workspaceId]);
-      const rooms = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, parent_room_id, name, version, created_by, created_at, updated_at FROM rooms WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const rooms = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, parent_room_id, name, default_agent_id, default_agent_version, room_kind, dm_account_id, version, created_by, created_at, updated_at FROM rooms WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const memberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM workspace_members WHERE workspace_id = $1 ORDER BY account_id", [context.workspaceId]);
       const roomMemberships = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, account_id, role, state, version, created_at, updated_at, revoked_at FROM room_members WHERE workspace_id = $1 ORDER BY room_id, account_id", [context.workspaceId]);
       const records = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, record_type, id, version, payload, search_text, content_hash, created_by, updated_by, created_at, updated_at FROM workspace_records WHERE workspace_id = $1 ORDER BY record_type, id", [context.workspaceId]);
@@ -2101,12 +2104,39 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
   if (activeWorkspaceOwnerCount === 0) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
   const roomIds = new Set<string>();
   const parentRoomIds = new Map<string, string | undefined>();
+  const roomSettings = new Map<string, { kind: "normal" | "agent_dm"; defaultAgentId?: string; defaultAgentVersion?: number; dmAccountId?: string }>();
   for (const row of rowsByFile.get("rooms.jsonl") ?? []) {
     const roomId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
     const createdBy = opaquePortableValue(row.created_by, "workspace_bundle_v3_relation_invalid");
     if (roomIds.has(roomId) || !knownAccountIds.has(createdBy)) {
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
+    const roomKind = row.room_kind === undefined || row.room_kind === null ? "normal" : row.room_kind;
+    if (roomKind !== "normal" && roomKind !== "agent_dm") {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    const defaultAgentId = optionalOpaqueId(row.default_agent_id, "workspace_bundle_v3_relation_invalid");
+    const defaultAgentVersionValue = row.default_agent_version === undefined || row.default_agent_version === null || row.default_agent_version === ""
+      ? undefined
+      : Number(row.default_agent_version);
+    if (defaultAgentVersionValue !== undefined
+      && (!Number.isSafeInteger(defaultAgentVersionValue) || defaultAgentVersionValue < 1)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if ((defaultAgentId === undefined) !== (defaultAgentVersionValue === undefined)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    const dmAccountId = optionalOpaqueId(row.dm_account_id, "workspace_bundle_v3_relation_invalid");
+    if ((roomKind === "normal" && dmAccountId !== undefined)
+      || (roomKind === "agent_dm" && (dmAccountId === undefined || defaultAgentId === undefined))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    roomSettings.set(roomId, {
+      kind: roomKind,
+      ...(defaultAgentId ? { defaultAgentId } : {}),
+      ...(defaultAgentVersionValue !== undefined ? { defaultAgentVersion: defaultAgentVersionValue } : {}),
+      ...(dmAccountId ? { dmAccountId } : {})
+    });
     roomIds.add(roomId);
     if (row.parent_room_id !== undefined && row.parent_room_id !== null) {
       parentRoomIds.set(roomId, opaquePortableValue(row.parent_room_id, "workspace_bundle_v3_relation_invalid"));
@@ -2159,6 +2189,15 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
         }
         ancestorRoomId = parentRoomIds.get(ancestorRoomId);
       }
+    }
+  }
+  // An Agent-DM is private by explicit construction. Its participant must be
+  // represented by an active Room membership; workspace-level inheritance is
+  // deliberately not enough to prove the DM boundary.
+  for (const [roomId, settings] of roomSettings) {
+    if (settings.kind !== "agent_dm" || !settings.dmAccountId
+      || roomMembershipStates.get(`${roomId}\u0000${settings.dmAccountId}`) !== "active") {
+      if (settings.kind === "agent_dm") throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
   }
   for (const roomId of roomIds) {

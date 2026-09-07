@@ -4,7 +4,7 @@ import type { TemporaryContextAttachment } from "@samurai-agent/agent-backends";
 import { defaultModelForProvider, providerProfiles, type ProviderCredential, type ProviderProfile } from "../provider-profiles";
 
 export type ProviderId = "openai" | "gemini" | "anthropic" | "openrouter" | "openai-compatible";
-export type ProviderToolName = "create_artifact" | "create_generated_surface" | "request_external_send" | "remember_topic";
+export type ProviderToolName = "create_artifact" | "create_generated_surface" | "request_external_send" | "remember_topic" | "subagent_delegate";
 
 export interface ProviderToolCall {
   id?: string;

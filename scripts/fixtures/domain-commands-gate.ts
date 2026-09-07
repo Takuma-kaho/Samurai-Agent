@@ -27,19 +27,19 @@ import {
 import { assertContractVersionDiscipline } from "../lib/domain-contract-version.mjs";
 
 const root = process.cwd();
-const expectedCommandCount = Number(process.env.SAMURAI_EXPECT_COMMAND_COUNT ?? "159");
-const expectedQueries = ["activity.history.list", "agent.list", "agent.view", "artifact.list", "artifact.view", "browser.extract", "collection.records.list", "collection.schema.docs", "collection.schema.get", "collection.search", "collection.view.present", "curator.snapshot.list", "file.inspect", "file.list", "file.read", "generated_surface.export", "memory.search", "organization.invitation.list", "organization.list", "organization.member.list", "organization.view", "organization.workspace.list", "presentation.plan", "resource.version.get", "room.list", "room.member.list", "room.ownerless.list", "room.resource.share.list", "room.view", "session.search", "skill.search", "skill.view", "wiki.search", "workspace.context.get", "workspace.member.list", "workspace.organization.move.preflight", "workspace.organization.move.status"];
+const expectedCommandCount = Number(process.env.SAMURAI_EXPECT_COMMAND_COUNT ?? "170");
+const expectedQueries = ["activity.history.list", "agent.backend.list", "agent.list", "agent.view", "artifact.list", "artifact.view", "browser.extract", "collection.records.list", "collection.schema.docs", "collection.schema.get", "collection.search", "collection.view.present", "curator.snapshot.list", "file.inspect", "file.list", "file.read", "generated_surface.export", "memory.search", "organization.invitation.list", "organization.list", "organization.member.list", "organization.view", "organization.workspace.list", "presentation.plan", "resource.version.get", "room.list", "room.member.list", "room.ownerless.list", "room.resource.share.list", "room.view", "room.work.list", "room.work.view", "session.search", "skill.search", "skill.view", "wiki.search", "workspace.context.get", "workspace.member.list", "workspace.organization.move.preflight", "workspace.organization.move.status"];
 const expectedLegacy = ["approval.approve", "approval.deny", "grant.create", "grant.revoke", "workspace.delete"];
 
 assert.equal(domainCommandEntries.length, expectedCommandCount);
-assert.equal(domainQueryEntries.length, 37);
+assert.equal(domainQueryEntries.length, 40);
 assert.equal(domainLegacyCommandEntries.length, 5);
-assert.equal(operationDefinitions.length, 196);
+assert.equal(operationDefinitions.length, 210);
 assert.deepEqual(domainQueryEntries.map((entry) => entry.id).sort(), expectedQueries);
 assert.deepEqual(domainLegacyCommandEntries.map((entry) => entry.id).sort(), expectedLegacy);
-assert.equal(actionCatalogEntries.length, 159);
+assert.equal(actionCatalogEntries.length, 170);
 assert.equal(getDomainCommandCatalogDiagnostics().ok, true);
-assert.equal(new Set(operationDefinitions.map((definition) => definition.id)).size, 196);
+assert.equal(new Set(operationDefinitions.map((definition) => definition.id)).size, 210);
 
 for (const action of actionCatalogEntries) {
   assert.equal("handler_id" in action, false, `${action.id} leaked handler_id into Action Catalog`);
@@ -175,6 +175,15 @@ for (const definition of operationDefinitions) {
     ? { ...sampledInput, promotion_id: "promotion_fixture" }
     : definition.id === "agent.patch"
       ? { ...sampledInput, role: "Fixture role" }
+      : definition.id === "room.work.comment.create"
+        // The static JSON Schema cannot represent the body-or-attachment
+        // refinement. Supply a body so the fixture exercises a valid comment
+        // without implying that a comment becomes an Agent instruction.
+        ? { ...sampledInput, body: "Fixture comment", attachments: [] }
+        : definition.id === "room.work.create" || definition.id === "room.work.reply"
+          // As above, the JSON Schema cannot represent the instruction-or-
+          // attachment refinement shared by initial work and a reply.
+          ? { ...sampledInput, instruction: "Fixture Room work instruction", attachments: [] }
       : definition.id === "learning.resource.version.update"
         ? { ...sampledInput, content: "Fixture Resource content." }
       : definition.id === "workspace.organization.move.preflight" || definition.id === "workspace.organization.move.commit"
@@ -345,7 +354,7 @@ assert.doesNotThrow(() => assertContractVersionDiscipline([versionFixture], [{ .
 
 const operationsRoot = path.join(root, "packages/domain-operations/src/operations");
 const operationFiles = filesUnder(operationsRoot).filter((file) => file.endsWith(".operation.ts"));
-assert.equal(operationFiles.length, 196);
+assert.equal(operationFiles.length, 210);
 for (const file of operationFiles) {
   const source = readFileSync(file, "utf8");
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true);
@@ -376,11 +385,11 @@ for (const removed of [
 ]) assert.equal(existsSync(path.join(root, removed)), false, `legacy source remains: ${removed}`);
 
 const indexSource = readFileSync(path.join(root, "packages/domain-operations/src/generated/operation-index.generated.ts"), "utf8");
-assert.equal((indexSource.match(/import operation\d+/g) ?? []).length, 196);
+assert.equal((indexSource.match(/import operation\d+/g) ?? []).length, 210);
 assert.equal(indexSource.includes("handler_id"), false);
 assert.equal(indexSource.includes("runtime_method"), false);
 const binderSource = readFileSync(path.join(root, "packages/domain-operations/src/generated/operation-binder.generated.ts"), "utf8");
-assert.equal((binderSource.match(/import operation\d+/g) ?? []).length, 196);
+assert.equal((binderSource.match(/import operation\d+/g) ?? []).length, 210);
 
 const checkedSources = [
   "packages/action-catalog/src/index.ts",

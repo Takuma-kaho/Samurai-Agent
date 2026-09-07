@@ -16,7 +16,13 @@ export {
   type DomainQueryId
 } from "./generated/operation-index.generated.js";
 export { bindOperationDefinitions, type DomainOperationPorts } from "./generated/operation-binder.generated.js";
-export { domainOperationClient, domainOperationIdFor, type DomainOperationKey } from "./generated/operation-client.generated.js";
+export {
+  domainOperationClient,
+  legacyDomainOperationClient,
+  domainOperationIdFor,
+  type DomainOperationKey,
+  type LegacyDomainOperationKey
+} from "./generated/operation-client.generated.js";
 export { collectionManageCompatibility, deprecatedOperations } from "./generated/legacy-operations.generated.js";
 export * from "./catalog.js";
 export * from "./value-objects/organization.js";
@@ -49,6 +55,37 @@ export { default as workspaceBundleExport } from "./operations/organization/work
 export { default as workspaceBundleRestore } from "./operations/organization/workspace-bundle-restore.operation.js";
 export { default as chatTurnRun } from "./operations/chat/turn/run.operation.js";
 export { default as sessionCreate } from "./operations/session/create.operation.js";
+export { default as roomWorkCreate } from "./operations/room/work-create.operation.js";
+export { default as roomWorkReply } from "./operations/room/work-reply.operation.js";
+export { default as roomWorkCommentCreate } from "./operations/room/work-comment-create.operation.js";
+export { default as roomWorkCommentApply } from "./operations/room/work-comment-apply.operation.js";
+export { default as roomWorkCommentReactionSet } from "./operations/room/work-comment-reaction-set.operation.js";
+export { default as roomWorkList } from "./operations/room/work-list.operation.js";
+export { default as roomWorkView } from "./operations/room/work-view.operation.js";
+export { default as roomDefaultAgentSet } from "./operations/room/default-agent-set.operation.js";
+export { default as roomWorkStop } from "./operations/room/work-stop.operation.js";
+export { default as roomWorkAssigneeStop } from "./operations/room/work-assignee-stop.operation.js";
+export { default as roomWorkAssigneeReassign } from "./operations/room/work-assignee-reassign.operation.js";
+export { default as roomWorkAssigneeDelegate } from "./operations/room/work-assignee-delegate.operation.js";
+export { default as agentDmOpen } from "./operations/agent/dm-open.operation.js";
+export { default as agentBackendList } from "./operations/agent/backend/list.operation.js";
+export type { RoomCreateInput, RoomAgentPermissionInput, RoomAgentPermission, RoomCreateNewAgentInput, RoomCreatePorts } from "./operations/room/create.operation.js";
+export type { RoomWorkCreateInput, RoomWorkCreatePorts } from "./operations/room/work-create.operation.js";
+export type { RoomWorkReplyInput, RoomWorkReplyPorts } from "./operations/room/work-reply.operation.js";
+export type { RoomWorkCommentCreateInput, RoomWorkCommentCreatePorts } from "./operations/room/work-comment-create.operation.js";
+export type { RoomWorkCommentApplyInput, RoomWorkCommentApplyPorts } from "./operations/room/work-comment-apply.operation.js";
+export type { RoomWorkCommentReactionSetInput, RoomWorkCommentReactionSetPorts } from "./operations/room/work-comment-reaction-set.operation.js";
+export type { RoomWorkListInput, RoomWorkListPorts } from "./operations/room/work-list.operation.js";
+export type { RoomWorkViewInput, RoomWorkViewPorts } from "./operations/room/work-view.operation.js";
+export type { RoomDefaultAgentSetInput, RoomDefaultAgentSetPorts } from "./operations/room/default-agent-set.operation.js";
+export type { RoomWorkStopInput, RoomWorkStopPorts } from "./operations/room/work-stop.operation.js";
+export type { RoomWorkAssigneeStopInput, RoomWorkAssigneeStopPorts } from "./operations/room/work-assignee-stop.operation.js";
+export type { RoomWorkAssigneeReassignInput, RoomWorkAssigneeReassignPorts } from "./operations/room/work-assignee-reassign.operation.js";
+export type { RoomWorkAssigneeDelegateInput, RoomWorkAssigneeDelegatePorts } from "./operations/room/work-assignee-delegate.operation.js";
+export type { AgentDmOpenInput, AgentDmOpenPorts } from "./operations/agent/dm-open.operation.js";
+export { agentBackendRecordSchema } from "./operations/agent/backend/list.operation.js";
+export type { AgentBackendListPorts } from "./operations/agent/backend/list.operation.js";
+export * from "./operations/room/work-contracts.js";
 export { default as generatedSurfaceActionRun } from "./operations/generated_surface/action/run.operation.js";
 export { default as generatedSurfaceCreate } from "./operations/generated_surface/create.operation.js";
 export { default as generatedSurfaceExport } from "./operations/generated_surface/export.operation.js";

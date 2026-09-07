@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { WorkspaceServerError } from "@samurai-agent/workspace-server";
 import type { PostgresRuntimeChatCompletionEvent } from "../adapters/runtime/postgres-runtime-chat.js";
-import { recordPostgresChatCompletionActivity } from "./http-server.js";
+import { recordPostgresChatCompletionActivity, runtimeChatAvailableProviderTools, workspaceFileResourceRef } from "./http-server.js";
 
 describe("PostgreSQL Runtime Completion projection", () => {
   it("always submits the stable Activity ID so Completion can atomically replay it", async () => {
@@ -58,6 +58,34 @@ describe("PostgreSQL Runtime Completion projection", () => {
 
     expect(ingestedOperationIds).toHaveLength(2);
     expect(ingestedOperationIds[0]).not.toBe(ingestedOperationIds[1]);
+  });
+});
+
+describe("Workspace file ResourceRef response", () => {
+  it("emits only the server-owned logical file identity", () => {
+    expect(workspaceFileResourceRef({
+      workspaceId: "workspace-file-ref",
+      roomId: "room-file-ref",
+      path: "notes/brief.md",
+      version: 3,
+      sha256: "a".repeat(64),
+      size: 12,
+      createdAt: "2026-09-06T00:00:00.000Z",
+      updatedAt: "2026-09-06T00:00:00.000Z"
+    })).toEqual({
+      kind: "file",
+      id: "a".repeat(64),
+      uri: "notes/brief.md",
+      version: "3",
+      label: "notes/brief.md"
+    });
+  });
+});
+
+describe("Native Runtime provider tools", () => {
+  it("keeps delegation out of the normal Chat capability set", () => {
+    expect(runtimeChatAvailableProviderTools()).toEqual(["create_artifact"]);
+    expect(runtimeChatAvailableProviderTools({ roomWorkBinding: true })).toEqual(["create_artifact", "subagent_delegate"]);
   });
 });
 

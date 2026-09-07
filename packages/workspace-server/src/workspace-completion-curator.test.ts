@@ -33,4 +33,45 @@ describe("Workspace Completion Curator", () => {
 
     expect(hash).toMatch(/^[a-f0-9]{64}$/);
   });
+
+  it("serializes state and resource fingerprint reads on the transaction client", async () => {
+    let activeQueries = 0;
+    let maxConcurrentQueries = 0;
+    const statements: string[] = [];
+    const sql = {
+      query: async (text: string) => {
+        statements.push(text);
+        activeQueries += 1;
+        maxConcurrentQueries = Math.max(maxConcurrentQueries, activeQueries);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        activeQueries -= 1;
+        if (text.includes("workspace_completion_curator_state")) return { rows: [] };
+        return {
+          rows: [{
+            resource_count: 0,
+            resource_updated_at: null,
+            activity_finalized_at: null,
+            evaluation_created_at: null
+          }]
+        };
+      }
+    } as unknown as WorkspaceSql;
+    const completion = {
+      store: {
+        database: {
+          withContext: async <T>(_context: unknown, action: (transaction: WorkspaceSql) => Promise<T>) => action(sql)
+        }
+      }
+    } as unknown as WorkspaceCompletionService;
+
+    await new WorkspaceCompletionCuratorService(completion).inputHash(
+      { workspaceId: "workspace_curator_serial", accountId: "account_curator_serial" },
+      { roomId: "room_curator_serial", mode: "light" }
+    );
+
+    expect(maxConcurrentQueries).toBe(1);
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain("workspace_completion_curator_state");
+    expect(statements[1]).toContain("workspace_completion_resources");
+  });
 });

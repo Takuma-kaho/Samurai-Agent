@@ -337,6 +337,154 @@ export class WorkspaceServerCommandService {
     return this.store.listRooms(context);
   }
 
+  setRoomDefaultAgent(
+    context: Parameters<WorkspaceServerStore["setRoomDefaultAgent"]>[0],
+    input: Parameters<WorkspaceServerStore["setRoomDefaultAgent"]>[1]
+  ) {
+    return this.store.setRoomDefaultAgent(context, input);
+  }
+
+  openAgentDm(
+    context: Parameters<WorkspaceServerStore["openAgentDm"]>[0],
+    input: Parameters<WorkspaceServerStore["openAgentDm"]>[1]
+  ) {
+    return this.store.openAgentDm(context, input);
+  }
+
+  createRoomWork(
+    context: Parameters<WorkspaceServerStore["createRoomWork"]>[0],
+    input: Parameters<WorkspaceServerStore["createRoomWork"]>[1]
+  ) {
+    return this.store.createRoomWork(context, input);
+  }
+
+  /** Compatibility-only Session-to-Room-work bridge. */
+  migrateLegacyChatTurn(
+    context: Parameters<WorkspaceServerStore["migrateLegacyChatTurn"]>[0],
+    input: Parameters<WorkspaceServerStore["migrateLegacyChatTurn"]>[1]
+  ) {
+    return this.store.migrateLegacyChatTurn(context, input);
+  }
+
+  resolveRoomWorkLegacySession(
+    context: Parameters<WorkspaceServerStore["resolveRoomWorkLegacySession"]>[0],
+    input: Parameters<WorkspaceServerStore["resolveRoomWorkLegacySession"]>[1]
+  ) {
+    return this.store.resolveRoomWorkLegacySession(context, input);
+  }
+
+  listRoomWorks(
+    context: Parameters<WorkspaceServerStore["listRoomWorks"]>[0],
+    input: Parameters<WorkspaceServerStore["listRoomWorks"]>[1]
+  ) {
+    return this.store.listRoomWorks(context, input);
+  }
+
+  viewRoomWork(
+    context: Parameters<WorkspaceServerStore["viewRoomWork"]>[0],
+    input: Parameters<WorkspaceServerStore["viewRoomWork"]>[1]
+  ) {
+    return this.store.viewRoomWork(context, input);
+  }
+
+  replyToRoomWork(
+    context: Parameters<WorkspaceServerStore["replyToRoomWork"]>[0],
+    input: Parameters<WorkspaceServerStore["replyToRoomWork"]>[1]
+  ) {
+    return this.store.replyToRoomWork(context, input);
+  }
+
+  createRoomWorkComment(
+    context: Parameters<WorkspaceServerStore["createRoomWorkComment"]>[0],
+    input: Parameters<WorkspaceServerStore["createRoomWorkComment"]>[1]
+  ) {
+    return this.store.createRoomWorkComment(context, input);
+  }
+
+  setRoomWorkCommentReaction(
+    context: Parameters<WorkspaceServerStore["setRoomWorkCommentReaction"]>[0],
+    input: Parameters<WorkspaceServerStore["setRoomWorkCommentReaction"]>[1]
+  ) {
+    return this.store.setRoomWorkCommentReaction(context, input);
+  }
+
+  applyRoomWorkComment(
+    context: Parameters<WorkspaceServerStore["applyRoomWorkComment"]>[0],
+    input: Parameters<WorkspaceServerStore["applyRoomWorkComment"]>[1]
+  ) {
+    return this.store.applyRoomWorkComment(context, input);
+  }
+
+  stopRoomWork(
+    context: Parameters<WorkspaceServerStore["stopRoomWork"]>[0],
+    input: Parameters<WorkspaceServerStore["stopRoomWork"]>[1]
+  ) {
+    return this.store.stopRoomWork(context, input);
+  }
+
+  stopRoomWorkAssignee(
+    context: Parameters<WorkspaceServerStore["stopRoomWorkAssignee"]>[0],
+    input: Parameters<WorkspaceServerStore["stopRoomWorkAssignee"]>[1]
+  ) {
+    return this.store.stopRoomWorkAssignee(context, input);
+  }
+
+  confirmRoomWorkStop(
+    context: Parameters<WorkspaceServerStore["confirmRoomWorkStop"]>[0],
+    input: Parameters<WorkspaceServerStore["confirmRoomWorkStop"]>[1]
+  ) {
+    return this.store.confirmRoomWorkStop(context, input);
+  }
+
+  markRoomWorkStopUnconfirmed(
+    context: Parameters<WorkspaceServerStore["markRoomWorkStopUnconfirmed"]>[0],
+    input: Parameters<WorkspaceServerStore["markRoomWorkStopUnconfirmed"]>[1]
+  ) {
+    return this.store.markRoomWorkStopUnconfirmed(context, input);
+  }
+
+  reassignRoomWorkAssignee(
+    context: Parameters<WorkspaceServerStore["reassignRoomWorkAssignee"]>[0],
+    input: Parameters<WorkspaceServerStore["reassignRoomWorkAssignee"]>[1]
+  ) {
+    return this.store.reassignRoomWorkAssignee(context, input);
+  }
+
+  claimRoomWorkReservation(
+    context: Parameters<WorkspaceServerStore["claimRoomWorkReservation"]>[0],
+    input: Parameters<WorkspaceServerStore["claimRoomWorkReservation"]>[1]
+  ) {
+    return this.store.claimRoomWorkReservation(context, input);
+  }
+
+  claimRoomWorkLaunch(
+    context: Parameters<WorkspaceServerStore["claimRoomWorkLaunch"]>[0],
+    input: Parameters<WorkspaceServerStore["claimRoomWorkLaunch"]>[1]
+  ) {
+    return this.store.claimRoomWorkLaunch(context, input);
+  }
+
+  settleRoomWorkAssignment(
+    context: Parameters<WorkspaceServerStore["settleRoomWorkAssignment"]>[0],
+    input: Parameters<WorkspaceServerStore["settleRoomWorkAssignment"]>[1]
+  ) {
+    return this.store.settleRoomWorkAssignment(context, input);
+  }
+
+  completeRoomWorkReservation(
+    context: Parameters<WorkspaceServerStore["completeRoomWorkReservation"]>[0],
+    input: Parameters<WorkspaceServerStore["completeRoomWorkReservation"]>[1]
+  ) {
+    return this.store.completeRoomWorkReservation(context, input);
+  }
+
+  settleRoomWorkReservation(
+    context: Parameters<WorkspaceServerStore["settleRoomWorkReservation"]>[0],
+    input: Parameters<WorkspaceServerStore["settleRoomWorkReservation"]>[1]
+  ) {
+    return this.store.settleRoomWorkReservation(context, input);
+  }
+
   getExternalConnectionDescriptor(input: Parameters<WorkspaceServerStore["getExternalConnectionDescriptor"]>[0]) {
     return this.store.getExternalConnectionDescriptor(input);
   }

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { WorkspaceFileResourceRefSchema } from "@samurai-agent/core-schemas";
 import { canonicalJson } from "./auth";
 import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { WorkspaceServerError } from "./errors";
@@ -96,6 +97,28 @@ const workspaceIdentityFiles = [
   ["workspace_agent_room_permissions", "agent-room-permissions.jsonl"],
   ["workspace_connection_descriptors", "connection-descriptors.jsonl"]
 ] as const;
+
+// Room-owned human work is portable history, while its execution leases are
+// deployment-local. These files are optional when reading an older V4 Bundle;
+// new exports always write all seven files, including empty ones.
+const workspaceHumanWorkFiles = [
+  ["workspace_human_works", "human-works.jsonl"],
+  ["workspace_human_work_assignments", "human-work-assignments.jsonl"],
+  ["workspace_human_work_instructions", "human-work-instructions.jsonl"],
+  ["workspace_human_work_comments", "human-work-comments.jsonl"],
+  ["workspace_human_work_comment_reactions", "human-work-comment-reactions.jsonl"],
+  ["workspace_human_work_controls", "human-work-controls.jsonl"],
+  ["workspace_human_work_launch_reservations", "human-work-launch-reservations.jsonl"]
+] as const;
+
+// This map is the compatibility bridge from retired Runtime Sessions to the
+// Room work aggregate. It is historical metadata only; it never authorizes a
+// new launch or claims a reservation.
+const workspaceHumanWorkLegacyFiles = [
+  ["workspace_human_work_legacy_sessions", "human-work-legacy-sessions.jsonl"]
+] as const;
+
+const workspaceHumanWorkAllFiles = [...workspaceHumanWorkFiles, ...workspaceHumanWorkLegacyFiles] as const;
 
 function safeErrorCode(error: unknown): string {
   if (error instanceof WorkspaceServerError) return error.code;
@@ -254,6 +277,9 @@ export class WorkspaceBundleV4Service {
       for (const [table, filename] of workspaceIdentityFiles) {
         await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), identityRows[table] ?? []);
       }
+      for (const [table, filename] of workspaceHumanWorkAllFiles) {
+        await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
+      }
       await this.writeCompletionFiles(context, staging, rows);
       await this.writeKnowledgeWikiProjection(staging, rows);
       await this.writeCollectionProjection(staging);
@@ -262,7 +288,8 @@ export class WorkspaceBundleV4Service {
         ...tableFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
         ...workspaceChatFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
         ...workspaceRuntimeHistoryFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const),
-        ...workspaceIdentityFiles.map(([table]) => [portableCountKey(table), (identityRows[table] ?? []).length] as const)
+        ...workspaceIdentityFiles.map(([table]) => [portableCountKey(table), (identityRows[table] ?? []).length] as const),
+        ...workspaceHumanWorkAllFiles.map(([table]) => [portableCountKey(table), (rows[table] ?? []).length] as const)
       ]);
       const baseProvenance = base.manifest as typeof base.manifest & WorkspaceBundleV3Provenance;
       // A legacy V3 manifest's schema_version is only a compatibility label;
@@ -702,6 +729,21 @@ export class WorkspaceBundleV4Service {
         const result = await sql.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE workspace_id = $1`, [context.workspaceId]);
         values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
       }
+      for (const [table] of workspaceHumanWorkAllFiles) {
+        const select = table === "workspace_human_work_instructions"
+          ? `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body,
+                    samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+                    source_kind, source_comment_id, source_comment_version, state, created_by, created_at
+             FROM ${table} WHERE workspace_id = $1`
+          : table === "workspace_human_work_comments"
+            ? `SELECT workspace_id, id, work_id, room_id, author_account_id, version, body,
+                      samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+                      created_at
+               FROM ${table} WHERE workspace_id = $1`
+            : `SELECT * FROM ${table} WHERE workspace_id = $1`;
+        const result = await sql.query<Record<string, unknown>>(select, [context.workspaceId]);
+        values[table] = result.rows.map((row) => portableRuntimeRow(table, row));
+      }
       return values;
     });
   }
@@ -715,9 +757,14 @@ export class WorkspaceBundleV4Service {
         [context.workspaceId]
       );
       const permissions = await sql.query<Record<string, unknown>>(
-        `SELECT workspace_id, room_id, agent_id, can_view, can_edit, can_execute, version,
-                created_by, created_at, updated_at
-         FROM workspace_agent_room_permissions WHERE workspace_id = $1 ORDER BY room_id, agent_id`,
+        `SELECT permission.workspace_id, permission.room_id, permission.agent_id,
+                permission.can_view, permission.can_edit, permission.can_execute, permission.version,
+                permission.created_by, permission.created_at, permission.updated_at
+         FROM workspace_agent_room_permissions AS permission
+         JOIN rooms AS room ON room.workspace_id = permission.workspace_id AND room.id = permission.room_id
+         WHERE permission.workspace_id = $1
+           AND (room.room_kind <> 'agent_dm' OR room.default_agent_id = permission.agent_id)
+         ORDER BY permission.room_id, permission.agent_id`,
         [context.workspaceId]
       );
       const connections = await sql.query<Record<string, unknown>>(
@@ -841,7 +888,7 @@ export class WorkspaceBundleV4Service {
   }
 
   private async importCompletionExtension(context: WorkspaceRequestContext, source: { directory: string; manifest: WorkspaceBundleV4Manifest }): Promise<void> {
-    const rows = await readCompletionBundleRows(source.directory);
+    const rows = await readCompletionBundleRows(source.directory, source.manifest.workspace_id);
     const receiptId = completionId("completion_receipt", context.workspaceId, source.manifest.integrity_hash);
     const existingReceipt = await this.store.database.withContext(context, async (sql) => sql.query<{ id: string }>(
       "SELECT id FROM workspace_completion_migration_receipts WHERE workspace_id = $1 AND id = $2 AND integrity_hash = $3 AND status = 'switched'",
@@ -856,7 +903,12 @@ export class WorkspaceBundleV4Service {
     try {
       await this.store.database.withContext(context, async (sql) => {
         await sql.query("SET CONSTRAINTS ALL DEFERRED");
-        await this.importWorkspaceIdentityRows(context, sql, rows);
+        // V3 creates Rooms before the V4 Agent extension. Agents must exist
+        // before their default-Agent FK is restored, while DM Room settings
+        // must be applied before specialist ACL rows are imported. The
+        // identity importer therefore restores Agents, Room settings, then
+        // only the still-effective ACL rows.
+        await this.importWorkspaceIdentityRows(context, sql, rows, source.directory);
         const stagedIds = new Set(batches.map((batch) => batch.id));
         for (const header of rows.workspace_completion_file_batches ?? []) {
           const id = stringValue(header.id, "workspace_bundle_v4_batch_invalid");
@@ -875,8 +927,13 @@ export class WorkspaceBundleV4Service {
           await insertPortableStaticRow(sql, "workspace_completion_file_batch_entries", { ...entry, workspace_id: context.workspaceId });
         }
         for (const table of importTableOrder) {
-          for (const row of rows[table] ?? []) await insertPortableRow(sql, table, { ...row, workspace_id: context.workspaceId });
+          for (const row of rows[table] ?? []) {
+            const restored = restorePortableRuntimeHistoryRow(table, row, context.workspaceId);
+            await insertPortableRow(sql, table, { ...restored, workspace_id: context.workspaceId });
+          }
         }
+        await importWorkspaceHumanWorkRows(sql, context, prepareHumanWorkRowsForRestore(rows, context, source.manifest));
+        await importWorkspaceLegacySessionRows(sql, context, rows);
         for (const row of rows.workspace_completion_migration_receipts ?? []) {
           await insertMigrationReceipt(sql, { ...row, workspace_id: context.workspaceId });
         }
@@ -963,11 +1020,13 @@ export class WorkspaceBundleV4Service {
   private async importWorkspaceIdentityRows(
     context: WorkspaceRequestContext,
     sql: WorkspaceSql,
-    rows: Record<string, Record<string, unknown>[]>
+    rows: Record<string, Record<string, unknown>[]>,
+    baseRoot: string
   ): Promise<void> {
     for (const row of rows.workspace_agents ?? []) {
       await importWorkspaceAgentRow(context, sql, row);
     }
+    await this.importWorkspaceRoomSettings(context, sql, baseRoot);
     for (const row of rows.workspace_agent_room_permissions ?? []) {
       await sql.query(
         "SELECT samurai_import_workspace_agent_room_permission($1, $2, $3, $4, $5, $6, $7, $8, $9::TIMESTAMPTZ, $10::TIMESTAMPTZ)",
@@ -1005,6 +1064,43 @@ export class WorkspaceBundleV4Service {
           stringValue(row.created_by, "workspace_bundle_connection_created_by_invalid"),
           timestampValue(row.created_at, "workspace_bundle_connection_created_at_invalid"),
           timestampValue(row.updated_at, "workspace_bundle_connection_updated_at_invalid")
+        ]
+      );
+    }
+  }
+
+  private async importWorkspaceRoomSettings(
+    context: WorkspaceRequestContext,
+    sql: WorkspaceSql,
+    baseRoot: string
+  ): Promise<void> {
+    const rooms = await readJsonl(resolveBundlePath(baseRoot, `${baseV3Directory}/rooms.jsonl`));
+    for (const row of rooms) {
+      const hasV4RoomSettings = row.room_kind === "agent_dm"
+        || row.default_agent_id !== undefined && row.default_agent_id !== null && row.default_agent_id !== ""
+        || row.default_agent_version !== undefined && row.default_agent_version !== null && row.default_agent_version !== ""
+        || row.dm_account_id !== undefined && row.dm_account_id !== null && row.dm_account_id !== "";
+      if (!hasV4RoomSettings) continue;
+      const roomKind = row.room_kind === undefined || row.room_kind === null ? "normal" : stringValue(row.room_kind, "workspace_bundle_room_kind_invalid");
+      const defaultAgentId = nullableStringValue(row.default_agent_id, "workspace_bundle_room_default_agent_invalid");
+      const defaultAgentVersion = row.default_agent_version === undefined || row.default_agent_version === null || row.default_agent_version === ""
+        ? null
+        : integerValue(row.default_agent_version, "workspace_bundle_room_default_agent_version_invalid");
+      await sql.query(
+        "SELECT samurai_import_workspace_room_v2($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::TIMESTAMPTZ, $12::TIMESTAMPTZ)",
+        [
+          context.workspaceId,
+          stringValue(row.id, "workspace_bundle_room_id_invalid"),
+          nullableStringValue(row.parent_room_id, "workspace_bundle_room_parent_invalid"),
+          stringValue(row.name, "workspace_bundle_room_name_invalid"),
+          roomKind,
+          nullableStringValue(row.dm_account_id, "workspace_bundle_room_dm_account_invalid"),
+          defaultAgentId,
+          defaultAgentVersion,
+          integerValue(row.version, "workspace_bundle_room_version_invalid"),
+          stringValue(row.created_by, "workspace_bundle_room_created_by_invalid"),
+          timestampValue(row.created_at, "workspace_bundle_room_created_at_invalid"),
+          timestampValue(row.updated_at, "workspace_bundle_room_updated_at_invalid")
         ]
       );
     }
@@ -1281,12 +1377,29 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
       ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
       : [];
   }
-  assertPortableRuntimeHistory(rows);
+  assertPortableRuntimeHistory(rows, manifest.workspace_id);
   const connections = await readJsonl(resolveBundlePath(root, `${completionDirectory}/connection-descriptors.jsonl`));
   if (connections.some((row) => row.status === "active")) {
     throw new WorkspaceServerError("workspace_bundle_v4_active_connection_forbidden", 400);
   }
   for (const [table, filename] of workspaceIdentityFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  for (const [table, filename] of workspaceHumanWorkAllFiles) {
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if (hasManifestCount && !hasBundleFile) {
+      throw new WorkspaceServerError("workspace_bundle_v4_required_file_missing", 400);
+    }
+    rows[table] = hasManifestCount || hasBundleFile
+      ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
+      : [];
+  }
+  // Old v95/v96 exports may carry a parent reply continuation with the
+  // post-v107 default `normal` origin.  Apply the same strict compatibility
+  // projection used by restore before validating the graph; forged or
+  // ambiguous parent edges remain unchanged and are rejected below.
+  normalizeLegacyParentContinuationOrigins(rows);
+  await assertPortableHumanWorkRelations(root, manifest, rows);
   const countByKey = new Map<string, number>();
   for (const [table] of tableFiles) countByKey.set(portableCountKey(table), rows[table]?.length ?? 0);
   for (const [table, filename] of workspaceChatFiles) {
@@ -1311,6 +1424,12 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
     }
   }
   for (const [table] of workspaceIdentityFiles) countByKey.set(portableCountKey(table), rows[table]?.length ?? 0);
+  for (const [table, filename] of workspaceHumanWorkAllFiles) {
+    const key = portableCountKey(table);
+    const hasManifestCount = Object.prototype.hasOwnProperty.call(manifest.record_counts, key);
+    const hasBundleFile = await pathExists(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+    if (hasManifestCount || hasBundleFile) countByKey.set(key, rows[table]?.length ?? 0);
+  }
   if (canonicalJson(Object.keys(manifest.record_counts).sort()) !== canonicalJson([...countByKey.keys()].sort())) {
     throw new WorkspaceServerError("workspace_bundle_v4_record_count_mismatch", 400, {
       expected: Object.keys(manifest.record_counts).sort(),
@@ -1373,7 +1492,7 @@ export async function writeWorkspaceBundleV4Transport(input: { transport: unknow
   }
 }
 
-async function readCompletionBundleRows(root: string): Promise<Record<string, Record<string, unknown>[]>> {
+async function readCompletionBundleRows(root: string, workspaceId: string): Promise<Record<string, Record<string, unknown>[]>> {
   const rows: Record<string, Record<string, unknown>[]> = {};
   for (const [table, filename] of tableFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
   for (const [table, filename] of workspaceChatFiles) {
@@ -1385,10 +1504,14 @@ async function readCompletionBundleRows(root: string): Promise<Record<string, Re
       : await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
   }
   for (const [table, filename] of workspaceIdentityFiles) rows[table] = await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  for (const [table, filename] of workspaceHumanWorkAllFiles) {
+    rows[table] = await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
+  }
+  normalizeLegacyParentContinuationOrigins(rows);
   // Keep the import path defensive even if a future caller bypasses the
   // public verifier. The source row `session_ref` remains untouched; only
   // provider-shaped identifiers in Runtime metadata/payload are rejected.
-  assertPortableRuntimeHistory(rows);
+  assertPortableRuntimeHistory(rows, workspaceId);
   return rows;
 }
 
@@ -1452,6 +1575,59 @@ function normalizePortableBatchRows(rows: Record<string, Record<string, unknown>
 
 async function insertPortableRow(sql: WorkspaceSql, table: (typeof importTableOrder)[number], row: Record<string, unknown>): Promise<void> {
   await sql.query(`INSERT INTO ${table} SELECT (jsonb_populate_record(NULL::${table}, $1::JSONB)).*`, [canonicalJson(row)]);
+}
+
+async function importWorkspaceHumanWorkRows(
+  sql: WorkspaceSql,
+  context: Pick<WorkspaceRequestContext, "workspaceId">,
+  rows: Record<string, Record<string, unknown>[]>
+): Promise<void> {
+  const hasRows = workspaceHumanWorkFiles.some(([table]) => (rows[table] ?? []).length > 0);
+  if (!hasRows) return;
+  const json = (table: (typeof workspaceHumanWorkFiles)[number][0]): string => canonicalJson(rows[table] ?? []);
+  await sql.query(
+    `SELECT samurai_import_workspace_human_work(
+       $1, $2::JSONB, $3::JSONB, $4::JSONB, $5::JSONB, $6::JSONB, $7::JSONB, $8::JSONB
+     )`,
+    [
+      context.workspaceId,
+      json("workspace_human_works"),
+      json("workspace_human_work_assignments"),
+      json("workspace_human_work_instructions"),
+      json("workspace_human_work_comments"),
+      json("workspace_human_work_comment_reactions"),
+      json("workspace_human_work_controls"),
+      json("workspace_human_work_launch_reservations")
+    ]
+  );
+  // The legacy import RPC predates dependency edges. Restore them through a
+  // separate guarded RPC after all assignments exist, preserving graph
+  // relations without making old Bundle files or their import ordering
+  // invalid.
+  await sql.query(
+    "SELECT samurai_restore_human_work_assignment_dependencies($1, $2::JSONB)",
+    [context.workspaceId, json("workspace_human_work_assignments")]
+  );
+  // v107 carries the server-only assignment origin as well.  This keeps
+  // delegated children distinct from parent continuations after restore;
+  // restored live work remains blocked and never auto-launches.
+  await sql.query(
+    "SELECT samurai_restore_human_work_assignment_origins($1, $2::JSONB)",
+    [context.workspaceId, json("workspace_human_work_assignments")]
+  );
+}
+
+async function importWorkspaceLegacySessionRows(
+  sql: WorkspaceSql,
+  context: Pick<WorkspaceRequestContext, "workspaceId">,
+  rows: Record<string, Record<string, unknown>[]>
+): Promise<void> {
+  const mappings = rows.workspace_human_work_legacy_sessions ?? [];
+  if (mappings.length === 0) return;
+  await sql.query(
+    "SELECT samurai_import_workspace_human_work_legacy_sessions($1, $2::JSONB)",
+    [context.workspaceId, canonicalJson(mappings)]
+  );
 }
 
 async function insertMigrationReceipt(sql: WorkspaceSql, row: Record<string, unknown>): Promise<void> {
@@ -1620,7 +1796,77 @@ function portableRuntimeRow(table: string, row: Record<string, unknown>): Record
       blocked_at: null
     };
   }
+  if (table === "workspace_human_work_assignments") {
+    // An assignment's lease/current run can only be meaningful on the source
+    // Server. Keep settled result history, but never export a live ownership
+    // claim that a target could resume.
+    const active = ["queued", "ready", "running", "waiting", "blocked"].includes(String(portable.status));
+    return {
+      ...portable,
+      ...(active ? { current_run_id: null } : {}),
+      lease_owner: null,
+      lease_expires_at: null
+    };
+  }
+  if (table === "workspace_human_work_launch_reservations") {
+    // Reservation rows remain auditable, but their live lease is never
+    // portable. Restore converts reserved/claimed rows to cancelled.
+    return {
+      ...portable,
+      lease_owner: null,
+      lease_expires_at: null
+    };
+  }
+  if (table === "workspace_human_works") {
+    return {
+      ...portable,
+      completion_criteria: stripPortableRuntimeProviderIdentifiers(portable.completion_criteria)
+    };
+  }
+  if (table === "workspace_human_work_controls") {
+    return {
+      ...portable,
+      details: stripPortableRuntimeProviderIdentifiers(portable.details)
+    };
+  }
+  if (table === "workspace_human_work_instructions" || table === "workspace_human_work_comments") {
+    return {
+      ...portable,
+      attachment_refs: stripPortableRuntimeProviderIdentifiers(portable.attachment_refs)
+    };
+  }
   return portable;
+}
+
+/**
+ * A settled Run is portable evidence, not a new executable association.  The
+ * database trigger intentionally rejects `metadata.runtime_binding` unless
+ * the assignment is currently running; a restored historical assignment is
+ * terminal (or explicitly outcome-unknown) and must therefore not be
+ * inserted with that live binding.  Keep the verified source binding under a
+ * non-executable history key so the evidence remains inspectable without
+ * allowing Runtime to resume it.
+ */
+function restorePortableRuntimeHistoryRow(
+  table: string,
+  row: Record<string, unknown>,
+  targetWorkspaceId: string
+): Record<string, unknown> {
+  if (table !== "workspace_runtime_runs") return row;
+  const metadata = row.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return row;
+  const record = metadata as Record<string, unknown>;
+  const binding = record.runtime_binding;
+  if (binding === undefined) return row;
+  const { runtime_binding: _runtimeBinding, ...safeMetadata } = record;
+  return {
+    ...row,
+    metadata: {
+      ...safeMetadata,
+      historical_runtime_binding: binding,
+      restored_workspace_id: targetWorkspaceId
+    }
+  };
 }
 
 const portableRuntimeTerminalStatuses = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
@@ -1634,14 +1880,20 @@ function assertPortableRuntimeRun(row: Record<string, unknown>, requireBackendSe
   }
 }
 
-function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknown>[]>): void {
+function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknown>[]>, workspaceId: string): void {
   const runs = rows.workspace_runtime_runs ?? [];
   const runIds = new Set(runs.map((row) => row.id).filter((id): id is string => typeof id === "string"));
   for (const run of runs) {
+    if (run.workspace_id !== undefined && run.workspace_id !== workspaceId) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
     assertPortableRuntimeRun(run, true);
     assertPortableRuntimeProviderIdentifiersAbsent(run.metadata);
   }
   for (const event of rows.workspace_runtime_events ?? []) {
+    if (event.workspace_id !== undefined && event.workspace_id !== workspaceId) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
     if (event.backend_session_id !== null && event.backend_session_id !== undefined) {
       throw new WorkspaceServerError("workspace_bundle_v4_backend_session_forbidden", 400);
     }
@@ -1651,6 +1903,9 @@ function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknow
     }
   }
   for (const change of rows.workspace_runtime_changes ?? []) {
+    if (change.workspace_id !== undefined && change.workspace_id !== workspaceId) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
     if (typeof change.run_id === "string" && !runIds.has(change.run_id)) {
       throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
     }
@@ -1659,6 +1914,9 @@ function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknow
     .map((row) => row.id)
     .filter((id): id is string => typeof id === "string"));
   for (const activity of rows.workspace_runtime_activities ?? []) {
+    if (activity.workspace_id !== undefined && activity.workspace_id !== workspaceId) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
     if (typeof activity.backend_run_id === "string" && !runIds.has(activity.backend_run_id)) {
       throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
     }
@@ -1667,11 +1925,1129 @@ function assertPortableRuntimeHistory(rows: Record<string, Record<string, unknow
     .map((row) => row.id)
     .filter((id): id is string => typeof id === "string"));
   for (const usage of rows.workspace_runtime_resource_usage ?? []) {
+    if (usage.workspace_id !== undefined && usage.workspace_id !== workspaceId) {
+      throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+    }
     if (typeof usage.activity_id !== "string" || !activityIds.has(usage.activity_id)
       || (typeof usage.workspace_change_id === "string" && !changeIds.has(usage.workspace_change_id))) {
       throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
     }
   }
+}
+
+function runtimeHistoryRelationError(): never {
+  throw new WorkspaceServerError("workspace_bundle_v4_runtime_history_reference_invalid", 400);
+}
+
+function runtimeBindingText(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return runtimeHistoryRelationError();
+  return value.trim();
+}
+
+function runtimeBindingInteger(value: unknown, minimum: number): number {
+  const number = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value)
+      ? Number(value)
+      : NaN;
+  if (!Number.isSafeInteger(number) || number < minimum) return runtimeHistoryRelationError();
+  return number;
+}
+
+/**
+ * Runtime bindings are executable only while a Work assignment is running.
+ * A Bundle may contain their settled evidence, but every source-side
+ * Workspace/Room/Work/Assignment/Agent/Backend relation must be proven before
+ * the binding is moved to the non-executable historical metadata key during
+ * restore.  This keeps a forged binding from becoming silently portable.
+ */
+function assertPortableRuntimeBindingRelations(
+  rows: Record<string, Record<string, unknown>[]>,
+  workspaceId: string,
+  workById: ReadonlyMap<string, Record<string, unknown>>,
+  assignmentById: ReadonlyMap<string, Record<string, unknown>>,
+  agentIds: ReadonlySet<string>,
+  agentVersions: ReadonlyMap<string, number>,
+  agentBackends: ReadonlyMap<string, string>
+): void {
+  for (const run of rows.workspace_runtime_runs ?? []) {
+    const metadata = run.metadata;
+    if (metadata === null || metadata === undefined) continue;
+    if (typeof metadata !== "object" || Array.isArray(metadata)) runtimeHistoryRelationError();
+    const binding = (metadata as Record<string, unknown>).runtime_binding;
+    if (binding === undefined) continue;
+    if (!binding || typeof binding !== "object" || Array.isArray(binding)) runtimeHistoryRelationError();
+    const bindingRecord = binding as Record<string, unknown>;
+    const bindingWorkspaceId = runtimeBindingText(bindingRecord.workspace_id);
+    const bindingRoomId = runtimeBindingText(bindingRecord.room_id);
+    // `portableRuntimeRow` removes provider-shaped session identifiers from
+    // opaque metadata. Older V4 exports therefore omit this nested field;
+    // when it is present in a future/hand-built bundle, it must still match
+    // the Workspace-owned Run session.
+    const bindingSessionId = bindingRecord.session_id === undefined
+      ? undefined
+      : runtimeBindingText(bindingRecord.session_id);
+    const bindingAgentId = runtimeBindingText(bindingRecord.agent_id);
+    const bindingBackendId = runtimeBindingText(bindingRecord.backend_id);
+    const bindingGeneration = runtimeBindingInteger(bindingRecord.generation, 0);
+    const bindingAgentVersion = runtimeBindingInteger(bindingRecord.agent_configuration_version, 1);
+    if (bindingWorkspaceId !== workspaceId
+      || bindingRoomId !== runtimeBindingText(run.room_id)
+      || bindingSessionId !== undefined && bindingSessionId !== runtimeBindingText(run.session_id)
+      || bindingAgentId !== runtimeBindingText(run.agent_id)
+      || bindingBackendId !== runtimeBindingText(run.backend_id)
+      || !agentIds.has(bindingAgentId)
+      || agentBackends.get(bindingAgentId) !== bindingBackendId
+      || agentVersions.get(bindingAgentId)! < bindingAgentVersion) {
+      runtimeHistoryRelationError();
+    }
+
+    const nestedAgent = bindingRecord.agent;
+    if (nestedAgent !== undefined) {
+      if (!nestedAgent || typeof nestedAgent !== "object" || Array.isArray(nestedAgent)) runtimeHistoryRelationError();
+      const nested = nestedAgent as Record<string, unknown>;
+      if (nested.backend_id !== undefined && runtimeBindingText(nested.backend_id) !== bindingBackendId) runtimeHistoryRelationError();
+      if (nested.config_version !== undefined && runtimeBindingInteger(nested.config_version, 1) !== bindingAgentVersion) runtimeHistoryRelationError();
+    }
+
+    const workId = bindingRecord.work_id === undefined ? undefined : runtimeBindingText(bindingRecord.work_id);
+    const assigneeId = bindingRecord.assignee_id === undefined ? undefined : runtimeBindingText(bindingRecord.assignee_id);
+    if ((workId === undefined) !== (assigneeId === undefined)) runtimeHistoryRelationError();
+    if (workId === undefined || assigneeId === undefined) continue;
+
+    const work = workById.get(workId);
+    const assignment = assignmentById.get(assigneeId);
+    if (!work || !assignment
+      || work.room_id !== bindingRoomId
+      || assignment.work_id !== workId
+      || assignment.room_id !== bindingRoomId
+      || assignment.agent_id !== bindingAgentId
+      || runtimeBindingInteger(assignment.agent_version, 1) !== bindingAgentVersion
+      || bindingGeneration > runtimeBindingInteger(work.control_generation, 0)) {
+      runtimeHistoryRelationError();
+    }
+    if (bindingRecord.parent_assignee_id !== undefined
+      && runtimeBindingText(bindingRecord.parent_assignee_id) !== (assignment.parent_assignment_id ?? undefined)) {
+      runtimeHistoryRelationError();
+    }
+  }
+}
+
+const humanWorkTerminalStatuses = new Set(["completed", "failed", "cancelled"]);
+const humanWorkActiveStatuses = new Set(["queued", "running", "waiting", "blocked"]);
+const humanAssignmentStatuses = new Set(["queued", "ready", "running", "waiting", "blocked", "completed", "failed", "cancelled", "outcome_unknown"]);
+
+function humanWorkRelationError(): never {
+  throw new WorkspaceServerError("workspace_bundle_v4_human_work_relation_invalid", 400);
+}
+
+function humanWorkId(value: unknown): string {
+  if (typeof value !== "string") return humanWorkRelationError();
+  try {
+    return assertOpaqueId(value, "workspace_bundle_v4_human_work_relation_invalid");
+  } catch {
+    return humanWorkRelationError();
+  }
+}
+
+function humanWorkWorkspaceId(row: Record<string, unknown>, workspaceId: string): void {
+  if (row.workspace_id !== workspaceId) humanWorkRelationError();
+}
+
+function humanWorkTimestamp(value: unknown): string {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return humanWorkRelationError();
+  return value;
+}
+
+function humanWorkPositiveInteger(value: unknown): number {
+  const number = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(number) || number < 1) return humanWorkRelationError();
+  return number;
+}
+
+function humanWorkNonNegativeInteger(value: unknown): number {
+  const number = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(number) || number < 0) return humanWorkRelationError();
+  return number;
+}
+
+function humanWorkNullableId(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return humanWorkId(value);
+}
+
+function humanWorkArray(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return humanWorkRelationError();
+  return value;
+}
+
+function humanWorkNonEmptyText(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return humanWorkRelationError();
+  return value;
+}
+
+function humanWorkObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return humanWorkRelationError();
+  return value as Record<string, unknown>;
+}
+
+function isLegacyUnresolvedAttachmentMarker(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const marker = value as Record<string, unknown>;
+  if (marker.kind !== "legacy_unresolved"
+    || marker.reason !== "reference_unavailable"
+    || !marker.ref || typeof marker.ref !== "object" || Array.isArray(marker.ref)
+    || Object.keys(marker).some((key) => !["kind", "reason", "ref"].includes(key))) {
+    return false;
+  }
+  const ref = marker.ref as Record<string, unknown>;
+  return !Object.keys(ref).some((key) => !["kind", "id", "uri", "version", "label"].includes(key))
+    && Object.values(ref).every((entry) => entry === null || typeof entry === "string");
+}
+
+/**
+ * A legacy reply continuation is only meaningful when the delegated branch
+ * that produced it has been fully settled.  Keep this check independent of
+ * JSONL order and walk the complete delegated subtree: a terminal delegated
+ * sibling with a queued/running descendant is still an incomplete snapshot.
+ */
+function hasSafeDelegatedSiblingSubtree(
+  assignments: readonly Record<string, unknown>[],
+  child: Record<string, unknown>,
+  parentId: string,
+  stoppedAssignments: ReadonlySet<string>,
+): boolean {
+  const siblings = assignments.filter((sibling) =>
+    sibling.id !== child.id
+    && sibling.work_id === child.work_id
+    && sibling.parent_assignment_id === parentId
+  );
+  if (siblings.length === 0) return false;
+
+  const assignmentById = new Map<string, Record<string, unknown>>();
+  for (const assignment of assignments) {
+    if (typeof assignment.id === "string") assignmentById.set(assignment.id, assignment);
+  }
+
+  const validateSubtree = (root: Record<string, unknown>): boolean => {
+    const visited = new Set<string>();
+    const pending = [root];
+    while (pending.length > 0) {
+      const assignment = pending.pop()!;
+      const assignmentId = typeof assignment.id === "string" ? assignment.id : undefined;
+      if (!assignmentId || visited.has(assignmentId)) return false;
+      visited.add(assignmentId);
+
+      if (assignment.work_id !== child.work_id
+        || assignment.origin_kind !== "delegated"
+        || !humanWorkTerminalStatuses.has(String(assignment.status))
+        || isReassignedHumanWorkAssignment(assignment)
+        || stoppedAssignments.has(assignmentId)) {
+        return false;
+      }
+
+      const descendants = assignments.filter((candidate) =>
+        candidate.work_id === child.work_id
+        && candidate.parent_assignment_id === assignmentId
+      );
+      for (const descendant of descendants) {
+        const descendantId = typeof descendant.id === "string" ? descendant.id : undefined;
+        if (!descendantId || assignmentById.get(descendantId) !== descendant) return false;
+        pending.push(descendant);
+      }
+    }
+    return true;
+  };
+
+  return siblings.every(validateSubtree);
+}
+
+function isHumanWorkContinuationInstruction(instruction: Record<string, unknown>): boolean {
+  return instruction.source_kind === "reply" || instruction.source_kind === "comment_reflection";
+}
+
+function isSyntheticParentContinuationInstruction(instruction: Record<string, unknown>): boolean {
+  if (instruction.source_kind !== "reply" || typeof instruction.body !== "string") return false;
+  try {
+    const body = JSON.parse(instruction.body) as unknown;
+    return !!body && typeof body === "object" && !Array.isArray(body)
+      && (body as Record<string, unknown>).kind === "parent_continuation";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * v95/v96 created reply continuations before assignment origin metadata
+ * existed.  Once v107 added the `normal`/`parent_continuation` distinction,
+ * those historical rows could be serialized with `origin_kind=normal` even
+ * though their parent edge represented a continuation.  Normalize only the
+ * narrow, structurally provable legacy shape in memory; the source JSONL is
+ * intentionally left unchanged so its historical provenance remains intact.
+ *
+ * A parent edge by itself is never enough.  The child must have the latest
+ * reply instruction for its assignment, share the parent's Work/Room/Agent
+ * and Agent version, point to a terminal non-reassigned parent, and have no
+ * unsafe sibling (delegated siblings are valid historical evidence). Anything
+ * ambiguous remains `normal` and is rejected by the normal relation checks
+ * below.
+ */
+function normalizeLegacyParentContinuationOrigins(rows: Record<string, Record<string, unknown>[]>): void {
+  const assignments = rows.workspace_human_work_assignments ?? [];
+  const instructions = rows.workspace_human_work_instructions ?? [];
+  const works = new Map(
+    (rows.workspace_human_works ?? [])
+      .filter((work) => typeof work.id === "string")
+      .map((work) => [work.id as string, work])
+  );
+  const assignmentsById = new Map(
+    assignments
+      .filter((assignment) => typeof assignment.id === "string")
+      .map((assignment) => [assignment.id as string, assignment])
+  );
+  const instructionsByAssignment = new Map<string, Record<string, unknown>[]>();
+  for (const instruction of instructions) {
+    if (typeof instruction.assignment_id !== "string") continue;
+    const existing = instructionsByAssignment.get(instruction.assignment_id) ?? [];
+    existing.push(instruction);
+    instructionsByAssignment.set(instruction.assignment_id, existing);
+  }
+  const stoppedAssignments = new Set(
+    (rows.workspace_human_work_controls ?? [])
+      .filter((control) => control.action === "assignment_stop"
+        && ["accepted", "pending", "confirmed", "unconfirmed"].includes(String(control.state)))
+      .map((control) => control.assignment_id)
+      .filter((assignmentId): assignmentId is string => typeof assignmentId === "string")
+  );
+
+  // Before v107 the assignment origin was not serialized.  A delegated
+  // sibling can therefore only be recovered from the server-owned shape that
+  // created it: a parent edge plus exactly one matching `system` instruction
+  // for the same Assignment/Work/Room/version.  Infer this before looking for
+  // a continuation so the strict checks below see the same graph as the
+  // database.  Do not infer from the instruction body itself; a continuation
+  // shaped system payload is an explicit forgery signal and remains rejected.
+  for (const sibling of assignments) {
+    const siblingId = typeof sibling.id === "string" ? sibling.id : undefined;
+    const parentId = typeof sibling.parent_assignment_id === "string" ? sibling.parent_assignment_id : undefined;
+    if (!siblingId || !parentId || (sibling.origin_kind !== undefined && sibling.origin_kind !== null)) continue;
+    const parent = assignmentsById.get(parentId);
+    const work = typeof sibling.work_id === "string" ? works.get(sibling.work_id) : undefined;
+    if (!parent || !work
+      || parent.work_id !== sibling.work_id
+      || parent.room_id !== sibling.room_id
+      || String(work.stop_state) !== "none"
+      || isReassignedHumanWorkAssignment(parent)
+      || isReassignedHumanWorkAssignment(sibling)
+      || stoppedAssignments.has(parentId)
+      || stoppedAssignments.has(siblingId)
+      || Number(sibling.instruction_version) <= Number(parent.instruction_version)
+      || Number(sibling.instruction_version) > Number(work.instruction_version)) continue;
+    const matchingSystemInstructions = (instructionsByAssignment.get(siblingId) ?? []).filter((instruction) =>
+      instruction.work_id === sibling.work_id
+      && instruction.room_id === sibling.room_id
+      && instruction.assignment_id === siblingId
+      && instruction.source_kind === "system"
+      && Number(instruction.version) === Number(sibling.instruction_version)
+    );
+    if (matchingSystemInstructions.length !== 1) continue;
+    const body = matchingSystemInstructions[0]!.body;
+    if (typeof body === "string") {
+      try {
+        const parsed = JSON.parse(body) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          && (parsed as Record<string, unknown>).kind === "parent_continuation") continue;
+      } catch {
+        // Delegated instruction bodies are opaque text; only the structured
+        // continuation shape above is forbidden.
+      }
+    }
+    sibling.origin_kind = "delegated";
+  }
+
+  const candidates = new Set<string>();
+  for (const child of assignments) {
+    const childId = typeof child.id === "string" ? child.id : undefined;
+    const parentId = typeof child.parent_assignment_id === "string" ? child.parent_assignment_id : undefined;
+    const originKind = child.origin_kind;
+    if (!childId || !parentId || (originKind !== undefined && originKind !== null && originKind !== "normal")) continue;
+    const parent = assignmentsById.get(parentId);
+    const work = typeof child.work_id === "string" ? works.get(child.work_id) : undefined;
+    if (!parent || !work
+      || parent.work_id !== child.work_id
+      || parent.room_id !== child.room_id
+      || parent.agent_id !== child.agent_id
+      || Number(parent.agent_version) !== Number(child.agent_version)
+      || !humanWorkTerminalStatuses.has(String(parent.status))
+      || String(child.status) === "outcome_unknown"
+      || isReassignedHumanWorkAssignment(parent)
+      || isReassignedHumanWorkAssignment(child)
+      || String(work.stop_state) !== "none"
+      || stoppedAssignments.has(parentId)
+      || stoppedAssignments.has(childId)
+      || Number(child.instruction_version) <= Number(parent.instruction_version)
+      || Number(child.instruction_version) > Number(work.instruction_version)) continue;
+    const continuationInstruction = (instructionsByAssignment.get(childId) ?? []).find((instruction) =>
+      instruction.work_id === child.work_id
+      && instruction.room_id === child.room_id
+      && isHumanWorkContinuationInstruction(instruction)
+      && Number(instruction.version) === Number(child.instruction_version));
+    if (!continuationInstruction) continue;
+    // A historical reply continuation may have a sibling created by the
+    // delegation path.  Keep the compatibility projection aligned with the
+    // database guard: delegated siblings are expected evidence, while a
+    // normal/unknown, reassigned, or stopped sibling keeps the relation
+    // ambiguous and fail-closed.
+    if (!hasSafeDelegatedSiblingSubtree(assignments, child, parentId, stoppedAssignments)) continue;
+    candidates.add(childId);
+  }
+
+  // A v95/v96 row may itself be the parent of another legacy reply.  The
+  // immediate-child checks above are not enough in that case: an ancestor
+  // that was reassigned, explicitly stopped, or is an unproven
+  // `normal + parent` edge makes the whole chain ambiguous.  Walk every
+  // ancestor before mutating any origin, allowing a normal parent edge only
+  // when that ancestor is independently proven to be another reply child.
+  const hasSafeParentChain = (child: Record<string, unknown>): boolean => {
+    const visited = new Set<string>();
+    let current = child;
+    while (true) {
+      const currentId = typeof current.id === "string" ? current.id : undefined;
+      const parentId = typeof current.parent_assignment_id === "string" ? current.parent_assignment_id : undefined;
+      if (!currentId || !parentId || visited.has(currentId)) return !parentId;
+      visited.add(currentId);
+      const parent = assignmentsById.get(parentId);
+      const currentWork = typeof current.work_id === "string" ? works.get(current.work_id) : undefined;
+      if (!parent
+        || !currentWork
+        || parent.work_id !== current.work_id
+        || parent.room_id !== current.room_id
+        || parent.agent_id !== current.agent_id
+        || Number(parent.agent_version) !== Number(current.agent_version)
+        || !humanWorkTerminalStatuses.has(String(parent.status))
+        || String(current.status) === "outcome_unknown"
+        || isReassignedHumanWorkAssignment(parent)
+        || isReassignedHumanWorkAssignment(current)
+        || String(currentWork.stop_state) !== "none"
+        || stoppedAssignments.has(parentId)
+        || stoppedAssignments.has(currentId)
+        || Number(current.instruction_version) <= Number(parent.instruction_version)) return false;
+
+      const currentOrigin = current.origin_kind;
+      if (currentOrigin === "normal" || currentOrigin === undefined || currentOrigin === null) {
+        // Only the original child and another independently proven legacy
+        // reply may retain a parent edge while still marked normal.  An
+        // arbitrary ancestor with that shape remains fail-closed.
+        if (!candidates.has(currentId)) return false;
+        const currentInstruction = (instructionsByAssignment.get(currentId) ?? []).find((instruction) =>
+          instruction.work_id === current.work_id
+          && instruction.room_id === current.room_id
+          && isHumanWorkContinuationInstruction(instruction)
+          && Number(instruction.version) === Number(current.instruction_version));
+        if (!currentInstruction) return false;
+      } else if (currentOrigin === "parent_continuation") {
+        const currentInstruction = (instructionsByAssignment.get(currentId) ?? []).find((instruction) =>
+          instruction.work_id === current.work_id
+          && instruction.room_id === current.room_id
+          && isHumanWorkContinuationInstruction(instruction)
+          && Number(instruction.version) === Number(current.instruction_version));
+        if (!currentInstruction) return false;
+      } else if (currentOrigin !== "delegated") {
+        return false;
+      }
+      if (!hasSafeDelegatedSiblingSubtree(assignments, current, parentId, stoppedAssignments)) return false;
+      current = parent;
+    }
+  };
+  for (const assignment of assignments) {
+    if (typeof assignment.id === "string" && candidates.has(assignment.id) && hasSafeParentChain(assignment)) {
+      assignment.origin_kind = "parent_continuation";
+    }
+  }
+
+}
+
+function isReassignedHumanWorkAssignment(assignment: Record<string, unknown>): boolean {
+  const result = assignment.result;
+  return !!result && typeof result === "object" && !Array.isArray(result)
+    && (result as Record<string, unknown>).reason === "reassigned";
+}
+
+/**
+ * Validates the Room/Agent/Account graph before an import reaches the
+ * SECURITY DEFINER human-work entrypoint. This is intentionally separate from
+ * the SQL function: the verifier must reject unknown references in an
+ * untrusted Bundle, while the SQL function remains the final RLS-safe guard.
+ */
+async function assertPortableHumanWorkRelations(
+  root: string,
+  manifest: WorkspaceBundleV4Manifest,
+  rows: Record<string, Record<string, unknown>[]>
+): Promise<void> {
+  const baseRoot = resolveBundlePath(root, baseV3Directory);
+  let workspace: Record<string, unknown>;
+  try {
+    workspace = JSON.parse(await readFile(resolveBundlePath(baseRoot, "workspace.json"), "utf8")) as Record<string, unknown>;
+  } catch {
+    return humanWorkRelationError();
+  }
+  const baseRooms = await readJsonl(resolveBundlePath(baseRoot, "rooms.jsonl"));
+  const baseAccounts = await readJsonl(resolveBundlePath(baseRoot, "accounts.jsonl"));
+  const baseMemberships = await readJsonl(resolveBundlePath(baseRoot, "memberships.jsonl"));
+  const baseRoomMemberships = await readJsonl(resolveBundlePath(baseRoot, "room-memberships.jsonl"));
+  const baseFiles = await readJsonl(resolveBundlePath(baseRoot, "files.jsonl"));
+  const workspaceId = manifest.workspace_id;
+  const knownAccounts = new Set<string>();
+  const ownerId = humanWorkId(workspace.created_by);
+  knownAccounts.add(ownerId);
+  for (const account of baseAccounts) {
+    knownAccounts.add(humanWorkId(account.id));
+  }
+  for (const membership of [...baseMemberships, ...baseRoomMemberships]) {
+    humanWorkWorkspaceId(membership, workspaceId);
+    knownAccounts.add(humanWorkId(membership.account_id));
+  }
+  const roomIds = new Set<string>();
+  const roomKinds = new Map<string, string>();
+  for (const room of baseRooms) {
+    humanWorkWorkspaceId(room, workspaceId);
+    const roomId = humanWorkId(room.id);
+    if (roomIds.has(roomId)) humanWorkRelationError();
+    roomIds.add(roomId);
+    const kind = room.room_kind === undefined || room.room_kind === null ? "normal" : String(room.room_kind);
+    if (kind !== "normal" && kind !== "agent_dm") humanWorkRelationError();
+    roomKinds.set(roomId, kind);
+  }
+  const explicitMemberships = new Map<string, string>();
+  for (const membership of baseRoomMemberships) {
+    const roomId = humanWorkId(membership.room_id);
+    const accountId = humanWorkId(membership.account_id);
+    if (!roomIds.has(roomId) || !knownAccounts.has(accountId)) humanWorkRelationError();
+    const key = `${roomId}\u0000${accountId}`;
+    if (explicitMemberships.has(key)) humanWorkRelationError();
+    explicitMemberships.set(key, String(membership.state));
+  }
+
+  const agentIds = new Set<string>();
+  const agentVersions = new Map<string, number>();
+  const agentBackends = new Map<string, string>();
+  for (const agent of rows.workspace_agents ?? []) {
+    humanWorkWorkspaceId(agent, workspaceId);
+    const agentId = humanWorkId(agent.id);
+    if (agentIds.has(agentId)) humanWorkRelationError();
+    agentIds.add(agentId);
+    agentVersions.set(agentId, humanWorkPositiveInteger(agent.version));
+    if (typeof agent.backend_id === "string" && agent.backend_id.trim()) agentBackends.set(agentId, agent.backend_id);
+    if (!knownAccounts.has(humanWorkId(agent.created_by))) humanWorkRelationError();
+    humanWorkTimestamp(agent.created_at);
+    humanWorkTimestamp(agent.updated_at);
+  }
+  const permissions = new Map<string, Record<string, unknown>>();
+  for (const permission of rows.workspace_agent_room_permissions ?? []) {
+    humanWorkWorkspaceId(permission, workspaceId);
+    const roomId = humanWorkId(permission.room_id);
+    const agentId = humanWorkId(permission.agent_id);
+    if (!roomIds.has(roomId) || !agentIds.has(agentId)
+      || typeof permission.can_view !== "boolean" || typeof permission.can_edit !== "boolean"
+      || typeof permission.can_execute !== "boolean" || !knownAccounts.has(humanWorkId(permission.created_by))) {
+      humanWorkRelationError();
+    }
+    humanWorkPositiveInteger(permission.version);
+    humanWorkTimestamp(permission.created_at);
+    humanWorkTimestamp(permission.updated_at);
+    const key = `${roomId}\u0000${agentId}`;
+    if (permissions.has(key)) humanWorkRelationError();
+    permissions.set(key, permission);
+  }
+  for (const connection of rows.workspace_connection_descriptors ?? []) {
+    humanWorkWorkspaceId(connection, workspaceId);
+    const agentId = humanWorkNullableId(connection.agent_id);
+    if ((agentId && !agentIds.has(agentId))
+      || !knownAccounts.has(humanWorkId(connection.principal_account_id))
+      || !knownAccounts.has(humanWorkId(connection.created_by))
+      || connection.status === "active"
+      || !["revoked", "expired"].includes(String(connection.status))
+      || !Array.isArray(connection.allowed_room_ids)
+      || connection.allowed_room_ids.some((roomId) => !roomIds.has(humanWorkId(roomId)))
+      || humanWorkPositiveInteger(connection.room_limit) < connection.allowed_room_ids.length) {
+      humanWorkRelationError();
+    }
+    humanWorkId(connection.id);
+    humanWorkId(connection.connector_id);
+    humanWorkId(connection.app_id);
+    humanWorkPositiveInteger(connection.version);
+    humanWorkTimestamp(connection.expires_at);
+    humanWorkTimestamp(connection.created_at);
+    humanWorkTimestamp(connection.updated_at);
+    if (connection.revoked_at !== null && connection.revoked_at !== undefined) humanWorkTimestamp(connection.revoked_at);
+    if (!Array.isArray(connection.ingress_classes) || connection.ingress_classes.some((entry) => typeof entry !== "string" || !entry.trim())) humanWorkRelationError();
+  }
+
+  // Room settings are stored in the embedded V3 Rooms file. Old V3/V4 rows
+  // omit the additive columns and therefore behave as normal Rooms.
+  for (const room of baseRooms) {
+    const roomId = humanWorkId(room.id);
+    const kind = room.room_kind === undefined || room.room_kind === null ? "normal" : room.room_kind;
+    if (kind !== "normal" && kind !== "agent_dm") humanWorkRelationError();
+    const agentId = humanWorkNullableId(room.default_agent_id);
+    const agentVersion = room.default_agent_version === undefined || room.default_agent_version === null || room.default_agent_version === ""
+      ? undefined
+      : humanWorkPositiveInteger(room.default_agent_version);
+    if ((agentId === undefined) !== (agentVersion === undefined)
+      || (agentId !== undefined && !agentIds.has(agentId))
+      || (agentId !== undefined && agentVersions.get(agentId)! < agentVersion!)) {
+      humanWorkRelationError();
+    }
+    const dmAccountId = humanWorkNullableId(room.dm_account_id);
+    if ((kind === "normal" && dmAccountId !== undefined)
+      || (kind === "agent_dm" && (dmAccountId === undefined || agentId === undefined))
+      || (dmAccountId !== undefined && !knownAccounts.has(dmAccountId))) {
+      humanWorkRelationError();
+    }
+    if (kind === "agent_dm") {
+      if (explicitMemberships.get(`${roomId}\u0000${dmAccountId}`) !== "active") humanWorkRelationError();
+      const permission = permissions.get(`${roomId}\u0000${agentId}`);
+      if (!permission || permission.can_view !== true || permission.can_execute !== true) humanWorkRelationError();
+    }
+  }
+
+  const portableFiles = new Map<string, { roomId: string; version: number; sha256: string }>();
+  for (const file of baseFiles) {
+    humanWorkWorkspaceId(file, workspaceId);
+    const filePath = typeof file.path === "string" ? file.path : humanWorkRelationError();
+    try {
+      assertSafeRelativePath(filePath);
+    } catch {
+      humanWorkRelationError();
+    }
+    const roomId = humanWorkId(file.room_id);
+    const version = humanWorkPositiveInteger(file.version);
+    const sha256 = typeof file.sha256 === "string" && /^[a-f0-9]{64}$/.test(file.sha256)
+      ? file.sha256
+      : humanWorkRelationError();
+    if (!roomIds.has(roomId) || portableFiles.has(filePath)
+      || manifest.files[`${baseV3Directory}/files/${filePath}`] !== sha256) {
+      humanWorkRelationError();
+    }
+    portableFiles.set(filePath, { roomId, version, sha256 });
+  }
+
+  const assertPortableAttachmentRefs = async (value: unknown, roomId: string): Promise<void> => {
+    const entries = humanWorkArray(value);
+    if (entries.length > 32) humanWorkRelationError();
+    const validRefs = [];
+    for (const entry of entries) {
+      if (isLegacyUnresolvedAttachmentMarker(entry)) continue;
+      const parsed = WorkspaceFileResourceRefSchema.safeParse(entry);
+      if (!parsed.success) humanWorkRelationError();
+      validRefs.push(parsed.data);
+    }
+    for (const ref of validRefs) {
+      try {
+        assertSafeRelativePath(ref.uri);
+      } catch {
+        humanWorkRelationError();
+      }
+      const file = portableFiles.get(ref.uri);
+      if (!file || file.roomId !== roomId || file.sha256 !== ref.id
+        || String(file.version) !== ref.version
+        || manifest.files[`${baseV3Directory}/files/${ref.uri}`] !== ref.id) {
+        humanWorkRelationError();
+      }
+      try {
+        const content = await readFile(resolveBundlePath(baseRoot, `files/${ref.uri}`));
+        if (hashBytes(content) !== file.sha256) humanWorkRelationError();
+      } catch {
+        humanWorkRelationError();
+      }
+    }
+  };
+
+  const works = rows.workspace_human_works ?? [];
+  const workById = new Map<string, Record<string, unknown>>();
+  const workOperationIds = new Set<string>();
+  for (const work of works) {
+    humanWorkWorkspaceId(work, workspaceId);
+    const workId = humanWorkId(work.id);
+    const roomId = humanWorkId(work.room_id);
+    const operationId = humanWorkId(work.operation_id);
+    const defaultAgentId = humanWorkId(work.default_agent_id);
+    const status = String(work.status);
+    const stopState = String(work.stop_state);
+    if (workById.has(workId) || workOperationIds.has(operationId)
+      || !roomIds.has(roomId) || !knownAccounts.has(humanWorkId(work.requester_account_id))
+      || !agentIds.has(defaultAgentId) || !["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"].includes(status)
+      || !["none", "requested", "confirmed", "unconfirmed"].includes(stopState)
+      || humanWorkNonEmptyText(work.title).length > 500
+      || !humanWorkNonEmptyText(work.objective)
+      || humanWorkArray(work.completion_criteria).length > 100
+      || humanWorkPositiveInteger(work.default_agent_version) < 1
+      || humanWorkPositiveInteger(work.instruction_version) < 1
+      || humanWorkNonNegativeInteger(work.control_generation) < 0) {
+      humanWorkRelationError();
+    }
+    humanWorkTimestamp(work.created_at);
+    humanWorkTimestamp(work.updated_at);
+    workById.set(workId, work);
+    workOperationIds.add(operationId);
+  }
+
+  const assignments = rows.workspace_human_work_assignments ?? [];
+  const assignmentById = new Map<string, Record<string, unknown>>();
+  for (const assignment of assignments) {
+    humanWorkWorkspaceId(assignment, workspaceId);
+    const assignmentId = humanWorkId(assignment.id);
+    const workId = humanWorkId(assignment.work_id);
+    const roomId = humanWorkId(assignment.room_id);
+    const parentId = humanWorkNullableId(assignment.parent_assignment_id);
+    const originKind = assignment.origin_kind === undefined || assignment.origin_kind === null
+      ? undefined
+      : String(assignment.origin_kind);
+    const dependencyIds = assignment.dependency_assignment_ids === null || assignment.dependency_assignment_ids === undefined
+      ? []
+      : Array.isArray(assignment.dependency_assignment_ids)
+        ? assignment.dependency_assignment_ids.map((value) => humanWorkId(value))
+        : humanWorkRelationError();
+    const status = String(assignment.status);
+    const work = workById.get(workId);
+    if (assignmentById.has(assignmentId) || !work || work.room_id !== roomId
+      || roomKinds.get(roomId) === "agent_dm" && parentId !== undefined
+      || !agentIds.has(humanWorkId(assignment.agent_id)) || !humanAssignmentStatuses.has(status)
+      || originKind !== undefined && !["normal", "delegated", "parent_continuation"].includes(originKind)
+      || agentVersions.get(humanWorkId(assignment.agent_id))! < humanWorkPositiveInteger(assignment.agent_version)
+      || humanWorkPositiveInteger(assignment.agent_version) < 1
+      || humanWorkPositiveInteger(assignment.instruction_version) < 1
+      || humanWorkNonNegativeInteger(assignment.attempt) < 0
+      || typeof assignment.priority !== "number" && typeof assignment.priority !== "string"
+      || assignment.lease_owner !== null && assignment.lease_owner !== undefined
+      || assignment.lease_expires_at !== null && assignment.lease_expires_at !== undefined) {
+      humanWorkRelationError();
+    }
+    humanWorkNonNegativeInteger(assignment.attempt);
+    if (!Number.isSafeInteger(Number(assignment.priority))) humanWorkRelationError();
+    if (parentId === assignmentId || new Set(dependencyIds).size !== dependencyIds.length
+      || dependencyIds.includes(assignmentId) || dependencyIds.includes(parentId ?? "")) humanWorkRelationError();
+    humanWorkTimestamp(assignment.created_at);
+    humanWorkTimestamp(assignment.updated_at);
+    if (assignment.started_at !== null && assignment.started_at !== undefined) humanWorkTimestamp(assignment.started_at);
+    if (assignment.completed_at !== null && assignment.completed_at !== undefined) humanWorkTimestamp(assignment.completed_at);
+    if (assignment.current_run_id !== null && assignment.current_run_id !== undefined) humanWorkId(assignment.current_run_id);
+    if (assignment.result !== null && assignment.result !== undefined) humanWorkObject(assignment.result);
+    assignmentById.set(assignmentId, assignment);
+  }
+  for (const assignment of assignments) {
+    const parentId = humanWorkNullableId(assignment.parent_assignment_id);
+    const originKind = assignment.origin_kind === undefined || assignment.origin_kind === null
+      ? undefined
+      : String(assignment.origin_kind);
+    if (parentId) {
+      const parent = assignmentById.get(parentId);
+      if (!parent || parent.work_id !== assignment.work_id) humanWorkRelationError();
+    }
+    // Bundles from before v107 omit this server-only field and remain
+    // readable; when it is present, however, its parent/Agent relation is
+    // part of the restore contract. In particular, a forged continuation
+    // cannot inherit an unrelated parent's SessionRef.
+    if (originKind === "normal" && parentId) humanWorkRelationError();
+    // A missing origin is only compatible with pre-v107 data after the
+    // normalization pass has proved the exact delegated/reply structure. Any
+    // remaining parent edge is unknown or ambiguous and must fail closed.
+    if (originKind === undefined && parentId) humanWorkRelationError();
+    if (originKind !== undefined && originKind !== "normal" && !parentId) humanWorkRelationError();
+    if (originKind === "parent_continuation" && parentId) {
+      const parent = assignmentById.get(parentId);
+      if (!parent
+        || !["completed", "failed", "cancelled"].includes(String(parent.status))
+        || parent.agent_id !== assignment.agent_id
+        || Number(parent.agent_version) !== Number(assignment.agent_version)) {
+        humanWorkRelationError();
+      }
+    }
+    const dependencyIds = Array.isArray(assignment.dependency_assignment_ids) ? assignment.dependency_assignment_ids : [];
+    for (const dependencyId of dependencyIds) {
+      const dependency = assignmentById.get(humanWorkId(dependencyId));
+      if (!dependency || dependency.work_id !== assignment.work_id || dependency.room_id !== assignment.room_id) humanWorkRelationError();
+    }
+  }
+  assertPortableRuntimeBindingRelations(rows, workspaceId, workById, assignmentById, agentIds, agentVersions, agentBackends);
+  const visitingAssignments = new Set<string>();
+  const visitedAssignments = new Set<string>();
+  const visitAssignment = (assignmentId: string): void => {
+    if (visitingAssignments.has(assignmentId)) humanWorkRelationError();
+    if (visitedAssignments.has(assignmentId)) return;
+    const assignment = assignmentById.get(assignmentId);
+    if (!assignment) humanWorkRelationError();
+    visitingAssignments.add(assignmentId);
+    const parent = humanWorkNullableId(assignment.parent_assignment_id);
+    if (parent) visitAssignment(parent);
+    const dependencyIds = Array.isArray(assignment.dependency_assignment_ids) ? assignment.dependency_assignment_ids : [];
+    for (const dependencyId of dependencyIds) visitAssignment(humanWorkId(dependencyId));
+    visitingAssignments.delete(assignmentId);
+    visitedAssignments.add(assignmentId);
+  };
+  for (const assignment of assignments) visitAssignment(humanWorkId(assignment.id));
+
+  const continuationParents = new Set<string>();
+  for (const assignment of assignments) {
+    if (assignment.origin_kind !== "parent_continuation") continue;
+    const parentId = humanWorkNullableId(assignment.parent_assignment_id);
+    if (!parentId || continuationParents.has(parentId)) humanWorkRelationError();
+    continuationParents.add(parentId);
+  }
+
+  const instructions = rows.workspace_human_work_instructions ?? [];
+  const instructionById = new Map<string, Record<string, unknown>>();
+  const instructionVersions = new Set<string>();
+  for (const instruction of instructions) {
+    humanWorkWorkspaceId(instruction, workspaceId);
+    const instructionId = humanWorkId(instruction.id);
+    const workId = humanWorkId(instruction.work_id);
+    const roomId = humanWorkId(instruction.room_id);
+    const assignmentId = humanWorkNullableId(instruction.assignment_id);
+    const sourceCommentId = humanWorkNullableId(instruction.source_comment_id);
+    const sourceCommentVersion = instruction.source_comment_version === null || instruction.source_comment_version === undefined
+      ? undefined
+      : humanWorkPositiveInteger(instruction.source_comment_version);
+    const version = humanWorkPositiveInteger(instruction.version);
+    const key = `${workId}\u0000${version}`;
+    const attachmentRefs = humanWorkArray(instruction.attachment_refs);
+    const body = typeof instruction.body === "string" ? instruction.body.trim() : "";
+    if (instructionById.has(instructionId) || instructionVersions.has(key)
+      || !workById.has(workId) || workById.get(workId)!.room_id !== roomId
+      || (assignmentId !== undefined && (!assignmentById.has(assignmentId) || assignmentById.get(assignmentId)!.work_id !== workId || assignmentById.get(assignmentId)!.room_id !== roomId))
+      || body.length === 0 && attachmentRefs.length === 0
+      || !["request", "reply", "comment_reflection", "system"].includes(String(instruction.source_kind))
+      || !["pending", "accepted", "delivered", "applied", "failed"].includes(String(instruction.state))
+      || !knownAccounts.has(humanWorkId(instruction.created_by))
+      || (sourceCommentId === undefined) !== (sourceCommentVersion === undefined)) {
+      humanWorkRelationError();
+    }
+    humanWorkTimestamp(instruction.created_at);
+    await assertPortableAttachmentRefs(attachmentRefs, roomId);
+    instructionById.set(instructionId, instruction);
+    instructionVersions.add(key);
+  }
+
+  const comments = rows.workspace_human_work_comments ?? [];
+  const commentById = new Map<string, Record<string, unknown>>();
+  const commentVersions = new Set<string>();
+  for (const comment of comments) {
+    humanWorkWorkspaceId(comment, workspaceId);
+    const commentId = humanWorkId(comment.id);
+    const workId = humanWorkId(comment.work_id);
+    const roomId = humanWorkId(comment.room_id);
+    const version = humanWorkPositiveInteger(comment.version);
+    const key = `${workId}\u0000${version}`;
+    const attachmentRefs = humanWorkArray(comment.attachment_refs);
+    const body = typeof comment.body === "string" ? comment.body.trim() : "";
+    if (commentById.has(commentId) || commentVersions.has(key)
+      || !workById.has(workId) || workById.get(workId)!.room_id !== roomId
+      || !knownAccounts.has(humanWorkId(comment.author_account_id))
+      || body.length === 0 && attachmentRefs.length === 0) {
+      humanWorkRelationError();
+    }
+    humanWorkTimestamp(comment.created_at);
+    await assertPortableAttachmentRefs(attachmentRefs, roomId);
+    commentById.set(commentId, comment);
+    commentVersions.add(key);
+  }
+  for (const instruction of instructions) {
+    const commentId = humanWorkNullableId(instruction.source_comment_id);
+    if (commentId !== undefined) {
+      const comment = commentById.get(commentId);
+      if (!comment || comment.work_id !== instruction.work_id || Number(comment.version) !== Number(instruction.source_comment_version)) humanWorkRelationError();
+    }
+  }
+
+  const reactions = rows.workspace_human_work_comment_reactions ?? [];
+  const reactionById = new Set<string>();
+  const reactionKeys = new Set<string>();
+  for (const reaction of reactions) {
+    humanWorkWorkspaceId(reaction, workspaceId);
+    const reactionId = humanWorkId(reaction.id);
+    const workId = humanWorkId(reaction.work_id);
+    const roomId = humanWorkId(reaction.room_id);
+    const commentId = humanWorkId(reaction.comment_id);
+    const key = `${commentId}\u0000${humanWorkId(reaction.actor_account_id)}\u0000${reaction.reaction}`;
+    const comment = commentById.get(commentId);
+    if (reactionById.has(reactionId) || reactionKeys.has(key) || !comment
+      || comment.work_id !== workId || comment.room_id !== roomId
+      || !knownAccounts.has(humanWorkId(reaction.actor_account_id)) || reaction.reaction !== "like"
+      || typeof reaction.enabled !== "boolean" || humanWorkPositiveInteger(reaction.version) < 1) {
+      humanWorkRelationError();
+    }
+    humanWorkTimestamp(reaction.created_at);
+    humanWorkTimestamp(reaction.updated_at);
+    reactionById.add(reactionId);
+    reactionKeys.add(key);
+  }
+
+  const controls = rows.workspace_human_work_controls ?? [];
+  const controlById = new Set<string>();
+  const controlOperations = new Set<string>();
+  for (const control of controls) {
+    humanWorkWorkspaceId(control, workspaceId);
+    const controlId = humanWorkId(control.id);
+    const workId = humanWorkId(control.work_id);
+    const roomId = humanWorkId(control.room_id);
+    const assignmentId = humanWorkNullableId(control.assignment_id);
+    const operationId = humanWorkId(control.operation_id);
+    if (controlById.has(controlId) || controlOperations.has(operationId)
+      || !workById.has(workId) || workById.get(workId)!.room_id !== roomId
+      || (assignmentId !== undefined && (!assignmentById.has(assignmentId) || assignmentById.get(assignmentId)!.work_id !== workId || assignmentById.get(assignmentId)!.room_id !== roomId))
+      || !["stop_request", "stop_confirm", "stop_unconfirmed", "resume", "assignment_stop", "reassign"].includes(String(control.action))
+      || !["accepted", "pending", "confirmed", "failed", "unconfirmed"].includes(String(control.state))
+      || !knownAccounts.has(humanWorkId(control.actor_account_id))) {
+      humanWorkRelationError();
+    }
+    humanWorkNonNegativeInteger(control.generation);
+    humanWorkObject(control.details);
+    humanWorkTimestamp(control.created_at);
+    humanWorkTimestamp(control.updated_at);
+    controlById.add(controlId);
+    controlOperations.add(operationId);
+  }
+
+  assertPortableParentContinuationRelations(assignments, assignmentById, workById, instructions, controls);
+
+  const reservations = rows.workspace_human_work_launch_reservations ?? [];
+  const reservationById = new Set<string>();
+  const reservationOperations = new Set<string>();
+  for (const reservation of reservations) {
+    humanWorkWorkspaceId(reservation, workspaceId);
+    const reservationId = humanWorkId(reservation.id);
+    const workId = humanWorkId(reservation.work_id);
+    const assignmentId = humanWorkId(reservation.assignment_id);
+    const roomId = humanWorkId(reservation.room_id);
+    const operationId = humanWorkId(reservation.operation_id);
+    const status = String(reservation.status);
+    const assignment = assignmentById.get(assignmentId);
+    if (reservationById.has(reservationId) || reservationOperations.has(operationId)
+      || !assignment || assignment.work_id !== workId || assignment.room_id !== roomId
+      || !["reserved", "claimed", "released", "cancelled"].includes(status)
+      || reservation.lease_owner !== null && reservation.lease_owner !== undefined
+      || reservation.lease_expires_at !== null && reservation.lease_expires_at !== undefined
+      || (status === "claimed") !== (reservation.claimed_at !== null && reservation.claimed_at !== undefined)
+      || (["released", "cancelled"].includes(status) && reservation.released_at === null || ["released", "cancelled"].includes(status) && reservation.released_at === undefined)) {
+      humanWorkRelationError();
+    }
+    humanWorkNonNegativeInteger(reservation.generation);
+    humanWorkTimestamp(reservation.scheduled_at);
+    humanWorkTimestamp(reservation.created_at);
+    humanWorkTimestamp(reservation.updated_at);
+    if (reservation.claimed_at !== null && reservation.claimed_at !== undefined) humanWorkTimestamp(reservation.claimed_at);
+    if (reservation.released_at !== null && reservation.released_at !== undefined) humanWorkTimestamp(reservation.released_at);
+    reservationById.add(reservationId);
+    reservationOperations.add(operationId);
+  }
+
+  const sessions = new Map<string, Record<string, unknown>>();
+  for (const session of rows.workspace_runtime_sessions ?? []) {
+    if (session.workspace_id !== workspaceId) humanWorkRelationError();
+    const sessionId = humanWorkId(session.id);
+    if (sessions.has(sessionId)) humanWorkRelationError();
+    sessions.set(sessionId, session);
+  }
+  const legacyMappings = rows.workspace_human_work_legacy_sessions ?? [];
+  const legacyById = new Set<string>();
+  const legacyBySession = new Set<string>();
+  const legacyByWork = new Set<string>();
+  const legacyByOperation = new Set<string>();
+  for (const mapping of legacyMappings) {
+    humanWorkWorkspaceId(mapping, workspaceId);
+    const mappingId = humanWorkId(mapping.id);
+    const sessionId = humanWorkId(mapping.legacy_session_id);
+    const roomId = humanWorkId(mapping.room_id);
+    const workId = humanWorkId(mapping.work_id);
+    const operationId = humanWorkId(mapping.operation_id);
+    const session = sessions.get(sessionId);
+    if (legacyById.has(mappingId) || legacyBySession.has(sessionId) || legacyByWork.has(workId) || legacyByOperation.has(operationId)
+      || !session || session.room_id !== roomId || !roomIds.has(roomId) || !workById.has(workId)
+      || workById.get(workId)!.room_id !== roomId || !knownAccounts.has(humanWorkId(mapping.created_by))) {
+      humanWorkRelationError();
+    }
+    humanWorkTimestamp(mapping.created_at);
+    humanWorkTimestamp(mapping.updated_at);
+    legacyById.add(mappingId);
+    legacyBySession.add(sessionId);
+    legacyByWork.add(workId);
+    legacyByOperation.add(operationId);
+  }
+}
+
+/**
+ * Parent continuations are server-owned continuation edges, not arbitrary
+ * child assignments. Keep the import verifier aligned with the database
+ * guard: an existing continuation must have a terminal, non-reassigned
+ * ancestor chain, no active assignment stop, and an unstopped Work. A
+ * delegated sibling is required for a synthetic system continuation; a direct
+ * user reply/comment continuation may legitimately have no sibling. A second
+ * continuation or an untyped sibling makes the snapshot ambiguous. This
+ * check never rewrites a `parent_continuation` row.
+ */
+function assertPortableParentContinuationRelations(
+  assignments: readonly Record<string, unknown>[],
+  assignmentById: ReadonlyMap<string, Record<string, unknown>>,
+  workById: ReadonlyMap<string, Record<string, unknown>>,
+  instructions: readonly Record<string, unknown>[],
+  controls: readonly Record<string, unknown>[]
+): void {
+  const activeAssignmentStops = new Set(
+    controls
+      .filter((control) => control.action === "assignment_stop"
+        && ["accepted", "pending", "confirmed", "unconfirmed"].includes(String(control.state)))
+      .map((control) => control.assignment_id)
+      .filter((assignmentId): assignmentId is string => typeof assignmentId === "string")
+  );
+  const instructionsByAssignment = new Map<string, Record<string, unknown>[]>();
+  for (const instruction of instructions) {
+    const assignmentId = instruction.assignment_id;
+    if (typeof assignmentId !== "string") continue;
+    const current = instructionsByAssignment.get(assignmentId) ?? [];
+    current.push(instruction);
+    instructionsByAssignment.set(assignmentId, current);
+  }
+  const continuationParents = new Set<string>();
+  const assertParentContinuationInstruction = (assignment: Record<string, unknown>): Record<string, unknown> => {
+    const assignmentId = humanWorkId(assignment.id);
+    const instruction = (instructionsByAssignment.get(assignmentId) ?? []).find((candidate) =>
+      candidate.work_id === assignment.work_id
+      && candidate.room_id === assignment.room_id
+      && Number(candidate.version) === Number(assignment.instruction_version)
+      && isHumanWorkContinuationInstruction(candidate)
+    );
+    if (!instruction) humanWorkRelationError();
+    return instruction;
+  };
+  const assertChain = (target: Record<string, unknown>): void => {
+    const visited = new Set<string>();
+    let current = target;
+    while (true) {
+      const currentId = humanWorkId(current.id);
+      const parentId = humanWorkNullableId(current.parent_assignment_id);
+      if (!parentId) return;
+      if (visited.has(currentId)) humanWorkRelationError();
+      visited.add(currentId);
+      const parent = assignmentById.get(parentId);
+      const work = workById.get(humanWorkId(current.work_id));
+      if (!parent || !work
+        || parent.work_id !== current.work_id
+        || parent.room_id !== current.room_id
+        || String(work.stop_state) !== "none"
+        || !humanWorkTerminalStatuses.has(String(parent.status))
+        || isReassignedHumanWorkAssignment(current)
+        || isReassignedHumanWorkAssignment(parent)
+        || activeAssignmentStops.has(currentId)
+        || activeAssignmentStops.has(parentId)) {
+        humanWorkRelationError();
+      }
+      const currentOrigin = current.origin_kind === undefined || current.origin_kind === null
+        ? undefined
+        : String(current.origin_kind);
+      if (currentId !== humanWorkId(target.id)
+        && currentOrigin === "normal") humanWorkRelationError();
+      if (currentOrigin === "parent_continuation") {
+        const instruction = assertParentContinuationInstruction(current);
+        const siblings = assignments.filter((sibling) =>
+          sibling.id !== current.id
+          && sibling.work_id === current.work_id
+          && sibling.parent_assignment_id === parentId
+        );
+        if ((siblings.length > 0 || isSyntheticParentContinuationInstruction(instruction))
+          && !hasSafeDelegatedSiblingSubtree(assignments, current, parentId, activeAssignmentStops)) {
+          humanWorkRelationError();
+        }
+      }
+      current = parent;
+    }
+  };
+
+  for (const assignment of assignments) {
+    if (assignment.origin_kind !== "parent_continuation") continue;
+    const assignmentId = humanWorkId(assignment.id);
+    const parentId = humanWorkNullableId(assignment.parent_assignment_id);
+    const work = workById.get(humanWorkId(assignment.work_id));
+    if (!parentId || !work || String(work.stop_state) !== "none"
+      || continuationParents.has(parentId)
+      || isReassignedHumanWorkAssignment(assignment)
+      || activeAssignmentStops.has(assignmentId)) {
+      humanWorkRelationError();
+    }
+    continuationParents.add(parentId);
+    assertParentContinuationInstruction(assignment);
+    assertChain(assignment);
+  }
+}
+
+/**
+ * Produces the target-side projection for the guarded import function. A
+ * Bundle can contain an in-flight source snapshot, but its target must start
+ * with no runnable work, no current run, and no claimable reservation.
+ */
+function prepareHumanWorkRowsForRestore(
+  rows: Record<string, Record<string, unknown>[]>,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  manifest: WorkspaceBundleV4Manifest
+): Record<string, Record<string, unknown>[]> {
+  const prepared = { ...rows };
+  const works = (rows.workspace_human_works ?? []).map((row) => ({ ...row }));
+  const assignments = (rows.workspace_human_work_assignments ?? []).map((row) => ({ ...row }));
+  const reservations = (rows.workspace_human_work_launch_reservations ?? []).map((row) => ({ ...row }));
+  const controls = (rows.workspace_human_work_controls ?? []).map((row) => ({ ...row }));
+  for (const work of works) {
+    const sourceStatus = String(work.status);
+    const sourceStopState = work.stop_state;
+    if (sourceStatus !== "queued" && sourceStatus !== "running") continue;
+    work.status = "blocked";
+    work.stop_state = "unconfirmed";
+    const generation = Number(work.control_generation);
+    const nextGeneration = Number.isSafeInteger(generation) && generation >= 0 ? generation + 1 : 1;
+    work.control_generation = nextGeneration;
+    if (controls.some((control) => control.work_id === work.id && control.action === "stop_unconfirmed")) continue;
+    const restoredAt = typeof work.updated_at === "string" ? work.updated_at : new Date().toISOString();
+    controls.push({
+      workspace_id: context.workspaceId,
+      id: completionId("restore_stop_unconfirmed", manifest.workspace_id, `${manifest.integrity_hash}:${String(work.id)}`),
+      work_id: work.id,
+      assignment_id: null,
+      room_id: work.room_id,
+      action: "stop_unconfirmed",
+      state: "unconfirmed",
+      actor_account_id: context.accountId,
+      generation: nextGeneration,
+      operation_id: completionId("restore_stop_operation", manifest.workspace_id, `${manifest.integrity_hash}:${String(work.id)}`),
+      details: {
+        reason: "workspace_bundle_restore_interrupted",
+        source_status: sourceStatus,
+        source_stop_state: sourceStopState
+      },
+      created_at: restoredAt,
+      updated_at: restoredAt
+    });
+  }
+  for (const assignment of assignments) {
+    if (!["queued", "ready", "running"].includes(String(assignment.status))) continue;
+    assignment.status = "waiting";
+    assignment.current_run_id = null;
+    assignment.lease_owner = null;
+    assignment.lease_expires_at = null;
+  }
+  for (const reservation of reservations) {
+    if (!["reserved", "claimed"].includes(String(reservation.status))) continue;
+    reservation.status = "cancelled";
+    reservation.lease_owner = null;
+    reservation.lease_expires_at = null;
+    reservation.claimed_at = null;
+    reservation.released_at = reservation.released_at
+      ?? reservation.updated_at
+      ?? reservation.created_at
+      ?? new Date().toISOString();
+  }
+  prepared.workspace_human_works = works;
+  prepared.workspace_human_work_assignments = assignments;
+  prepared.workspace_human_work_launch_reservations = reservations;
+  prepared.workspace_human_work_controls = controls;
+  return prepared;
 }
 
 /**

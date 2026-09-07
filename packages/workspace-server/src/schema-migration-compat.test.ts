@@ -8,6 +8,8 @@ import {
 } from "./schema";
 
 describe("Workspace Server migration checksum compatibility", () => {
+  const legacyV109Checksum = "b08987e51ff8a5caa421b5ea76503b8698da1904afc1416a5f0ada5e40acc143";
+
   it("does not rewrite legacy checksums when a later migration fails", async () => {
     const applied = migrationRowsThrough(79).map((migration) => legacyMigrationIfNeeded(migration));
     const client = new FakeMigrationClient(applied, "ALTER TABLE workspaces ALTER COLUMN organization_id DROP NOT NULL");
@@ -49,6 +51,52 @@ describe("Workspace Server migration checksum compatibility", () => {
       const sql = migration?.statements.join("\n") ?? "";
       expect(sql).not.toMatch(/organization_invitation_workspace_grants\s+grant\b/);
     }
+  });
+
+  it("grants the runtime role the reassignment guard used by reservation claims", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(116));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    const grantQuery = client.queries.find((query) => query.text.startsWith("GRANT EXECUTE ON FUNCTION"));
+    expect(grantQuery?.text).toContain("samurai_human_work_assignment_is_superseded(TEXT, TEXT)");
+  });
+
+  it("accepts only the known legacy v109 checksum and converges it before v115", async () => {
+    const applied = migrationRowsThrough(109).map((migration) => (
+      migration.version === 109 ? { ...migration, checksum: legacyV109Checksum } : migration
+    ));
+    const client = new FakeMigrationClient(applied);
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    const currentV109 = workspaceServerMigrationStatus().find((migration) => migration.version === 109)?.checksum;
+    expect(currentV109).toBe("624d49c1a5c07c718366215eebcab9109e7903004478cb414004f35ab9dbdff2");
+    expect(ledgerUpdates(client)).toContainEqual({
+      text: "UPDATE samurai_server_schema_migrations SET checksum = $1 WHERE version = $2",
+      values: [currentV109, 109]
+    });
+    expect(workspaceServerMigrationDefinitions().find((migration) => migration.version === 113)?.statements.join("\n"))
+      .toContain("samurai_reassign_human_work");
+    expect(workspaceServerMigrationDefinitions().find((migration) => migration.version === 115)?.name)
+      .toBe("workspace_server_human_work_continuation_reply_only");
+    const grantIndex = client.queries.reduce((index, query, queryIndex) => (
+      query.text.startsWith("GRANT ") ? queryIndex : index
+    ), -1);
+    const updateIndex = client.queries.findIndex((query) => query.text.startsWith("UPDATE samurai_server_schema_migrations"));
+    expect(grantIndex).toBeGreaterThanOrEqual(0);
+    expect(updateIndex).toBeGreaterThan(grantIndex);
+  });
+
+  it("rejects an unknown v109 checksum without rewriting the ledger", async () => {
+    const applied = migrationRowsThrough(109).map((migration) => (
+      migration.version === 109 ? { ...migration, checksum: "0".repeat(64) } : migration
+    ));
+    const client = new FakeMigrationClient(applied);
+
+    await expect(applyWorkspaceServerMigrations(fakePool(client), "samurai_app"))
+      .rejects.toThrow("workspace_server_schema_migration_mismatch:109");
+    expect(ledgerUpdates(client)).toHaveLength(0);
   });
 });
 

@@ -16,9 +16,9 @@ const publicContractOnlyOperationIds = new Set([
 ]);
 
 describe("Domain Operation strict gate coverage", () => {
-  it("loads the complete 196-operation strict gate with unique handlers", () => {
+  it("loads the complete 210-operation strict gate with unique handlers", () => {
     const ids = operationDefinitions.map((definition) => definition.id);
-    expect(operationDefinitions).toHaveLength(196);
+    expect(operationDefinitions).toHaveLength(210);
     expect(new Set(ids).size).toBe(ids.length);
     expect(operationDefinitions.every((definition) => definition.input && definition.output && typeof definition.createHandler === "function")).toBe(true);
     expect(Object.keys(domainOperationIds)).toHaveLength(operationDefinitions.length);
@@ -145,6 +145,11 @@ describe("Domain Operation strict gate coverage", () => {
           if ([
             "createRoom", "patchRoom", "listRooms", "viewRoom",
             "createAgent", "patchAgent", "bindAgentBackend", "listAgents", "viewAgent",
+            "openAgentDm", "setRoomDefaultAgent",
+            "createRoomWork", "listRoomWorks", "viewRoomWork", "replyToRoomWork",
+            "delegateRoomWorkAssignee",
+            "createRoomWorkComment", "applyRoomWorkComment", "setRoomWorkCommentReaction",
+            "stopRoomWork", "stopRoomWorkAssignee", "reassignRoomWorkAssignee",
             "addWorkspaceMember", "changeWorkspaceMemberRole", "removeWorkspaceMember",
             "setAgentRoomCreatePermission", "setRoomAgentPermissions", "removeRoomAgent", "addRoomMember",
             "listRoomParticipants", "changeRoomMemberRole", "removeRoomMember",
@@ -456,6 +461,10 @@ describe("Domain Operation strict gate coverage", () => {
             ? { ...(generatedInput as Record<string, unknown>), promotion_id: "sample" }
           : definition.id === "agent.patch"
             ? { ...(generatedInput as Record<string, unknown>), name: "sample" }
+          : definition.id === "room.work.comment.create"
+            ? { ...(generatedInput as Record<string, unknown>), body: "Fixture comment", attachments: [] }
+            : definition.id === "room.work.create" || definition.id === "room.work.reply"
+              ? { ...(generatedInput as Record<string, unknown>), instruction: "Fixture Room work instruction", attachments: [] }
           : definition.id === "learning.resource.version.update"
             ? { ...(generatedInput as Record<string, unknown>), content: "fixture content" }
           : definition.id === "workspace.organization.move.preflight" || definition.id === "workspace.organization.move.commit"
@@ -528,8 +537,8 @@ describe("Domain Operation strict gate coverage", () => {
       if (count === 0 && definition.id !== "presentation.plan") throw new Error(`${definition.id} did not call its Port`);
     }
 
-    expect(bindings).toHaveLength(196);
-    expect(portCalls.size).toBe(168);
+    expect(bindings).toHaveLength(210);
+    expect(portCalls.size).toBe(182);
 
     for (const operationId of ["artifact.create", "chat.turn.run"] as const) {
       const binding = bindings.find((candidate) => candidate.definition.id === operationId)!;

@@ -1,4 +1,4 @@
-import type { AgentBackend, BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
+import type { AgentBackend, BackendCancelResult, BackendExecutionContext, BackendOutputEvent, BackendRunInput } from "@samurai-agent/agent-backends";
 import type { BackendSessionPolicy, JsonValue } from "@samurai-agent/core-schemas";
 import { ensureProviderToolCallIds, ProviderRequestError, type ProviderAdapter, type ProviderInput, type ProviderOutput, type ProviderStreamChunk, type ProviderToolCall } from "./provider";
 
@@ -19,6 +19,14 @@ export interface SamuraiNativeBackendComponents {
   toolExecutor?: NativeToolExecutor;
 }
 
+/**
+ * Native execution is rebuilt from Samurai-owned state on every Run.  The
+ * binding is deliberately narrower than the provider input: it identifies
+ * the selected Agent and work boundary, but never carries credentials or an
+ * external Session ID.
+ */
+export type NativeExecutionContext = Extract<BackendExecutionContext, { credential_boundary: "provider_api"; continuity: "samurai_context" }>;
+
 export class SamuraiNativeBackend implements AgentBackend {
   readonly id = "samurai-native";
   readonly kind = "samurai_native" as const;
@@ -30,6 +38,7 @@ export class SamuraiNativeBackend implements AgentBackend {
   private readonly contextBuilder: NativeContextBuilder;
   private readonly promptBuilder: NativePromptBuilder;
   private readonly toolLoop: NativeToolLoop;
+  private readonly activeRunControllers = new Map<string, AbortController>();
 
   constructor(providerOrComponents?: ProviderAdapter | SamuraiNativeBackendComponents) {
     const components = nativeBackendComponents(providerOrComponents);
@@ -40,46 +49,107 @@ export class SamuraiNativeBackend implements AgentBackend {
     this.toolLoop = components.toolLoop ?? new NativeToolLoop(this.promptBuilder, toolExecutor);
   }
 
+  async cancelRun(runId: string): Promise<BackendCancelResult> {
+    const controller = this.activeRunControllers.get(runId);
+    if (!controller) {
+      return { kind: "unsupported", state: "unknown", reason: "active_run_not_tracked" };
+    }
+    controller.abort();
+    return { kind: "requested" };
+  }
+
   async *runTurn(input: BackendRunInput): AsyncIterable<BackendOutputEvent> {
     if (input.abort_signal?.aborted) {
       yield this.promptBuilder.cancelledBeforeStartEvent();
       return;
     }
-    yield this.promptBuilder.runStartedEvent(input);
-
-    if (!this.provider) {
-      yield this.promptBuilder.providerMissingEvent();
-      return;
-    }
-    if (input.abort_signal?.aborted) {
-      yield this.promptBuilder.cancelledBeforeStartEvent();
-      return;
-    }
-
+    const nativeController = new AbortController();
+    const composed = composeAbortSignals(input.abort_signal, nativeController.signal);
+    this.activeRunControllers.set(input.run_id, nativeController);
     try {
-      const providerInput = this.contextBuilder.build(input);
-      if (this.provider.stream) {
-        for await (const event of this.toolLoop.eventsForStream(this.provider.stream(providerInput), input.abort_signal)) {
-          yield event;
-        }
-      } else {
-        const output = await this.provider.generate(providerInput);
-        for (const event of this.toolLoop.eventsForOutput(output)) {
-          yield event;
-        }
+      yield this.promptBuilder.runStartedEvent(input);
+
+      if (composed.signal.aborted) {
+        yield this.promptBuilder.cancelledBeforeStartEvent();
+        return;
       }
-    } catch (error) {
-      yield this.promptBuilder.providerFailureEvent(error, this.provider, input.abort_signal?.aborted === true);
+
+      const contextError = nativeExecutionContextError(input, this.id);
+      if (contextError) {
+        yield this.promptBuilder.executionContextRejectedEvent(contextError);
+        return;
+      }
+
+      if (!this.provider) {
+        yield this.promptBuilder.providerMissingEvent();
+        return;
+      }
+      if (composed.signal.aborted) {
+        yield this.promptBuilder.cancelledBeforeStartEvent();
+        return;
+      }
+
+      try {
+        const providerInput = this.contextBuilder.build({ ...input, abort_signal: composed.signal });
+        if (this.provider.stream) {
+          for await (const event of this.toolLoop.eventsForStream(this.provider.stream(providerInput), composed.signal)) {
+            yield event;
+          }
+        } else {
+          const output = await this.provider.generate(providerInput);
+          for (const event of this.toolLoop.eventsForOutput(output)) {
+            yield event;
+          }
+        }
+      } catch (error) {
+        yield this.promptBuilder.providerFailureEvent(error, this.provider, composed.signal.aborted);
+      }
+    } finally {
+      composed.dispose();
+      if (this.activeRunControllers.get(input.run_id) === nativeController) {
+        this.activeRunControllers.delete(input.run_id);
+      }
     }
   }
 }
 
+function composeAbortSignals(primary: AbortSignal | undefined, secondary: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (primary?.aborted || secondary.aborted) {
+    controller.abort();
+    return { signal: controller.signal, dispose: () => undefined };
+  }
+  primary?.addEventListener("abort", abort, { once: true });
+  secondary.addEventListener("abort", abort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      primary?.removeEventListener("abort", abort);
+      secondary.removeEventListener("abort", abort);
+    }
+  };
+}
+
 export class NativeContextBuilder {
   build(input: BackendRunInput): ProviderInput {
+    const executionAgent = input.execution_context?.agent;
+    const agentContext = executionAgent
+      ? {
+          id: executionAgent.id,
+          name: executionAgent.name,
+          role: executionAgent.role,
+          instructions: executionAgent.instructions,
+          authority: "supporting_context" as const
+        }
+      : input.agent_context;
     return {
       abortSignal: input.abort_signal,
       envelope: input.envelope,
-      agentContext: input.agent_context,
+      // The execution snapshot is authoritative when present.  This keeps a
+      // stale caller-provided supporting context from changing the Agent's
+      // role or instructions for this Run.
+      agentContext,
       freezeSnapshot: input.freeze_snapshot,
       gatewayBoundary: input.gateway_boundary,
       activeMemory: input.active_memory.map((memory, index) => ({
@@ -143,6 +213,20 @@ export class NativePromptBuilder {
       payload: {
         error_code: "provider_not_configured",
         message: "No LLM provider is configured."
+      }
+    };
+  }
+
+  executionContextRejectedEvent(reason: string): BackendOutputEvent {
+    return {
+      event_type: "run_failed",
+      terminal_evidence: { kind: "not_started", source: "preflight_rejection" },
+      payload: {
+        error_code: "native_execution_context_rejected",
+        message: "Native execution context was rejected before the provider started.",
+        reason,
+        retryable: false,
+        cause_category: "configuration"
       }
     };
   }
@@ -400,6 +484,9 @@ function nativeToolActionId(toolName: string): string {
   if (toolName === "request_external_send") {
     return "external.send.prepare";
   }
+  if (toolName === "subagent_delegate") {
+    return "room.work.assignee.delegate";
+  }
   return toolName || "unknown_tool";
 }
 
@@ -408,6 +495,35 @@ function nativeBackendComponents(input: ProviderAdapter | SamuraiNativeBackendCo
     return {};
   }
   return isProviderAdapter(input) ? { provider: input } : input;
+}
+
+function nativeExecutionContextError(input: BackendRunInput, backendId: string): string | undefined {
+  const context = input.execution_context;
+  if (!context) return undefined;
+  if (context.credential_boundary !== "provider_api") return "credential_boundary_mismatch";
+  if (context.continuity !== "samurai_context") return "external_session_not_allowed";
+  if (!context.agent.enabled) return "agent_disabled";
+  if (context.agent.backend_id !== backendId) return "agent_backend_mismatch";
+  if (context.association.backend_id !== backendId) return "association_backend_mismatch";
+  if (context.association.room_id !== input.room_id) return "room_association_mismatch";
+  if (input.backend_session_id) return "external_session_id_not_allowed";
+  if (input.agent_context && (
+    input.agent_context.id !== context.agent.id
+    || input.agent_context.name !== context.agent.name
+    || input.agent_context.role !== context.agent.role
+    || input.agent_context.instructions !== context.agent.instructions
+  )) return "agent_context_mismatch";
+  if ([context.agent.id, context.agent.name, context.agent.role, context.agent.instructions].some((value) => !value.trim())) {
+    return "agent_snapshot_incomplete";
+  }
+  // Human Work's initial control generation is explicitly zero.  A zero is
+  // valid only when the typed work/assignee association is present; a
+  // malformed/no-association context still fails closed at generation one.
+  const hasWorkAssociation = Boolean(context.association.work_id.trim() && context.association.assignee_id.trim());
+  if (!Number.isSafeInteger(context.association.generation) || context.association.generation < (hasWorkAssociation ? 0 : 1)) return "association_generation_invalid";
+  if (Object.values(context.association).some((value) => typeof value === "string" && value.trim() === "")) return "association_identity_missing";
+  if (!context.agent.config_version.trim()) return "agent_config_version_missing";
+  return undefined;
 }
 
 function isProviderAdapter(input: ProviderAdapter | SamuraiNativeBackendComponents): input is ProviderAdapter {

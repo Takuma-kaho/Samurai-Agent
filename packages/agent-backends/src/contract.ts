@@ -146,6 +146,43 @@ export interface BackendToolBridge {
   tools: BackendToolBridgeToolDescriptor[];
 }
 
+/**
+ * Host-owned identity used to correlate a Backend run with the work that
+ * requested it.  This is deliberately an association only: it carries no
+ * Room authorization decision, external provider Session ID, or credential.
+ */
+export interface BackendRunAssociation {
+  workspace_id: string;
+  room_id: string;
+  work_id: string;
+  assignee_id: string;
+  backend_id: string;
+  generation: number;
+}
+
+/** Agent configuration snapshot selected by the host for one run. */
+export interface BackendExecutionAgentContext {
+  id: string;
+  name: string;
+  role: string;
+  instructions: string;
+  enabled: boolean;
+  backend_id: string;
+  config_version: string;
+}
+
+/**
+ * Optional additive execution context.  The boundary and continuity labels
+ * describe host policy; they do not grant a Backend Room authority or expose
+ * the external Session identity to a Client.
+ */
+export interface BackendExecutionContext {
+  agent: BackendExecutionAgentContext;
+  association: BackendRunAssociation;
+  credential_boundary: "provider_api" | "external_cli";
+  continuity: "samurai_context" | "external_session";
+}
+
 export interface BackendRunInput {
   run_id: string;
   /** Optional app-owned Session identity; Room/Run remain the Core identity. */
@@ -160,6 +197,7 @@ export interface BackendRunInput {
   };
   /** Host-owned identity for one Room, Session, Agent, and Backend pairing. */
   backend_session_key?: string;
+  /** Host-resolved provider identity; never a Client-supplied identifier. */
   backend_session_id?: string;
   input_message_id?: string;
   workspace_root?: string;
@@ -217,6 +255,8 @@ export interface BackendRunInput {
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
   expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view" | "generated_surface">;
   tool_bridge?: BackendToolBridge;
+  /** Optional host-owned correlation context; absent for legacy callers. */
+  execution_context?: BackendExecutionContext;
   abort_signal?: AbortSignal;
 }
 
@@ -259,10 +299,48 @@ export type RuntimeFailureCauseCategory = BackendRuntimeFailure["causeCategory"]
 export type BackendTerminalEvidence = CoreBackendTerminalEvidence;
 export type BackendIndeterminateEvidence = Extract<CoreBackendTerminalEvidence, { kind: "indeterminate" }>;
 export type BackendSettledEvidence = Exclude<CoreBackendTerminalEvidence, BackendIndeterminateEvidence>;
+
+/**
+ * A cancellation request is intentionally not a terminal result.  Backends
+ * that can only ask their runtime to stop return `requested`; the terminal
+ * event emitted by that runtime is the source of confirmation.
+ */
+export type BackendCancelRequestedResult = {
+  kind: "requested";
+  request_id?: string;
+  requested_at?: string;
+};
+
+/** A terminal cancellation result backed by settled evidence. */
+export type BackendCancelSettledResult = {
+  kind: "settled";
+  evidence: BackendSettledEvidence;
+  request_id?: string;
+  confirmed_at?: string;
+};
+
+/**
+ * The local backend does not track a live process after a restart.  Keep that
+ * fact explicit instead of converting it into a successful cancellation.
+ */
+export type BackendCancelUnavailableResult = {
+  kind: "unsupported";
+  state?: "not_running" | "unknown";
+  reason?: "active_run_not_tracked" | "cancel_not_supported" | "runtime_state_unavailable";
+};
+
 export type BackendCancelResult =
-  | { kind: "settled"; evidence: BackendSettledEvidence }
-  | { kind: "requested" }
-  | { kind: "unsupported" };
+  | BackendCancelSettledResult
+  | BackendCancelRequestedResult
+  | BackendCancelUnavailableResult;
+
+export function isBackendCancelRequested(result: BackendCancelResult): result is BackendCancelRequestedResult {
+  return result.kind === "requested";
+}
+
+export function isBackendCancelSettled(result: BackendCancelResult): result is BackendCancelSettledResult {
+  return result.kind === "settled";
+}
 
 export interface AgentBackendStatus {
   id: string;

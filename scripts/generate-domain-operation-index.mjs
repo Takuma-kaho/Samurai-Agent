@@ -23,6 +23,13 @@ const modules = filesUnder(operationsRoot)
   .map(readOperationModule)
   .sort((left, right) => left.id.localeCompare(right.id));
 
+// These operations remain executable for old callers, but must not appear in
+// the normal generated Client.  Keep the compatibility surface explicit so a
+// Session-less Room client cannot accidentally discover either legacy entry.
+const legacyClientOperationIds = new Set(["chat.turn.run", "session.create"]);
+const publicClientModules = modules.filter((module) => !legacyClientOperationIds.has(module.id));
+const legacyClientModules = modules.filter((module) => legacyClientOperationIds.has(module.id));
+
 const duplicate = modules.find((module, index) => index > 0 && modules[index - 1].id === module.id);
 if (duplicate) throw new Error(`duplicate_domain_operation_id:${duplicate.id}`);
 
@@ -122,12 +129,19 @@ const clientLines = [
   'import { domainOperationIds, type DomainOperationId } from "./operation-index.generated.js";',
   "",
   "export const domainOperationClient = Object.freeze({",
-  ...modules.map((module) => `  ${camelCaseId(module.id)}: (): typeof domainOperationIds.${camelCaseId(module.id)} => domainOperationIds.${camelCaseId(module.id)},`),
+  ...publicClientModules.map((module) => `  ${camelCaseId(module.id)}: (): typeof domainOperationIds.${camelCaseId(module.id)} => domainOperationIds.${camelCaseId(module.id)},`),
+  "});",
+  "",
+  "// Explicit compatibility-only client. Do not use this for Room-first UI or SDK flows.",
+  "export const legacyDomainOperationClient = Object.freeze({",
+  ...legacyClientModules.map((module) => `  ${camelCaseId(module.id)}: (): typeof domainOperationIds.${camelCaseId(module.id)} => domainOperationIds.${camelCaseId(module.id)},`),
   "});",
   "",
   "export type DomainOperationKey = keyof typeof domainOperationClient;",
-  "export function domainOperationIdFor(key: DomainOperationKey): DomainOperationId {",
-  "  return domainOperationClient[key]();",
+  "export type LegacyDomainOperationKey = keyof typeof legacyDomainOperationClient;",
+  "export function domainOperationIdFor(key: DomainOperationKey | LegacyDomainOperationKey): DomainOperationId {",
+  "  if (key in domainOperationClient) return domainOperationClient[key as DomainOperationKey]();",
+  "  return legacyDomainOperationClient[key as LegacyDomainOperationKey]();",
   "}",
   ""
 ];

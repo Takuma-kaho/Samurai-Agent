@@ -5,6 +5,15 @@ import {
   DomainApiRequestSchema,
   DomainApiTransportRequest,
   DomainApiClient,
+  PublicRoomCreateInputSchema,
+  PublicRoomAgentPermissionSetInputSchema,
+  PublicRoomAgentRemoveInputSchema,
+  PublicRoomAgentPermissionRecordSchema,
+  PublicAgentBackendRecordSchema,
+  PublicRoomMemberListRecordSchema,
+  PublicRoomDomainApiRequestSchema,
+  PublicRoomWorkCommentCreateInputSchema,
+  PublicRoomWorkCreateInputSchema,
   PublicEventEnvelopeSchema,
   PublicWorkspaceDirectorySchema,
   PublicWorkspaceTransferManifestSchema,
@@ -13,6 +22,8 @@ import {
   eventPayloadSchemaFor,
   isApiVersionCompatible,
   isEventVersionCompatible,
+  publicLegacyDomainOperationCompatibility,
+  legacyPublicDomainOperationIds,
   parsePublicEventPayload,
   publicDomainOperationIds,
   publicOperationOutputSchemaFor,
@@ -36,6 +47,104 @@ describe("public Domain API contract", () => {
     expect(DomainApiRequestSchema.safeParse({
       context: { room_id: "room_1", actor_id: "spoofed" },
       input: {}
+    }).success).toBe(false);
+  });
+
+  it("publishes Room-first work inputs and keeps legacy Session IDs compatibility-only", () => {
+    expect(publicDomainOperationIds).not.toContain("session.create");
+    expect(publicDomainOperationIds).not.toContain("chat.turn.run");
+    expect(legacyPublicDomainOperationIds).toEqual(["session.create", "chat.turn.run"]);
+    expect(publicLegacyDomainOperationCompatibility).toEqual([
+      expect.objectContaining({ id: "session.create", availability: "deprecated_command", replacement_operation_ids: ["room.work.create"] }),
+      expect.objectContaining({ id: "chat.turn.run", availability: "deprecated_command", replacement_operation_ids: ["room.work.create", "room.work.reply"] })
+    ]);
+
+    expect(PublicRoomDomainApiRequestSchema.safeParse({
+      context: { room_id: "room_1" },
+      input: { instruction: "Use the Room work contract." }
+    }).success).toBe(true);
+    expect(PublicRoomWorkCreateInputSchema.safeParse({ instruction: "Use the Room work contract.", session_id: "session_1" }).success).toBe(false);
+    expect(PublicRoomWorkCommentCreateInputSchema.safeParse({ work_id: "work_1", body: "A comment", actor_id: "spoofed" }).success).toBe(false);
+
+    expect(PublicRoomCreateInputSchema.safeParse({
+      name: "Product",
+      default_agent_id: "agent_1",
+      agent_permission: { can_view: true, can_edit: true, can_execute: true }
+    }).success).toBe(true);
+    expect(PublicRoomCreateInputSchema.safeParse({
+      name: "Product",
+      new_agent: {
+        name: "Builder",
+        role: "builder",
+        instructions: "Build the requested result.",
+        backend_id: "samurai-native",
+        permission: { can_view: true, can_edit: false, can_execute: true }
+      }
+    }).success).toBe(true);
+    expect(PublicRoomCreateInputSchema.safeParse({
+      name: "Invalid",
+      default_agent_id: "agent_1",
+      new_agent: {
+        name: "Builder",
+        role: "builder",
+        instructions: "Build the requested result.",
+        backend_id: "samurai-native"
+      }
+    }).success).toBe(false);
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
+      "room.member.list",
+      "room.agent.permission.set",
+      "room.agent.remove",
+      "agent.backend.list"
+    ]));
+    expect(PublicAgentBackendRecordSchema.safeParse({
+      id: "samurai-native",
+      kind: "samurai_native",
+      label: "Samurai Native",
+      configured: true,
+      enabled: true,
+      connection_state: "ready"
+    }).success).toBe(true);
+    expect(PublicAgentBackendRecordSchema.safeParse({
+      id: "samurai-native",
+      kind: "samurai_native",
+      label: "Samurai Native",
+      configured: true,
+      enabled: true,
+      connection_state: "ready",
+      metadata: { command: "/private/secret" }
+    }).success).toBe(false);
+    expect(PublicRoomAgentPermissionSetInputSchema.safeParse({
+      agent_id: "agent_1",
+      can_view: true,
+      can_edit: false,
+      can_execute: true
+    }).success).toBe(true);
+    expect(PublicRoomAgentPermissionSetInputSchema.safeParse({
+      agent_id: "agent_1",
+      can_view: false,
+      can_edit: false,
+      can_execute: true
+    }).success).toBe(false);
+    expect(PublicRoomAgentRemoveInputSchema.safeParse({ agent_id: "agent_1" }).success).toBe(true);
+    expect(PublicRoomMemberListRecordSchema.safeParse({ humans: [], agents: [] }).success).toBe(true);
+    expect(PublicRoomAgentPermissionRecordSchema.safeParse({
+      id: "room_agent:room_1:agent_1",
+      room_id: "room_1",
+      agent_id: "agent_1",
+      can_view: false,
+      can_edit: false,
+      can_execute: false,
+      version: 2,
+      created_by: "account_1",
+      created_at: "2026-08-30T00:00:00.000Z",
+      updated_at: "2026-08-30T00:00:00.000Z",
+      removed: true
+    }).success).toBe(true);
+    expect(PublicRoomCreateInputSchema.safeParse({
+      name: "Invalid default permission",
+      default_agent_id: "agent_1",
+      agent_permission: { can_view: true, can_edit: false, can_execute: false }
     }).success).toBe(false);
   });
 
@@ -94,6 +203,55 @@ describe("public Domain API contract", () => {
       resources: [],
       payload: { organization_id: "organization_1", name: "Acme" }
     }).success).toBe(true);
+  });
+
+  it("publishes Room work events as safe state projections", () => {
+    expect(eventCatalog.map((entry) => entry.event_type)).toEqual(expect.arrayContaining([
+      "workspace.room_work.changed",
+      "workspace.room_work.comment.changed",
+      "workspace.room_work.assignee.changed",
+      "workspace.room_default_agent.changed",
+      "workspace.agent_dm.changed"
+    ]));
+    expect(eventPayloadSchemaFor("workspace.room_work.changed").safeParse({
+      room_id: "room_1",
+      work_id: "work_1",
+      action: "created",
+      status: "running",
+      generation: 1,
+      version: 1
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.room_work.changed").safeParse({
+      room_id: "room_1",
+      work_id: "work_1",
+      action: "updated",
+      status: "backend_error"
+    }).success).toBe(false);
+    expect(eventPayloadSchemaFor("workspace.room_work.assignee.changed").safeParse({
+      room_id: "room_1",
+      work_id: "work_1",
+      assignee_id: "assignment_child",
+      action: "delegated",
+      delegated: true,
+      agent_id: "agent_child",
+      parent_assignee_id: "assignment_parent",
+      status: "waiting",
+      generation: 1,
+      version: 2
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.room_work.comment.changed").safeParse({
+      room_id: "room_1",
+      work_id: "work_1",
+      comment_id: "comment_1",
+      action: "created",
+      body: "private body"
+    }).success).toBe(false);
+    expect(eventPayloadSchemaFor("workspace.agent_dm.changed").safeParse({
+      room_id: "room_dm",
+      agent_id: "agent_1",
+      action: "opened",
+      session_id: "session_private"
+    }).success).toBe(false);
   });
 
   it("publishes Organization events and keeps sensitive fields outside payloads", () => {
@@ -206,6 +364,7 @@ describe("public Domain API contract", () => {
     await client.exportWorkspaceBundle("workspace_1", { operationId: "export_1", expectedWorkspaceVersion: 2 });
     await client.attachWorkspaceToOrganization("organization_1", "workspace_1", { operationId: "attach_1", expectedWorkspaceVersion: 3, confirmGuestMemberships: true });
     await client.detachWorkspaceFromOrganization("organization_1", "workspace_1", { operationId: "detach_1" });
+    await client.listAgentBackends("workspace_1");
 
     expect(requests).toEqual([
       { method: "GET", path: "/api/account/workspaces" },
@@ -214,7 +373,8 @@ describe("public Domain API contract", () => {
       { method: "POST", path: "/api/workspaces/bundles/restore", body: { bundle_id: "bundle_1", confirm: true }, operationId: "restore_managed_1", idempotencyKey: "restore_managed_1" },
       { method: "POST", path: "/api/workspaces/workspace_1/bundle/export", body: { expected_workspace_version: 2 }, operationId: "export_1", idempotencyKey: "export_1" },
       { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/attach", body: { expected_workspace_version: 3, confirm_guest_memberships: true }, operationId: "attach_1", idempotencyKey: "attach_1" },
-      { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/detach", body: {}, operationId: "detach_1", idempotencyKey: "detach_1" }
+      { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/detach", body: {}, operationId: "detach_1", idempotencyKey: "detach_1" },
+      { method: "POST", path: "/api/v1/workspaces/workspace_1/domain/queries/agent.backend.list", body: { context: {}, input: {} } }
     ]);
   });
 

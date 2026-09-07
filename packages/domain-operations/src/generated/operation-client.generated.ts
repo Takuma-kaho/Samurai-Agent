@@ -4,7 +4,9 @@ import { domainOperationIds, type DomainOperationId } from "./operation-index.ge
 export const domainOperationClient = Object.freeze({
   activityHistoryList: (): typeof domainOperationIds.activityHistoryList => domainOperationIds.activityHistoryList,
   agentBackendBind: (): typeof domainOperationIds.agentBackendBind => domainOperationIds.agentBackendBind,
+  agentBackendList: (): typeof domainOperationIds.agentBackendList => domainOperationIds.agentBackendList,
   agentCreate: (): typeof domainOperationIds.agentCreate => domainOperationIds.agentCreate,
+  agentDmOpen: (): typeof domainOperationIds.agentDmOpen => domainOperationIds.agentDmOpen,
   agentList: (): typeof domainOperationIds.agentList => domainOperationIds.agentList,
   agentPatch: (): typeof domainOperationIds.agentPatch => domainOperationIds.agentPatch,
   agentView: (): typeof domainOperationIds.agentView => domainOperationIds.agentView,
@@ -31,7 +33,6 @@ export const domainOperationClient = Object.freeze({
   browserInteract: (): typeof domainOperationIds.browserInteract => domainOperationIds.browserInteract,
   browserNavigate: (): typeof domainOperationIds.browserNavigate => domainOperationIds.browserNavigate,
   browserScreenshot: (): typeof domainOperationIds.browserScreenshot => domainOperationIds.browserScreenshot,
-  chatTurnRun: (): typeof domainOperationIds.chatTurnRun => domainOperationIds.chatTurnRun,
   clientEventAck: (): typeof domainOperationIds.clientEventAck => domainOperationIds.clientEventAck,
   clientEventDeliver: (): typeof domainOperationIds.clientEventDeliver => domainOperationIds.clientEventDeliver,
   clientEventExpire: (): typeof domainOperationIds.clientEventExpire => domainOperationIds.clientEventExpire,
@@ -142,6 +143,7 @@ export const domainOperationClient = Object.freeze({
   roomAgentPermissionSet: (): typeof domainOperationIds.roomAgentPermissionSet => domainOperationIds.roomAgentPermissionSet,
   roomAgentRemove: (): typeof domainOperationIds.roomAgentRemove => domainOperationIds.roomAgentRemove,
   roomCreate: (): typeof domainOperationIds.roomCreate => domainOperationIds.roomCreate,
+  roomDefaultAgentSet: (): typeof domainOperationIds.roomDefaultAgentSet => domainOperationIds.roomDefaultAgentSet,
   roomList: (): typeof domainOperationIds.roomList => domainOperationIds.roomList,
   roomMemberAdd: (): typeof domainOperationIds.roomMemberAdd => domainOperationIds.roomMemberAdd,
   roomMemberList: (): typeof domainOperationIds.roomMemberList => domainOperationIds.roomMemberList,
@@ -155,8 +157,18 @@ export const domainOperationClient = Object.freeze({
   roomResourceShareList: (): typeof domainOperationIds.roomResourceShareList => domainOperationIds.roomResourceShareList,
   roomResourceShareRevoke: (): typeof domainOperationIds.roomResourceShareRevoke => domainOperationIds.roomResourceShareRevoke,
   roomView: (): typeof domainOperationIds.roomView => domainOperationIds.roomView,
+  roomWorkAssigneeDelegate: (): typeof domainOperationIds.roomWorkAssigneeDelegate => domainOperationIds.roomWorkAssigneeDelegate,
+  roomWorkAssigneeReassign: (): typeof domainOperationIds.roomWorkAssigneeReassign => domainOperationIds.roomWorkAssigneeReassign,
+  roomWorkAssigneeStop: (): typeof domainOperationIds.roomWorkAssigneeStop => domainOperationIds.roomWorkAssigneeStop,
+  roomWorkCommentApply: (): typeof domainOperationIds.roomWorkCommentApply => domainOperationIds.roomWorkCommentApply,
+  roomWorkCommentCreate: (): typeof domainOperationIds.roomWorkCommentCreate => domainOperationIds.roomWorkCommentCreate,
+  roomWorkCommentReactionSet: (): typeof domainOperationIds.roomWorkCommentReactionSet => domainOperationIds.roomWorkCommentReactionSet,
+  roomWorkCreate: (): typeof domainOperationIds.roomWorkCreate => domainOperationIds.roomWorkCreate,
+  roomWorkList: (): typeof domainOperationIds.roomWorkList => domainOperationIds.roomWorkList,
+  roomWorkReply: (): typeof domainOperationIds.roomWorkReply => domainOperationIds.roomWorkReply,
+  roomWorkStop: (): typeof domainOperationIds.roomWorkStop => domainOperationIds.roomWorkStop,
+  roomWorkView: (): typeof domainOperationIds.roomWorkView => domainOperationIds.roomWorkView,
   sandboxExec: (): typeof domainOperationIds.sandboxExec => domainOperationIds.sandboxExec,
-  sessionCreate: (): typeof domainOperationIds.sessionCreate => domainOperationIds.sessionCreate,
   sessionSearch: (): typeof domainOperationIds.sessionSearch => domainOperationIds.sessionSearch,
   sessionSearchReindex: (): typeof domainOperationIds.sessionSearchReindex => domainOperationIds.sessionSearchReindex,
   settingsPatch: (): typeof domainOperationIds.settingsPatch => domainOperationIds.settingsPatch,
@@ -200,7 +212,15 @@ export const domainOperationClient = Object.freeze({
   workspaceRepair: (): typeof domainOperationIds.workspaceRepair => domainOperationIds.workspaceRepair,
 });
 
+// Explicit compatibility-only client. Do not use this for Room-first UI or SDK flows.
+export const legacyDomainOperationClient = Object.freeze({
+  chatTurnRun: (): typeof domainOperationIds.chatTurnRun => domainOperationIds.chatTurnRun,
+  sessionCreate: (): typeof domainOperationIds.sessionCreate => domainOperationIds.sessionCreate,
+});
+
 export type DomainOperationKey = keyof typeof domainOperationClient;
-export function domainOperationIdFor(key: DomainOperationKey): DomainOperationId {
-  return domainOperationClient[key]();
+export type LegacyDomainOperationKey = keyof typeof legacyDomainOperationClient;
+export function domainOperationIdFor(key: DomainOperationKey | LegacyDomainOperationKey): DomainOperationId {
+  if (key in domainOperationClient) return domainOperationClient[key as DomainOperationKey]();
+  return legacyDomainOperationClient[key as LegacyDomainOperationKey]();
 }

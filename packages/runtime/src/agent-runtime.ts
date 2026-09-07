@@ -361,6 +361,7 @@ export {
   NativeToolExecutor,
   NativeToolLoop,
   SamuraiNativeBackend,
+  type NativeExecutionContext,
   type SamuraiNativeBackendComponents
 } from "./backend/native-backend";
 export {

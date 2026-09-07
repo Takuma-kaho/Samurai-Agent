@@ -17,6 +17,7 @@ import {
   BackendRunRecordSchema,
   MessageEnvelopeSchema,
   ResourceRefSchema,
+  WorkspaceFileResourceRefSchema,
   ToolRunRecordSchema,
   type MessageRecord,
   type MemoryFrontmatter,
@@ -44,7 +45,7 @@ import {
   WorkspaceChangeRecordSchema,
   type SupportedLocale
 } from "@samurai-agent/core-schemas";
-import type { AgentBackendRegistry, BackendOutputEvent, BackendRunInput, BackendTerminalEvidence, MemoryCandidateLike, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
+import type { AgentBackend, AgentBackendRegistry, BackendExecutionContext, BackendOutputEvent, BackendRunInput, BackendTerminalEvidence, MemoryCandidateLike, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
 import { BackendEventBridge, type RunChatTurnResult } from "@samurai-agent/runtime";
 import {
   PostgresWorkspaceDatabase,
@@ -111,10 +112,35 @@ export interface PostgresRuntimeToolExecutionResult {
   resourceRefs: ResourceRef[];
   summary: string;
   output?: JsonValue;
+  /** Optional Workspace change classification for non-artifact tools. */
+  changeType?: import("@samurai-agent/core-schemas").WorkspaceChangeType;
+}
+
+/** Server-owned Room-work association used by the delegation tool.  The
+ * provider payload is intentionally not part of this value: Work, parent
+ * assignment, requester, and generation come from the admitted Run. */
+export interface PostgresRuntimeTrustedRoomWorkBinding {
+  /** The admitted Run is the only parent execution authority. */
+  runId: string;
+  workspaceId: string;
+  roomId: string;
+  workId: string;
+  assigneeId: string;
+  /** Explicit alias: this assignee is the parent of the child assignment. */
+  parentAssignmentId: string;
+  agentId: string;
+  generation: number;
+  requestedByParticipantId: string;
 }
 
 export interface PostgresRuntimeToolExecutionPort {
   execute(input: PostgresRuntimeToolExecutionInput): Promise<PostgresRuntimeToolExecutionResult>;
+  /** Optional bounded Room-work delegation path.  Implementations must call
+   * the public Domain Operation with `trustedRoomWorkBinding` and ignore any
+   * model-supplied work/actor/parent identifiers. */
+  delegate?(input: PostgresRuntimeToolExecutionInput & {
+    trustedRoomWorkBinding: PostgresRuntimeTrustedRoomWorkBinding;
+  }): Promise<PostgresRuntimeToolExecutionResult>;
 }
 
 export interface PostgresRuntimeChatCompletionEvent {
@@ -178,8 +204,55 @@ export interface PostgresRuntimeChatTurnInput {
   idempotencyKey: string;
   retryOfRunId?: string;
   attemptNo?: number;
+  /**
+   * Server-owned identity for a normal Room work assignment.  This is an
+   * internal execution binding; public Room work operations do not accept a
+   * Session or a provider session identifier.
+   */
+  executionBinding?: PostgresRuntimeExecutionBinding;
+  /**
+   * Legacy server-owned provider SessionRef.  It is retained for non-Room
+   * callers only; Room-work continuations must use the bound structure below.
+   */
+  resumeBackendSessionId?: string;
+  /**
+   * Server-owned, fully bound external continuation candidate.  Room-work
+   * callers can only resume when every parent association still matches the
+   * newly admitted execution.  Public APIs never accept this value.
+   */
+  resumeBackendContinuation?: PostgresRuntimeExternalContinuation;
   /** Optional owner/lease cancellation for long-running worker executions. */
   signal?: AbortSignal;
+}
+
+export interface PostgresRuntimeExecutionBinding {
+  workId?: string;
+  assigneeId?: string;
+  /** Parent Room-work assignment for a server-created continuation only. */
+  parentAssigneeId?: string;
+  generation?: number;
+  agentConfigurationVersion?: number;
+}
+
+/**
+ * A provider-native session is never a sufficient authority to resume a
+ * Room-work execution.  The Store constructs this from the terminal parent
+ * Run, and the runtime checks every immutable association again just before
+ * it invokes a Backend resume path.
+ */
+export interface PostgresRuntimeExternalContinuation {
+  backendSessionId: string;
+  parent: {
+    workspaceId: string;
+    roomId: string;
+    sessionId: string;
+    workId: string;
+    assigneeId: string;
+    agentId: string;
+    agentConfigurationVersion?: number;
+    backendId: string;
+    generation: number;
+  };
 }
 
 export type PostgresRuntimeDomainCommandInput =
@@ -200,11 +273,83 @@ interface RuntimeAgent {
   role: string;
   instructions: string;
   backendId: string;
+  configurationVersion: number;
+  enabled: boolean;
+}
+
+interface RuntimeExecutionBinding {
+  workspaceId: string;
+  roomId: string;
+  sessionId: string;
+  workId?: string;
+  assigneeId?: string;
+  parentAssigneeId?: string;
+  agentId: string;
+  agentConfigurationVersion: number;
+  backendId: string;
+  generation: number;
+  agent: {
+    name: string;
+    role: string;
+    instructions: string;
+    enabled: boolean;
+  };
+}
+
+/**
+ * The provider Session is an optional optimization for an external Backend.
+ * The Room Work API can inspect this small, non-secret state on the persisted
+ * Backend Run and distinguish a real provider resume from a new conversation
+ * rebuilt from Samurai's durable history.
+ */
+type RuntimeContinuationReason =
+  | "candidate_missing"
+  | "candidate_invalid"
+  | "candidate_mismatch"
+  | "native_backend"
+  | "resume_unsupported"
+  | "resume_failed";
+
+interface RuntimeContinuationState {
+  mode: "resumed" | "reconstructed";
+  source: "external_session" | "samurai_context";
+  reason?: RuntimeContinuationReason;
+}
+
+interface RuntimeContinuationDecision {
+  backendSessionId?: string;
+  state: RuntimeContinuationState;
+}
+
+type RuntimeBackendExecutionContext = BackendExecutionContext & {
+  continuity_state?: RuntimeContinuationState;
+};
+
+class ExternalContinuationResumeFailure extends Error {
+  readonly causeValue: unknown;
+
+  constructor(causeValue: unknown) {
+    super("runtime_external_continuation_resume_failed");
+    this.name = "ExternalContinuationResumeFailure";
+    this.causeValue = causeValue;
+  }
 }
 
 interface MaterializedWorkspaceAttachment {
   context: TemporaryContextAttachment;
   absolutePath: string;
+}
+
+type RoomWorkAttachmentRef = z.infer<typeof WorkspaceFileResourceRefSchema>;
+
+interface PreflightWorkspaceFile {
+  ref: RoomWorkAttachmentRef;
+  file: {
+    path: string;
+    version: number;
+    sha256: string;
+    content: Buffer;
+  };
 }
 
 const runtimeWorkspaceAttachmentMaxBytes = 8 * 1024 * 1024;
@@ -228,8 +373,15 @@ interface RuntimeToolOutcome {
   resourceRefs?: ResourceRef[];
   summary: string;
   output?: JsonValue;
+  changeType?: import("@samurai-agent/core-schemas").WorkspaceChangeType;
   reason?: string;
   errorCode?: string;
+}
+
+interface RuntimeToolOperationSpec {
+  operation: string;
+  capabilityId: string;
+  proposedEffect: string;
 }
 
 interface RuntimeRunRow {
@@ -315,9 +467,17 @@ interface RuntimeAuditRecordRow {
 interface RuntimeAgentRow {
   id: string;
   display_name: string;
-  description: string;
   backend_id: string;
   status: string;
+  role?: string;
+  instructions?: string;
+  enabled?: boolean;
+  configuration_version?: number | string;
+}
+
+interface RuntimeRoomDefaultAgentRow {
+  default_agent_id: string | null;
+  default_agent_version: number | string | null;
 }
 
 interface RuntimeChangeRow {
@@ -689,7 +849,10 @@ export class PostgresRuntimeChat {
 
   async syncBackendRun(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireControlRun(runId);
-    if (isSettled(run)) return this.reprojectSettledRun(run);
+    // An outcome-unknown Run is a durable uncertainty marker, not a final
+    // success/failure.  A later backend terminal event may reconcile it.  Do
+    // not reconnect stable terminal Runs, and never re-run the provider.
+    if (isSettled(run) && run.status !== "outcome_unknown") return this.reprojectSettledRun(run);
     const admission = await this.admissionForRun(run);
     const backend = this.backendRegistry.get(run.backend_id);
     if (!backend?.streamEvents) {
@@ -762,6 +925,14 @@ export class PostgresRuntimeChat {
     if (!original.session_id) throw new WorkspaceServerError("runtime_retry_session_missing", 409);
     const admission = await this.admissionForRun(original);
     const envelope = admission.userMessage.envelope;
+    const originalBinding = runtimeBindingFromRunMetadata(original.metadata, {
+      workspaceId: this.workspaceId,
+      roomId: original.room_id ?? admission.session.room_id!,
+      sessionId: admission.session.id,
+      agent: admission.agent,
+      agentId: original.agent_id,
+      backendId: original.backend_id
+    });
     return this.runChatTurn({
       sessionId: original.session_id,
       content: admission.userMessage.content,
@@ -773,7 +944,16 @@ export class PostgresRuntimeChat {
       attachments: envelope?.attachments ?? [],
       idempotencyKey: requireId(input.idempotencyKey, "runtime_retry_idempotency_key_required"),
       retryOfRunId: original.id,
-      attemptNo: (original.current_attempt ?? 1) + 1
+      attemptNo: (original.current_attempt ?? 1) + 1,
+      ...(originalBinding ? {
+        executionBinding: {
+          ...(originalBinding.workId ? { workId: originalBinding.workId } : {}),
+          ...(originalBinding.assigneeId ? { assigneeId: originalBinding.assigneeId } : {}),
+          ...(originalBinding.parentAssigneeId ? { parentAssigneeId: originalBinding.parentAssigneeId } : {}),
+          generation: originalBinding.generation,
+          agentConfigurationVersion: originalBinding.agentConfigurationVersion
+        }
+      } : {})
     });
   }
 
@@ -789,30 +969,40 @@ export class PostgresRuntimeChat {
     if (!run.session_id || !run.room_id || !run.input_message_id) {
       throw new WorkspaceServerError(`runtime_run_admission_incomplete:${run.id}`, 409);
     }
+    const persistedBinding = runtimeBindingFromRunMetadata(run.metadata, {
+      workspaceId: this.workspaceId,
+      roomId: run.room_id,
+      sessionId: run.session_id,
+      agentId: run.agent_id ?? undefined,
+      backendId: run.backend_id
+    });
+    const persistedAgent = persistedBinding ? runtimeAgentFromBinding(persistedBinding) : undefined;
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, run.room_id!);
-      const [sessionResult, messageResult, operationResult, activityResult] = await Promise.all([
-        sql.query<RuntimeSessionRow>(
-          `SELECT workspace_id, id, session_key, room_id, title, ui_locale, output_locale, created_at, updated_at
-           FROM workspace_runtime_sessions WHERE workspace_id = $1 AND id = $2`,
-          [this.workspaceId, run.session_id]
-        ),
-        sql.query<RuntimeMessageRow>(
-          "SELECT * FROM workspace_runtime_messages WHERE workspace_id = $1 AND id = $2",
-          [this.workspaceId, run.input_message_id]
-        ),
-        sql.query<RuntimeOperationRow>(
-          `SELECT workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
-           FROM workspace_runtime_operations WHERE workspace_id = $1 AND id = $2`,
-          [this.workspaceId, runtimeOperationId(run.id)]
-        ),
-        sql.query<RuntimeActivityRow>(
-          `SELECT * FROM workspace_runtime_activities
-           WHERE workspace_id = $1 AND backend_run_id = $2 AND room_id = $3
-           ORDER BY created_at DESC LIMIT 1`,
-          [this.workspaceId, run.id, run.room_id]
-        )
-      ]);
+      // `withContext` supplies one PoolClient.  Keep these reads sequential so
+      // the admission path never queues concurrent queries on that client.
+      // Apart from avoiding pg's client-queue deprecation, this preserves the
+      // same RLS context and fail-closed row checks as the former read set.
+      const sessionResult = await sql.query<RuntimeSessionRow>(
+        `SELECT workspace_id, id, session_key, room_id, title, ui_locale, output_locale, created_at, updated_at
+         FROM workspace_runtime_sessions WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, run.session_id]
+      );
+      const messageResult = await sql.query<RuntimeMessageRow>(
+        "SELECT * FROM workspace_runtime_messages WHERE workspace_id = $1 AND id = $2",
+        [this.workspaceId, run.input_message_id]
+      );
+      const operationResult = await sql.query<RuntimeOperationRow>(
+        `SELECT workspace_id, id, session_id, room_id, operation, status, payload, created_at, updated_at
+         FROM workspace_runtime_operations WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, runtimeOperationId(run.id)]
+      );
+      const activityResult = await sql.query<RuntimeActivityRow>(
+        `SELECT * FROM workspace_runtime_activities
+         WHERE workspace_id = $1 AND backend_run_id = $2 AND room_id = $3
+         ORDER BY created_at DESC LIMIT 1`,
+        [this.workspaceId, run.id, run.room_id]
+      );
       const sessionRow = sessionResult.rows[0];
       const messageRow = messageResult.rows[0];
       const operationRow = operationResult.rows[0];
@@ -822,6 +1012,7 @@ export class PostgresRuntimeChat {
       }
       return {
         session: sessionFromRow(sessionRow),
+        ...(persistedAgent ? { agent: persistedAgent } : {}),
         userMessage: messageFromRow(messageRow),
         run,
         operation: operationFromRow(operationRow),
@@ -838,6 +1029,17 @@ export class PostgresRuntimeChat {
   private backendRunInputForControl(admission: RuntimeAdmission): BackendRunInput {
     const roomId = admission.run.room_id ?? admission.session.room_id;
     if (!roomId) throw new WorkspaceServerError(`runtime_run_room_missing:${admission.run.id}`, 409);
+    const binding = runtimeBindingFromRunMetadata(admission.run.metadata, {
+      workspaceId: this.workspaceId,
+      roomId,
+      sessionId: admission.session.id,
+      agent: admission.agent,
+      agentId: admission.run.agent_id,
+      backendId: admission.run.backend_id
+    });
+    const backend = this.backendRegistry.get(admission.run.backend_id);
+    const continuationState = runtimeContinuationFromRunMetadata(admission.run.metadata);
+    const executionContext = binding && backend ? runtimeExecutionContext(binding, backend, continuationState) : undefined;
     const envelope = admission.userMessage.envelope ?? MessageEnvelopeSchema.parse({
       id: createId("envelope"),
       source: channelForSource(admission.run.source),
@@ -850,24 +1052,67 @@ export class PostgresRuntimeChat {
       metadata: {},
       received_at: admission.userMessage.created_at
     });
+    const backendEnvelope = {
+      ...envelope,
+      metadata: runtimeMetadataForBackend(envelope.metadata)
+    };
     return {
       run_id: admission.run.id,
       session_id: admission.session.id,
       room_id: roomId,
-      ...(admission.run.backend_session_id ? { backend_session_id: admission.run.backend_session_id } : {}),
+      ...(admission.agent ? {
+        agent_context: {
+          id: admission.agent.id,
+          name: admission.agent.name,
+          role: admission.agent.role,
+          instructions: admission.agent.instructions,
+          authority: "supporting_context" as const
+        }
+      } : {}),
+      ...(binding ? { backend_session_key: runtimeBackendSessionKey(binding) } : {}),
+      // Native Room-work continuity is rebuilt from Samurai's persisted
+      // context. Never feed a provider Session ID into that typed boundary;
+      // external backends may still need their existing native identifier.
+      ...(admission.run.backend_session_id && !executionContext ? { backend_session_id: admission.run.backend_session_id } : {}),
       input_message_id: admission.userMessage.id,
       workspace_root: this.agentWorktreeRoot,
       working_directory: this.agentWorktreeRoot,
-      envelope,
+      envelope: backendEnvelope,
       user_input: admission.userMessage.content,
       input_locale: admission.userMessage.input_locale,
       output_locale: admission.userMessage.output_locale,
       active_memory: [],
-      available_tools: [...this.availableTools],
+      available_tools: this.availableProviderTools(binding),
       recent_messages: [],
-      metadata: envelope.metadata,
-      context_intent: "light_chat"
+      // The persisted Run binding is authoritative for control/reconnect
+      // paths.  Pass its typed association separately; generic metadata is
+      // kept as caller data and never used as a hidden execution contract.
+      metadata: runtimeMetadataForBackend(admission.run.metadata),
+      context_intent: "light_chat",
+      ...(executionContext ? { execution_context: executionContext } : {})
     };
+  }
+
+  /**
+   * Provider capability advertisement is derived per execution, never from
+   * the HTTP request that constructed this Runtime facade. The delegation
+   * tool is available only when the admitted Run has the complete trusted
+   * Room-work association and the Host port that enforces it.
+   */
+  private availableProviderTools(binding?: RuntimeExecutionBinding): string[] {
+    const hasTrustedRoomWorkBinding = Boolean(
+      binding?.workId
+      && binding.assigneeId
+      && binding.agentId
+      && binding.backendId
+      && Number.isSafeInteger(binding.generation)
+      && binding.generation >= 0
+      && Number.isSafeInteger(binding.agentConfigurationVersion)
+      && binding.agentConfigurationVersion >= 1
+      && binding.agent.enabled
+      && this.toolExecution?.delegate
+    );
+    return this.availableTools.filter((toolName) => toolName !== "subagent_delegate" || hasTrustedRoomWorkBinding);
   }
 
   private async markCancelling(run: BackendRunRecord): Promise<BackendRunRecord> {
@@ -1094,39 +1339,92 @@ export class PostgresRuntimeChat {
     const knowledge = await this.relevantKnowledge(session.room_id, content);
     const agent = await this.resolveAgent(session.room_id, input.agentId);
     const requestedBackendId = input.backendId?.trim();
-    if (agent && requestedBackendId && requestedBackendId !== agent.backendId) {
+    if (requestedBackendId && requestedBackendId !== agent.backendId) {
       throw new WorkspaceServerError("runtime_backend_agent_mismatch", 409);
     }
-    const backendId = agent?.backendId || requestedBackendId || this.defaultBackendId;
+    const executionBinding = buildRuntimeExecutionBinding({
+      workspaceId: this.workspaceId,
+      roomId: session.room_id,
+      sessionId: session.id,
+      agent,
+      input: input.executionBinding
+    });
+    const backendId = agent.backendId;
     const backend = this.backendRegistry.get(backendId);
     if (!backend) throw new WorkspaceServerError(`runtime_backend_not_registered:${backendId}`, 409);
+    const roomWorkContinuation = resolveRoomWorkExternalContinuation({
+      candidate: input.resumeBackendContinuation,
+      binding: executionBinding,
+      backend,
+      workspaceId: this.workspaceId,
+      sessionId: session.id,
+      roomId: session.room_id
+    });
+    // A raw provider SessionRef predates Room Work.  It remains available to
+    // legacy internal callers, but a Room-work binding deliberately ignores
+    // it: only the Store-derived, association-checked candidate above can
+    // select a provider resume path.
+    const legacyResumeBackendSessionId = executionBinding.workId
+      ? undefined
+      : input.resumeBackendSessionId?.trim() || undefined;
+    if (!executionBinding.workId && input.resumeBackendSessionId !== undefined && !legacyResumeBackendSessionId) {
+      throw new WorkspaceServerError("runtime_backend_session_id_invalid", 400);
+    }
+    if (legacyResumeBackendSessionId && backend.kind === "samurai_native") {
+      throw new WorkspaceServerError("runtime_backend_resume_unsupported", 409);
+    }
+    if (legacyResumeBackendSessionId && !backend.resumeRun) {
+      throw new WorkspaceServerError("runtime_backend_resume_unsupported", 409);
+    }
+    const resumeBackendSessionId = roomWorkContinuation?.backendSessionId ?? legacyResumeBackendSessionId;
+    const continuationState = roomWorkContinuation?.state;
+    const executionContext = runtimeExecutionContext(executionBinding, backend, continuationState);
+    // Room Work attachments are server-issued immutable file references. Read
+    // the DB row and physical bytes before admission so an invalid request
+    // cannot create a durable Message/Run/Activity/Reservation. The admit
+    // transaction repeats the DB-side association check under a file lock.
+    const roomWorkExecution = Boolean(executionBinding.workId);
+    const hasFileAttachment = (input.attachments ?? []).some((ref) => ref.kind === "file");
+    const roomWorkPreflight = hasFileAttachment
+      ? await this.preflightRoomWorkAttachments(session.room_id, input.attachments ?? [], roomWorkExecution)
+      : undefined;
+    const attachments = roomWorkExecution
+      ? roomWorkPreflight?.map((item) => item.ref) ?? (input.attachments ?? [])
+      : (input.attachments ?? []);
     const inputLocale = input.inputLocale ?? session.ui_locale;
     const outputLocale = input.outputLocale ?? session.output_locale;
+    const userMetadata = runtimeMetadataForBackend(input.metadata ?? {});
     const envelope = MessageEnvelopeSchema.parse({
       id: createId("envelope"),
       source: this.source?.kind === "external_app" ? "webhook" : this.source?.kind === "host" ? "cron" : "web",
       actor_identity: this.source?.kind === "external_app" ? "external_app" : this.source?.kind === "host" ? "owner_scheduled" : "owner",
       session_key: session.session_key,
       user_intent: "chat",
-      attachments: input.attachments ?? [],
+      attachments,
       input_locale: inputLocale,
       output_locale: outputLocale,
-      metadata: input.metadata ?? {},
+      metadata: userMetadata,
       received_at: nowIso()
     });
+    const backendEnvelope = {
+      ...envelope,
+      metadata: runtimeMetadataForBackend(envelope.metadata)
+    };
     const requestHash = stableHash({
       session_id: session.id,
       room_id: session.room_id,
-      agent_id: agent?.id ?? null,
+      agent_id: agent.id,
       backend_id: backend.id,
+      execution_binding: executionBinding,
       content,
       input_locale: inputLocale,
       output_locale: outputLocale,
-      metadata: input.metadata ?? {},
-      attachments: input.attachments ?? [],
+      metadata: userMetadata,
+      attachments,
       temporary_context: (input.temporaryContext ?? []).map(temporaryContextHash),
       retry_of_run_id: input.retryOfRunId ?? null,
-      attempt_no: input.attemptNo ?? 1
+      attempt_no: input.attemptNo ?? 1,
+      resume_backend_session_id: resumeBackendSessionId ?? null
     });
     const admission = await this.admit({
       session,
@@ -1138,7 +1436,11 @@ export class PostgresRuntimeChat {
       idempotencyKey,
       outputLocale,
       retryOfRunId: input.retryOfRunId,
-      attemptNo: input.attemptNo
+      attemptNo: input.attemptNo,
+      metadata: userMetadata,
+      attachments,
+      executionBinding,
+      ...(continuationState ? { continuationState } : {})
     });
     if (admission.replay) {
       if (isSettled(admission.run)) {
@@ -1176,39 +1478,113 @@ export class PostgresRuntimeChat {
     let materializedAttachments: MaterializedWorkspaceAttachment[] = [];
     try {
       await ensureAgentWorktree(this.agentWorktreeRoot, this.coreWorkspaceRoot);
-      materializedAttachments = await this.materializeWorkspaceAttachments(session.room_id, input.attachments ?? [], admission.run.id);
+      materializedAttachments = await this.materializeWorkspaceAttachments(
+        session.room_id,
+        attachments,
+        admission.run.id,
+        roomWorkPreflight
+      );
     } catch (error) {
-      await this.rejectAdmittedRun(admission, session, content, error, "runtime_workspace_attachment_unavailable");
+      // No provider has started yet. Remove the provisional admission rows so
+      // a physical-file race cannot leave a failed Run/Message/Activity or a
+      // held reservation behind. If a concurrent control already moved the
+      // Run out of the admitted phase, fall back to the existing terminal
+      // evidence path rather than deleting a live execution.
+      await this.discardUnstartedAdmission(admission, error, "runtime_workspace_attachment_unavailable");
     }
     try {
       await this.transitionToExternalRunning(admission.run);
-      const inputForBackend: BackendRunInput = {
+      const recentMessages = await this.listMessages(session.id);
+      const buildInputForBackend = (continuation?: RuntimeContinuationState, providerSessionId?: string): BackendRunInput => ({
         run_id: admission.run.id,
         session_id: session.id,
         room_id: session.room_id,
-        ...(agent ? { agent_context: { id: agent.id, name: agent.name, role: agent.role, instructions: agent.instructions, authority: "supporting_context" as const } } : {}),
+        agent_context: { id: agent.id, name: agent.name, role: agent.role, instructions: agent.instructions, authority: "supporting_context" as const },
+        backend_session_key: runtimeBackendSessionKey(executionBinding),
         input_message_id: admission.userMessage.id,
         workspace_root: this.agentWorktreeRoot,
         working_directory: this.agentWorktreeRoot,
-        envelope,
+        envelope: backendEnvelope,
         user_input: content,
         input_locale: inputLocale,
         output_locale: outputLocale,
         active_memory: knowledge.map((page) => memoryCandidate(page)),
-        recent_messages: await this.listMessages(session.id),
+        recent_messages: recentMessages,
         ...((input.temporaryContext?.length || materializedAttachments.length) ? {
           temporary_context: [...(input.temporaryContext ?? []), ...materializedAttachments.map((item) => item.context)]
         } : {}),
-        metadata: input.metadata ?? {},
+        // The persisted Run metadata is the authoritative binding.  A
+        // provider must not receive a caller-supplied Room/work/Agent context
+        // that differs from the admission record.
+        metadata: runtimeMetadataForBackend(admission.run.metadata),
         context_intent: "light_chat",
-        available_tools: [...this.availableTools],
+        available_tools: this.availableProviderTools(executionBinding),
+        ...(providerSessionId ? { backend_session_id: providerSessionId } : {}),
+        ...(continuation ? { execution_context: runtimeExecutionContext(executionBinding, backend, continuation) } : executionContext ? { execution_context: executionContext } : {}),
         ...(input.signal ? { abort_signal: input.signal } : {})
-      };
-      const settled = await this.executeBackendStream({
-        admission,
-        runInput: inputForBackend,
-        stream: backend.runTurn(inputForBackend)
       });
+      let inputForBackend = buildInputForBackend(continuationState, resumeBackendSessionId);
+      let settled: BackendRunRecord;
+      if (!resumeBackendSessionId) {
+        settled = await this.executeBackendStream({
+          admission,
+          runInput: inputForBackend,
+          stream: backend.runTurn(inputForBackend)
+        });
+      } else {
+        let backendStream: AsyncIterable<BackendOutputEvent>;
+        try {
+          backendStream = backend.resumeRun!(admission.run.id, {
+            backend_session_id: resumeBackendSessionId,
+            user_input: content,
+            input_locale: inputLocale,
+            output_locale: outputLocale,
+            ...(attachments.length > 0 ? { attachments } : {})
+          });
+        } catch (error) {
+          // A synchronous resume failure proves that the provider did not
+          // accept this continuation. Record the reconstruction before
+          // starting a fresh provider conversation.
+          if (!executionBinding.parentAssigneeId) throw error;
+          const fallbackState: RuntimeContinuationState = {
+            mode: "reconstructed",
+            source: "samurai_context",
+            reason: "resume_failed"
+          };
+          await this.updateContinuationState(admission, fallbackState);
+          inputForBackend = buildInputForBackend(fallbackState);
+          settled = await this.executeBackendStream({
+            admission,
+            runInput: inputForBackend,
+            stream: backend.runTurn(inputForBackend)
+          });
+          const result = await this.project(settled);
+          await this.notifyCompletionActivity(result, content);
+          return result;
+        }
+        try {
+          settled = await this.executeBackendStream({
+            admission,
+            runInput: inputForBackend,
+            stream: backendStream,
+            rethrowExternalContinuationFailure: Boolean(executionBinding.parentAssigneeId)
+          });
+        } catch (error) {
+          if (!(error instanceof ExternalContinuationResumeFailure) || !executionBinding.parentAssigneeId) throw error;
+          const fallbackState: RuntimeContinuationState = {
+            mode: "reconstructed",
+            source: "samurai_context",
+            reason: "resume_failed"
+          };
+          await this.updateContinuationState(admission, fallbackState);
+          inputForBackend = buildInputForBackend(fallbackState);
+          settled = await this.executeBackendStream({
+            admission,
+            runInput: inputForBackend,
+            stream: backend.runTurn(inputForBackend)
+          });
+        }
+      }
       const result = await this.project(settled);
       await this.notifyCompletionActivity(result, content);
       return result;
@@ -1220,7 +1596,8 @@ export class PostgresRuntimeChat {
   private async materializeWorkspaceAttachments(
     roomId: string,
     refs: ResourceRef[],
-    runId: string
+    runId: string,
+    preparedFiles?: readonly PreflightWorkspaceFile[]
   ): Promise<MaterializedWorkspaceAttachment[]> {
     const fileRefs = refs.filter((ref) => ref.kind === "file");
     if (fileRefs.length === 0) return [];
@@ -1230,10 +1607,18 @@ export class PostgresRuntimeChat {
     const materialized: MaterializedWorkspaceAttachment[] = [];
     try {
       for (const ref of fileRefs) {
+        const prepared = preparedFiles?.find((item) => item.ref.uri === ref.uri && item.ref.id === ref.id && item.ref.version === ref.version);
+        // Re-read after admission as well. A file can be replaced after the
+        // transaction commits but before the provider starts; using only the
+        // preflight snapshot would silently execute stale bytes.
         const file = await this.readWorkspaceFile(this.context(), roomId, ref);
+        if (file.path !== ref.uri) throw new WorkspaceServerError("runtime_workspace_attachment_scope_mismatch", 409);
         if (ref.id !== file.sha256) throw new WorkspaceServerError("runtime_workspace_attachment_reference_mismatch", 409);
-        if (ref.version !== undefined && ref.version !== String(file.version)) {
+        if (ref.version === undefined || ref.version !== String(file.version)) {
           throw new WorkspaceServerError("runtime_workspace_attachment_version_conflict", 409);
+        }
+        if (prepared && (prepared.file.sha256 !== file.sha256 || prepared.file.version !== file.version)) {
+          throw new WorkspaceServerError("runtime_workspace_attachment_changed_during_admission", 409);
         }
         if (file.content.byteLength > runtimeWorkspaceAttachmentMaxBytes
           || totalBytes + file.content.byteLength > runtimeWorkspaceAttachmentMaxTotalBytes) {
@@ -1271,6 +1656,155 @@ export class PostgresRuntimeChat {
     }
   }
 
+  /**
+   * Room Work attachment reads are deliberately performed before Runtime
+   * admission.  The Store-backed reader verifies both the DB row and the
+   * physical bytes; admission repeats the DB association check in its own
+   * transaction so a concurrent file update cannot turn an old snapshot into
+   * an executable Work request.
+   */
+  private async preflightRoomWorkAttachments(
+    roomId: string,
+    refs: readonly ResourceRef[],
+    strictRoomWork = true
+  ): Promise<PreflightWorkspaceFile[]> {
+    const candidates = strictRoomWork ? refs : refs.filter((ref) => ref.kind === "file");
+    const parsed = WorkspaceFileResourceRefSchema.array().max(32).safeParse(candidates);
+    if (!parsed.success) throw new WorkspaceServerError("runtime_workspace_attachment_reference_invalid", 400);
+    if (parsed.data.length === 0) return [];
+    if (!this.readWorkspaceFile) throw new WorkspaceServerError("runtime_workspace_attachment_reader_unavailable", 503);
+    const files: PreflightWorkspaceFile[] = [];
+    for (const ref of parsed.data) {
+      const file = await this.readWorkspaceFile(this.context(), roomId, ref);
+      if (!Number.isSafeInteger(file.version) || file.version < 1) {
+        throw new WorkspaceServerError("runtime_workspace_attachment_version_invalid", 409);
+      }
+      if (file.path !== ref.uri) {
+        throw new WorkspaceServerError("runtime_workspace_attachment_scope_mismatch", 409);
+      }
+      if (ref.id !== file.sha256) {
+        throw new WorkspaceServerError("runtime_workspace_attachment_reference_mismatch", 409);
+      }
+      if (ref.version !== String(file.version)) {
+        throw new WorkspaceServerError("runtime_workspace_attachment_version_conflict", 409);
+      }
+      files.push({ ref, file });
+    }
+    return files;
+  }
+
+  /**
+   * Materialization happens after admission for the normal provider path, so
+   * a filesystem failure must remove the provisional durable rows.  The
+   * second transaction only deletes a still-queued/admitted Run with no
+   * Runtime events; a concurrent stop/control that moved the Run to another
+   * phase is left to the normal terminal-evidence path instead.
+   */
+  private async discardUnstartedAdmission(
+    admission: RuntimeAdmission,
+    error: unknown,
+    fallbackCode: string
+  ): Promise<never> {
+    const binding = admission.run.metadata
+      ? runtimeBindingFromRunMetadata(admission.run.metadata, {
+          workspaceId: this.workspaceId,
+          roomId: admission.session.room_id!,
+          sessionId: admission.session.id,
+          agent: admission.agent,
+          agentId: admission.run.agent_id ?? admission.agent?.id,
+          backendId: admission.run.backend_id
+        })
+      : undefined;
+    const cleanupErrorCode = error instanceof WorkspaceServerError ? error.code : fallbackCode;
+    const discarded = await this.database.withContext(this.context(), async (sql) => {
+      if (binding?.workId && binding.assigneeId) {
+        const reset = await sql.query<{ discarded: boolean }>(
+          "SELECT samurai_discard_human_work_runtime_admission($1, $2, $3, $4, $5, $6) AS discarded",
+          [this.workspaceId, binding.workId, binding.assigneeId, binding.generation, admission.run.id, cleanupErrorCode]
+        );
+        if (reset.rows[0]?.discarded !== true) return false;
+      }
+      const current = await sql.query<{
+        status: string;
+        phase: string | null;
+        session_id: string | null;
+        room_id: string | null;
+        input_message_id: string | null;
+      }>(
+        `SELECT status, phase, session_id, room_id, input_message_id
+           FROM workspace_runtime_runs
+          WHERE workspace_id = $1 AND id = $2
+          FOR UPDATE`,
+        [this.workspaceId, admission.run.id]
+      );
+      const row = current.rows[0];
+      if (!row || row.status !== "queued" || row.phase !== "admitted"
+        || row.session_id !== admission.session.id
+        || row.room_id !== admission.session.room_id
+        || row.input_message_id !== admission.userMessage.id) {
+        return false;
+      }
+      const events = await sql.query<{ id: string }>(
+        `SELECT id FROM workspace_runtime_events
+          WHERE workspace_id = $1 AND run_id = $2
+          LIMIT 1`,
+        [this.workspaceId, admission.run.id]
+      );
+      if (events.rows[0]) return false;
+      await sql.query(
+        `DELETE FROM workspace_runtime_resource_usage
+          WHERE workspace_id = $1 AND activity_id = $2`,
+        [this.workspaceId, admission.activity.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_changes
+          WHERE workspace_id = $1 AND (run_id = $2 OR activity_id = $3 OR domain_operation_id = $4)`,
+        [this.workspaceId, admission.run.id, admission.activity.id, admission.operation.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_events
+          WHERE workspace_id = $1 AND run_id = $2`,
+        [this.workspaceId, admission.run.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_activities
+          WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, admission.activity.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_reservations
+          WHERE workspace_id = $1 AND run_id = $2`,
+        [this.workspaceId, admission.run.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_operations
+          WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, admission.operation.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_runs
+          WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, admission.run.id]
+      );
+      await sql.query(
+        `DELETE FROM workspace_runtime_messages
+          WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, admission.userMessage.id]
+      );
+      return true;
+    });
+    if (!discarded) {
+      return this.rejectAdmittedRun(
+        admission,
+        admission.session,
+        admission.userMessage.content,
+        error,
+        fallbackCode
+      );
+    }
+    throw error instanceof WorkspaceServerError ? error : new WorkspaceServerError(fallbackCode, 503);
+  }
+
   private async rejectAdmittedRun(
     admission: RuntimeAdmission,
     session: SessionRecord,
@@ -1294,6 +1828,50 @@ export class PostgresRuntimeChat {
     throw error instanceof WorkspaceServerError ? error : new WorkspaceServerError(fallbackCode, 503);
   }
 
+  /**
+   * Re-check the immutable DB half of every Room Work attachment while the
+   * admission transaction is still open. Workspace file writes use the same
+   * advisory key, so a committed version/path update cannot race this check.
+   */
+  private async assertRoomWorkAttachmentAdmission(
+    sql: WorkspaceSql,
+    roomId: string,
+    refs: readonly ResourceRef[]
+  ): Promise<void> {
+    const parsed = WorkspaceFileResourceRefSchema.array().max(32).safeParse(refs);
+    if (!parsed.success) throw new WorkspaceServerError("runtime_workspace_attachment_reference_invalid", 400);
+    if (parsed.data.length === 0) return;
+    const permission = await sql.query<{ allowed: boolean }>(
+      "SELECT samurai_can_room($1, $2, 'read') AS allowed",
+      [this.workspaceId, roomId]
+    );
+    if (permission.rows[0]?.allowed !== true) {
+      throw new WorkspaceServerError("room_read_permission_denied", 403);
+    }
+    const paths = [...new Set(parsed.data.map((ref) => ref.uri))].sort();
+    for (const filePath of paths) {
+      await sql.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`${this.workspaceId}\u001f${filePath}`]);
+    }
+    const result = await sql.query<{ path: string; version: number | string; sha256: string }>(
+      `SELECT path, version, sha256
+         FROM workspace_files
+        WHERE workspace_id = $1 AND room_id = $2 AND path = ANY($3::TEXT[])
+        FOR SHARE`,
+      [this.workspaceId, roomId, paths]
+    );
+    const files = new Map(result.rows.map((row) => [row.path, row]));
+    for (const ref of parsed.data) {
+      const file = files.get(ref.uri);
+      if (!file) throw new WorkspaceServerError("runtime_workspace_attachment_not_found", 404);
+      if (file.sha256 !== ref.id) {
+        throw new WorkspaceServerError("runtime_workspace_attachment_reference_mismatch", 409);
+      }
+      if (String(file.version) !== ref.version) {
+        throw new WorkspaceServerError("runtime_workspace_attachment_version_conflict", 409);
+      }
+    }
+  }
+
   private async admit(input: {
     session: SessionRecord;
     agent?: RuntimeAgent;
@@ -1305,12 +1883,17 @@ export class PostgresRuntimeChat {
     outputLocale: SupportedLocale;
     retryOfRunId?: string;
     attemptNo?: number;
+    metadata?: Record<string, JsonValue>;
+    attachments?: readonly ResourceRef[];
+    executionBinding?: RuntimeExecutionBinding;
+    continuationState?: RuntimeContinuationState;
   }): Promise<RuntimeAdmission> {
     const now = nowIso();
     const runId = createId("run");
     const messageId = createId("message");
     const activityId = createId("activity");
     const source = this.source ?? { kind: "native_app" as const, app_id: "samurai-native" };
+    const userMetadata = runtimeMetadataForBackend(input.metadata ?? {});
     const principal = input.agent
       ? { kind: "agent" as const, agent_id: input.agent.id, requested_by_participant_id: this.accountId }
       : this.principal ?? { kind: "human" as const, participant_id: this.accountId };
@@ -1341,7 +1924,12 @@ export class PostgresRuntimeChat {
       request_hash: input.requestHash,
       started_at: now,
       input_summary: summarize(input.content),
-      metadata: input.retryOfRunId ? { retry_of_run_id: input.retryOfRunId } : {}
+      metadata: {
+        ...userMetadata,
+        ...(input.retryOfRunId ? { retry_of_run_id: input.retryOfRunId } : {}),
+        ...(input.executionBinding ? { runtime_binding: runtimeBindingMetadata(input.executionBinding) } : {}),
+        ...(input.continuationState ? { runtime_continuation: input.continuationState } : {})
+      }
     });
     const operation = buildRuntimeOperation({
       session: input.session,
@@ -1408,6 +1996,12 @@ export class PostgresRuntimeChat {
     };
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, input.session.room_id!);
+      // Idempotent replays must be resolved before the Room Work admission
+      // guard. A stop can legitimately close the assignment after the
+      // original Run was admitted; replaying that durable Run must not be
+      // mistaken for a new external execution and rejected because its
+      // current_run_id is already set. The request hash check in
+      // replayAdmission still rejects a reused key with different input.
       const existing = await sql.query<RuntimeRunRow>(
         `SELECT * FROM workspace_runtime_runs
          WHERE workspace_id = $1 AND session_id = $2 AND request_idempotency_key = $3`,
@@ -1415,6 +2009,30 @@ export class PostgresRuntimeChat {
       );
       if (existing.rows[0]) {
         return replayAdmission(sql, runFromRow(existing.rows[0]));
+      }
+      // Room-work stop and Runtime admission share the Work-row lock inside
+      // this server-owned function. A stop committed before this point wins
+      // before a Runtime Run (and therefore an external process) exists; if
+      // admission wins, the insert trigger records the Run ID for the stop
+      // dispatcher to cancel and reconcile.
+      if (input.executionBinding?.workId && input.executionBinding.assigneeId) {
+        try {
+          await sql.query(
+            "SELECT samurai_assert_human_work_runtime_admission($1, $2, $3, $4)",
+            [this.workspaceId, input.executionBinding.workId, input.executionBinding.assigneeId, input.executionBinding.generation]
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          if (message.includes("human_work_execution_admission_closed")) {
+            throw new WorkspaceServerError("room_work_execution_admission_closed", 409);
+          }
+          throw error;
+        }
+        await this.assertRoomWorkAttachmentAdmission(
+          sql,
+          input.session.room_id!,
+          input.attachments ?? []
+        );
       }
       const held = await sql.query<{ run_id: string }>(
         `SELECT run_id FROM workspace_runtime_reservations
@@ -1509,6 +2127,7 @@ export class PostgresRuntimeChat {
     runInput?: BackendRunInput;
     stream: AsyncIterable<BackendOutputEvent>;
     unknownOnError?: boolean;
+    rethrowExternalContinuationFailure?: boolean;
   }): Promise<BackendRunRecord> {
     const { admission } = input;
     const eventBridge = new BackendEventBridge({
@@ -1519,8 +2138,10 @@ export class PostgresRuntimeChat {
     });
     let terminal: BackendEventRecord | undefined;
     let output = "";
+    let receivedBackendEvent = false;
     try {
       for await (const backendEvent of input.stream) {
+        receivedBackendEvent = true;
         const projection = eventBridge.project(backendEvent);
         if (projection.terminal) {
           terminal = projection.record;
@@ -1558,6 +2179,13 @@ export class PostgresRuntimeChat {
         if (saved) await this.notifyEvent(saved, admission.session.room_id!);
       }
     } catch (error) {
+      if (input.rethrowExternalContinuationFailure && !receivedBackendEvent) {
+        // No provider event was observed. This is the only resume failure
+        // that can safely fall back to a new provider conversation: once an
+        // event exists, the operation may already have side effects and must
+        // remain an ordinary failed/unknown Run.
+        throw new ExternalContinuationResumeFailure(error);
+      }
       terminal = this.failureEvent(
         admission.run,
         error,
@@ -1601,8 +2229,14 @@ export class PostgresRuntimeChat {
     if (!toolCallId) return { status: "failed", summary: "Tool call ID is missing.", errorCode: "tool_call_id_required" };
     const providerToolName = stringPayload(started.payload.provider_tool_name);
     const actionId = stringPayload(started.payload.action_id);
+    const capabilityId = stringPayload(started.payload.capability_id);
     const isArtifactCreate = providerToolName === "create_artifact" || actionId === "artifact.create";
-    if (!isArtifactCreate) {
+    const isRoomWorkDelegation = capabilityId === "subagent_delegate"
+      || actionId === "room.work.assignee.delegate"
+      || providerToolName === "subagent_delegate"
+      || providerToolName === "samurai.room.work.assignee.delegate"
+      || providerToolName === "mcp__samurai__room_work_assignee_delegate";
+    if (!isArtifactCreate && !isRoomWorkDelegation) {
       return {
         status: "failed",
         providerToolName: providerToolName ?? "unknown_tool",
@@ -1616,8 +2250,10 @@ export class PostgresRuntimeChat {
       return {
         status: "failed",
         providerToolName: providerToolName ?? "create_artifact",
-        actionId: actionId ?? "artifact.create",
-        summary: "Artifact creation is unavailable because the Host tool port is not configured.",
+        actionId: actionId ?? (isRoomWorkDelegation ? "room.work.assignee.delegate" : "artifact.create"),
+        summary: isRoomWorkDelegation
+          ? "Room-work delegation is unavailable because the Host tool port is not configured."
+          : "Artifact creation is unavailable because the Host tool port is not configured.",
         reason: "runtime_tool_execution_unavailable",
         errorCode: "runtime_tool_execution_unavailable"
       };
@@ -1627,50 +2263,83 @@ export class PostgresRuntimeChat {
       tool_call_id: toolCallId,
       ...(providerToolName ? { provider_tool_name: providerToolName } : {}),
       ...(actionId ? { action_id: actionId } : {}),
+      ...(capabilityId ? { capability_id: capabilityId } : {}),
       arguments: jsonRecord(started.payload.arguments ?? started.payload.input ?? {}),
       payload: started.payload
     };
+    // Provider arguments are intent only.  In particular, a model must not
+    // be able to select another Room Work, parent assignment, Run, actor, or
+    // requester by smuggling those fields through the delegation tool.
+    const executionEvent = isRoomWorkDelegation
+      ? sanitizeDelegationToolEvent(event)
+      : event;
+    const operationSpec = isRoomWorkDelegation
+      ? { operation: "room.work.assignee.delegate", capabilityId: "subagent_delegate", proposedEffect: "Create one bounded child Room-work assignment." }
+      : { operation: "artifact.create", capabilityId: "artifact.create", proposedEffect: "Create a local workspace artifact draft." };
     let operation: OperationRecord | undefined;
+    let trustedRoomWorkBinding: PostgresRuntimeTrustedRoomWorkBinding | undefined;
     try {
-      operation = await this.ensureToolOperation(input.admission, event);
+      // Validate the persisted Room-work association before creating the
+      // idempotency ledger entry. A normal Chat run, or a run whose binding
+      // was lost/malformed, must not be able to replay or create a delegated
+      // assignment merely by emitting the provider tool name.
+      trustedRoomWorkBinding = isRoomWorkDelegation
+        ? this.trustedRoomWorkBinding(input.admission)
+        : undefined;
+      operation = await this.ensureToolOperation(input.admission, executionEvent, operationSpec);
       if (operation.status === "completed" && operation.result_ref) {
         const replayedRefs = ResourceRefSchema.array().parse([operation.result_ref]);
         return {
           status: "completed",
-          providerToolName: providerToolName ?? "create_artifact",
-          actionId: actionId ?? "artifact.create",
+          providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : "create_artifact"),
+          actionId: actionId ?? operationSpec.operation,
           operationId: operation.id,
           resourceRefs: replayedRefs,
-          summary: "Artifact creation was already completed for this tool call.",
+          summary: isRoomWorkDelegation ? "Room-work delegation was already completed for this tool call." : "Artifact creation was already completed for this tool call.",
           output: { replayed: true, resource_ref: operation.result_ref }
         };
       }
-      const result = await this.toolExecution.execute({
+      const result = isRoomWorkDelegation
+        ? this.toolExecution.delegate
+          ? await this.toolExecution.delegate({
+              run: input.admission.run,
+              runInput: input.runInput,
+              event: executionEvent,
+              operation,
+              trustedRoomWorkBinding: trustedRoomWorkBinding!
+            })
+          : (() => { throw new WorkspaceServerError("runtime_subagent_delegate_unavailable", 503); })()
+        : await this.toolExecution.execute({
         run: input.admission.run,
         runInput: input.runInput,
-        event,
+        event: executionEvent,
         operation
       });
       const resourceRefs = uniqueResourceRefs(ResourceRefSchema.array().max(32).parse(result.resourceRefs));
       const artifactRef = resourceRefs.find((ref) => ref.kind === "artifact");
-      if (!artifactRef) throw new WorkspaceServerError("runtime_tool_result_artifact_missing", 500);
-      const canonicalResourceRefs = uniqueResourceRefs([artifactRef, ...resourceRefs]);
+      if (isArtifactCreate && !artifactRef) throw new WorkspaceServerError("runtime_tool_result_artifact_missing", 500);
+      if (isRoomWorkDelegation && !resourceRefs.some((ref) => ref.kind === "room_work_assignee")) {
+        throw new WorkspaceServerError("runtime_tool_result_assignment_missing", 500);
+      }
+      const canonicalResourceRefs = uniqueResourceRefs([...(artifactRef ? [artifactRef] : []), ...resourceRefs]);
       const evidence = await this.settleToolExecution({
         admission: input.admission,
         operation,
         status: "completed",
         summary: result.summary,
-        resourceRefs: canonicalResourceRefs
+        resourceRefs: canonicalResourceRefs,
+        changeType: result.changeType ?? (isRoomWorkDelegation ? "other" : "artifact_created")
       });
       const refs = [...canonicalResourceRefs, evidence.activityRef, ...(evidence.changeRef ? [evidence.changeRef] : [])];
       return {
         status: "completed",
-        providerToolName: providerToolName ?? "create_artifact",
-        actionId: actionId ?? "artifact.create",
+        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : "create_artifact"),
+        actionId: actionId ?? operationSpec.operation,
         operationId: operation.id,
         resourceRefs: refs,
         summary: result.summary,
-        ...(result.output !== undefined ? { output: result.output } : {})
+        ...(result.output !== undefined ? { output: result.output } : {}),
+        ...(result.changeType ? { changeType: result.changeType } : {})
       };
     } catch (error) {
       const errorCode = toolErrorCode(error);
@@ -1692,8 +2361,8 @@ export class PostgresRuntimeChat {
       }
       return {
         status: "failed",
-        providerToolName: providerToolName ?? "create_artifact",
-        actionId: actionId ?? "artifact.create",
+        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : "create_artifact"),
+        actionId: actionId ?? operationSpec.operation,
         ...(operation ? { operationId: operation.id } : {}),
         summary,
         errorCode,
@@ -1756,16 +2425,67 @@ export class PostgresRuntimeChat {
     } as never).record;
   }
 
+  /**
+   * Build the only authority that the `subagent_delegate` port receives.
+   * Room/work/assignment/run/requester identity is reconstructed from the
+   * admitted Run and its persisted binding; provider arguments never enter
+   * this object.
+   */
+  private trustedRoomWorkBinding(admission: RuntimeAdmission): PostgresRuntimeTrustedRoomWorkBinding {
+    const roomId = admission.run.room_id ?? admission.session.room_id;
+    if (!roomId) throw new WorkspaceServerError("runtime_room_work_room_missing", 409);
+    const binding = runtimeBindingFromRunMetadata(admission.run.metadata, {
+      workspaceId: this.workspaceId,
+      roomId,
+      sessionId: admission.session.id,
+      agent: admission.agent,
+      agentId: admission.run.agent_id ?? admission.agent?.id,
+      backendId: admission.run.backend_id
+    });
+    if (!binding?.workId || !binding.assigneeId) {
+      throw new WorkspaceServerError("runtime_subagent_binding_missing", 409);
+    }
+    const requestedByParticipantId = admission.run.requested_by_participant_id?.trim();
+    if (!requestedByParticipantId) {
+      throw new WorkspaceServerError("runtime_subagent_requester_missing", 409);
+    }
+    if (binding.workspaceId !== this.workspaceId || binding.roomId !== roomId || binding.sessionId !== admission.session.id) {
+      throw new WorkspaceServerError("runtime_subagent_binding_mismatch", 409);
+    }
+    return {
+      runId: admission.run.id,
+      workspaceId: this.workspaceId,
+      roomId,
+      workId: binding.workId,
+      assigneeId: binding.assigneeId,
+      parentAssignmentId: binding.assigneeId,
+      agentId: binding.agentId,
+      generation: binding.generation,
+      requestedByParticipantId
+    };
+  }
+
   private async ensureToolOperation(
     admission: RuntimeAdmission,
-    event: PostgresRuntimeToolCallEvent
+    event: PostgresRuntimeToolCallEvent,
+    spec: RuntimeToolOperationSpec
   ): Promise<OperationRecord> {
     const operationId = runtimeToolOperationId(admission.run.id, event.tool_call_id);
-    const inputHash = stableHash({
-      provider_tool_name: event.provider_tool_name ?? "create_artifact",
-      action_id: event.action_id ?? "artifact.create",
-      arguments: event.arguments
-    });
+    // Keep the historical artifact hash stable so an older completed tool
+    // operation remains replayable after this delegation capability lands.
+    const inputHash = stableHash(spec.operation === "artifact.create"
+      ? {
+          provider_tool_name: event.provider_tool_name ?? "create_artifact",
+          action_id: event.action_id ?? "artifact.create",
+          arguments: event.arguments
+        }
+      : {
+          capability_id: spec.capabilityId,
+          operation: spec.operation,
+          provider_tool_name: event.provider_tool_name ?? spec.capabilityId,
+          action_id: event.action_id ?? spec.operation,
+          arguments: event.arguments
+        });
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, admission.run.room_id!);
       const existing = await sql.query<RuntimeOperationRow>(
@@ -1783,6 +2503,9 @@ export class PostgresRuntimeChat {
         run: admission.run,
         inputHash,
         inputMessageId: admission.userMessage.id,
+        operation: spec.operation,
+        capabilityId: spec.capabilityId,
+        proposedEffect: spec.proposedEffect,
         now: nowIso()
       });
       await sql.query(
@@ -1810,6 +2533,7 @@ export class PostgresRuntimeChat {
     status: "completed" | "failed";
     summary: string;
     resourceRefs: ResourceRef[];
+    changeType?: import("@samurai-agent/core-schemas").WorkspaceChangeType;
     errorCode?: string;
   }): Promise<{ operation: OperationRecord; activityRef: ResourceRef; changeRef?: ResourceRef }> {
     return this.database.withContext(this.context(), async (sql) => {
@@ -1862,7 +2586,7 @@ export class PostgresRuntimeChat {
           domain_operation_id: input.operation.id,
           ...(input.admission.run.session_ref ? { session_ref: input.admission.run.session_ref } : {}),
           resource_ref: resourceRef,
-          change_type: "artifact_created",
+          change_type: input.changeType ?? "artifact_created",
           summary: summarize(input.summary, 2_000),
           correlation_id: input.operation.correlation_id,
           created_at: now
@@ -2122,7 +2846,24 @@ export class PostgresRuntimeChat {
         [this.workspaceId, event.run_id]
       );
       const state = runState.rows[0];
-      if (!state || isTerminalRunState(state.status, state.phase)) return undefined;
+      if (!state) return undefined;
+      if (isTerminalRunState(state.status, state.phase)
+        && !(state.status === "outcome_unknown" && isTerminalEventType(event.event_type))) {
+        return undefined;
+      }
+      if (event.backend_session_id) {
+        const updatedRun = await sql.query<{ backend_session_id: string }>(
+          `UPDATE workspace_runtime_runs
+           SET backend_session_id = COALESCE(backend_session_id, $3)
+           WHERE workspace_id = $1 AND id = $2
+             AND (backend_session_id IS NULL OR backend_session_id = $3)
+           RETURNING backend_session_id`,
+          [this.workspaceId, event.run_id, event.backend_session_id]
+        );
+        if (updatedRun.rows[0]?.backend_session_id !== event.backend_session_id) {
+          throw new WorkspaceServerError(`runtime_backend_session_conflict:${event.run_id}`, 409);
+        }
+      }
       const existing = await sql.query<RuntimeEventRow>(
         `SELECT * FROM workspace_runtime_events WHERE workspace_id = $1 AND id = $2`,
         [this.workspaceId, event.id]
@@ -2194,10 +2935,17 @@ export class PostgresRuntimeChat {
       );
       const current = currentResult.rows[0] ? runFromRow(currentResult.rows[0]) : undefined;
       if (!current) throw new WorkspaceServerError(`runtime_run_not_found:${input.admission.run.id}`, 500);
-      if (isSettled(current)) return current;
       const currentPhase = current.phase ?? "admitted";
+      const lateUnknownReconciliation = current.status === "outcome_unknown"
+        && currentPhase === "settled"
+        && terminalEvidence?.success === true
+        && terminalEvidence.data.kind !== "indeterminate";
+      // Stable terminal Runs are immutable.  The only exception is a
+      // previously outcome-unknown Run receiving a later evidence record;
+      // that record is reconciled below under the same row lock.
+      if (isSettled(current) && !lateUnknownReconciliation) return current;
       const activeStatuses: BackendRunRecord["status"][] = ["queued", "running", "waiting_for_backend_input"];
-      if (!activeStatuses.includes(current.status) || currentPhase === "settled") {
+      if ((!activeStatuses.includes(current.status) && !lateUnknownReconciliation) || (currentPhase === "settled" && !lateUnknownReconciliation)) {
         throw new WorkspaceServerError(`runtime_settlement_cas_conflict:${current.id}`, 409);
       }
       const maxSequence = await sql.query<{ max_sequence: number | string | null }>(
@@ -2205,6 +2953,10 @@ export class PostgresRuntimeChat {
         [this.workspaceId, current.id]
       );
       const terminal = { ...input.terminal, sequence: Math.max(input.terminal.sequence, Number(maxSequence.rows[0]?.max_sequence ?? 0) + 1) };
+      if (current.backend_session_id && terminal.backend_session_id
+        && current.backend_session_id !== terminal.backend_session_id) {
+        throw new WorkspaceServerError(`runtime_backend_session_conflict:${current.id}`, 409);
+      }
       if (outputMessage) {
         await sql.query(
           `INSERT INTO workspace_runtime_messages(
@@ -2227,10 +2979,11 @@ export class PostgresRuntimeChat {
       const updated = await sql.query<RuntimeRunRow>(
         `UPDATE workspace_runtime_runs
          SET status = $3, phase = $4, output_message_id = $5, output_summary = $6,
-             error_code = $7, completed_at = $8
+             error_code = $7, completed_at = $8,
+             backend_session_id = COALESCE(backend_session_id, $11)
          WHERE workspace_id = $1 AND id = $2 AND status = $9 AND phase = $10
          RETURNING *`,
-        [this.workspaceId, current.id, finalStatus, finalPhase, outputMessage?.id ?? null, outputSummary ?? null, errorCode ?? null, finalStatus === "waiting_for_backend_input" || finalStatus === "outcome_unknown" ? null : now, current.status, currentPhase]
+        [this.workspaceId, current.id, finalStatus, finalPhase, outputMessage?.id ?? null, outputSummary ?? null, errorCode ?? null, finalStatus === "waiting_for_backend_input" || finalStatus === "outcome_unknown" ? null : now, current.status, currentPhase, terminal.backend_session_id ?? null]
       );
       if (!updated.rows[0]) throw new WorkspaceServerError(`runtime_settlement_cas_conflict:${current.id}`, 409);
       await sql.query(
@@ -2290,31 +3043,69 @@ export class PostgresRuntimeChat {
     });
   }
 
-  private async resolveAgent(roomId: string, requestedAgentId?: string): Promise<RuntimeAgent | undefined> {
+  private async resolveAgent(roomId: string, requestedAgentId?: string): Promise<RuntimeAgent> {
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, roomId);
+      const roomResult = await sql.query<RuntimeRoomDefaultAgentRow>(
+        `SELECT default_agent_id, default_agent_version
+         FROM rooms
+         WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, roomId]
+      );
+      const room = roomResult.rows[0];
+      if (!room) throw new WorkspaceServerError("runtime_room_not_found", 404);
+      const explicitAgentId = requestedAgentId?.trim() || undefined;
+      const selectedAgentId = explicitAgentId ?? (room.default_agent_id?.trim() || undefined);
+      if (!selectedAgentId) {
+        // An existing Room may remain readable while an administrator has not
+        // selected its default Agent yet.  Never turn that migration state
+        // into "first Agent wins" or an unrelated backend fallback.
+        throw new WorkspaceServerError("runtime_room_default_agent_missing", 409);
+      }
+      if (!explicitAgentId && room.default_agent_version === null) {
+        throw new WorkspaceServerError("runtime_room_default_agent_version_missing", 409);
+      }
       const result = await sql.query<RuntimeAgentRow>(
-        `SELECT agent.id, agent.display_name, agent.description, agent.backend_id, agent.status
+        `SELECT agent.id, agent.display_name, agent.role,
+                agent.instructions, agent.enabled, agent.backend_id, agent.status,
+                agent.version AS configuration_version
          FROM workspace_agents agent
          JOIN workspace_agent_room_permissions permission
            ON permission.workspace_id = agent.workspace_id AND permission.agent_id = agent.id
          WHERE agent.workspace_id = $1 AND permission.room_id = $2
            AND permission.can_execute = TRUE
            AND agent.status = 'active'
-           AND ($3::TEXT IS NULL OR agent.id = $3)
-         ORDER BY agent.created_at, agent.id
+           AND agent.enabled = TRUE
+           AND agent.id = $3
          LIMIT 1`,
-        [this.workspaceId, roomId, requestedAgentId ?? null]
+        [this.workspaceId, roomId, selectedAgentId]
       );
       const row = result.rows[0];
-      if (requestedAgentId && !row) throw new WorkspaceServerError("runtime_agent_not_authorized_for_room", 403);
-      if (!row) return undefined;
+      if (!row) {
+        throw new WorkspaceServerError(
+          explicitAgentId ? "runtime_agent_not_authorized_for_room" : "runtime_room_default_agent_unavailable",
+          explicitAgentId ? 403 : 409
+        );
+      }
+      const configurationVersion = Number(row.configuration_version);
+      if (!Number.isSafeInteger(configurationVersion) || configurationVersion < 1) {
+        throw new WorkspaceServerError("runtime_agent_configuration_version_invalid", 500);
+      }
+      if (!explicitAgentId && room.default_agent_version !== null
+        && configurationVersion !== Number(room.default_agent_version)) {
+        throw new WorkspaceServerError("runtime_room_default_agent_version_conflict", 409);
+      }
+      const instructions = row.instructions?.trim();
+      const role = row.role?.trim();
+      if (!instructions || !role) throw new WorkspaceServerError("runtime_agent_profile_incomplete", 409);
       return {
         id: row.id,
         name: row.display_name,
-        role: "workspace_agent",
-        instructions: row.description || "Follow the Room instructions and return a concise result.",
-        backendId: row.backend_id
+        role,
+        instructions,
+        backendId: row.backend_id,
+        configurationVersion,
+        enabled: row.enabled === true
       };
     });
   }
@@ -2465,6 +3256,21 @@ export class PostgresRuntimeChat {
       );
       return Number(result.rows[0]?.max_sequence ?? 0) + 1;
     });
+  }
+
+  private async updateContinuationState(admission: RuntimeAdmission, state: RuntimeContinuationState): Promise<void> {
+    const updated = await this.database.withContext(this.context(), async (sql) => {
+      const result = await sql.query<RuntimeRunRow>(
+        `UPDATE workspace_runtime_runs
+         SET metadata = jsonb_set(COALESCE(metadata, '{}'::JSONB), '{runtime_continuation}', $3::JSONB, TRUE)
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING *`,
+        [this.workspaceId, admission.run.id, jsonText(state)]
+      );
+      return result.rows[0];
+    });
+    if (!updated) throw new WorkspaceServerError(`runtime_continuation_state_update_failed:${admission.run.id}`, 500);
+    admission.run = runFromRow(updated);
   }
 
   private async activityForRun(sql: WorkspaceSql, runId: string, roomId: string): Promise<ActivityRecord | undefined> {
@@ -2775,14 +3581,17 @@ function buildToolOperation(input: {
   run: BackendRunRecord;
   inputHash: string;
   inputMessageId: string;
+  operation?: string;
+  capabilityId?: string;
+  proposedEffect?: string;
   now: string;
 }): OperationRecord {
   return OperationRecordSchema.parse({
     id: input.id,
     ...(input.run.session_id ? { session_id: input.run.session_id } : {}),
     run_id: input.run.id,
-    capability_id: "artifact.create",
-    operation: "artifact.create",
+    capability_id: input.capabilityId ?? "artifact.create",
+    operation: input.operation ?? "artifact.create",
     actor_identity: actorIdentityForSource(input.run.source),
     ...(principalParticipantId(input.run.principal) ? { participant_id: principalParticipantId(input.run.principal) } : {}),
     ...(input.run.principal ? { participant_kind: input.run.principal.kind, principal: input.run.principal } : {}),
@@ -2796,7 +3605,7 @@ function buildToolOperation(input: {
     input_hash: input.inputHash,
     input_ref: messageResourceRef(input.inputMessageId),
     target_resource_refs: [],
-    proposed_effects: ["Create a local workspace artifact draft."],
+    proposed_effects: [input.proposedEffect ?? "Create a local workspace artifact draft."],
     status: "created",
     correlation_id: `${input.run.id}:${input.id}`,
     created_at: input.now,
@@ -3135,10 +3944,396 @@ function uniqueResourceRefs(refs: ResourceRef[]): ResourceRef[] {
   });
 }
 
+const delegationAuthorityArgumentKeys = new Set([
+  "workspace", "room", "work", "assignee", "assignment", "run", "parent", "parent_run", "parentrun",
+  "parent_assignment", "parentassignment", "actor", "requester", "principal", "authority",
+  "workspace_id", "workspaceid",
+  "room_id", "roomid",
+  "work_id", "workid",
+  "assignee_id", "assigneeid",
+  "parent_assignee_id", "parentassigneeid",
+  "parent_assignment_id", "parentassignmentid",
+  "parent_work_id", "parentworkid",
+  "run_id", "runid",
+  "parent_run_id", "parentrunid",
+  "actor_id", "actorid",
+  "account_id", "accountid",
+  "participant_id", "participantid",
+  "requester_id", "requesterid",
+  "requested_by_participant_id", "requestedbyparticipantid",
+  "generation", "expected_generation", "expectedgeneration",
+  "control_generation", "controlgeneration",
+  "expected_version", "expectedversion",
+  "runtime_binding", "runtimebinding", "execution_binding", "executionbinding"
+]);
+
+function sanitizeDelegationArguments(value: Record<string, JsonValue>): Record<string, JsonValue> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => {
+    const normalized = key.replace(/[-\s]/g, "_").toLowerCase();
+    return !delegationAuthorityArgumentKeys.has(normalized) && !delegationAuthorityArgumentKeys.has(normalized.replace(/_/g, ""));
+  }));
+}
+
+function sanitizeDelegationToolEvent(event: PostgresRuntimeToolCallEvent): PostgresRuntimeToolCallEvent {
+  const argumentsValue = sanitizeDelegationArguments(event.arguments);
+  const payload = sanitizeDelegationArguments(event.payload);
+  return {
+    ...event,
+    arguments: argumentsValue,
+    payload: {
+      ...payload,
+      arguments: argumentsValue
+    }
+  };
+}
+
 function summarizePayload(value: JsonValue | undefined): string {
   if (value === undefined) return "";
   if (typeof value === "string") return summarize(value, 2_000);
   try { return summarize(JSON.stringify(value), 2_000); } catch { return "[unserializable]"; }
+}
+
+function buildRuntimeExecutionBinding(input: {
+  workspaceId: string;
+  roomId: string;
+  sessionId: string;
+  agent: RuntimeAgent;
+  input?: PostgresRuntimeExecutionBinding;
+}): RuntimeExecutionBinding {
+  const workId = input.input?.workId?.trim() || undefined;
+  const assigneeId = input.input?.assigneeId?.trim() || undefined;
+  const parentAssigneeId = input.input?.parentAssigneeId?.trim() || undefined;
+  const hasWorkBinding = workId !== undefined || assigneeId !== undefined;
+  if ((input.input?.workId !== undefined && !workId)
+    || (input.input?.assigneeId !== undefined && !assigneeId)
+    || (input.input?.parentAssigneeId !== undefined && !parentAssigneeId)) {
+    throw new WorkspaceServerError("runtime_execution_binding_incomplete", 400);
+  }
+  const generationValue = input.input?.generation ?? (hasWorkBinding ? undefined : 1);
+  // Human Work starts at control_generation=0.  Zero is a real initial
+  // generation; only a missing, negative, fractional, or unsafe value is
+  // invalid here.
+  if (generationValue === undefined || !Number.isSafeInteger(generationValue) || generationValue < 0) {
+    throw new WorkspaceServerError("runtime_execution_generation_invalid", 400);
+  }
+  const agentConfigurationVersionValue = input.input?.agentConfigurationVersion
+    ?? (hasWorkBinding ? undefined : input.agent.configurationVersion);
+  if (agentConfigurationVersionValue === undefined
+    || !Number.isSafeInteger(agentConfigurationVersionValue)
+    || agentConfigurationVersionValue < 1) {
+    throw new WorkspaceServerError("runtime_agent_configuration_version_invalid", 400);
+  }
+  const generation = generationValue;
+  const agentConfigurationVersion = agentConfigurationVersionValue;
+  if (agentConfigurationVersion !== input.agent.configurationVersion) {
+    throw new WorkspaceServerError("runtime_agent_configuration_version_conflict", 409);
+  }
+  if ((workId && !assigneeId) || (!workId && assigneeId)) {
+    throw new WorkspaceServerError("runtime_execution_binding_incomplete", 400);
+  }
+  if (parentAssigneeId && !workId) {
+    throw new WorkspaceServerError("runtime_execution_binding_incomplete", 400);
+  }
+  return {
+    workspaceId: input.workspaceId,
+    roomId: input.roomId,
+    sessionId: input.sessionId,
+    ...(workId ? { workId } : {}),
+    ...(assigneeId ? { assigneeId } : {}),
+    ...(parentAssigneeId ? { parentAssigneeId } : {}),
+    agentId: input.agent.id,
+    agentConfigurationVersion,
+    backendId: input.agent.backendId,
+    generation,
+    agent: {
+      name: input.agent.name,
+      role: input.agent.role,
+      instructions: input.agent.instructions,
+      enabled: input.agent.enabled
+    }
+  };
+}
+
+function runtimeBackendSessionKey(binding: RuntimeExecutionBinding): string {
+  // A provider-native Session is an execution detail.  The stable key is
+  // derived from the full Samurai binding so a different Room, work,
+  // assignee, Backend, or generation can never reuse it accidentally.
+  return `samurai-runtime:${stableHash({
+    workspace_id: binding.workspaceId,
+    room_id: binding.roomId,
+    session_id: binding.sessionId,
+    work_id: binding.workId ?? null,
+    assignee_id: binding.assigneeId ?? null,
+    parent_assignee_id: binding.parentAssigneeId ?? null,
+    agent_id: binding.agentId,
+    backend_id: binding.backendId,
+    generation: binding.generation
+  })}`;
+}
+
+function runtimeExecutionContext(
+  binding: RuntimeExecutionBinding,
+  backend: Pick<AgentBackend, "kind">,
+  continuationState?: RuntimeContinuationState
+): RuntimeBackendExecutionContext | undefined {
+  // BackendRunAssociation deliberately requires a concrete work and
+  // assignee.  Legacy Session callers do not have that association, so they
+  // keep the old input shape; Room-work launches always provide both IDs.
+  if (!binding.workId || !binding.assigneeId) return undefined;
+  const isNative = backend.kind === "samurai_native";
+  return {
+    agent: {
+      id: binding.agentId,
+      name: binding.agent.name,
+      role: binding.agent.role,
+      instructions: binding.agent.instructions,
+      enabled: binding.agent.enabled,
+      backend_id: binding.backendId,
+      config_version: String(binding.agentConfigurationVersion)
+    },
+    association: {
+      workspace_id: binding.workspaceId,
+      room_id: binding.roomId,
+      work_id: binding.workId,
+      assignee_id: binding.assigneeId,
+      backend_id: binding.backendId,
+      generation: binding.generation
+    },
+    credential_boundary: isNative ? "provider_api" : "external_cli",
+    continuity: isNative ? "samurai_context" : "external_session",
+    ...(continuationState ? { continuity_state: continuationState } : {})
+  };
+}
+
+function runtimeBindingMetadata(binding: RuntimeExecutionBinding): Record<string, JsonValue> {
+  return {
+    workspace_id: binding.workspaceId,
+    room_id: binding.roomId,
+    session_id: binding.sessionId,
+    ...(binding.workId ? { work_id: binding.workId } : {}),
+    ...(binding.assigneeId ? { assignee_id: binding.assigneeId } : {}),
+    ...(binding.parentAssigneeId ? { parent_assignee_id: binding.parentAssigneeId } : {}),
+    agent_id: binding.agentId,
+    agent_configuration_version: binding.agentConfigurationVersion,
+    backend_id: binding.backendId,
+    generation: binding.generation,
+    agent: {
+      name: binding.agent.name,
+      role: binding.agent.role,
+      instructions: binding.agent.instructions,
+      enabled: binding.agent.enabled,
+      backend_id: binding.backendId,
+      config_version: String(binding.agentConfigurationVersion)
+    }
+  };
+}
+
+function runtimeMetadataForBackend(metadata: Record<string, JsonValue>): Record<string, JsonValue> {
+  // `runtime_binding` is persisted for reconciliation, but it is a typed
+  // host association rather than provider/user metadata.  Keep it out of the
+  // generic Backend payload; controls receive it through execution_context.
+  const { runtime_binding: _runtimeBinding, runtime_continuation: _runtimeContinuation, ...safeMetadata } = metadata;
+  return safeMetadata;
+}
+
+function runtimeContinuationFromRunMetadata(metadata: Record<string, JsonValue>): RuntimeContinuationState | undefined {
+  const value = metadata.runtime_continuation;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, JsonValue>;
+  const mode = record.mode;
+  const source = record.source;
+  if (mode !== "resumed" && mode !== "reconstructed") return undefined;
+  if (source !== "external_session" && source !== "samurai_context") return undefined;
+  const reason = record.reason;
+  if (reason !== undefined
+    && reason !== "candidate_missing"
+    && reason !== "candidate_invalid"
+    && reason !== "candidate_mismatch"
+    && reason !== "native_backend"
+    && reason !== "resume_unsupported"
+    && reason !== "resume_failed") return undefined;
+  return {
+    mode,
+    source,
+    ...(reason ? { reason } : {})
+  };
+}
+
+function runtimeAgentFromBinding(binding: RuntimeExecutionBinding): RuntimeAgent {
+  return {
+    id: binding.agentId,
+    name: binding.agent.name,
+    role: binding.agent.role,
+    instructions: binding.agent.instructions,
+    backendId: binding.backendId,
+    configurationVersion: binding.agentConfigurationVersion,
+    enabled: binding.agent.enabled
+  };
+}
+
+function runtimeBindingFromRunMetadata(
+  metadata: Record<string, JsonValue>,
+  fallback: {
+    workspaceId: string;
+    roomId: string;
+    sessionId: string;
+    agent?: RuntimeAgent;
+    agentId?: string;
+    parentAssigneeId?: string;
+    backendId: string;
+  }
+): RuntimeExecutionBinding | undefined {
+  const binding = metadata.runtime_binding;
+  if (binding !== undefined) {
+    if (typeof binding !== "object" || Array.isArray(binding)) {
+      throw new WorkspaceServerError("runtime_run_binding_invalid", 409);
+    }
+    const record = binding as Record<string, JsonValue>;
+    const agent = record.agent;
+    const agentRecord = agent && typeof agent === "object" && !Array.isArray(agent) ? agent as Record<string, JsonValue> : undefined;
+    const nestedBackendId = stringPayload(agentRecord?.backend_id);
+    const nestedConfigurationVersion = numberPayload(agentRecord?.config_version);
+    const workspaceId = stringPayload(record.workspaceId ?? record.workspace_id);
+    const roomId = stringPayload(record.roomId ?? record.room_id);
+    const sessionId = stringPayload(record.sessionId ?? record.session_id);
+    const agentId = stringPayload(record.agentId ?? record.agent_id);
+    const backendId = stringPayload(record.backendId ?? record.backend_id) ?? stringPayload(agentRecord?.backend_id);
+    const workId = stringPayload(record.workId ?? record.work_id);
+    const assigneeId = stringPayload(record.assigneeId ?? record.assignee_id);
+    const parentAssigneeId = stringPayload(record.parentAssigneeId ?? record.parent_assignee_id);
+    const generation = numberPayload(record.generation);
+    const agentConfigurationVersion = numberPayload(record.agentConfigurationVersion ?? record.agent_configuration_version)
+      ?? numberPayload(agentRecord?.config_version);
+    const name = stringPayload(agentRecord?.name) ?? fallback.agent?.name;
+    const role = stringPayload(agentRecord?.role) ?? fallback.agent?.role;
+    const instructions = stringPayload(agentRecord?.instructions) ?? fallback.agent?.instructions;
+    const enabled = agentRecord?.enabled === undefined
+      ? fallback.agent?.enabled === true
+      : agentRecord.enabled === true;
+    if (((record.workId !== undefined || record.work_id !== undefined) && !workId)
+      || ((record.assigneeId !== undefined || record.assignee_id !== undefined) && !assigneeId)
+      || ((record.parentAssigneeId !== undefined || record.parent_assignee_id !== undefined) && !parentAssigneeId)
+      || (agent !== undefined && agent !== null && !agentRecord)
+      || (agentRecord?.backend_id !== undefined && agentRecord.backend_id !== null
+        && stringPayload(agentRecord.backend_id) === undefined)
+      || (agentRecord?.config_version !== undefined && agentRecord.config_version !== null
+        && numberPayload(agentRecord.config_version) === undefined)
+      || !workspaceId || !roomId || !sessionId || !agentId || !backendId || generation === undefined || !agentConfigurationVersion || !name || !role || !instructions
+      || (workId && !assigneeId) || (!workId && assigneeId)
+      || (parentAssigneeId && (!workId || !assigneeId))
+      || (nestedBackendId !== undefined && nestedBackendId !== backendId)
+      || (nestedConfigurationVersion !== undefined && nestedConfigurationVersion !== agentConfigurationVersion)) {
+      throw new WorkspaceServerError("runtime_run_binding_invalid", 409);
+    }
+    if (workspaceId !== fallback.workspaceId || roomId !== fallback.roomId || sessionId !== fallback.sessionId
+      || (fallback.agentId && agentId !== fallback.agentId)
+      || (fallback.parentAssigneeId && parentAssigneeId !== fallback.parentAssigneeId)
+      || backendId !== fallback.backendId) {
+      throw new WorkspaceServerError("runtime_run_binding_mismatch", 409);
+    }
+    return {
+      workspaceId,
+      roomId,
+      sessionId,
+      ...(workId ? { workId } : {}),
+      ...(assigneeId ? { assigneeId } : {}),
+      ...(parentAssigneeId ? { parentAssigneeId } : {}),
+      agentId,
+      agentConfigurationVersion,
+      backendId,
+      generation,
+      agent: { name, role, instructions, enabled }
+    };
+  }
+  if (!fallback.agent || !fallback.agentId) return undefined;
+  return {
+    workspaceId: fallback.workspaceId,
+    roomId: fallback.roomId,
+    sessionId: fallback.sessionId,
+    agentId: fallback.agentId,
+    ...(fallback.parentAssigneeId ? { parentAssigneeId: fallback.parentAssigneeId } : {}),
+    agentConfigurationVersion: fallback.agent.configurationVersion,
+    backendId: fallback.backendId,
+    generation: 1,
+    agent: {
+      name: fallback.agent.name,
+      role: fallback.agent.role,
+      instructions: fallback.agent.instructions,
+      enabled: fallback.agent.enabled
+    }
+  };
+}
+
+/**
+ * Resolve a provider-native continuation only from a Store-created candidate.
+ * A provider Session ID is intentionally useless by itself: every immutable
+ * parent/child association must still match the current Room Work binding.
+ * Missing, malformed, stale, or unsupported candidates simply select the
+ * normal `runTurn` path, which starts a new external session safely.
+ */
+function resolveRoomWorkExternalContinuation(input: {
+  candidate?: PostgresRuntimeExternalContinuation;
+  binding: RuntimeExecutionBinding;
+  backend: Pick<AgentBackend, "id" | "kind" | "resumeRun">;
+  workspaceId: string;
+  roomId: string;
+  sessionId: string;
+}): RuntimeContinuationDecision | undefined {
+  if (!input.binding.workId || !input.binding.assigneeId || !input.binding.parentAssigneeId) return undefined;
+  if (input.backend.kind === "samurai_native") {
+    return {
+      state: { mode: "reconstructed", source: "samurai_context", reason: "native_backend" }
+    };
+  }
+  if (typeof input.backend.resumeRun !== "function") {
+    return {
+      state: { mode: "reconstructed", source: "samurai_context", reason: "resume_unsupported" }
+    };
+  }
+  const candidate = input.candidate;
+  if (!candidate || typeof candidate !== "object") {
+    return {
+      state: { mode: "reconstructed", source: "samurai_context", reason: "candidate_missing" }
+    };
+  }
+  const backendSessionId = typeof candidate.backendSessionId === "string" ? candidate.backendSessionId.trim() : "";
+  const parent = candidate.parent;
+  if (!backendSessionId || !parent || typeof parent !== "object") {
+    return {
+      state: { mode: "reconstructed", source: "samurai_context", reason: "candidate_invalid" }
+    };
+  }
+  if (parent.workspaceId !== input.workspaceId
+    || parent.roomId !== input.roomId
+    || parent.sessionId !== input.sessionId
+    || parent.workId !== input.binding.workId
+    || parent.assigneeId !== input.binding.parentAssigneeId
+    || parent.agentId !== input.binding.agentId
+    || parent.agentConfigurationVersion !== input.binding.agentConfigurationVersion
+    || parent.backendId !== input.binding.backendId
+    || parent.generation !== input.binding.generation
+    || input.backend.id !== input.binding.backendId) {
+    return {
+      state: { mode: "reconstructed", source: "samurai_context", reason: "candidate_mismatch" }
+    };
+  }
+  if (!Number.isSafeInteger(parent.agentConfigurationVersion) || parent.agentConfigurationVersion < 1
+    || !Number.isSafeInteger(parent.generation) || parent.generation < 0) {
+    return {
+      state: { mode: "reconstructed", source: "samurai_context", reason: "candidate_invalid" }
+    };
+  }
+  return {
+    backendSessionId,
+    state: { mode: "resumed", source: "external_session" }
+  };
+}
+
+function numberPayload(value: JsonValue | undefined): number | undefined {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function isSettled(run: BackendRunRecord): boolean {
@@ -3155,6 +4350,10 @@ function markChatReplay(result: RunChatTurnResult): RunChatTurnResult {
 
 function isTerminalRunState(status: string, phase: string | null): boolean {
   return phase === "settled" || status === "completed" || status === "failed" || status === "cancelled" || status === "outcome_unknown";
+}
+
+function isTerminalEventType(eventType: string): boolean {
+  return eventType === "run_completed" || eventType === "run_failed";
 }
 
 function isPreExternalPhase(phase: string | undefined): boolean {

@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88]);
+    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 121 }, (_, index) => index + 1));
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -219,6 +219,54 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("workspace_runtime_runs_idempotency_index");
     expect(schema).toContain("workspace_runtime_reservations");
     expect(schema).toContain("workspace_runtime_client_events_room_fkey");
+    const delegationMigration = migrations.find((migration) => migration.version === 102);
+    expect(delegationMigration?.name).toBe("workspace_server_human_work_delegation");
+    const delegationSql = delegationMigration?.statements.join("\n") ?? "";
+    expect(delegationSql).toContain("dependency_assignment_ids");
+    expect(delegationSql).toContain("samurai_delegate_human_work");
+    expect(delegationSql).toContain("samurai_restore_human_work_assignment_dependencies");
+    expect(delegationSql).toContain("samurai_guard_human_work_dependency_ready");
+    expect(delegationSql).toContain("samurai_release_human_work_dependency_children");
+    expect(delegationSql).toContain("FOR UPDATE");
+    const roomAgentRevocationMigration = migrations.find((migration) => migration.version === 104);
+    expect(roomAgentRevocationMigration?.name).toBe("workspace_server_room_agent_permission_revocation");
+    const roomAgentRevocationSql = roomAgentRevocationMigration?.statements.join("\n") ?? "";
+    expect(roomAgentRevocationSql).toContain("samurai_remove_workspace_agent_room_permission");
+    expect(roomAgentRevocationSql).toContain("workspace_default_agent_remove_required");
+    expect(roomAgentRevocationSql).toContain("Do not alter existing Work/Assignment rows");
+    const attachmentVersionMigration = migrations.find((migration) => migration.version === 105);
+    expect(attachmentVersionMigration?.name).toBe("workspace_server_human_work_attachment_version_contract");
+    const attachmentVersionSql = attachmentVersionMigration?.statements.join("\n") ?? "";
+    expect(attachmentVersionSql).toContain("jsonb_build_object('version', file.version::TEXT)");
+    expect(attachmentVersionSql).toContain("NOT (attachment ? 'version')");
+    expect(attachmentVersionSql).toContain("file_row.version::TEXT IS DISTINCT FROM attachment_version");
+    const runtimeAdmissionCleanupMigration = migrations.find((migration) => migration.version === 106);
+    expect(runtimeAdmissionCleanupMigration?.name).toBe("workspace_server_human_work_runtime_admission_cleanup");
+    const runtimeAdmissionCleanupSql = runtimeAdmissionCleanupMigration?.statements.join("\n") ?? "";
+    expect(runtimeAdmissionCleanupSql).toContain("samurai_discard_human_work_runtime_admission");
+    expect(runtimeAdmissionCleanupSql).toContain("current_run_id = NULL");
+    const delegationContinuationMigration = migrations.find((migration) => migration.version === 107);
+    expect(delegationContinuationMigration?.name).toBe("workspace_server_human_work_delegation_continuation_guards");
+    const delegationContinuationSql = delegationContinuationMigration?.statements.join("\n") ?? "";
+    expect(delegationContinuationSql).toContain("origin_kind");
+    expect(delegationContinuationSql).toContain("samurai_delegate_human_work_from_runtime");
+    expect(delegationContinuationSql).toContain("human_work_launch_generation_conflict");
+    expect(delegationContinuationSql).toContain("samurai_create_human_work_parent_continuation");
+    expect(delegationContinuationSql).toContain("candidate_parent_id := COALESCE(NEW.parent_assignment_id, NEW.id)");
+    expect(delegationContinuationSql).toContain("control_generation = GREATEST(control_generation, NEW.generation)");
+    expect(delegationContinuationSql).toContain("samurai_control_human_work_v106");
+    const continuationRestoreHardeningMigration = migrations.find((migration) => migration.version === 109);
+    expect(continuationRestoreHardeningMigration?.name).toBe("workspace_server_human_work_continuation_restore_hardening");
+    const continuationRestoreHardeningSql = continuationRestoreHardeningMigration?.statements.join("\n") ?? "";
+    expect(continuationRestoreHardeningSql).toContain("samurai_human_work_assignment_outcome_tree");
+    expect(continuationRestoreHardeningSql).toContain("samurai_is_completion_maintenance_identity");
+    expect(continuationRestoreHardeningSql).toContain("status NOT IN ('completed', 'failed', 'cancelled')");
+    expect(continuationRestoreHardeningSql).toContain("samurai.human_work.reassign");
+    expect(continuationRestoreHardeningSql).toContain("WITH RECURSIVE ancestors(id, depth)");
+    expect(continuationRestoreHardeningSql).toContain("ORDER BY depth ASC, id");
+    expect(continuationRestoreHardeningSql).toContain("reason', 'reassigned");
+    expect(continuationRestoreHardeningSql).toContain("parent_assignment_id IS DISTINCT FROM assignment_row.parent_assignment_id");
+    expect(continuationRestoreHardeningSql).toContain("parent_assignment.agent_version IS DISTINCT FROM restored_assignment.agent_version");
     const clientEventRlsMigration = migrations.find((migration) => migration.version === 57);
     expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read')");
     expect(clientEventRlsMigration?.statements.join("\n")).toContain("room_id IS NULL AND samurai_can_workspace(workspace_id, 'guest')");
@@ -582,4 +630,543 @@ describe("Workspace Server PostgreSQL schema", () => {
       allSql.lastIndexOf("CREATE OR REPLACE FUNCTION samurai_delete_organization(")
     );
   });
+
+  it("adds Room defaults, private Agent DM, human work persistence, and import guards in v89", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 89);
+    expect(migration?.name).toBe("workspace_server_room_default_agent_dm_and_human_work");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS default_agent_id TEXT");
+    expect(sql).toContain("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS default_agent_version BIGINT");
+    expect(sql).toContain("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS room_kind TEXT NOT NULL DEFAULT 'normal'");
+    expect(sql).toContain("workspace_agent_dm_unique");
+    expect(sql).toContain("agent_dm_membership_required");
+    const roomRoleStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_room_role(");
+    const roomRoleEnd = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_create_room(", roomRoleStart);
+    const roomRoleSql = sql.slice(roomRoleStart, roomRoleEnd);
+    expect(roomRoleSql).toContain("IF room_kind_name = 'agent_dm' THEN");
+    const dmRoleStart = roomRoleSql.indexOf("IF room_kind_name = 'agent_dm' THEN");
+    const normalRoleStart = roomRoleSql.indexOf("workspace_role_name :=", dmRoleStart);
+    expect(roomRoleSql.slice(dmRoleStart, normalRoleStart)).not.toContain("samurai_workspace_role(");
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_import_workspace_room_v2(");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_import_workspace_human_work(");
+    expect(sql).toContain("workspace_import_session_invalid");
+    for (const table of [
+      "workspace_human_works", "workspace_human_work_assignments", "workspace_human_work_instructions",
+      "workspace_human_work_comments", "workspace_human_work_comment_reactions", "workspace_human_work_controls",
+      "workspace_human_work_launch_reservations"
+    ]) {
+      expect(sql).toContain(`CREATE TABLE ${table}`);
+      expect(sql).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+      expect(sql).toContain(`CREATE POLICY ${table}_insert_denied ON ${table} FOR INSERT WITH CHECK (false)`);
+    }
+    expect(sql).toContain("samurai_set_human_work_comment_reaction");
+    expect(sql).toContain("target_reservation_id TEXT");
+    expect(sql).toContain("target_lease_owner TEXT");
+    expect(sql).toContain("target_expected_generation BIGINT");
+    expect(sql).toContain("human_work_assignment_lease_conflict");
+    expect(sql).toContain("work_generation <> target_expected_generation AND target_status <> 'outcome_unknown'");
+
+    const controlStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_can_human_work_control(");
+    const controlEnd = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_set_human_work_comment_reaction(", controlStart);
+    const controlSql = sql.slice(controlStart, controlEnd);
+    // The requester must still be an active member of the Room. Workspace
+    // role inheritance alone must not let a removed requester control work.
+    expect(controlSql).toContain("JOIN room_members AS room_member");
+    expect(controlSql).toContain("room_member.state = 'active'");
+    expect(controlSql).toContain("work.requester_account_id = samurai_current_account_id()");
+    expect(controlSql).toContain("room_member.role IN ('owner', 'admin')");
+
+    for (const functionName of [
+      "samurai_append_human_work_instruction",
+      "samurai_reflect_human_work_comment",
+      "samurai_reassign_human_work"
+    ]) {
+      const functionStart = sql.indexOf(`CREATE OR REPLACE FUNCTION ${functionName}(`);
+      const functionEnd = sql.indexOf("$$`,", functionStart);
+      const functionSql = sql.slice(functionStart, functionEnd);
+      // These mutations change the next execution; unlike stop, they require
+      // a fresh execute capability in addition to current control ownership.
+      expect(functionSql).toContain("samurai_can_room(target_workspace_id");
+      expect(functionSql).toContain("'execute'");
+    }
+
+    const abortStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_abort_workspace_import(");
+    const abortEnd = sql.indexOf("ALTER TABLE rooms ADD COLUMN", abortStart);
+    const abortSql = sql.slice(abortStart, abortEnd);
+    expect(abortSql).toContain("DELETE FROM workspace_human_work_controls");
+    expect(abortSql).toContain("DELETE FROM workspace_human_works");
+    expect(abortSql.indexOf("DELETE FROM workspace_human_work_controls")).toBeLessThan(
+      abortSql.indexOf("DELETE FROM workspace_human_work_assignments")
+    );
+    expect(abortSql.indexOf("DELETE FROM workspace_human_works")).toBeLessThan(
+      abortSql.indexOf("DELETE FROM rooms")
+    );
+    expect(abortSql.indexOf("DELETE FROM rooms")).toBeLessThan(
+      abortSql.indexOf("DELETE FROM workspace_agents")
+    );
+  });
+
+  it("keeps legacy Session-to-Room-work resolution internal and atomic in v90", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 90);
+    expect(migration?.name).toBe("workspace_server_legacy_session_room_work_bridge");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE TABLE workspace_human_work_legacy_sessions");
+    expect(sql).toContain("UNIQUE (workspace_id, legacy_session_id)");
+    expect(sql).toContain("REFERENCES workspace_runtime_sessions(workspace_id, id) ON DELETE RESTRICT");
+    expect(sql).toContain("CREATE POLICY workspace_human_work_legacy_sessions_read ON workspace_human_work_legacy_sessions FOR SELECT");
+    expect(sql).toContain("workspace_human_work_legacy_sessions_insert_denied");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_bind_human_work_legacy_session(");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_import_workspace_human_work_legacy_sessions(");
+    expect(sql).toContain("pg_advisory_xact_lock(hashtextextended(");
+    expect(sql).toContain("samurai_abort_workspace_import_v89");
+    expect(sql).toContain("DELETE FROM workspace_human_work_legacy_sessions");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_bind_human_work_legacy_session");
+  });
+
+  it("keeps Room-work reservation candidate locking inside the server-owned claim function in v91", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 91);
+    expect(migration?.name).toBe("workspace_server_human_work_server_owned_claim");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_claim_human_work_launch(");
+    expect(sql).toContain("SECURITY DEFINER");
+    expect(sql).toContain("target_reservation_id IS NULL");
+    expect(sql).toContain("FOR UPDATE OF reservation SKIP LOCKED");
+    expect(sql).toContain("samurai_can_room(target_workspace_id, reservation.room_id, 'execute')");
+    expect(sql).toContain("RETURN NULL");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_claim_human_work_launch");
+    expect(sql).not.toContain("GRANT UPDATE ON TABLE workspace_human_work_launch_reservations");
+  });
+
+  it("keeps the Room default-Agent lock inside a server-owned function in v92", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 92);
+    expect(migration?.name).toBe("workspace_server_human_work_room_default_lock");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_lock_room_default_agent(");
+    expect(sql).toContain("RETURNS TABLE(default_agent_id TEXT, default_agent_version BIGINT)");
+    expect(sql).toContain("SECURITY DEFINER");
+    expect(sql).toContain("samurai_can_room(target_workspace_id, target_room_id, 'execute')");
+    expect(sql).toContain("FOR SHARE");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_lock_room_default_agent(TEXT, TEXT) FROM PUBLIC");
+  });
+
+  it("clears terminal Room-work reservation lease state in v93", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 93);
+    expect(migration?.name).toBe("workspace_server_human_work_terminal_reservation_state");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_normalize_human_work_launch_reservation_state()");
+    expect(sql).toContain("NEW.status IN ('released', 'cancelled')");
+    expect(sql).toContain("NEW.claimed_at := NULL");
+    expect(sql).toContain("NEW.lease_owner := NULL");
+    expect(sql).toContain("NEW.lease_expires_at := NULL");
+    expect(sql).toContain("BEFORE INSERT OR UPDATE OF status ON workspace_human_work_launch_reservations");
+  });
+
+  it("captures the runtime Run link when Room work settles in v94", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 94);
+    expect(migration?.name).toBe("workspace_server_human_work_assignment_run_link");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_capture_human_work_assignment_run_link()");
+    expect(sql).toContain("NEW.result ->> 'run_id'");
+    expect(sql).toContain("NEW.current_run_id := run_id");
+    expect(sql).toContain("BEFORE INSERT OR UPDATE OF status, result ON workspace_human_work_assignments");
+  });
+
+  it("creates a new assignment and launch reservation for terminal Room-work replies in v95", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 95);
+    expect(migration?.name).toBe("workspace_server_human_work_continuation_assignment");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_append_human_work_instruction(");
+    expect(sql).toContain("target_source_kind IN ('reply', 'comment_reflection')");
+    expect(sql).toContain("active_assignment_count = 0");
+    expect(sql).toContain("status = 'outcome_unknown'");
+    expect(sql).toContain("RAISE EXCEPTION 'human_work_outcome_unknown'");
+    expect(sql).toContain("INSERT INTO workspace_human_work_assignments");
+    expect(sql).toContain("parent_assignment_id, agent_id");
+    expect(sql).toContain("INSERT INTO workspace_human_work_launch_reservations");
+    expect(sql).toContain("status = 'queued'");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_append_human_work_instruction");
+  });
+
+  it("queues active Room-work continuations and only releases them after a known parent outcome in v96", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 96);
+    expect(migration?.name).toBe("workspace_server_human_work_waiting_continuation");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_append_human_work_instruction(");
+    expect(sql).toContain("active_assignment_count > 1 AND target_assignment_id IS NULL");
+    expect(sql).toContain("RAISE EXCEPTION 'human_work_instruction_target_required'");
+    expect(sql).toContain("status = 'waiting'");
+    expect(sql).toContain("RAISE EXCEPTION 'human_work_instruction_child_pending'");
+    expect(sql).toContain("parent_assignment_id, agent_id");
+    expect(sql).toContain("status = 'reserved'");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_settle_human_work_assignment(");
+    expect(sql).toContain("target_status IN ('completed', 'failed', 'cancelled') AND work_stop_state = 'none'");
+    expect(sql).toContain("SET status = 'ready'");
+    expect(sql).toContain("target_status = 'outcome_unknown'");
+    expect(sql).toContain("status = 'reserved'");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_settle_human_work_assignment");
+  });
+
+  it("cancels waiting assignment-stop descendants and their reservations in v97", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 97);
+    expect(migration?.name).toBe("workspace_server_human_work_assignment_stop_descendants");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_control_human_work(");
+    expect(sql).toContain("target_action = 'assignment_stop'");
+    expect(sql).toContain("WITH RECURSIVE assignment_tree AS");
+    expect(sql).toContain("JOIN assignment_tree AS parent ON parent.id = child.parent_assignment_id");
+    expect(sql).toContain("status IN ('queued', 'ready', 'waiting', 'blocked')");
+    expect(sql).toContain("SET status = 'cancelled'");
+    expect(sql).toContain("status = 'reserved'");
+    expect(sql).toContain("released_at = COALESCE(reservation.released_at, NOW())");
+    expect(sql).toContain("status IN ('reserved', 'claimed')");
+    expect(sql).toContain("human_work_assignment_not_stoppable");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_control_human_work");
+  });
+
+  it("projects instruction state from assignment evidence in v98", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 98);
+    expect(migration?.name).toBe("workspace_server_human_work_instruction_state_projection");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_human_work_instruction_state_for_assignment(");
+    expect(sql).toContain("target_assignment_status IN ('queued', 'ready', 'running', 'blocked') THEN 'accepted'");
+    expect(sql).toContain("target_assignment_status = 'waiting' AND target_parent_assignment_id IS NOT NULL THEN 'pending'");
+    expect(sql).toContain("target_assignment_status = 'completed' THEN 'applied'");
+    expect(sql).toContain("target_assignment_status IN ('failed', 'cancelled', 'outcome_unknown') THEN 'failed'");
+    expect(sql).not.toContain("'delivered'");
+    expect(sql).toContain("BEFORE INSERT OR UPDATE OF assignment_id ON workspace_human_work_instructions");
+    expect(sql).toContain("AFTER INSERT OR UPDATE OF status, parent_assignment_id ON workspace_human_work_assignments");
+    expect(sql).toContain("SET state = samurai_human_work_instruction_state_for_assignment(");
+    expect(sql).toContain("FROM workspace_human_work_assignments AS assignment");
+    expect(sql).toContain("DROP TRIGGER IF EXISTS workspace_human_work_instruction_state_before_write");
+    expect(sql).toContain("DROP TRIGGER IF EXISTS workspace_human_work_instruction_state_after_assignment");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_human_work_instruction_state_for_assignment");
+  });
+
+  it("serializes Room-work active stop and runtime admission in v99", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 99);
+    expect(migration?.name).toBe("workspace_server_human_work_active_stop_protocol");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("ALTER TABLE workspace_human_work_controls");
+    expect(sql).toContain("lease_owner TEXT");
+    expect(sql).toContain("lease_expires_at TIMESTAMPTZ");
+    expect(sql).toContain("attempt BIGINT NOT NULL DEFAULT 0");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_control_human_work(");
+    expect(sql).toContain("assignment.status = 'running' AND assignment.current_run_id IS NULL");
+    expect(sql).toContain("target_action = 'assignment_stop'");
+    expect(sql).toContain("status IN ('queued', 'ready', 'waiting', 'blocked')");
+    expect(sql).not.toContain("human_work_assignment_not_stoppable");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_assert_human_work_runtime_admission(");
+    expect(sql).toContain("human_work_execution_admission_closed");
+    expect(sql).toContain("control.action = 'assignment_stop'");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_capture_human_work_runtime_run_link()");
+    expect(sql).toContain("NEW.metadata -> 'runtime_binding'");
+    expect(sql).toContain("assignment_row.current_run_id");
+    expect(sql).toContain("CREATE TRIGGER workspace_human_work_runtime_run_link");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_claim_human_work_stop_dispatch(");
+    expect(sql).toContain("'targets', targets");
+    expect(sql).toContain("'reservation_id', reservation_id");
+    expect(sql).toContain("'run_id', run_id");
+    expect(sql).toContain("'lease_owner', target_lease_owner");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_reconcile_human_work_stop_dispatch(");
+    expect(sql).toContain("target_outcome NOT IN ('completed', 'failed', 'cancelled', 'outcome_unknown')");
+    expect(sql).toContain("stop_state = 'unconfirmed'");
+    expect(sql).toContain("stop_state = 'confirmed', status = 'cancelled'");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_settle_human_work_assignment(");
+    expect(sql).toContain("late result is accepted only when the server-owned Run link");
+    expect(sql).toContain("IF stale_generation THEN");
+    expect(sql).toContain("never releases a waiting");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_assert_human_work_runtime_admission");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_claim_human_work_stop_dispatch");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_reconcile_human_work_stop_dispatch");
+  });
+
+  it("projects unconfirmed stop assignees without exposing dispatch details in v100", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 100);
+    expect(migration?.name).toBe("workspace_server_human_work_stop_unconfirmed_projection");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_project_human_work_stop_control_details()");
+    expect(sql).toContain("unconfirmed_assignee_ids");
+    expect(sql).toContain("assignment.status = 'outcome_unknown'");
+    expect(sql).toContain("BEFORE INSERT OR UPDATE OF state, details ON workspace_human_work_controls");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_project_human_work_stop_control_details");
+  });
+
+  it("orders Room-work launch claim locks as Work, Assignment, Reservation in v101", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 101);
+    expect(migration?.name).toBe("workspace_server_human_work_launch_lock_order");
+    const sql = migration?.statements.join("\n") ?? "";
+    const functionStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_claim_human_work_launch(");
+    const functionEnd = sql.indexOf("$$`,", functionStart);
+    const functionSql = sql.slice(functionStart, functionEnd);
+
+    expect(functionSql).toContain("FOR UPDATE OF work SKIP LOCKED");
+    expect(functionSql).toContain("FROM workspace_human_works\n        WHERE workspace_id = target_workspace_id AND id = candidate_work_id\n        FOR UPDATE SKIP LOCKED");
+    expect(functionSql).toContain("FROM workspace_human_work_assignments\n        WHERE workspace_id = target_workspace_id");
+    expect(functionSql).toContain("FROM workspace_human_work_launch_reservations\n        WHERE workspace_id = target_workspace_id");
+    expect(functionSql.indexOf("FROM workspace_human_works\n        WHERE workspace_id = target_workspace_id AND id = candidate_work_id\n        FOR UPDATE SKIP LOCKED")).toBeLessThan(
+      functionSql.indexOf("FROM workspace_human_work_assignments\n        WHERE workspace_id = target_workspace_id")
+    );
+    expect(functionSql.indexOf("FROM workspace_human_work_assignments\n        WHERE workspace_id = target_workspace_id")).toBeLessThan(
+      functionSql.indexOf("FROM workspace_human_work_launch_reservations\n        WHERE workspace_id = target_workspace_id")
+    );
+    expect(functionSql).toContain("human_work_stopped");
+    expect(functionSql).toContain("status IN ('ready', 'queued')");
+    expect(functionSql).toContain("REVOKE EXECUTE ON FUNCTION samurai_claim_human_work_launch");
+  });
+
+  it("guards Room-work attachment refs against foreign, stale, and unsafe files in v103", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 103);
+    expect(migration?.name).toBe("workspace_server_human_work_attachment_reference_guards");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_validate_human_work_attachment_refs()");
+    expect(sql).toContain("samurai_can_room(NEW.workspace_id, NEW.room_id, 'read')");
+    expect(sql).toContain("file.room_id = NEW.room_id");
+    expect(sql).toContain("file_row.sha256 IS DISTINCT FROM attachment_id");
+    expect(sql).toContain("file_row.version::TEXT IS DISTINCT FROM attachment_version");
+    expect(sql).toContain("workspace_human_work_instruction_attachment_refs");
+    expect(sql).toContain("workspace_human_work_comment_attachment_refs");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_validate_human_work_attachment_refs()");
+  });
+
+  it("keeps Agent DM permissions private while preserving normal Room and default-Agent paths in v108", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 108);
+    expect(migration?.name).toBe("workspace_server_agent_dm_specialist_permission_guards");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    const canAgentRoomStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_can_agent_room(");
+    const canAgentRoomEnd = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_set_workspace_agent_room_permission(", canAgentRoomStart);
+    const canAgentRoomSql = sql.slice(canAgentRoomStart, canAgentRoomEnd);
+    expect(canAgentRoomSql).toContain("room.room_kind <> 'agent_dm' OR room.default_agent_id = permission.agent_id");
+
+    const setPermissionStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_set_workspace_agent_room_permission(");
+    const setPermissionEnd = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_remove_workspace_agent_room_permission(", setPermissionStart);
+    const setPermissionSql = sql.slice(setPermissionStart, setPermissionEnd);
+    expect(setPermissionSql).toContain("IF target_room_kind = 'agent_dm' THEN");
+    expect(setPermissionSql).toContain("agent_dm_specialist_permission_denied");
+    expect(setPermissionSql).toContain("agent_dm_default_agent_permission_immutable");
+    // The guard is scoped to DM rows; the existing insert/upsert path remains
+    // available for normal Rooms.
+    expect(setPermissionSql).toContain("INSERT INTO workspace_agent_room_permissions(");
+
+    const importPermissionStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_import_workspace_agent_room_permission(");
+    const importPermissionEnd = sql.indexOf("REVOKE EXECUTE ON FUNCTION samurai_set_workspace_agent_room_permission", importPermissionStart);
+    const importPermissionSql = sql.slice(importPermissionStart, importPermissionEnd);
+    expect(importPermissionSql).toContain("IF target_room_kind = 'agent_dm'");
+    expect(importPermissionSql).toContain("AND target_agent_id IS DISTINCT FROM target_default_agent_id");
+    expect(importPermissionSql).toContain("RETURN;");
+    // Invalid historical specialist rows are omitted from the restored target;
+    // the migration never deletes the source row.
+    expect(sql).not.toContain("DELETE FROM workspace_agent_room_permissions");
+
+    const v89 = workspaceServerMigrationDefinitions().find((entry) => entry.version === 89);
+    const v89Sql = v89?.statements.join("\n") ?? "";
+    expect(v89Sql).toContain("target_room_kind = 'agent_dm', TRUE, 1");
+    expect(v89Sql).toContain("INSERT INTO workspace_agent_room_permissions(");
+    expect(v89Sql).toContain("agent_dm_default_agent_immutable");
+  });
+
+  it("projects legacy attachment history safely and terminally rejects it at launch in v110", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 110);
+    expect(migration?.name).toBe("workspace_server_human_work_dm_attachment_compatibility");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("legacy_unresolved");
+    expect(sql).toContain("samurai_project_human_work_attachment_refs");
+    expect(sql).toContain("samurai_human_work_attachment_refs_have_unresolved");
+    expect(sql).toContain("samurai_fail_human_work_launch_preflight");
+    expect(sql).toContain("samurai.human_work.reassign");
+    expect(sql).toContain("replaced_by_assignment_id");
+    expect(sql).toContain("human_work_dm_delegation_forbidden");
+    const dmGuardStart = sql.indexOf("CREATE OR REPLACE FUNCTION samurai_guard_human_work_dm_delegation()");
+    const dmGuardEnd = sql.indexOf("DROP TRIGGER IF EXISTS workspace_human_work_dm_delegation_guard", dmGuardStart);
+    expect(sql.slice(dmGuardStart, dmGuardEnd)).not.toContain("samurai_is_import_session");
+  });
+
+  it("rejects DM delegated restore and excludes superseded assignment subtrees from continuation in v111", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 111);
+    expect(migration?.name).toBe("workspace_server_human_work_reassignment_continuation_boundary");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("human_work_reassign_parent_continuation_forbidden");
+    expect(sql).toContain("samurai_human_work_assignment_is_superseded");
+    expect(sql).toContain("NOT samurai_human_work_assignment_is_superseded(NEW.workspace_id, child.id)");
+    expect(sql).toContain("NOT samurai_human_work_assignment_is_superseded(NEW.workspace_id, descendants.id)");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_human_work_assignment_outcome_tree");
+  });
+
+  it("repairs only structurally proven legacy reply continuation origins in v112", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 112);
+    expect(migration?.name).toBe("workspace_server_human_work_legacy_reply_continuation_origin");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("samurai_is_legacy_human_work_reply_continuation");
+    expect(sql).toContain("child.origin_kind = 'normal'");
+    expect(sql).toContain("instruction.source_kind = 'reply'");
+    expect(sql).toContain("child.agent_id = parent.agent_id");
+    expect(sql).toContain("child.agent_version = parent.agent_version");
+    expect(sql).toContain("parent.status IN ('completed', 'failed', 'cancelled')");
+    expect(sql).toContain("NOT EXISTS (");
+    expect(sql).toContain("room.room_kind = 'agent_dm'");
+    expect(sql).toContain("SET origin_kind = 'parent_continuation'");
+  });
+
+  it("converges legacy v109 continuation definitions and classifies only reply children in v113", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 113);
+    expect(migration?.name).toBe("workspace_server_human_work_continuation_legacy_checksum_convergence");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_human_work_reply_continuation_safe(");
+    expect(sql).toContain("WITH RECURSIVE assignment_chain");
+    expect(sql).toContain("reason' = 'reassigned");
+    expect(sql).toContain("action = 'assignment_stop'");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_mark_human_work_reply_continuation()");
+    expect(sql).toContain("NEW.source_kind IS DISTINCT FROM 'reply'");
+    expect(sql).toContain("child.agent_id = parent.agent_id");
+    expect(sql).toContain("child.agent_version = parent.agent_version");
+    expect(sql).toContain("current_setting('samurai.human_work.reassign', true) = '1'");
+    expect(sql).toContain("origin_kind = 'parent_continuation'");
+    expect(sql).toContain("workspace_human_work_instruction_reply_continuation_origin");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_reassign_human_work(");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_restore_human_work_assignment_origins(");
+  });
+
+  it("hardens continuation safety in the append-only v114 migration", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 114);
+    expect(migration?.name).toBe("workspace_server_human_work_continuation_restore_safety");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("work.stop_state = 'none'");
+    expect(sql).toContain("sibling.result ->> 'reason' = 'reassigned'");
+    expect(sql).toContain("action = 'assignment_stop'");
+    expect(sql).toContain("samurai_human_work_reply_continuation_safe(child.workspace_id, child.id, FALSE)");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_human_work_jsonb_field_safe(");
+    expect(sql).toContain("EXCEPTION WHEN OTHERS THEN");
+    expect(sql).not.toContain("pg_input_is_valid");
+    expect(sql).toContain("samurai_human_work_jsonb_field_safe(instruction.body, 'kind')");
+    expect(sql).toContain("Never demote an existing");
+    expect(sql).toContain("WHERE item.origin_kind = 'parent_continuation'");
+  });
+
+  it("makes v115 reply-only and audits existing continuation rows before applying", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 115);
+    expect(migration?.name).toBe("workspace_server_human_work_continuation_reply_only");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("instruction.source_kind = 'reply'");
+    expect(sql).toContain("workspace_server_parent_continuation_invalid");
+    expect(sql).toContain("origin_kind = 'parent_continuation'");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_regenerate_human_work_assignment_sibling_reservations()");
+    expect(sql).toContain("WITH RECURSIVE stopped_tree");
+    expect(sql).toContain("SET generation = work_generation");
+    expect(sql).toContain("DROP FUNCTION IF EXISTS samurai_human_work_jsonb_field_safe(TEXT, TEXT)");
+    expect(sql).not.toContain("source_kind = 'system'");
+    expect(sql).not.toContain("SET origin_kind = 'normal'");
+  });
+
+  it("cancels reassigned descendant reservations and fails closed at claim in v116", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 116);
+    expect(migration?.name).toBe("workspace_server_human_work_reassignment_descendant_claim_guard");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("samurai_cancel_human_work_reassigned_descendants");
+    expect(sql).toContain("WITH RECURSIVE descendant_tree");
+    expect(sql).toContain("assignment.status IN ('queued', 'ready', 'waiting', 'blocked')");
+    expect(sql).toContain("reservation.status = 'reserved'");
+    expect(sql).toContain("reason', 'reassigned'");
+    expect(sql).toContain("NOT samurai_human_work_assignment_is_superseded(target_workspace_id, assignment.id)");
+    expect(sql).toContain("IF samurai_human_work_assignment_is_superseded(target_workspace_id, assignment_row.id)");
+    expect(sql).toContain("SET status = 'cancelled', released_at = COALESCE(released_at, NOW())");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_reassign_human_work(");
+    expect(sql).toContain("PERFORM samurai_cancel_human_work_reassigned_descendants(");
+  });
+
+  it("requires stop reconciliation before reassignment and closes superseded dependencies in v117", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 117);
+    expect(migration?.name).toBe("workspace_server_human_work_reassignment_stop_and_dependency_boundary");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("samurai_human_work_assignment_dependencies_safe");
+    expect(sql).toContain("dependency.status = 'outcome_unknown'");
+    expect(sql).toContain("samurai_human_work_assignment_is_superseded(target_workspace_id, dependency.id)");
+    expect(sql).toContain("samurai_guard_human_work_reassign_transition");
+    expect(sql).toContain("human_work_reassign_outcome_unknown");
+    expect(sql).toContain("human_work_reassign_stop_required");
+    expect(sql).toContain("human_work_reassign_stop_pending");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_human_work_reassignment_affected_assignments(");
+    expect(sql).toContain("current_assignment.assignment_id = ANY(");
+    expect(sql).toContain("FROM samurai_human_work_reassignment_affected_assignments(");
+    expect(sql).toContain("SELECT dependent.id AS assignment_id");
+    expect(sql).toContain("samurai_cancel_human_work_reassigned_descendants");
+    expect(sql).toContain("ALTER FUNCTION samurai_claim_human_work_launch(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT) RENAME TO samurai_claim_human_work_launch_v116");
+    expect(sql).toContain("samurai_human_work_assignment_dependencies_safe");
+    expect(sql).toContain("reason', 'dependency_reassigned'");
+  });
+
+  it("keeps invalid claims side-effect free and rejects A to B to C reassignment in v118", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 118);
+    expect(migration?.name).toBe("workspace_server_human_work_reassignment_idempotency_and_claim_input_boundary");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("samurai_guard_human_work_reassign_superseded");
+    expect(sql).toContain("human_work_assignment_already_reassigned");
+    expect(sql).toContain("samurai_human_work_assignment_is_superseded(OLD.workspace_id, OLD.id)");
+    expect(sql).toContain("ALTER FUNCTION samurai_claim_human_work_launch(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT)");
+    expect(sql).toContain("RENAME TO samurai_claim_human_work_launch_v117");
+    expect(sql).toContain("btrim(COALESCE(target_lease_owner, '')) = ''");
+    expect(sql).toContain("target_lease_expires_at IS NULL");
+    expect(sql).toContain("btrim(COALESCE(target_operation_id, '')) = ''");
+    expect(sql).toContain("RETURN samurai_claim_human_work_launch_v116(");
+    expect(sql).toContain("RETURN samurai_claim_human_work_launch_v117(");
+  });
+
+  it("stores reply/comment continuation origins at creation and repairs only safe legacy rows in v119", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 119);
+    expect(migration?.name).toBe("workspace_server_human_work_continuation_origin_at_creation");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("pg_get_functiondef");
+    expect(sql).toContain("instruction.source_kind IN (''reply'', ''comment_reflection'')");
+    expect(sql).toContain("RENAME TO samurai_append_human_work_instruction_v118");
+    expect(sql).toContain("target_source_kind IN ('reply', 'comment_reflection')");
+    expect(sql).toContain("SET origin_kind = 'parent_continuation'");
+    expect(sql).toContain("samurai_human_work_reply_continuation_safe(assignment.workspace_id, assignment.id, FALSE)");
+    expect(sql).toContain("GET DIAGNOSTICS changed_count = ROW_COUNT");
+    expect(sql).toContain("EXIT WHEN changed_count = 0");
+  });
+
+  it("qualifies runtime delegation bindings without weakening the Room/Work boundary in v120", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 120);
+    expect(migration?.name).toBe("workspace_server_human_work_runtime_delegation_column_ambiguity_fix");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_delegate_human_work_from_runtime(");
+    expect(sql).toContain("bound_work_id");
+    expect(sql).toContain("bound_room_id");
+    expect(sql).toContain("bound_parent_assignment_id");
+    expect(sql).toContain("run_row.room_id IS DISTINCT FROM bound_room_id");
+    expect(sql).toContain("assignment.work_id = bound_work_id");
+    expect(sql).toContain("assignment.room_id = bound_room_id");
+    expect(sql).toContain("samurai_can_room(target_workspace_id, bound_room_id, 'execute')");
+    expect(sql).not.toContain("assignment.work_id = work_id");
+    expect(sql).not.toContain("assignment.room_id = room_id");
+  });
+
+  it("requeues stale pre-admission sibling claims without reviving stopped descendants in v121", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 121);
+    expect(migration?.name).toBe("workspace_server_human_work_assignment_stop_pre_admission_guard");
+    const sql = migration?.statements.join("\n") ?? "";
+
+    expect(sql).toContain("samurai.human_work.assignment_stop");
+    expect(sql).toContain("status = 'claimed'");
+    expect(sql).toContain("assignment.current_run_id IS NULL");
+    expect(sql).toContain("SET status = 'ready'");
+    expect(sql).toContain("SET status = 'reserved', generation = work_generation");
+    expect(sql).toContain("WITH RECURSIVE stopped_tree AS");
+    expect(sql).toContain("NOT EXISTS (\n            SELECT 1 FROM stopped_tree");
+    expect(sql).toContain("DROP TRIGGER IF EXISTS workspace_human_work_assignment_sibling_generation");
+    expect(sql).toContain("CREATE TRIGGER workspace_human_work_assignment_sibling_generation");
+  });
+
 });

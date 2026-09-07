@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
 import path from "node:path";
 import { Server as SocketServer } from "socket.io";
-import { ClientEventRecordSchema, ResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { ClientEventRecordSchema, ResourceRefSchema, WorkspaceFileResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
 import { builtinSurfaceRendererRegistryEntries } from "@samurai-agent/ui-protocol";
 import { domainCommandInputSources, listActionCatalogEntries, listDomainCommandEntries, listDomainQueryEntries, pluginManifests, type DomainCommandInputSource } from "@samurai-agent/action-catalog";
 import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
@@ -25,6 +25,7 @@ import {
   WorkspaceLearningRunner,
   createInternalWorkspaceMaintenanceCaller,
   assertOpaqueId,
+  assertSafeRelativePath,
   canonicalJson,
   createVerifiedWorkspaceHumanCaller,
   loadWorkspaceServerConfig,
@@ -45,6 +46,8 @@ import {
   type WorkspaceCompletionService,
   type WorkspaceBundleV3Manifest,
   type WorkspaceBundleV4Manifest,
+  type WorkspaceFile,
+  type WorkspaceFileResourceRef,
   type WorkspaceRequestContext,
   type WorkspaceServerCommandService,
   type WorkspaceServerConfig
@@ -55,6 +58,7 @@ import {
   executeOrganizationCommandOperation,
   executeOrganizationQueryOperation,
   mountDomainApiV1,
+  publicAgentBackendRecord,
   publicOperationResult,
   publicWorkspaceDirectory,
   publicWorkspaceOrganizationAssociationResult,
@@ -63,6 +67,7 @@ import {
   type OrganizationApiRequestContext
 } from "./domain-api-v1";
 import { WorkspaceWorkerSupervisor } from "../workers/workspace-worker-supervisor";
+import { PostgresRoomWorkWorker } from "../workers/postgres-room-work-worker";
 import { createWorkspaceCompletionBackendReviewPort } from "../workers/workspace-completion-review-port";
 import { createWorkspaceLearningBackendReviewPort } from "../workers/workspace-learning-review-port";
 import { PostgresRuntimeExecutionWorker } from "../workers/postgres-runtime-execution-worker";
@@ -366,10 +371,26 @@ export async function createWorkspaceServerHttp(
       });
     }
   });
+  const roomWorkWorker = new PostgresRoomWorkWorker({
+    store,
+    runtimeFor: (context, operationId) => postgresRuntimeCommands(
+      core.database,
+      config,
+      backendRegistry,
+      { ...context, operationId },
+      io,
+      store,
+      knowledgeMemory,
+      (event) => recordPostgresChatCompletionActivity(commands, { ...context, operationId }, event),
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context)
+    )
+  });
   const workerSupervisor = new WorkspaceWorkerSupervisor({
     learningRunner,
     maintenance,
     executionJobWorker: new PostgresRuntimeExecutionWorker(core.database, 60_000, completion),
+    roomWorkWorker,
+    roomWorkStopWorker: roomWorkWorker,
     gatewayMaintenance: new PostgresGatewayMaintenanceWorker(core.database),
     skillOptimizationWorker: new PostgresSkillOptimizationWorker({
       database: core.database,
@@ -467,6 +488,7 @@ export async function createWorkspaceServerHttp(
     operationContext,
     organizationContext: (req, organizationId, options) => organizationRequestContext(req, organizationId, options),
     requestId: (req) => authenticated(req).requestId,
+    backendRegistry,
     runtimeFor: (req) => {
       const context = operationContext(req);
       return postgresRuntimeCommands(
@@ -478,7 +500,7 @@ export async function createWorkspaceServerHttp(
         store,
         knowledgeMemory,
         (event) => recordPostgresChatCompletionActivity(commands, context, event),
-        createPostgresRuntimeToolExecutionPort(commands, artifacts, context)
+        createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context)
       );
     }
   });
@@ -667,7 +689,10 @@ export async function createWorkspaceServerHttp(
   }));
 
   app.get("/api/workspaces/:workspaceId/agent-backends", authenticateWorkspace, asyncRoute(async (_req, res) => {
-    res.json(backendRegistry.statuses());
+    // Keep the legacy route for existing clients, but expose the same safe
+    // availability projection as the public Domain query.  Backend metadata,
+    // capabilities, session policy, and diagnostics stay host-owned.
+    res.json(backendRegistry.statuses().map(publicAgentBackendRecord));
   }));
 
   // PostgreSQL Gateway control-plane surface. Every mutation is bound through
@@ -933,7 +958,7 @@ export async function createWorkspaceServerHttp(
     const roomId = stringField(body, "room_id");
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
     const session = await createPostgresChatSessionThroughDomainOperation(runtimeCommands, {
       workspaceId: context.workspaceId,
       accountId: context.accountId,
@@ -1043,7 +1068,7 @@ export async function createWorkspaceServerHttp(
     };
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, completionContext, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
     const metadata = body.metadata === undefined ? undefined : jsonObjectField(body, "metadata");
     const result = await runPostgresChatTurnThroughDomainOperation(runtimeCommands, {
       workspaceId: context.workspaceId,
@@ -1101,7 +1126,7 @@ export async function createWorkspaceServerHttp(
     const input = body.input === undefined ? {} : jsonObjectField(body, "input");
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
     res.json(await runtimeCommands.resumeBackendRun(pathParam(req, "runId"), input));
   }));
 
@@ -1109,7 +1134,7 @@ export async function createWorkspaceServerHttp(
     const context = operationContext(req);
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
     res.json(await runtimeCommands.syncBackendRun(pathParam(req, "runId")));
   }));
 
@@ -1117,7 +1142,7 @@ export async function createWorkspaceServerHttp(
     const context = operationContext(req);
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
     res.json(await runtimeCommands.recoverBackendRun(pathParam(req, "runId")));
   }));
 
@@ -1126,7 +1151,7 @@ export async function createWorkspaceServerHttp(
     const body = objectBody(req.body);
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
     const result = await runtimeCommands.retryBackendRun(pathParam(req, "runId"), {
       idempotencyKey: context.operationId,
       ...(body.confirm_unknown === true ? { confirmUnknown: true } : {})
@@ -1214,7 +1239,7 @@ export async function createWorkspaceServerHttp(
       const context = operationContext(req);
       const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
         (event) => recordPostgresChatCompletionActivity(commands, context, event),
-        createPostgresRuntimeToolExecutionPort(commands, artifacts, context));
+        createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
       const runId = pathParam(req, "runId");
       if (action === "cancel") {
         res.json(await runtimeCommands.cancelBackendRun(runId));
@@ -3074,7 +3099,12 @@ export async function createWorkspaceServerHttp(
       if (!saved.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, saved.event);
       return saved;
     });
-    res.json({ file: result.file, event: result.event, replayed: result.replayed });
+    res.json({
+      file: result.file,
+      resource_ref: workspaceFileResourceRef(result.file),
+      event: result.event,
+      replayed: result.replayed
+    });
   }));
 
   app.post("/api/workspaces/:workspaceId/transfers", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -3787,10 +3817,16 @@ function organizationRequestContext(
   };
 }
 
-function runtimeChatAvailableProviderTools(): string[] {
-  const artifactCreate = listDomainCommandEntries("provider_tool_call")
-    .find((entry) => entry.id === "artifact.create" && entry.availability === "active");
-  return artifactCreate?.provider_tool_names?.filter((name) => name === "create_artifact") ?? [];
+export function runtimeChatAvailableProviderTools(options: { roomWorkBinding?: boolean } = {}): string[] {
+  const entries = listDomainCommandEntries("provider_tool_call");
+  const providerToolNames = [
+    { operation: "artifact.create", providerToolName: "create_artifact" },
+    ...(options.roomWorkBinding ? [{ operation: "room.work.assignee.delegate", providerToolName: "subagent_delegate" }] : [])
+  ];
+  return providerToolNames.flatMap(({ operation, providerToolName }) => {
+    const entry = entries.find((candidate) => candidate.id === operation && candidate.availability === "active");
+    return entry?.provider_tool_names?.includes(providerToolName) ? [providerToolName] : [];
+  });
 }
 
 function postgresRuntimeCommands(
@@ -3813,7 +3849,7 @@ function postgresRuntimeCommands(
     ...(context.operationId ? { operationId: context.operationId } : {}),
     backendRegistry,
     knowledgeMemory,
-    ...(toolExecution ? { toolExecution, availableTools: runtimeChatAvailableProviderTools() } : {}),
+    ...(toolExecution ? { toolExecution, availableTools: runtimeChatAvailableProviderTools({ roomWorkBinding: true }) } : {}),
     agentWorktreeRoot: path.join(config.storageRoot, "agent-worktrees", context.workspaceId),
     coreWorkspaceRoot: path.join(config.storageRoot, "workspaces"),
     readWorkspaceFile: async (fileContext, roomId, ref) => {
@@ -3843,6 +3879,7 @@ function postgresRuntimeCommands(
 function createPostgresRuntimeToolExecutionPort(
   commands: WorkspaceServerCommandService,
   artifacts: PostgresArtifact,
+  store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">
 ): PostgresRuntimeToolExecutionPort {
   return {
@@ -3883,6 +3920,69 @@ function createPostgresRuntimeToolExecutionPort(
           resource_ref: created.artifact.file_ref,
           replayed: created.replayed
         }
+      };
+    },
+    delegate: async (input) => {
+      const binding = input.trustedRoomWorkBinding;
+      if (binding.workspaceId !== context.workspaceId || input.run.id !== binding.runId || input.run.room_id !== binding.roomId) {
+        throw new WorkspaceServerError("runtime_subagent_binding_mismatch", 409);
+      }
+      await commands.assertRoomExecutable(context, binding.roomId);
+
+      let payload: ReturnType<typeof parseDomainOperationInput<"room.work.assignee.delegate">>;
+      try {
+        // Authority fields are supplied only by the persisted runtime binding.
+        // The provider may supply the child Agent and instruction, but it may
+        // not select the parent work, assignment, room, or generation.
+        payload = parseDomainOperationInput("room.work.assignee.delegate", {
+          ...(input.event.arguments as Record<string, unknown>),
+          work_id: binding.workId,
+          assignee_id: binding.assigneeId,
+          expected_generation: binding.generation
+        });
+      } catch {
+        throw new WorkspaceServerError("runtime_subagent_delegate_input_invalid", 400);
+      }
+
+      const created = await store.delegateRoomWorkAssigneeFromRuntime({
+        workspaceId: binding.workspaceId,
+        accountId: context.accountId,
+        operationId: input.operation.id
+      }, {
+        // The parent Run is the only internal authority.  Do not pass the
+        // model-visible Work/Assignment fields to the public delegate method;
+        // the v107 SQL wrapper derives and revalidates them from this Run.
+        parentRunId: binding.runId,
+        agentId: payload.agent_id,
+        instruction: payload.instruction,
+        ...(payload.dependency_assignee_ids ? { dependencyAssigneeIds: payload.dependency_assignee_ids } : {}),
+        ...(payload.attachments ? { attachments: payload.attachments } : {}),
+        expectedGeneration: binding.generation
+      });
+      const assignmentRef = ResourceRefSchema.parse({
+        kind: "room_work_assignee",
+        id: created.id,
+        uri: `samurai://room-work-assignees/${created.id}`
+      });
+      return {
+        resourceRefs: [assignmentRef],
+        summary: `Child assignment ${created.id} を作成しました。`,
+        output: {
+          assignment: {
+            id: created.id,
+            work_id: created.workId,
+            agent_id: created.agentId,
+            ...(created.parentAssignmentId ? { parent_assignee_id: created.parentAssignmentId } : {}),
+            status: created.status,
+            generation: created.generation,
+            instruction_version: created.instructionVersion,
+            attempt: created.attempt,
+            created_at: created.createdAt,
+            updated_at: created.updatedAt
+          },
+          resource_ref: assignmentRef
+        },
+        changeType: "other"
       };
     }
   };
@@ -4315,6 +4415,21 @@ function resourceRefsField(body: Record<string, unknown>, key: string) {
   } catch {
     throw new WorkspaceServerError(`${key}_invalid`, 400);
   }
+}
+
+/** The only ResourceRef shape emitted for a Workspace file.  It intentionally
+ * contains a relative logical path, never a storage root or absolute path. */
+export function workspaceFileResourceRef(file: WorkspaceFile): WorkspaceFileResourceRef {
+  const uri = assertSafeRelativePath(file.path);
+  const ref: WorkspaceFileResourceRef = {
+    kind: "file",
+    id: file.sha256,
+    uri,
+    version: String(file.version),
+    label: uri
+  };
+  WorkspaceFileResourceRefSchema.parse(ref);
+  return ref;
 }
 
 interface PostgresTemporaryContextAttachment {
