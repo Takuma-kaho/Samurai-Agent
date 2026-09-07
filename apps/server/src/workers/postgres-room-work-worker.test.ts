@@ -10,10 +10,29 @@ const context: WorkspaceRequestContext = {
 };
 
 function runtimeFake(status: "completed" | "outcome_unknown" = "completed") {
-  const runtime = {
-    createSession: vi.fn(async () => ({ id: "session_internal_only" })),
-    runChatTurn: vi.fn(async () => ({ backendRun: { id: "run_one", status, output_summary: status === "completed" ? "done" : null } }))
-  };
+  const createSession = vi.fn(async (_input?: Record<string, unknown>) => ({ id: "session_internal_only" }));
+  const runChatTurn = vi.fn(async (_input?: Record<string, unknown>) => ({ backendRun: { id: "run_one", status, output_summary: status === "completed" ? "done" : null } }));
+  const runDomainCommand = vi.fn(async (command: Record<string, any>) => {
+    if (command.operationId === "session.create") {
+      return createSession({
+        roomId: command.input.room_id,
+        operationId: command.context.idempotencyKey,
+        title: command.input.title
+      });
+    }
+    const input = command.input as Record<string, any>;
+    return runChatTurn({
+      sessionId: command.context.sessionId,
+      content: input.content,
+      ...(input.agent_id ? { agentId: input.agent_id } : {}),
+      ...(Array.isArray(input.attachments) && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
+      ...(command.executionBinding ? { executionBinding: command.executionBinding } : {}),
+      ...(command.resumeBackendContinuation ? { resumeBackendContinuation: command.resumeBackendContinuation } : {}),
+      idempotencyKey: command.context.idempotencyKey,
+      signal: command.signal
+    });
+  });
+  const runtime = { createSession, runChatTurn, runDomainCommand };
   return runtime as unknown as PostgresRuntimeCommandService;
 }
 
@@ -50,6 +69,36 @@ describe("PostgresRoomWorkWorker", () => {
 
     expect(result).toEqual({ claimed: 1, completed: 1, outcomeUnknown: 0 });
     expect(claim).toHaveBeenCalledWith(context, expect.objectContaining({ workerId: "worker_one", limit: 1 }));
+    expect(runtime.runDomainCommand).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      operationId: "session.create",
+      context: expect.objectContaining({
+        inputSource: "automation",
+        workspaceId: context.workspaceId,
+        actorId: context.accountId,
+        roomId: "room_one",
+        correlationId: expect.stringMatching(/^room_work_run_[a-f0-9]{48}:session$/),
+        idempotencyKey: expect.stringMatching(/^room_work_run_[a-f0-9]{48}:session$/)
+      }),
+      input: { room_id: "room_one", title: "Do the work" }
+    }));
+    expect(runtime.runDomainCommand).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      operationId: "chat.turn.run",
+      context: expect.objectContaining({
+        inputSource: "automation",
+        roomId: "room_one",
+        sessionId: "session_internal_only",
+        correlationId: expect.stringMatching(/^room_work_run_[a-f0-9]{48}$/),
+        idempotencyKey: expect.stringMatching(/^room_work_run_[a-f0-9]{48}$/)
+      }),
+      input: { content: "Do the work", agent_id: "agent_one", attachments: [] },
+      executionBinding: {
+        workId: "work_one",
+        assigneeId: "assignee_one",
+        generation: 2,
+        agentConfigurationVersion: 4
+      },
+      signal: expect.any(AbortSignal)
+    }));
     expect(runtime.createSession).toHaveBeenCalledWith(expect.objectContaining({ roomId: "room_one" }));
     expect(runtime.runChatTurn).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "session_internal_only",
@@ -280,10 +329,12 @@ describe("PostgresRoomWorkWorker", () => {
 
   it("dispatches an active Room-work stop through Runtime in the independent stop lane", async () => {
     const cancelBackendRun = vi.fn(async () => ({ id: "run_active", status: "cancelled" }));
+    const executeRunControlAction = vi.fn(async ({ runId }: { runId: string }) => cancelBackendRun(runId));
     const runtime = {
       createSession: vi.fn(async () => ({ id: "session_internal_only" })),
       runChatTurn: vi.fn(),
-      cancelBackendRun
+      cancelBackendRun,
+      executeRunControlAction
     } as unknown as PostgresRuntimeCommandService;
     const claimStop = vi.fn()
       .mockResolvedValueOnce({
@@ -305,6 +356,12 @@ describe("PostgresRoomWorkWorker", () => {
 
     expect(claimStop).toHaveBeenCalledWith(context, expect.objectContaining({ workerId: "worker_one", limit: 1 }));
     expect(cancelBackendRun).toHaveBeenCalledWith("run_active");
+    expect(executeRunControlAction).toHaveBeenCalledWith(expect.objectContaining({
+      action: "cancel",
+      runId: "run_active",
+      resumeInput: {},
+      idempotencyKey: expect.stringMatching(/^room_work_stop_[a-f0-9]{48}:cancel:assignee_one$/)
+    }));
     expect(reconcileStop).toHaveBeenCalledWith(
       expect.objectContaining({ operationId: expect.stringMatching(/^room_work_stop_[a-f0-9]{48}$/) }),
       expect.objectContaining({
@@ -320,10 +377,13 @@ describe("PostgresRoomWorkWorker", () => {
   });
 
   it("records an unconfirmed stop when Runtime cancellation cannot be proven", async () => {
+    const cancelBackendRun = vi.fn(async () => { throw new Error("backend_cancel_unconfirmed"); });
+    const executeRunControlAction = vi.fn(async ({ runId }: { runId: string }) => cancelBackendRun(runId));
     const runtime = {
       createSession: vi.fn(async () => ({ id: "session_internal_only" })),
       runChatTurn: vi.fn(),
-      cancelBackendRun: vi.fn(async () => { throw new Error("backend_cancel_unconfirmed"); })
+      cancelBackendRun,
+      executeRunControlAction
     } as unknown as PostgresRuntimeCommandService;
     const reconcileStop = vi.fn(async () => ({ state: "unconfirmed" }));
     const store = {
@@ -365,9 +425,14 @@ describe("PostgresRoomWorkWorker", () => {
   it("propagates a settlement failure while recording a runtime failure", async () => {
     const runtimeError = new Error("provider_failed");
     const settlementError = new Error("room_work_settlement_unavailable");
+    const runDomainCommand = vi.fn(async (command: Record<string, any>) => {
+      if (command.operationId === "session.create") return { id: "session_internal_only" };
+      throw runtimeError;
+    });
     const runtime = {
       createSession: vi.fn(async () => ({ id: "session_internal_only" })),
-      runChatTurn: vi.fn(async () => { throw runtimeError; })
+      runChatTurn: vi.fn(async () => { throw runtimeError; }),
+      runDomainCommand
     } as unknown as PostgresRuntimeCommandService;
     const settle = vi.fn(async () => { throw settlementError; });
     const store = {

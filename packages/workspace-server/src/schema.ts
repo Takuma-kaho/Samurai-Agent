@@ -20738,6 +20738,63 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "REVOKE EXECUTE ON FUNCTION samurai_regenerate_human_work_assignment_sibling_reservations() FROM PUBLIC"
     ]
   },
+  {
+    // Room authorization must fail closed when a caller supplies an ID from
+    // another Workspace. Workspace Owner/Admin inheritance is only valid for
+    // an existing Room in the requested Workspace; otherwise a cross-tenant
+    // move could pass authorization and fail later at the composite FK.
+    version: 122,
+    name: "workspace_server_room_role_requires_existing_room",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_room_role(target_workspace_id TEXT, target_room_id TEXT)
+      RETURNS TEXT
+      LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_role_name TEXT;
+      DECLARE room_kind_name TEXT;
+      BEGIN
+        SELECT room.room_kind INTO room_kind_name
+        FROM rooms AS room
+        WHERE room.workspace_id = target_workspace_id AND room.id = target_room_id;
+        IF NOT FOUND THEN RETURN NULL; END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_members
+          WHERE workspace_id = target_workspace_id
+            AND account_id = samurai_current_account_id()
+            AND state = 'active'
+        ) THEN
+          RETURN NULL;
+        END IF;
+        IF room_kind_name = 'agent_dm' THEN
+          -- DM privacy is explicit by construction. Workspace Owner/Admin
+          -- inheritance is deliberately not consulted for this Room kind.
+          RETURN (
+            SELECT member.role
+            FROM room_members AS member
+            WHERE member.workspace_id = target_workspace_id
+              AND member.room_id = target_room_id
+              AND member.account_id = samurai_current_account_id()
+              AND member.state = 'active'
+            LIMIT 1
+          );
+        END IF;
+        workspace_role_name := samurai_workspace_role(target_workspace_id);
+        IF samurai_role_rank(workspace_role_name) >= samurai_role_rank('admin') THEN
+          RETURN workspace_role_name;
+        END IF;
+        RETURN (
+          SELECT member.role
+          FROM room_members AS member
+          WHERE member.workspace_id = target_workspace_id
+            AND member.room_id = target_room_id
+            AND member.account_id = samurai_current_account_id()
+            AND member.state = 'active'
+          LIMIT 1
+        );
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_room_role(TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
 ];
 
 function workspaceGatewayRlsStatements(): string[] {

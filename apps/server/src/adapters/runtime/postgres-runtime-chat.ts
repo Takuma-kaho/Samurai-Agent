@@ -260,6 +260,15 @@ export type PostgresRuntimeDomainCommandInput =
       operationId: "chat.turn.run";
       context: TrustedDomainContext;
       input: unknown;
+      /**
+       * Server-owned execution state for the Room-work worker. These fields
+       * are deliberately outside the public domain-operation payload: the
+       * worker proves the assignment and continuation through the Store
+       * before handing them to this facade.
+       */
+      executionBinding?: PostgresRuntimeExecutionBinding;
+      resumeBackendContinuation?: PostgresRuntimeExternalContinuation;
+      signal?: AbortSignal;
     }
   | {
       operationId: "session.create";
@@ -3435,7 +3444,10 @@ export class PostgresRuntimeCommandService {
           ...(commandInput.output_locale ? { outputLocale: commandInput.output_locale } : {}),
           attachments: commandInput.attachments,
           temporaryContext: commandInput.temporary_context,
-          metadata: commandInput.metadata
+          metadata: commandInput.metadata,
+          ...(input.executionBinding ? { executionBinding: input.executionBinding } : {}),
+          ...(input.resumeBackendContinuation ? { resumeBackendContinuation: input.resumeBackendContinuation } : {}),
+          ...(input.signal ? { signal: input.signal } : {})
         })
       });
       const result = await handler.execute(input.context, chatTurnRun.input.parse(input.input));

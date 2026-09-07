@@ -81,6 +81,8 @@
 - 最終統合時に、停止予約の再キュー、Session境界、DM再オープンを別Agentレビューで再確認し、P0/P1の残存なしと判定した。
 - 完了済みWorkの返信を画面が無効化していたため、停止・結果不明・権限なし以外は返信可能に修正した。隔離Electron画面の同一Work返信とfocused testで再確認した。
 - 画面の明示委譲は、Renderer・Electron main・browser bridgeで、`parent_assignee_id`が省略された公開応答を不正扱いしていた。Work/Agent/子Assignmentを必須照合し、親IDが返る場合だけ一致確認するよう統一した。異常な親・子の応答を拒否する回帰testを追加した。初回の再検証で古い`apps/desktop/dist`を起動していたため、Desktop bundleを再生成してから上記の実画面再確認を行った。
+- PR CIのarchitecture boundaryで、Room Work workerがRuntimeの可変メソッドを直接呼んでいることを検出した。`runDomainCommand`と`executeRunControlAction`の正式なRuntime facade経路へ接続し、worker focused testとarchitecture verifierを再実行して通過した。
+- PR CIのHosted Room hierarchy probeで、存在しない別WorkspaceのRoom IDにOwner/Admin権限が返り、同一Workspace親FKに違反する問題を検出した。対象Roomの存在を先に確認して存在しない場合は`NULL`を返すmigration v122を追加し、Hosted/Self-host probeとschema testを再実行して通過した。
 
 ## 未検証範囲
 

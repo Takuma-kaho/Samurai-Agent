@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 121 }, (_, index) => index + 1));
+    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 122 }, (_, index) => index + 1));
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -76,6 +76,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_privacy_and_realtime_integrity");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_invitation_and_import_guards");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_hierarchy_reactivation_does_not_restore_room_access");
+    expect(migrations.map((migration) => migration.name)).toContain("workspace_server_room_role_requires_existing_room");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_public_event_journal");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_v1_room_agent_mutation_contract");
     expect(migrations.map((migration) => migration.name)).toContain("workspace_server_public_event_execute_policy");
@@ -97,6 +98,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("A role demotion is not a removal cascade");
     expect(schema).toContain("samurai_room_member_change_impact");
     expect(schema).toContain("room_parent_not_available");
+    expect(schema).toContain("IF NOT FOUND THEN RETURN NULL; END IF;");
     expect(schema).toContain("samurai_import_workspace_member");
     expect(schema).toContain("workspace_invitation_operation_id_required");
     expect(schema).toContain("samurai_clear_stale_room_memberships_on_workspace_activation");

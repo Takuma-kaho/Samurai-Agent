@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { WorkspaceFileResourceRefSchema, nowIso, type ResourceRef } from "@samurai-agent/core-schemas";
+import { WorkspaceFileResourceRefSchema, nowIso, type ResourceRef, type SessionRecord } from "@samurai-agent/core-schemas";
+import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
+import type { RunChatTurnResult } from "@samurai-agent/runtime";
 import {
   WorkspaceServerError,
   type WorkspaceRequestContext,
@@ -132,7 +134,7 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           throw new WorkspaceServerError(reservation.attachmentError, 400);
         }
         const runtime = this.options.runtimeFor(runContext, operationId);
-        const sessionId = await this.ensureInternalSession(runtime, reservation, operationId);
+        const sessionId = await this.ensureInternalSession(runtime, runContext, reservation, operationId, input.signal);
         const agentConfigurationVersion = await this.resolveAgentConfigurationVersion(context, reservation);
         const executionBinding: PostgresRuntimeExecutionBinding = {
           workId: reservation.workId,
@@ -141,16 +143,18 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           generation: reservation.generation,
           agentConfigurationVersion
         };
-        const result = await runtime.runChatTurn({
-          sessionId,
-          content: reservation.instruction,
-          ...(reservation.agentId ? { agentId: reservation.agentId } : {}),
-          ...(reservation.attachments.length > 0 ? { attachments: reservation.attachments } : {}),
-          ...(reservation.resumeBackendContinuation ? { resumeBackendContinuation: reservation.resumeBackendContinuation } : {}),
+        const result = await runtime.runDomainCommand({
+          operationId: "chat.turn.run",
+          context: roomWorkDomainContext(runContext, reservation.roomId, sessionId, operationId, input.signal),
+          input: {
+            content: reservation.instruction,
+            ...(reservation.agentId ? { agent_id: reservation.agentId } : {}),
+            attachments: reservation.attachments
+          },
           executionBinding,
-          idempotencyKey: operationId,
+          ...(reservation.resumeBackendContinuation ? { resumeBackendContinuation: reservation.resumeBackendContinuation } : {}),
           signal: input.signal
-        });
+        }) as RunChatTurnResult;
         const settledStatus = terminalStatus(result.backendRun.status);
         settlementAttempted = true;
         await this.settle(runContext, claimedReservation, {
@@ -257,7 +261,13 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
         try {
           if (runId) {
             const runtime = this.options.runtimeFor(dispatchContext, operationId);
-            const run = await runtime.cancelBackendRun(runId);
+            const controlResult = await runtime.executeRunControlAction({
+              action: "cancel",
+              runId,
+              resumeInput: {},
+              idempotencyKey: `${operationId}:cancel:${target.assignmentId}`
+            });
+            const run = "backendRun" in controlResult ? controlResult.backendRun : controlResult;
             outcome = stopOutcome(run.status);
           }
         } catch {
@@ -330,15 +340,21 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
 
   private async ensureInternalSession(
     runtime: PostgresRuntimeCommandService,
+    context: WorkspaceRequestContext,
     reservation: RoomWorkReservation,
-    operationId: string
+    operationId: string,
+    signal: AbortSignal
   ): Promise<string> {
     if (reservation.sessionId) return reservation.sessionId;
-    const session = await runtime.createSession({
-      roomId: reservation.roomId,
-      operationId: `${operationId}:session`,
-      title: reservation.instruction.slice(0, 200)
-    });
+    const sessionOperationId = `${operationId}:session`;
+    const session = await runtime.runDomainCommand({
+      operationId: "session.create",
+      context: roomWorkDomainContext(context, reservation.roomId, undefined, sessionOperationId, signal),
+      input: {
+        room_id: reservation.roomId,
+        title: reservation.instruction.slice(0, 200)
+      }
+    }) as SessionRecord;
     return session.id;
   }
 
@@ -391,6 +407,25 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
       now: result.now
     });
   }
+}
+
+function roomWorkDomainContext(
+  context: WorkspaceRequestContext,
+  roomId: string,
+  sessionId: string | undefined,
+  operationId: string,
+  signal: AbortSignal
+): TrustedDomainContext {
+  return {
+    inputSource: "automation",
+    workspaceId: context.workspaceId,
+    actorId: context.accountId,
+    roomId,
+    ...(sessionId ? { sessionId } : {}),
+    correlationId: operationId,
+    idempotencyKey: operationId,
+    signal
+  };
 }
 
 interface RoomWorkStopDispatchTarget {
