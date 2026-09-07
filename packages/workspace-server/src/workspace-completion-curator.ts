@@ -146,10 +146,11 @@ export class WorkspaceCompletionCuratorService {
   async inputHash(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; mode: "light" | "semantic" }): Promise<string> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     return this.completion.store.database.withContext(context, async (sql) => {
-      const [state, resources] = await Promise.all([
-        readState(sql, context.workspaceId, input.roomId),
-        readCuratorResourceFingerprint(sql, context.workspaceId, input.roomId)
-      ]);
+      // `withContext` hands both reads the same PoolClient. Keep them
+      // sequential: pg queues concurrent client.query calls, but that
+      // pattern is deprecated and can obscure the transaction ordering.
+      const state = await readState(sql, context.workspaceId, input.roomId);
+      const resources = await readCuratorResourceFingerprint(sql, context.workspaceId, input.roomId);
       return createHash("sha256").update(canonicalJson({
         room_id: input.roomId,
         mode: input.mode,

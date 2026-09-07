@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import { assertOpaqueId } from "./config";
+import { assertOpaqueId, assertSafeRelativePath } from "./config";
 import { assertAccountIdMatchesPublicKey, canonicalJson } from "./auth";
 import { WorkspaceServerError } from "./errors";
 import { PostgresWorkspaceDatabase, type WorkspaceSql } from "./postgres";
@@ -39,7 +39,29 @@ import type {
   WorkspacePublicEventPage,
   WorkspaceRequestContext,
   WorkspaceRoom,
+  WorkspaceRoomDefaultAgent,
+  WorkspaceRoomKind,
   WorkspaceRoomCreateResult,
+  WorkspaceAgentDm,
+  WorkspaceHumanWork,
+  WorkspaceHumanWorkAssignment,
+  WorkspaceHumanWorkAssignmentStatus,
+  WorkspaceHumanWorkComment,
+  WorkspaceHumanWorkControl,
+  WorkspaceHumanWorkControlAction,
+  WorkspaceHumanWorkControlState,
+  WorkspaceHumanWorkCreateResult,
+  WorkspaceHumanWorkInstruction,
+  WorkspaceHumanWorkInstructionSource,
+  WorkspaceHumanWorkInstructionState,
+  WorkspaceHumanWorkLegacySession,
+  WorkspaceHumanWorkLaunchReservation,
+  WorkspaceHumanWorkLaunchReservationStatus,
+  WorkspaceHumanWorkReaction,
+  WorkspaceHumanWorkStatus,
+  WorkspaceHumanWorkStopState,
+  WorkspaceHumanWorkView,
+  WorkspaceFileResourceRef,
   WorkspaceRoomMemberChangePreview,
   WorkspaceRoomMemberChangeResult,
   WorkspaceRoomMembership,
@@ -49,9 +71,10 @@ import type {
   WorkspaceState,
   WorkspaceSummary
 } from "./types";
-import type { ResourceRef } from "@samurai-agent/core-schemas";
+import { ResourceRefSchema, WorkspaceFileResourceRefSchema, type ResourceRef } from "@samurai-agent/core-schemas";
 
 const roleSet = new Set<WorkspaceMembershipRole>(["owner", "admin", "member", "guest"]);
+const workspaceHumanWorkStatusSet = new Set<WorkspaceHumanWorkStatus>(["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"]);
 const recordTypePattern = /^[a-z][a-z0-9_]{0,63}$/;
 const maxSearchTextLength = 500_000;
 
@@ -228,6 +251,211 @@ export interface SetWorkspaceAgentRoomPermissionInput {
   canEdit: boolean;
   canExecute: boolean;
   expectedVersion: number;
+}
+
+/** Revokes all Room-local Agent capabilities while retaining the permission
+ * row and audit history. In-progress assignments are not rewritten. */
+export interface RemoveWorkspaceAgentRoomPermissionInput {
+  roomId: string;
+  agentId: string;
+}
+
+/** The three Room-local capabilities that can be granted to an Agent. */
+export interface CreateWorkspaceRoomAgentPermissionInput {
+  canView: boolean;
+  canEdit: boolean;
+  canExecute: boolean;
+}
+
+/** Optional Agent profile created together with a new Room. */
+export interface CreateWorkspaceRoomAgentInput {
+  /** Internal callers may supply a stable id; the public operation normally omits it. */
+  id?: string;
+  name: string;
+  role: string;
+  instructions: string;
+  backendId: string;
+  enabled?: boolean;
+  permission?: CreateWorkspaceRoomAgentPermissionInput;
+}
+
+export interface CreateWorkspaceRoomInput {
+  id?: string;
+  name: string;
+  parentRoomId?: string;
+  /**
+   * Legacy callers may provide an explicit optimistic version. The public
+   * Domain API omits it: the Store resolves the current version inside the
+   * idempotent transaction so it never becomes part of the replay hash.
+   */
+  expectedWorkspaceVersion?: number;
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
+  kind?: WorkspaceRoomKind;
+  /** Only Agent DM creation may set this, and it must equal the caller. */
+  dmAccountId?: string;
+  /** Create this Agent before the Room and use it as the Room default. */
+  newAgent?: CreateWorkspaceRoomAgentInput;
+  /** Permission for the selected/default Agent, applied in the same transaction. */
+  agentPermission?: CreateWorkspaceRoomAgentPermissionInput;
+}
+
+export interface SetRoomDefaultAgentInput {
+  roomId: string;
+  /** `null` clears a normal Room default; Agent DM defaults are immutable. */
+  agentId: string | null;
+  expectedVersion?: number;
+}
+
+export interface OpenAgentDmInput {
+  agentId: string;
+}
+
+export interface CreateRoomWorkInput {
+  roomId: string;
+  instruction?: string;
+  attachments?: WorkspaceFileResourceRef[];
+  /** Optional explicit Agent. Omitted means the persisted Room default. */
+  agentId?: string;
+  title?: string;
+  objective?: string;
+  completionCriteria?: unknown[];
+  scheduledAt?: string;
+}
+
+/**
+ * Compatibility-only input for the retired Runtime Session path.  The
+ * session identifier is used only to resolve the internal bridge row; it is
+ * intentionally absent from all WorkspaceHumanWork DTOs.
+ */
+export interface MigrateLegacyChatTurnInput {
+  roomId: string;
+  sessionId: string;
+  instruction: string;
+  attachments?: WorkspaceFileResourceRef[];
+  agentId?: string;
+}
+
+export type MigrateLegacyChatTurnValue =
+  | { mode: "create"; work: WorkspaceHumanWork; launchReservation: WorkspaceHumanWorkLaunchReservation }
+  | { mode: "reply"; instruction: WorkspaceHumanWorkInstruction };
+
+export interface ListRoomWorksInput {
+  roomId: string;
+  status?: WorkspaceHumanWorkStatus;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ReplyToRoomWorkInput {
+  roomId: string;
+  workId: string;
+  assigneeId?: string;
+  instruction?: string;
+  attachments?: WorkspaceFileResourceRef[];
+  expectedVersion?: number;
+  expectedGeneration?: number;
+}
+
+export interface CreateRoomWorkCommentInput {
+  roomId: string;
+  workId: string;
+  body?: string;
+  attachments?: WorkspaceFileResourceRef[];
+  expectedVersion?: number;
+}
+
+export interface SetRoomWorkCommentReactionInput {
+  roomId: string;
+  workId: string;
+  commentId: string;
+  reaction: "like";
+  enabled: boolean;
+  expectedVersion?: number;
+}
+
+export interface ApplyRoomWorkCommentInput {
+  roomId: string;
+  workId: string;
+  commentId: string;
+  commentVersion: number;
+  assigneeId?: string;
+  expectedVersion?: number;
+  expectedGeneration?: number;
+}
+
+export interface StopRoomWorkInput {
+  roomId: string;
+  workId: string;
+  reason?: string;
+  expectedVersion?: number;
+  expectedGeneration?: number;
+}
+
+export interface StopRoomWorkAssigneeInput extends StopRoomWorkInput {
+  assigneeId: string;
+}
+
+export interface ReassignRoomWorkAssigneeInput {
+  roomId: string;
+  workId: string;
+  assigneeId: string;
+  agentId: string;
+  instruction?: string;
+  expectedVersion?: number;
+  expectedGeneration?: number;
+}
+
+export interface DelegateRoomWorkAssigneeInput {
+  roomId: string;
+  workId: string;
+  assigneeId: string;
+  agentId: string;
+  instruction: string;
+  dependencyAssigneeIds?: string[];
+  attachments?: ResourceRef[];
+  expectedVersion?: number;
+  expectedGeneration?: number;
+}
+
+/**
+ * Server-internal delegation input.  Unlike the public Domain Operation this
+ * shape carries only the admitted Runtime Run; SQL derives Work, Room,
+ * parent Assignment, requester, Agent, Backend, Session and generation from
+ * that trusted binding.
+ */
+export interface DelegateRoomWorkAssigneeFromRuntimeInput {
+  parentRunId: string;
+  agentId: string;
+  instruction: string;
+  dependencyAssigneeIds?: string[];
+  attachments?: ResourceRef[];
+  expectedGeneration: number;
+}
+
+export interface ClaimRoomWorkReservationInput {
+  workerId: string;
+  leaseMs: number;
+  now?: string;
+  limit?: number;
+  reservationId?: string;
+}
+
+export interface SettleRoomWorkAssignmentInput {
+  workId?: string;
+  assigneeId?: string;
+  assignmentId?: string;
+  /** The claimed reservation and lease owner are required for a safe settle. */
+  reservationId: string;
+  leaseOwner: string;
+  generation: number;
+  status: "completed" | "failed" | "cancelled" | "waiting" | "blocked" | "outcome_unknown";
+  result?: WorkspaceRecordPayload;
+  runId?: string;
+  outputSummary?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  now?: string;
 }
 
 export interface UpsertWorkspaceConnectionDescriptorInput {
@@ -1292,7 +1520,7 @@ export class WorkspaceServerStore {
   async listRooms(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">): Promise<WorkspaceRoom[]> {
     return this.database.withContext(context, async (sql) => {
       const result = await sql.query<RoomRow>(
-        `SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at,
+        `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at,
                 samurai_can_room(workspace_id, id, 'manage') AS can_manage,
                 samurai_can_room(workspace_id, id, 'execute') AS can_execute
          FROM rooms WHERE workspace_id = $1 ORDER BY created_at`,
@@ -1383,7 +1611,7 @@ export class WorkspaceServerStore {
         throw error;
       }
       const saved = await sql.query<RoomRow>(
-        "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        "SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, input.id]
       );
       const row = saved.rows[0];
@@ -1400,7 +1628,7 @@ export class WorkspaceServerStore {
     assertOpaqueId(roomId, "room_id_invalid");
     return this.database.withContext(context, async (sql) => {
       const result = await sql.query<RoomRow>(
-        `SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at,
+        `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at,
                 samurai_can_room(workspace_id, id, 'manage') AS can_manage,
                 samurai_can_room(workspace_id, id, 'execute') AS can_execute
          FROM rooms WHERE workspace_id = $1 AND id = $2`,
@@ -1410,6 +1638,1488 @@ export class WorkspaceServerStore {
       if (!row) throw new WorkspaceServerError("room_not_available", 404);
       return roomFromRow(row);
     });
+  }
+
+  /** Persist the one Room-level default Agent. It only affects new work; an
+   * existing assignment keeps the Agent/version captured at creation time. */
+  async setRoomDefaultAgent(
+    context: WorkspaceRequestContext,
+    input: SetRoomDefaultAgentInput
+  ): Promise<WorkspaceRoomDefaultAgent | null> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    if (input.agentId !== null) assertOpaqueId(input.agentId, "workspace_default_agent_id_invalid");
+    const current = await this.getRoom(context, input.roomId);
+    const expectedVersion = input.expectedVersion ?? current.version;
+    assertExpectedVersion(expectedVersion, "room_expected_version_invalid", 1);
+    const requestInput = {
+      roomId: input.roomId,
+      agentId: input.agentId,
+      ...(input.expectedVersion === undefined ? {} : { expectedVersion: input.expectedVersion })
+    };
+    const result = await this.runIdempotentResult(context, { action: "room.default_agent.set", input: requestInput }, async (sql) => {
+      try {
+        await sql.query(
+          "SELECT samurai_set_room_default_agent($1, $2, $3, $4)",
+          [context.workspaceId, input.roomId, input.agentId, expectedVersion]
+        );
+      } catch (error) {
+        if (postgresMessage(error).includes("room_version_conflict")) {
+          throw await this.roomVersionConflict(sql, context.workspaceId, input.roomId);
+        }
+        throw mapRoomWorkPostgresError(error, "room_default_agent_update_failed");
+      }
+      const row = (await sql.query<RoomRow>(
+        `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id,
+                default_agent_version, dm_account_id, version, created_at, updated_at
+         FROM rooms WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, input.roomId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_not_available", 404);
+      if (!row.default_agent_id || row.default_agent_version === null || row.default_agent_version === undefined) {
+        await this.insertEvent(sql, context, {
+          roomId: input.roomId,
+          kind: "room.default_agent.cleared",
+          recordType: "room",
+          recordId: input.roomId,
+          payload: { version: Number(row.version) }
+        });
+        await this.insertAudit(sql, context, {
+          action: "room.default_agent.set",
+          roomId: input.roomId,
+          subjectKind: "room",
+          subjectId: input.roomId,
+          beforeVersion: expectedVersion,
+          afterVersion: Number(row.version),
+          details: { default_agent_id: null }
+        });
+        return null;
+      }
+      const permission = (await sql.query<{ enabled: boolean; can_execute: boolean }>(
+        `SELECT agent.enabled, permission.can_execute
+         FROM workspace_agents AS agent
+         LEFT JOIN workspace_agent_room_permissions AS permission
+           ON permission.workspace_id = agent.workspace_id
+          AND permission.agent_id = agent.id
+          AND permission.room_id = $2
+         WHERE agent.workspace_id = $1 AND agent.id = $3`,
+        [context.workspaceId, input.roomId, row.default_agent_id]
+      )).rows[0];
+      const value: WorkspaceRoomDefaultAgent = {
+        roomId: input.roomId,
+        agentId: row.default_agent_id,
+        agentVersion: Number(row.default_agent_version),
+        enabled: permission?.enabled === true,
+        canExecute: permission?.can_execute === true,
+        version: Number(row.version),
+        updatedAt: iso(row.updated_at)
+      };
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.default_agent.changed",
+        recordType: "room",
+        recordId: input.roomId,
+        payload: { default_agent_id: value.agentId, default_agent_version: value.agentVersion, version: value.version }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.default_agent.set",
+        roomId: input.roomId,
+        subjectKind: "room",
+        subjectId: input.roomId,
+        beforeVersion: expectedVersion,
+        afterVersion: value.version,
+        details: { default_agent_id: value.agentId, default_agent_version: value.agentVersion }
+      });
+      return value;
+    });
+    // `null` is the legacy Store-level representation for clearing a default
+    // Agent; there is no object on which to carry the replay marker.  The
+    // public Room operation only accepts an Agent ID, so preserve that
+    // existing nullable API while exposing `replayed` for normal updates.
+    return result.value === null
+      ? null
+      : ({ ...result.value, replayed: result.replayed } as WorkspaceRoomDefaultAgent);
+  }
+
+  /** Open or retrieve the caller's private Agent DM Room. */
+  async openAgentDm(context: WorkspaceRequestContext, input: OpenAgentDmInput): Promise<WorkspaceAgentDm> {
+    assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const roomId = operationScopedId("agent_dm", `${context.workspaceId}:${context.accountId}:${input.agentId}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "agent.dm.open",
+      input: { agentId: input.agentId }
+    }, async (sql) => {
+      try {
+        const opened = await sql.query<{ result: unknown }>(
+          "SELECT samurai_open_agent_dm($1, $2, $3, $4) AS result",
+          [context.workspaceId, roomId, input.agentId, context.operationId]
+        );
+        // The SQL function returns the canonical Room ID.  A DM that already
+        // exists belongs to the same Account/Agent pair but was created by a
+        // different operation, so its ID is not the operation-scoped
+        // candidate above.
+        const openedValue = jsonObjectOrEmpty(opened.rows[0]?.result);
+        const openedRoomId = typeof openedValue.room_id === "string" && openedValue.room_id.length > 0
+          ? openedValue.room_id
+          : undefined;
+        if (!openedRoomId) throw new WorkspaceServerError("agent_dm_open_failed", 500);
+        const row = (await sql.query<RoomRow>(
+          `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id,
+                  default_agent_version, dm_account_id, version, created_at, updated_at
+           FROM rooms WHERE workspace_id = $1 AND id = $2`,
+          [context.workspaceId, openedRoomId]
+        )).rows[0];
+        if (!row || row.room_kind !== "agent_dm" || !row.default_agent_id || row.default_agent_version === null || row.default_agent_version === undefined) {
+          throw new WorkspaceServerError("agent_dm_open_failed", 500);
+        }
+        return {
+          workspaceId: row.workspace_id,
+          roomId: row.id,
+          kind: "agent_dm" as const,
+          agentId: row.default_agent_id,
+          agentVersion: Number(row.default_agent_version),
+          version: Number(row.version),
+          createdAt: iso(row.created_at),
+          updatedAt: iso(row.updated_at)
+        };
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "agent_dm_open_failed");
+      }
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceAgentDm;
+  }
+
+  /** Create the Room-facing work aggregate and reserve its first launch in one
+   * database transaction. The caller never receives or supplies a Session ID. */
+  async createRoomWork(context: WorkspaceRequestContext, input: CreateRoomWorkInput): Promise<WorkspaceHumanWorkCreateResult> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
+    const instruction = input.instruction?.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
+    if (!instruction) throw new WorkspaceServerError("room_work_instruction_required", 400);
+    if (input.title !== undefined && (!input.title.trim() || input.title.trim().length > 200)) {
+      throw new WorkspaceServerError("room_work_title_invalid", 400);
+    }
+    if (input.objective !== undefined && (!input.objective.trim() || input.objective.trim().length > 1_000_000)) {
+      throw new WorkspaceServerError("room_work_objective_invalid", 400);
+    }
+    if (input.agentId) assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const room = await this.getRoom(context, input.roomId);
+    const agentId = input.agentId ?? room.defaultAgentId;
+    if (!agentId) throw new WorkspaceServerError("workspace_room_default_agent_required", 409);
+    const title = input.title?.trim() || instruction.slice(0, 200);
+    const objective = input.objective?.trim() || instruction;
+    const completionCriteria = input.completionCriteria ?? [];
+    if (!Array.isArray(completionCriteria)) throw new WorkspaceServerError("room_work_completion_criteria_invalid", 400);
+    const scheduledAt = parseDateInput(input.scheduledAt, "room_work_scheduled_at_invalid") ?? new Date();
+    const workId = operationScopedId("room_work", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const assignmentId = operationScopedId("room_work_assignment", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const instructionId = operationScopedId("room_work_instruction", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const reservationId = operationScopedId("room_work_reservation", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const requestInput = {
+      roomId: input.roomId,
+      instruction: input.instruction ?? null,
+      attachments,
+      agentId: input.agentId ?? null,
+      title: input.title ?? null,
+      objective: input.objective ?? null,
+      completionCriteria,
+      scheduledAt: scheduledAt.toISOString()
+    };
+    const result = await this.runIdempotentResult(context, { action: "room.work.create", input: requestInput }, async (sql) => {
+      await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      const persistedRoom = await this.lockRoomDefaultAgent(sql, context.workspaceId, input.roomId);
+      const agent = (await sql.query<{ version: number | string; status: WorkspaceAgent["status"]; enabled: boolean }>(
+        `SELECT version, status, enabled FROM workspace_agents
+         WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, agentId]
+      )).rows[0];
+      if (!agent || agent.status !== "active" || agent.enabled !== true) {
+        throw new WorkspaceServerError("workspace_default_agent_not_available", 409);
+      }
+      if (!input.agentId && (persistedRoom.default_agent_id !== agentId
+        || persistedRoom.default_agent_version === null
+        || Number(persistedRoom.default_agent_version) !== Number(agent.version))) {
+        throw new WorkspaceServerError("workspace_room_default_agent_changed", 409);
+      }
+      try {
+        await sql.query(
+          "SELECT samurai_create_human_work($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::JSONB, $13, $14::JSONB, $15, $16)",
+          [
+            context.workspaceId,
+            workId,
+            assignmentId,
+            instructionId,
+            reservationId,
+            input.roomId,
+            context.accountId,
+            agentId,
+            Number(agent.version),
+            title,
+            objective,
+            canonicalJson(completionCriteria),
+            instruction,
+            canonicalJson(attachments),
+            scheduledAt.toISOString(),
+            context.operationId
+          ]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_creation_failed");
+      }
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, workId, input.roomId);
+      const reservation = await this.readHumanWorkReservation(sql, context.workspaceId, reservationId);
+      if (!reservation) throw new WorkspaceServerError("room_work_launch_reservation_missing", 500);
+      await this.insertAudit(sql, context, {
+        action: "room.work.create",
+        roomId: input.roomId,
+        subjectKind: "room_work",
+        subjectId: workId,
+        beforeVersion: 0,
+        afterVersion: work.instructionVersion,
+        details: { assignment_id: assignmentId, agent_id: agentId, reservation_id: reservationId }
+      });
+      return { work, launchReservation: reservation };
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  /**
+   * Convert one authorized legacy chat turn into the Room-work lifecycle.
+   *
+   * The legacy Session is only a lookup key for this compatibility lane.  A
+   * per-Session advisory lock serializes the first-use decision, while the
+   * normal operation ledger makes retries idempotent.  On first use this
+   * transaction creates the work, initial instruction, launch reservation,
+   * and bridge row together; later turns append an instruction to the
+   * already-mapped work without changing its Agent assignment.
+   */
+  async migrateLegacyChatTurn(
+    context: WorkspaceRequestContext,
+    input: MigrateLegacyChatTurnInput
+  ): Promise<IdempotentOperationResult<MigrateLegacyChatTurnValue>> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.sessionId, "legacy_session_id_invalid");
+    if (input.agentId) assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
+    const instruction = input.instruction.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
+    if (!instruction) throw new WorkspaceServerError("room_work_instruction_required", 400);
+    const title = instruction.slice(0, 200);
+    const objective = instruction;
+    const scheduledAt = new Date().toISOString();
+    const workId = operationScopedId("room_work", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const assignmentId = operationScopedId("room_work_assignment", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const instructionId = operationScopedId("room_work_instruction", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const reservationId = operationScopedId("room_work_reservation", `${context.workspaceId}:${input.roomId}`, context.operationId);
+    const legacyMapId = operationScopedId(
+      "legacy_session",
+      `${context.workspaceId}:${input.roomId}:${input.sessionId}`,
+      "binding"
+    );
+    const requestInput = {
+      roomId: input.roomId,
+      sessionId: input.sessionId,
+      instruction,
+      attachments,
+      agentId: input.agentId ?? null
+    };
+    const result = await this.runIdempotentResult(
+      context,
+      { action: "chat.turn.run.compatibility", input: requestInput },
+      async (sql): Promise<MigrateLegacyChatTurnValue> => {
+        await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+        await sql.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('samurai.workspace.human_work.legacy_session:' || $1 || ':' || $2 || ':' || $3, 0))",
+          [context.workspaceId, input.roomId, input.sessionId]
+        );
+        const session = (await sql.query<{ id: string; room_id: string | null }>(
+          `SELECT id, room_id FROM workspace_runtime_sessions
+           WHERE workspace_id = $1 AND id = $2 AND room_id = $3`,
+          [context.workspaceId, input.sessionId, input.roomId]
+        )).rows[0];
+        if (!session) throw new WorkspaceServerError("legacy_session_not_available", 404);
+
+        const mapping = (await sql.query<LegacySessionMapRow>(
+          `SELECT workspace_id, id, legacy_session_id, room_id, work_id, operation_id,
+                  created_by, created_at, updated_at
+           FROM workspace_human_work_legacy_sessions
+           WHERE workspace_id = $1 AND legacy_session_id = $2`,
+          [context.workspaceId, input.sessionId]
+        )).rows[0];
+        if (mapping) {
+          if (mapping.room_id !== input.roomId) {
+            throw new WorkspaceServerError("legacy_session_room_mismatch", 409);
+          }
+          const work = await this.readHumanWorkAggregate(sql, context.workspaceId, mapping.work_id, input.roomId);
+          const expectedVersion = work.instructionVersion;
+          const expectedGeneration = work.controlGeneration;
+          assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
+          assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
+          try {
+            await sql.query(
+              "SELECT samurai_append_human_work_instruction($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11, $12)",
+              [
+                context.workspaceId,
+                instructionId,
+                mapping.work_id,
+                null,
+                instruction,
+                expectedVersion,
+                "reply",
+                null,
+                null,
+                canonicalJson(attachments),
+                expectedGeneration,
+                context.operationId
+              ]
+            );
+          } catch (error) {
+            throw mapRoomWorkPostgresError(error, "room_work_reply_failed");
+          }
+          const row = (await sql.query<HumanWorkInstructionRow>(
+            `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs,
+                    source_kind, source_comment_id, source_comment_version, state, created_by, created_at
+             FROM workspace_human_work_instructions
+             WHERE workspace_id = $1 AND id = $2`,
+            [context.workspaceId, instructionId]
+          )).rows[0];
+          if (!row) throw new WorkspaceServerError("room_work_instruction_creation_failed", 500);
+          const savedInstruction = humanWorkInstructionFromRow(row);
+          await this.insertEvent(sql, context, {
+            roomId: input.roomId,
+            kind: "room.work.instruction.created",
+            recordType: "room_work_instruction",
+            recordId: savedInstruction.id,
+            payload: { work_id: mapping.work_id, version: savedInstruction.version, source_kind: "reply", legacy_session: true }
+          });
+          await this.insertAudit(sql, context, {
+            action: "chat.turn.run.compatibility",
+            roomId: input.roomId,
+            subjectKind: "room_work_instruction",
+            subjectId: savedInstruction.id,
+            beforeVersion: expectedVersion,
+            afterVersion: savedInstruction.version,
+            details: { work_id: mapping.work_id, legacy_session: true }
+          });
+          return { mode: "reply", instruction: savedInstruction };
+        }
+
+        const persistedRoom = await this.lockRoomDefaultAgent(sql, context.workspaceId, input.roomId);
+        const agentId = input.agentId ?? persistedRoom.default_agent_id;
+        if (!agentId) throw new WorkspaceServerError("workspace_room_default_agent_required", 409);
+        const agent = (await sql.query<{ version: number | string; status: WorkspaceAgent["status"]; enabled: boolean }>(
+          `SELECT version, status, enabled FROM workspace_agents
+           WHERE workspace_id = $1 AND id = $2`,
+          [context.workspaceId, agentId]
+        )).rows[0];
+        if (!agent || agent.status !== "active" || agent.enabled !== true) {
+          throw new WorkspaceServerError("workspace_default_agent_not_available", 409);
+        }
+        if (!input.agentId && (persistedRoom.default_agent_id !== agentId
+          || persistedRoom.default_agent_version === null
+          || Number(persistedRoom.default_agent_version) !== Number(agent.version))) {
+          throw new WorkspaceServerError("workspace_room_default_agent_changed", 409);
+        }
+        try {
+          await sql.query(
+            "SELECT samurai_create_human_work($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::JSONB, $13, $14::JSONB, $15, $16)",
+            [
+              context.workspaceId,
+              workId,
+              assignmentId,
+              instructionId,
+              reservationId,
+              input.roomId,
+              context.accountId,
+              agentId,
+              Number(agent.version),
+              title,
+              objective,
+              "[]",
+              instruction,
+              canonicalJson(attachments),
+              scheduledAt,
+              context.operationId
+            ]
+          );
+          await sql.query(
+            "SELECT samurai_bind_human_work_legacy_session($1, $2, $3, $4, $5, $6)",
+            [context.workspaceId, legacyMapId, input.sessionId, input.roomId, workId, context.operationId]
+          );
+        } catch (error) {
+          throw mapRoomWorkPostgresError(error, "room_work_creation_failed");
+        }
+        const work = await this.readHumanWorkAggregate(sql, context.workspaceId, workId, input.roomId);
+        const launchReservation = await this.readHumanWorkReservation(sql, context.workspaceId, reservationId);
+        if (!launchReservation) throw new WorkspaceServerError("room_work_launch_reservation_missing", 500);
+        await this.insertAudit(sql, context, {
+          action: "chat.turn.run.compatibility",
+          roomId: input.roomId,
+          subjectKind: "room_work",
+          subjectId: workId,
+          beforeVersion: 0,
+          afterVersion: work.instructionVersion,
+          details: { assignment_id: assignmentId, agent_id: agentId, reservation_id: reservationId, legacy_session: true }
+        });
+        return { mode: "create", work, launchReservation };
+      }
+    );
+    return result;
+  }
+
+  /** Resolve the internal legacy bridge without returning a public Session DTO. */
+  async resolveRoomWorkLegacySession(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { roomId: string; sessionId: string }
+  ): Promise<WorkspaceHumanWorkLegacySession | undefined> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.sessionId, "legacy_session_id_invalid");
+    return this.database.withContext(context, async (sql) => {
+      const row = (await sql.query<LegacySessionMapRow>(
+        `SELECT workspace_id, id, legacy_session_id, room_id, work_id, operation_id,
+                created_by, created_at, updated_at
+         FROM workspace_human_work_legacy_sessions
+         WHERE workspace_id = $1 AND legacy_session_id = $2 AND room_id = $3`,
+        [context.workspaceId, input.sessionId, input.roomId]
+      )).rows[0];
+      return row ? legacySessionFromRow(row) : undefined;
+    });
+  }
+
+  async listRoomWorks(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: ListRoomWorksInput
+  ): Promise<WorkspaceHumanWork[]> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    const limit = boundedLimit(input.limit);
+    if (input.status && !workspaceHumanWorkStatusSet.has(input.status)) throw new WorkspaceServerError("room_work_status_invalid", 400);
+    return this.database.withContext(context, async (sql) => {
+      const rows = await sql.query<HumanWorkRow>(
+        `SELECT workspace_id, id, room_id, requester_account_id, default_agent_id,
+                default_agent_version, title, objective, completion_criteria, status,
+                stop_state, instruction_version, control_generation, operation_id,
+                created_at, updated_at
+         FROM workspace_human_works
+         WHERE workspace_id = $1 AND room_id = $2
+           AND ($3::TEXT IS NULL OR status = $3)
+         ORDER BY updated_at DESC, id DESC
+         LIMIT $4`,
+        [context.workspaceId, input.roomId, input.status ?? null, limit]
+      );
+      const values: WorkspaceHumanWork[] = [];
+      for (const row of rows.rows) {
+        values.push(await this.readHumanWorkAggregate(sql, context.workspaceId, row.id, row.room_id, row) as WorkspaceHumanWork);
+      }
+      return values;
+    });
+  }
+
+  async viewRoomWork(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: { roomId: string; workId: string }
+  ): Promise<WorkspaceHumanWorkView> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    return this.database.withContext(context, async (sql) => {
+      const value = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId, undefined, true);
+      return value as WorkspaceHumanWorkView;
+    });
+  }
+
+  /** Append an explicit Agent instruction to an existing Room work. */
+  async replyToRoomWork(context: WorkspaceRequestContext, input: ReplyToRoomWorkInput): Promise<WorkspaceHumanWorkInstruction> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    if (input.assigneeId) assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
+    const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
+    const body = input.instruction?.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
+    if (!body) throw new WorkspaceServerError("room_work_instruction_required", 400);
+    const instructionId = operationScopedId("room_work_instruction", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const requestInput = {
+      roomId: input.roomId,
+      workId: input.workId,
+      assigneeId: input.assigneeId ?? null,
+      instruction: input.instruction ?? null,
+      attachments,
+      expectedVersion: input.expectedVersion ?? null,
+      expectedGeneration: input.expectedGeneration ?? null
+    };
+    const result = await this.runIdempotentResult(context, { action: "room.work.reply", input: requestInput }, async (sql) => {
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
+      await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      const expectedVersion = input.expectedVersion ?? work.instructionVersion;
+      const expectedGeneration = input.expectedGeneration ?? work.controlGeneration;
+      assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
+      assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
+      try {
+        await sql.query(
+          "SELECT samurai_append_human_work_instruction($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11, $12)",
+          [context.workspaceId, instructionId, input.workId, input.assigneeId ?? null, body, expectedVersion, "reply", null, null, canonicalJson(attachments), expectedGeneration, context.operationId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_reply_failed");
+      }
+      const row = (await sql.query<HumanWorkInstructionRow>(
+        `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs,
+                source_kind, source_comment_id, source_comment_version, state, created_by, created_at
+         FROM workspace_human_work_instructions WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, instructionId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_instruction_creation_failed", 500);
+      const instruction = humanWorkInstructionFromRow(row);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.instruction.created",
+        recordType: "room_work_instruction",
+        recordId: instruction.id,
+        payload: { work_id: input.workId, version: instruction.version, source_kind: "reply" }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.reply",
+        roomId: input.roomId,
+        subjectKind: "room_work_instruction",
+        subjectId: instruction.id,
+        beforeVersion: expectedVersion,
+        afterVersion: instruction.version,
+        details: { work_id: input.workId, assignment_id: input.assigneeId ?? null }
+      });
+      return instruction;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkInstruction;
+  }
+
+  /** Store human discussion separately from Agent instructions. */
+  async createRoomWorkComment(context: WorkspaceRequestContext, input: CreateRoomWorkCommentInput): Promise<WorkspaceHumanWorkComment> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
+    const body = input.body?.trim() ?? "";
+    if (!body && attachments.length === 0) throw new WorkspaceServerError("room_work_comment_requires_body_or_attachment", 400);
+    const commentId = operationScopedId("room_work_comment", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.comment.create",
+      input: { roomId: input.roomId, workId: input.workId, body, attachments, expectedVersion: input.expectedVersion ?? null }
+    }, async (sql) => {
+      await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
+      await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      try {
+        await sql.query(
+          "SELECT samurai_add_human_work_comment($1, $2, $3, $4, $5, $6::JSONB, $7, $8)",
+          [context.workspaceId, commentId, input.workId, input.roomId, body, canonicalJson(attachments), input.expectedVersion ?? null, context.operationId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_comment_creation_failed");
+      }
+      const row = (await sql.query<HumanWorkCommentRow>(
+        `SELECT workspace_id, id, work_id, room_id, author_account_id, version, body,
+                attachment_refs, created_at
+         FROM workspace_human_work_comments WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, commentId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_comment_creation_failed", 500);
+      const comment = humanWorkCommentFromRow(row, 0, []);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.comment.created",
+        recordType: "room_work_comment",
+        recordId: comment.id,
+        payload: { work_id: input.workId, version: comment.version }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.comment.create",
+        roomId: input.roomId,
+        subjectKind: "room_work_comment",
+        subjectId: comment.id,
+        beforeVersion: input.expectedVersion ?? 0,
+        afterVersion: comment.version,
+        details: { work_id: input.workId, attachment_count: attachments.length }
+      });
+      return comment;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkComment;
+  }
+
+  /** Persist one human like/unlike row; it never becomes an instruction. */
+  async setRoomWorkCommentReaction(context: WorkspaceRequestContext, input: SetRoomWorkCommentReactionInput): Promise<WorkspaceHumanWorkReaction> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    assertOpaqueId(input.commentId, "room_work_comment_id_invalid");
+    if (input.reaction !== "like") throw new WorkspaceServerError("room_work_reaction_invalid", 400);
+    const reactionId = operationScopedId("room_work_reaction", `${context.workspaceId}:${input.commentId}:${context.accountId}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.comment.reaction.set",
+      input: { roomId: input.roomId, workId: input.workId, commentId: input.commentId, reaction: input.reaction, enabled: input.enabled, expectedVersion: input.expectedVersion ?? null }
+    }, async (sql) => {
+      try {
+        await sql.query(
+          "SELECT samurai_set_human_work_comment_reaction($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+          [context.workspaceId, reactionId, input.workId, input.roomId, input.commentId, input.reaction, input.enabled, input.expectedVersion ?? null, context.operationId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_reaction_update_failed");
+      }
+      const row = (await sql.query<HumanWorkReactionRow>(
+        `SELECT workspace_id, id, work_id, room_id, comment_id, actor_account_id, reaction,
+                enabled, version, created_at, updated_at
+         FROM workspace_human_work_comment_reactions WHERE workspace_id = $1
+           AND comment_id = $2 AND actor_account_id = $3 AND reaction = $4`,
+        [context.workspaceId, input.commentId, context.accountId, input.reaction]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_reaction_update_failed", 500);
+      const reaction = humanWorkReactionFromRow(row);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.comment.reaction.changed",
+        recordType: "room_work_reaction",
+        recordId: reaction.id,
+        payload: { work_id: input.workId, comment_id: input.commentId, reaction: reaction.reaction, enabled: reaction.enabled, version: reaction.version }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.comment.reaction.set",
+        roomId: input.roomId,
+        subjectKind: "room_work_reaction",
+        subjectId: reaction.id,
+        beforeVersion: input.expectedVersion ?? 0,
+        afterVersion: reaction.version,
+        details: { work_id: input.workId, comment_id: input.commentId, reaction: reaction.reaction, enabled: reaction.enabled }
+      });
+      return reaction;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkReaction;
+  }
+
+  /** Apply a server-loaded comment snapshot as an explicit instruction. */
+  async applyRoomWorkComment(context: WorkspaceRequestContext, input: ApplyRoomWorkCommentInput): Promise<WorkspaceHumanWorkInstruction> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    assertOpaqueId(input.commentId, "room_work_comment_id_invalid");
+    if (input.assigneeId) assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
+    assertExpectedVersion(input.commentVersion, "room_work_comment_version_invalid", 1);
+    const instructionId = operationScopedId("room_work_instruction", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.comment.apply",
+      input: { roomId: input.roomId, workId: input.workId, commentId: input.commentId, commentVersion: input.commentVersion, assigneeId: input.assigneeId ?? null, expectedVersion: input.expectedVersion ?? null, expectedGeneration: input.expectedGeneration ?? null }
+    }, async (sql) => {
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
+      const expectedVersion = input.expectedVersion ?? work.instructionVersion;
+      const expectedGeneration = input.expectedGeneration ?? work.controlGeneration;
+      assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
+      assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
+      const comment = (await sql.query<HumanWorkCommentRow>(
+        `SELECT workspace_id, id, work_id, room_id, author_account_id, version, body,
+                samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+                created_at
+         FROM workspace_human_work_comments
+         WHERE workspace_id = $1 AND id = $2 AND work_id = $3 AND room_id = $4 AND version = $5`,
+        [context.workspaceId, input.commentId, input.workId, input.roomId, input.commentVersion]
+      )).rows[0];
+      if (!comment) throw new WorkspaceServerError("human_work_comment_snapshot_invalid", 409);
+      if (hasLegacyUnresolvedAttachmentMarker(comment.attachment_refs)) {
+        throw new WorkspaceServerError("room_work_attachment_reference_unavailable", 409);
+      }
+      const attachments = normalizeRoomWorkAttachmentRefsForRead(comment.attachment_refs);
+      const body = comment.body.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
+      if (!body) throw new WorkspaceServerError("human_work_comment_snapshot_invalid", 409);
+      await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      try {
+        await sql.query(
+          "SELECT samurai_append_human_work_instruction($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11, $12)",
+          [context.workspaceId, instructionId, input.workId, input.assigneeId ?? null, body, expectedVersion, "comment_reflection", input.commentId, input.commentVersion, canonicalJson(attachments), expectedGeneration, context.operationId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_comment_apply_failed");
+      }
+      const row = (await sql.query<HumanWorkInstructionRow>(
+        `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs,
+                source_kind, source_comment_id, source_comment_version, state, created_by, created_at
+         FROM workspace_human_work_instructions WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, instructionId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_instruction_creation_failed", 500);
+      const instruction = humanWorkInstructionFromRow(row);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.comment.applied",
+        recordType: "room_work_instruction",
+        recordId: instruction.id,
+        payload: { work_id: input.workId, comment_id: input.commentId, comment_version: input.commentVersion, version: instruction.version }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.comment.apply",
+        roomId: input.roomId,
+        subjectKind: "room_work_instruction",
+        subjectId: instruction.id,
+        beforeVersion: expectedVersion,
+        afterVersion: instruction.version,
+        details: { work_id: input.workId, comment_id: input.commentId, comment_version: input.commentVersion }
+      });
+      return instruction;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkInstruction;
+  }
+
+  async stopRoomWork(context: WorkspaceRequestContext, input: StopRoomWorkInput): Promise<WorkspaceHumanWorkControl> {
+    return this.changeRoomWorkControl(context, input, "stop_request");
+  }
+
+  async stopRoomWorkAssignee(context: WorkspaceRequestContext, input: StopRoomWorkAssigneeInput): Promise<WorkspaceHumanWorkControl> {
+    assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
+    return this.changeRoomWorkControl(context, input, "assignment_stop", input.assigneeId);
+  }
+
+  /** Explicit terminal confirmation is separate from the initial stop request. */
+  async confirmRoomWorkStop(context: WorkspaceRequestContext, input: StopRoomWorkInput): Promise<WorkspaceHumanWorkControl> {
+    return this.changeRoomWorkControl(context, input, "stop_confirm");
+  }
+
+  /** Record that a stop could not be confirmed because an external run's outcome is unknown. */
+  async markRoomWorkStopUnconfirmed(context: WorkspaceRequestContext, input: StopRoomWorkInput): Promise<WorkspaceHumanWorkControl> {
+    return this.changeRoomWorkControl(context, input, "stop_unconfirmed");
+  }
+
+  private async changeRoomWorkControl(
+    context: WorkspaceRequestContext,
+    input: StopRoomWorkInput,
+    action: WorkspaceHumanWorkControlAction,
+    assignmentId?: string
+  ): Promise<WorkspaceHumanWorkControl> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    if (input.reason !== undefined && (!input.reason.trim() || input.reason.trim().length > 2_000)) {
+      throw new WorkspaceServerError("room_work_control_reason_invalid", 400);
+    }
+    const controlId = operationScopedId("room_work_control", `${context.workspaceId}:${input.workId}:${action}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: `room.work.${action}`,
+      input: { roomId: input.roomId, workId: input.workId, assignmentId: assignmentId ?? null, reason: input.reason ?? null, expectedVersion: input.expectedVersion ?? null, expectedGeneration: input.expectedGeneration ?? null }
+    }, async (sql) => {
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
+      const expectedVersion = input.expectedVersion ?? work.instructionVersion;
+      const expectedGeneration = input.expectedGeneration ?? work.controlGeneration;
+      assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
+      assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
+      if (action === "stop_confirm" && work.stopState === "none") {
+        throw new WorkspaceServerError("room_work_stop_not_requested", 409);
+      }
+      try {
+        await sql.query(
+          "SELECT samurai_control_human_work($1, $2, $3, $4, $5, $6, $7, $8::JSONB)",
+          [context.workspaceId, controlId, input.workId, assignmentId ?? null, action, expectedGeneration, context.operationId, canonicalJson({ reason: input.reason?.trim() ?? null, expected_version: expectedVersion })]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_control_failed");
+      }
+      const row = (await sql.query<HumanWorkControlRow>(
+        `SELECT workspace_id, id, work_id, assignment_id, room_id, action, state,
+                actor_account_id, generation, operation_id, details, created_at, updated_at
+         FROM workspace_human_work_controls WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, controlId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_control_failed", 500);
+      const control = humanWorkControlFromRow(row);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.control.changed",
+        recordType: "room_work_control",
+        recordId: control.id,
+        payload: { work_id: input.workId, action: control.action, state: control.state, generation: control.generation }
+      });
+      await this.insertAudit(sql, context, {
+        action: `room.work.${action}`,
+        roomId: input.roomId,
+        subjectKind: "room_work_control",
+        subjectId: control.id,
+        beforeVersion: expectedVersion,
+        afterVersion: control.generation,
+        details: { work_id: input.workId, assignment_id: assignmentId ?? null, reason: input.reason?.trim() ?? null }
+      });
+      return control;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkControl;
+  }
+
+  async reassignRoomWorkAssignee(context: WorkspaceRequestContext, input: ReassignRoomWorkAssigneeInput): Promise<WorkspaceHumanWorkAssignment> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
+    assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const newAssignmentId = operationScopedId("room_work_assignment", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const reservationId = operationScopedId("room_work_reservation", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.assignee.reassign",
+      input: { roomId: input.roomId, workId: input.workId, assigneeId: input.assigneeId, agentId: input.agentId, instruction: input.instruction ?? null, expectedVersion: input.expectedVersion ?? null, expectedGeneration: input.expectedGeneration ?? null }
+    }, async (sql) => {
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
+      const expectedVersion = input.expectedVersion ?? work.instructionVersion;
+      const expectedGeneration = input.expectedGeneration ?? work.controlGeneration;
+      assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
+      assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
+      const agent = (await sql.query<{ version: number | string }>(
+        `SELECT version FROM workspace_agents WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, input.agentId]
+      )).rows[0];
+      if (!agent) throw new WorkspaceServerError("workspace_agent_not_active", 409);
+      const latest = work.assignments.find((assignment) => assignment.id === input.assigneeId);
+      const latestInstruction = (await sql.query<{ body: string; attachment_refs: unknown }>(
+        `SELECT body, attachment_refs FROM workspace_human_work_instructions
+         WHERE workspace_id = $1 AND work_id = $2 ORDER BY version DESC LIMIT 1`,
+        [context.workspaceId, input.workId]
+      )).rows[0];
+      const instruction = input.instruction?.trim() || latestInstruction?.body?.trim() || work.objective;
+      if (!instruction) throw new WorkspaceServerError("room_work_instruction_required", 400);
+      try {
+        await sql.query(
+          "SELECT samurai_reassign_human_work($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+          [context.workspaceId, input.workId, input.assigneeId, newAssignmentId, input.agentId, Number(agent.version), instruction, reservationId, expectedGeneration, context.operationId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_reassign_failed");
+      }
+      const row = (await sql.query<HumanWorkAssignmentRow>(
+        `SELECT workspace_id, id, work_id, room_id, parent_assignment_id, dependency_assignment_ids, agent_id,
+                agent_version, instruction_version, attempt, priority, status, current_run_id,
+                result, lease_owner, lease_expires_at, created_at, updated_at, started_at, completed_at
+         FROM workspace_human_work_assignments WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, newAssignmentId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_reassign_failed", 500);
+      const assignment = humanWorkAssignmentFromRow(row, expectedGeneration);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.assignee.reassigned",
+        recordType: "room_work_assignment",
+        recordId: assignment.id,
+        payload: { work_id: input.workId, previous_assignment_id: input.assigneeId, agent_id: assignment.agentId, generation: expectedGeneration }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.assignee.reassign",
+        roomId: input.roomId,
+        subjectKind: "room_work_assignment",
+        subjectId: assignment.id,
+        beforeVersion: expectedVersion,
+        afterVersion: assignment.instructionVersion,
+        details: { work_id: input.workId, previous_assignment_id: input.assigneeId, agent_id: input.agentId, previous_agent_id: latest?.agentId ?? null }
+      });
+      return assignment;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkAssignment;
+  }
+
+  /**
+   * Atomically append a bounded child assignment, its delegated instruction,
+   * and the launch reservation.  The SQL function owns all authority checks;
+   * this adapter only supplies IDs derived from the trusted operation context
+   * and returns the resulting assignment projection.
+   */
+  async delegateRoomWorkAssignee(context: WorkspaceRequestContext, input: DelegateRoomWorkAssigneeInput): Promise<WorkspaceHumanWorkAssignment> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.workId, "room_work_id_invalid");
+    assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
+    assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const instruction = input.instruction.trim();
+    if (!instruction) throw new WorkspaceServerError("room_work_instruction_required", 400);
+    const dependencies = [...new Set((input.dependencyAssigneeIds ?? []).map((id) => id.trim()).filter(Boolean))];
+    for (const id of dependencies) assertOpaqueId(id, "room_work_dependency_assignment_id_invalid");
+    const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
+    const childAssignmentId = operationScopedId("room_work_assignment", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const instructionId = operationScopedId("room_work_instruction", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const reservationId = operationScopedId("room_work_reservation", `${context.workspaceId}:${input.workId}`, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.assignee.delegate",
+      input: {
+        roomId: input.roomId,
+        workId: input.workId,
+        assigneeId: input.assigneeId,
+        agentId: input.agentId,
+        instruction,
+        dependencyAssigneeIds: dependencies,
+        attachments,
+        expectedVersion: input.expectedVersion ?? null,
+        expectedGeneration: input.expectedGeneration ?? null
+      }
+    }, async (sql) => {
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
+      await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      const expectedGeneration = input.expectedGeneration ?? work.controlGeneration;
+      const expectedVersion = input.expectedVersion ?? work.instructionVersion;
+      assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
+      assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
+      if (input.expectedGeneration !== undefined && input.expectedGeneration !== work.controlGeneration) {
+        throw new WorkspaceServerError("room_work_generation_conflict", 409);
+      }
+      try {
+        await sql.query(
+          "SELECT samurai_delegate_human_work($1, $2, $3, $4, $5, $6, $7, $8, $9::JSONB, $10::JSONB, $11, $12, $13)",
+          [
+            context.workspaceId,
+            input.workId,
+            input.assigneeId,
+            childAssignmentId,
+            instructionId,
+            reservationId,
+            input.agentId,
+            instruction,
+            canonicalJson(attachments),
+            canonicalJson(dependencies),
+            expectedGeneration,
+            context.operationId,
+            null
+          ]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_delegate_failed");
+      }
+      const row = (await sql.query<HumanWorkAssignmentRow>(
+        `SELECT workspace_id, id, work_id, room_id, parent_assignment_id, dependency_assignment_ids, agent_id,
+                agent_version, instruction_version, attempt, priority, status, current_run_id,
+                result, lease_owner, lease_expires_at, created_at, updated_at, started_at, completed_at
+         FROM workspace_human_work_assignments WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, childAssignmentId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_delegate_failed", 500);
+      const assignment = humanWorkAssignmentFromRow(row, work.controlGeneration);
+      await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "room.work.assignee.delegated",
+        recordType: "room_work_assignment",
+        recordId: assignment.id,
+        payload: {
+          work_id: input.workId,
+          parent_assignment_id: input.assigneeId,
+          assignee_id: assignment.id,
+          agent_id: assignment.agentId,
+          dependency_assignment_ids: dependencies,
+          status: assignment.status,
+          generation: assignment.generation
+        }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.assignee.delegate",
+        roomId: input.roomId,
+        subjectKind: "room_work_assignment",
+        subjectId: assignment.id,
+        beforeVersion: expectedVersion,
+        afterVersion: assignment.instructionVersion,
+        details: {
+          work_id: input.workId,
+          parent_assignment_id: input.assigneeId,
+          agent_id: input.agentId,
+          dependency_assignment_ids: dependencies,
+          reservation_id: reservationId
+        }
+      });
+      return assignment;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkAssignment;
+  }
+
+  /**
+   * Runtime-only delegation entrypoint.  The caller must provide the
+   * server-admitted parent Run; Work/Room/parent Assignment/requester and
+   * the parent Agent/Backend/Session binding are reconstructed and checked by
+   * samurai_delegate_human_work_from_runtime.  No model or public API field
+   * can select those associations.
+   */
+  async delegateRoomWorkAssigneeFromRuntime(
+    context: WorkspaceRequestContext,
+    input: DelegateRoomWorkAssigneeFromRuntimeInput
+  ): Promise<WorkspaceHumanWorkAssignment> {
+    assertOpaqueId(input.parentRunId, "backend_run_id_invalid");
+    assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const instruction = input.instruction.trim();
+    if (!instruction) throw new WorkspaceServerError("room_work_instruction_required", 400);
+    const dependencies = [...new Set((input.dependencyAssigneeIds ?? []).map((id) => id.trim()).filter(Boolean))];
+    for (const id of dependencies) assertOpaqueId(id, "room_work_dependency_assignment_id_invalid");
+    assertExpectedVersion(input.expectedGeneration, "room_work_generation_invalid", 0);
+    const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
+    const childAssignmentId = operationScopedId("room_work_assignment", context.workspaceId, context.operationId);
+    const instructionId = operationScopedId("room_work_instruction", context.workspaceId, context.operationId);
+    const reservationId = operationScopedId("room_work_reservation", context.workspaceId, context.operationId);
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.assignee.delegate",
+      input: {
+        trustedParentRunId: input.parentRunId,
+        agentId: input.agentId,
+        instruction,
+        dependencyAssigneeIds: dependencies,
+        attachments,
+        expectedGeneration: input.expectedGeneration
+      }
+    }, async (sql) => {
+      try {
+        await sql.query(
+          "SELECT samurai_delegate_human_work_from_runtime($1, $2, $3, $4, $5, $6, $7, $8::JSONB, $9::JSONB, $10, $11)",
+          [
+            context.workspaceId,
+            input.parentRunId,
+            childAssignmentId,
+            instructionId,
+            reservationId,
+            input.agentId,
+            instruction,
+            canonicalJson(attachments),
+            canonicalJson(dependencies),
+            input.expectedGeneration,
+            context.operationId
+          ]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_runtime_delegate_failed");
+      }
+      const row = (await sql.query<HumanWorkAssignmentRow>(
+        `SELECT workspace_id, id, work_id, room_id, parent_assignment_id, dependency_assignment_ids, agent_id,
+                agent_version, instruction_version, attempt, priority, status, current_run_id,
+                result, lease_owner, lease_expires_at, created_at, updated_at, started_at, completed_at
+         FROM workspace_human_work_assignments WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, childAssignmentId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_work_runtime_delegate_failed", 500);
+      const assignment = humanWorkAssignmentFromRow(row, input.expectedGeneration);
+      await this.insertEvent(sql, context, {
+        roomId: row.room_id,
+        kind: "room.work.assignee.delegated",
+        recordType: "room_work_assignment",
+        recordId: assignment.id,
+        payload: {
+          work_id: assignment.workId,
+          parent_assignment_id: assignment.parentAssignmentId ?? null,
+          assignee_id: assignment.id,
+          agent_id: assignment.agentId,
+          dependency_assignment_ids: dependencies,
+          status: assignment.status,
+          generation: assignment.generation,
+          source: "runtime_trusted_binding"
+        }
+      });
+      await this.insertAudit(sql, context, {
+        action: "room.work.assignee.delegate",
+        roomId: row.room_id,
+        subjectKind: "room_work_assignment",
+        subjectId: assignment.id,
+        afterVersion: assignment.instructionVersion,
+        details: {
+          work_id: assignment.workId,
+          parent_assignment_id: assignment.parentAssignmentId ?? null,
+          agent_id: assignment.agentId,
+          dependency_assignment_ids: dependencies,
+          reservation_id: reservationId,
+          parent_run_id: input.parentRunId
+        }
+      });
+      return assignment;
+    });
+    return { ...result.value, replayed: result.replayed } as WorkspaceHumanWorkAssignment;
+  }
+
+  /**
+   * Lease one accepted Room-work stop control for the process-owned worker.
+   * This does not contact a Backend: it only obtains the durable targets that
+   * were associated with the control while the Work row was locked.  Calling
+   * Runtime cancellation inside this transaction would make an external
+   * process part of the database commit and is deliberately avoided.
+   */
+  async claimRoomWorkStopDispatch(
+    context: WorkspaceRequestContext,
+    input: { workerId: string; leaseMs: number; now?: string; limit?: number }
+  ): Promise<Record<string, unknown> | undefined> {
+    assertOpaqueId(input.workerId, "room_work_worker_id_invalid");
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1_000 || input.leaseMs > 86_400_000) {
+      throw new WorkspaceServerError("room_work_stop_lease_invalid", 400);
+    }
+    const now = parseDateInput(input.now, "room_work_stop_now_invalid") ?? new Date();
+    const limit = boundedLimit(input.limit ?? 1);
+    const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
+    return this.database.withContext(context, async (sql) => {
+      const candidates = await sql.query<{ id: string }>(
+        `SELECT id
+         FROM workspace_human_work_controls
+         WHERE workspace_id = $1
+           AND action IN ('stop_request', 'assignment_stop')
+           AND (
+             action = 'assignment_stop'
+             OR EXISTS (
+               SELECT 1
+               FROM workspace_human_works AS work
+               WHERE work.workspace_id = workspace_human_work_controls.workspace_id
+                 AND work.id = workspace_human_work_controls.work_id
+                 AND work.control_generation = workspace_human_work_controls.generation
+             )
+           )
+           AND state IN ('accepted', 'pending', 'unconfirmed')
+           AND (
+             state <> 'pending'
+             OR lease_expires_at IS NULL
+             OR lease_expires_at <= $2::TIMESTAMPTZ
+             OR lease_owner = $3
+           )
+         ORDER BY updated_at, id
+         LIMIT $4`,
+        [context.workspaceId, now.toISOString(), input.workerId, limit]
+      );
+      for (const candidate of candidates.rows) {
+        const operationId = operationScopedId(
+          "room_work_stop_dispatch",
+          `${context.workspaceId}:${candidate.id}:${input.workerId}`,
+          context.operationId
+        );
+        try {
+          const result = await sql.query<{ dispatch: unknown }>(
+            "SELECT samurai_claim_human_work_stop_dispatch($1, $2, $3, $4::TIMESTAMPTZ, $5) AS dispatch",
+            [context.workspaceId, candidate.id, input.workerId, leaseExpiresAt.toISOString(), operationId]
+          );
+          const dispatch = jsonObjectOrEmpty(result.rows[0]?.dispatch);
+          if (typeof dispatch.control_id === "string" && dispatch.control_id) return dispatch;
+        } catch (error) {
+          const mapped = mapRoomWorkPostgresError(error, "room_work_stop_dispatch_claim_failed");
+          if (mapped instanceof WorkspaceServerError && new Set([
+            "room_work_stop_lease_conflict",
+            "room_work_stop_not_dispatchable",
+            "room_work_stop_control_not_found",
+            "room_work_stop_generation_conflict"
+          ]).has(mapped.code)) continue;
+          throw mapped;
+        }
+      }
+      return undefined;
+    });
+  }
+
+  /**
+   * Persist Runtime terminal evidence against a leased stop control.  SQL
+   * validates the Run-to-assignment binding before it changes a Room-work
+   * state, so a caller cannot turn an arbitrary external Run into stop proof.
+   */
+  async reconcileRoomWorkStopDispatch(
+    context: WorkspaceRequestContext,
+    input: {
+      controlId: string;
+      workerId: string;
+      assignmentId: string;
+      runId?: string;
+      outcome: "completed" | "failed" | "cancelled" | "outcome_unknown";
+    }
+  ): Promise<Record<string, unknown>> {
+    assertOpaqueId(input.controlId, "room_work_control_id_invalid");
+    assertOpaqueId(input.workerId, "room_work_worker_id_invalid");
+    assertOpaqueId(input.assignmentId, "room_work_assignment_id_invalid");
+    if (input.runId !== undefined) assertOpaqueId(input.runId, "backend_run_id_invalid");
+    const operationId = operationScopedId(
+      "room_work_stop_reconcile",
+      `${context.workspaceId}:${input.controlId}:${input.assignmentId}`,
+      context.operationId
+    );
+    return this.database.withContext(context, async (sql) => {
+      try {
+        const result = await sql.query<{ reconciliation: unknown }>(
+          "SELECT samurai_reconcile_human_work_stop_dispatch($1, $2, $3, $4, $5, $6, $7) AS reconciliation",
+          [context.workspaceId, input.controlId, input.workerId, input.assignmentId, input.runId ?? null, input.outcome, operationId]
+        );
+        const reconciliation = jsonObjectOrEmpty(result.rows[0]?.reconciliation);
+        if (!reconciliation.control_id) throw new WorkspaceServerError("room_work_stop_dispatch_reconcile_failed", 500);
+        return reconciliation;
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_stop_dispatch_reconcile_failed");
+      }
+    });
+  }
+
+  /** Claim one due launch reservation atomically; no external execution occurs in this transaction. */
+  async claimRoomWorkReservation(
+    context: WorkspaceRequestContext,
+    input: ClaimRoomWorkReservationInput
+  ): Promise<Record<string, unknown> | undefined> {
+    assertOpaqueId(input.workerId, "room_work_worker_id_invalid");
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1_000 || input.leaseMs > 86_400_000) {
+      throw new WorkspaceServerError("room_work_lease_invalid", 400);
+    }
+    const now = parseDateInput(input.now, "room_work_now_invalid") ?? new Date();
+    boundedLimit(input.limit ?? 1);
+    return this.database.withContext(context, async (sql) => {
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
+      const claimOperationId = operationScopedId(
+        "room_work_claim",
+        context.workspaceId,
+        `${input.reservationId ?? "next"}:${input.workerId}:${now.toISOString()}`
+      );
+      let claim: Record<string, unknown>;
+      let claimPhase: "recovery" | "claim" = "recovery";
+      try {
+        // A worker can disappear after the claim transaction commits but
+        // before Runtime admission. Reconcile one expired claimed token
+        // under the same transaction before asking the normal claim function
+        // for a new reservation. The SQL function owns the lock order and
+        // returns either a fresh-claim marker or a recovery marker; a stop or
+        // an already running Run is never treated as a new launch.
+        const recoveryResult = await sql.query<{ recovery: unknown }>(
+          "SELECT samurai_recover_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ) AS recovery",
+          [context.workspaceId, input.reservationId ?? null, input.workerId, leaseExpiresAt.toISOString()]
+        );
+        const recovery = jsonObjectOrEmpty(recoveryResult.rows[0]?.recovery);
+        const recoveryKind = typeof recovery.kind === "string" ? recovery.kind : undefined;
+        if (recoveryKind === "skip") {
+          // Stop/reassignment won the Work lock. Leave a linked Run for the
+          // dedicated stop dispatcher; the launch lane must not reconcile it
+          // as a normal work completion.
+          return undefined;
+        } else if (recoveryKind === "recovery") {
+          claim = recovery;
+        } else if (recoveryKind === "requeued") {
+          const recoveredReservationId = typeof recovery.reservation_id === "string"
+            ? recovery.reservation_id
+            : undefined;
+          if (!recoveredReservationId) return undefined;
+          claimPhase = "claim";
+          const claimResult = await sql.query<{ claim: unknown }>(
+            "SELECT samurai_claim_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ, $5) AS claim",
+            [context.workspaceId, recoveredReservationId, input.workerId, leaseExpiresAt.toISOString(), claimOperationId]
+          );
+          claim = jsonObjectOrEmpty(claimResult.rows[0]?.claim);
+        } else if (recoveryKind === "cancelled") {
+          return undefined;
+        } else {
+          claimPhase = "claim";
+          const claimResult = await sql.query<{ claim: unknown }>(
+            "SELECT samurai_claim_human_work_launch($1, $2, $3, $4::TIMESTAMPTZ, $5) AS claim",
+            [context.workspaceId, input.reservationId ?? null, input.workerId, leaseExpiresAt.toISOString(), claimOperationId]
+          );
+          claim = jsonObjectOrEmpty(claimResult.rows[0]?.claim);
+        }
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, claimPhase === "recovery"
+          ? "room_work_launch_recovery_failed"
+          : "room_work_launch_claim_failed");
+      }
+      const reservationId = typeof claim.reservation_id === "string" ? claim.reservation_id : undefined;
+      if (!reservationId) return undefined;
+      const claimed = (await sql.query<HumanWorkExecutionRow>(
+        `SELECT reservation.workspace_id, reservation.id AS reservation_id, reservation.work_id,
+                reservation.assignment_id, reservation.room_id, reservation.generation,
+                reservation.scheduled_at, work.control_generation, work.instruction_version,
+                assignment.agent_id, assignment.agent_version AS agent_configuration_version,
+                assignment.current_run_id,
+                assignment.origin_kind,
+                CASE WHEN parent_assignment.id IS NOT NULL
+                  THEN samurai_human_work_assignment_is_superseded(parent_assignment.workspace_id, parent_assignment.id)
+                  ELSE FALSE
+                END AS parent_assignment_superseded,
+                CASE WHEN parent_session.id IS NOT NULL THEN parent_assignment.id ELSE NULL END AS parent_assignment_id,
+                CASE WHEN parent_session.id IS NOT NULL THEN parent_assignment.parent_assignment_id ELSE NULL END AS parent_assignment_parent_id,
+                CASE WHEN parent_session.id IS NOT NULL THEN parent_run.backend_id ELSE NULL END AS parent_backend_id,
+                CASE WHEN parent_session.id IS NOT NULL THEN parent_run.agent_id ELSE NULL END AS parent_agent_id,
+                CASE WHEN parent_session.id IS NOT NULL THEN parent_run.backend_session_id ELSE NULL END AS parent_backend_session_id,
+                CASE WHEN parent_session.id IS NOT NULL THEN parent_run.metadata -> 'runtime_binding' ELSE NULL::JSONB END AS parent_runtime_binding,
+                parent_session.id AS session_id,
+                instruction.body AS instruction,
+                samurai_project_human_work_attachment_refs(
+                  reservation.workspace_id, reservation.room_id, instruction.attachment_refs
+                ) AS attachments,
+                samurai_human_work_attachment_refs_have_unresolved(
+                  reservation.workspace_id, reservation.room_id, instruction.attachment_refs
+                ) AS attachments_have_unresolved
+         FROM workspace_human_work_launch_reservations AS reservation
+         JOIN workspace_human_works AS work ON work.workspace_id = reservation.workspace_id AND work.id = reservation.work_id
+         JOIN workspace_human_work_assignments AS assignment ON assignment.workspace_id = reservation.workspace_id AND assignment.id = reservation.assignment_id
+         JOIN workspace_agents AS child_agent ON child_agent.workspace_id = assignment.workspace_id AND child_agent.id = assignment.agent_id
+         LEFT JOIN workspace_human_work_assignments AS parent_assignment
+           ON parent_assignment.workspace_id = assignment.workspace_id
+           AND parent_assignment.id = assignment.parent_assignment_id
+           AND parent_assignment.work_id = reservation.work_id
+           AND parent_assignment.room_id = reservation.room_id
+           AND parent_assignment.agent_id = assignment.agent_id
+           AND parent_assignment.agent_version = assignment.agent_version
+           AND parent_assignment.status IN ('completed', 'failed', 'cancelled')
+           AND NOT samurai_human_work_assignment_is_superseded(parent_assignment.workspace_id, parent_assignment.id)
+           AND assignment.origin_kind = 'parent_continuation'
+         LEFT JOIN workspace_runtime_runs AS parent_run
+           ON parent_run.workspace_id = parent_assignment.workspace_id
+           AND parent_run.id = parent_assignment.current_run_id
+           AND parent_run.room_id = reservation.room_id
+           AND parent_run.status IN ('completed', 'failed', 'cancelled')
+           AND parent_run.requested_by_participant_id = work.requester_account_id
+         LEFT JOIN workspace_runtime_sessions AS parent_session
+           ON parent_session.workspace_id = parent_run.workspace_id
+           AND parent_session.id = parent_run.session_id
+           AND parent_session.room_id = reservation.room_id
+           AND jsonb_typeof(parent_run.metadata -> 'runtime_binding') = 'object'
+           AND parent_run.metadata -> 'runtime_binding' ->> 'workspace_id' = reservation.workspace_id
+           AND parent_run.metadata -> 'runtime_binding' ->> 'room_id' = reservation.room_id
+           AND parent_run.metadata -> 'runtime_binding' ->> 'session_id' = parent_run.session_id
+           AND parent_run.metadata -> 'runtime_binding' ->> 'work_id' = reservation.work_id
+           AND parent_run.metadata -> 'runtime_binding' ->> 'assignee_id' = parent_assignment.id
+           AND parent_run.metadata -> 'runtime_binding' ->> 'agent_id' = assignment.agent_id
+           AND parent_run.agent_id = assignment.agent_id
+           AND parent_run.metadata -> 'runtime_binding' ->> 'backend_id' = child_agent.backend_id
+           AND parent_run.backend_id = child_agent.backend_id
+           AND (parent_run.metadata -> 'runtime_binding' ->> 'agent_configuration_version') ~ '^[0-9]+$'
+           AND (parent_run.metadata -> 'runtime_binding' ->> 'agent_configuration_version')::BIGINT = assignment.agent_version
+           AND (parent_run.metadata -> 'runtime_binding' ->> 'generation') ~ '^[0-9]+$'
+           AND (parent_run.metadata -> 'runtime_binding' ->> 'generation')::BIGINT = reservation.generation
+           AND COALESCE(NULLIF(btrim(parent_run.metadata -> 'runtime_binding' ->> 'parent_assignee_id'), ''), '')
+             = COALESCE(parent_assignment.parent_assignment_id, '')
+           AND (
+             jsonb_typeof(parent_run.metadata -> 'runtime_binding' -> 'agent') IS NULL
+             OR jsonb_typeof(parent_run.metadata -> 'runtime_binding' -> 'agent') = 'null'
+             OR (
+               jsonb_typeof(parent_run.metadata -> 'runtime_binding' -> 'agent') = 'object'
+               AND (
+                 NULLIF(btrim(parent_run.metadata -> 'runtime_binding' -> 'agent' ->> 'backend_id'), '') IS NULL
+                 OR parent_run.metadata -> 'runtime_binding' -> 'agent' ->> 'backend_id' = child_agent.backend_id
+               )
+               AND (
+                 NULLIF(btrim(parent_run.metadata -> 'runtime_binding' -> 'agent' ->> 'config_version'), '') IS NULL
+                 OR (
+                   (parent_run.metadata -> 'runtime_binding' -> 'agent' ->> 'config_version') ~ '^[0-9]+$'
+                   AND (parent_run.metadata -> 'runtime_binding' -> 'agent' ->> 'config_version')::BIGINT = assignment.agent_version
+                 )
+               )
+             )
+           )
+         LEFT JOIN workspace_human_work_instructions AS instruction
+           ON instruction.workspace_id = assignment.workspace_id AND instruction.work_id = assignment.work_id AND instruction.version = assignment.instruction_version
+         WHERE reservation.workspace_id = $1
+           AND reservation.id = $2
+           AND NOT samurai_human_work_assignment_is_superseded(assignment.workspace_id, assignment.id)`,
+        [context.workspaceId, reservationId]
+      )).rows[0];
+      if (!claimed || !claimed.instruction) throw new WorkspaceServerError("room_work_instruction_not_found", 500);
+      if (claimed.attachments_have_unresolved === true) {
+        const preflight = await sql.query<{ failed: boolean }>(
+          "SELECT samurai_fail_human_work_launch_preflight($1, $2, $3, $4, $5, $6, $7) AS failed",
+          [
+            context.workspaceId,
+            claimed.work_id,
+            claimed.assignment_id,
+            claimed.reservation_id,
+            input.workerId,
+            Number(claimed.generation),
+            "room_work_attachment_reference_unavailable"
+          ]
+        );
+        if (preflight.rows[0]?.failed !== true) {
+          throw new WorkspaceServerError("room_work_launch_preflight_failed", 409);
+        }
+        // The reservation and Assignment are now terminally failed in the
+        // same transaction. Returning no launch token prevents a worker from
+        // treating an unresolved historical reference as an attachment-free
+        // execution, while avoiding the old claim/rollback retry loop.
+        return undefined;
+      }
+      const attachments = normalizeRoomWorkAttachmentRefs(claimed.attachments);
+      await assertRoomWorkAttachmentRefs(sql, context, claimed.room_id, attachments);
+      // The reservation is the claimed execution token.  Returning the Work
+      // generation here would let a stale reservation masquerade as a fresh
+      // launch after an individual stop/reassign advanced the Work.
+      const generation = Number(claimed.generation);
+      const parentContinuation = roomWorkParentContinuation(claimed, generation);
+      return {
+        workId: claimed.work_id,
+        work_id: claimed.work_id,
+        assigneeId: claimed.assignment_id,
+        assignee_id: claimed.assignment_id,
+        assignmentId: claimed.assignment_id,
+        assignment_id: claimed.assignment_id,
+        roomId: claimed.room_id,
+        room_id: claimed.room_id,
+        agentId: claimed.agent_id,
+        agent_id: claimed.agent_id,
+        ...(claimed.agent_configuration_version === null || claimed.agent_configuration_version === undefined ? {} : {
+          agentConfigurationVersion: Number(claimed.agent_configuration_version),
+          agent_configuration_version: Number(claimed.agent_configuration_version)
+        }),
+        ...(claimed.current_run_id ? { currentRunId: claimed.current_run_id, current_run_id: claimed.current_run_id } : {}),
+        ...(claimed.origin_kind ? { originKind: claimed.origin_kind, origin_kind: claimed.origin_kind } : {}),
+        ...(parentContinuation?.sessionId ? { sessionId: parentContinuation.sessionId, session_id: parentContinuation.sessionId } : {}),
+        ...(parentContinuation?.parentAssigneeId ? {
+          parentAssigneeId: parentContinuation.parentAssigneeId,
+          parent_assignee_id: parentContinuation.parentAssigneeId
+        } : {}),
+        ...(parentContinuation?.continuation ? {
+          resumeBackendContinuation: parentContinuation.continuation,
+          resume_backend_continuation: parentContinuation.continuation
+        } : {}),
+        instruction: claimed.instruction,
+        attachments,
+        generation,
+        reservationGeneration: generation,
+        reservation_generation: generation,
+        version: Number(claimed.instruction_version),
+        reservationId: claimed.reservation_id,
+        reservation_id: claimed.reservation_id,
+        leaseOwner: input.workerId,
+        lease_owner: input.workerId,
+        leaseExpiresAt: leaseExpiresAt.toISOString(),
+        lease_expires_at: leaseExpiresAt.toISOString()
+      };
+    });
+  }
+
+  async claimRoomWorkLaunch(context: WorkspaceRequestContext, input: ClaimRoomWorkReservationInput): Promise<Record<string, unknown> | undefined> {
+    return this.claimRoomWorkReservation(context, input);
+  }
+
+  /** Settle a claimed assignment after the external Backend outcome is known. */
+  async settleRoomWorkAssignment(context: WorkspaceRequestContext, input: SettleRoomWorkAssignmentInput): Promise<Record<string, unknown>> {
+    const assignmentId = input.assignmentId ?? input.assigneeId;
+    if (!assignmentId) throw new WorkspaceServerError("room_work_assignment_id_required", 400);
+    assertOpaqueId(assignmentId, "room_work_assignment_id_invalid");
+    assertOpaqueId(input.reservationId, "room_work_reservation_id_invalid");
+    assertOpaqueId(input.leaseOwner, "room_work_lease_owner_invalid");
+    assertExpectedVersion(input.generation, "room_work_generation_invalid", 0);
+    const statuses = new Set<WorkspaceHumanWorkAssignmentStatus>(["completed", "failed", "cancelled", "waiting", "blocked", "outcome_unknown"]);
+    if (!statuses.has(input.status)) throw new WorkspaceServerError("room_work_assignment_status_invalid", 400);
+    const now = parseDateInput(input.now, "room_work_settle_now_invalid") ?? new Date();
+    const result = await this.runIdempotentResult(context, {
+      action: "room.work.assignment.settle",
+      input: { workId: input.workId ?? null, assigneeId: input.assigneeId ?? null, assignmentId, reservationId: input.reservationId, leaseOwner: input.leaseOwner, generation: input.generation, status: input.status, result: input.result ?? null, runId: input.runId ?? null, outputSummary: input.outputSummary ?? null, errorCode: input.errorCode ?? null, errorMessage: input.errorMessage ?? null, now: now.toISOString() }
+    }, async (sql) => {
+      const row = (await sql.query<{ workspace_id: string; work_id: string; room_id: string; status: string }>(
+        `SELECT workspace_id, work_id, room_id, status FROM workspace_human_work_assignments WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, assignmentId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("human_work_assignment_not_found", 404);
+      if (input.workId && input.workId !== row.work_id) throw new WorkspaceServerError("human_work_assignment_scope_invalid", 409);
+      const settlePayload = {
+        ...(input.result ?? {}),
+        ...(input.runId ? { run_id: input.runId } : {}),
+        ...(input.outputSummary ? { output_summary: input.outputSummary } : {}),
+        ...(input.errorCode ? { error_code: input.errorCode } : {}),
+        ...(input.errorMessage ? { error_message: input.errorMessage } : {})
+      };
+      try {
+        await sql.query(
+          "SELECT samurai_settle_human_work_assignment($1, $2, $3, $4::JSONB, $5, $6, $7, $8)",
+          [context.workspaceId, assignmentId, input.status, canonicalJson(settlePayload), input.leaseOwner, input.generation, input.reservationId, context.operationId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "room_work_assignment_settle_failed");
+      }
+      const assignment = (await sql.query<HumanWorkAssignmentRow>(
+        `SELECT workspace_id, id, work_id, room_id, parent_assignment_id, dependency_assignment_ids, agent_id,
+                agent_version, instruction_version, attempt, priority, status, current_run_id,
+                result, lease_owner, lease_expires_at, created_at, updated_at, started_at, completed_at
+         FROM workspace_human_work_assignments WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, assignmentId]
+      )).rows[0];
+      if (!assignment) throw new WorkspaceServerError("room_work_assignment_settle_failed", 500);
+      const work = await this.readHumanWorkAggregate(sql, context.workspaceId, assignment.work_id, assignment.room_id);
+      const mappedAssignment = humanWorkAssignmentFromRow(assignment, work.controlGeneration);
+      await this.insertAudit(sql, context, {
+        action: "room.work.assignment.settle",
+        roomId: assignment.room_id,
+        subjectKind: "room_work_assignment",
+        subjectId: assignmentId,
+        afterVersion: mappedAssignment.instructionVersion,
+        details: { work_id: assignment.work_id, status: input.status, run_id: input.runId ?? null }
+      });
+      return { workId: assignment.work_id, work_id: assignment.work_id, assignmentId, assignment_id: assignmentId, assigneeId: assignmentId, assignee_id: assignmentId, status: mappedAssignment.status, workStatus: work.status, work_status: work.status, assignment: mappedAssignment, work };
+    });
+    return result.value;
+  }
+
+  async completeRoomWorkReservation(context: WorkspaceRequestContext, input: SettleRoomWorkAssignmentInput): Promise<Record<string, unknown>> {
+    return this.settleRoomWorkAssignment(context, input);
+  }
+
+  async settleRoomWorkReservation(context: WorkspaceRequestContext, input: SettleRoomWorkAssignmentInput): Promise<Record<string, unknown>> {
+    return this.settleRoomWorkAssignment(context, input);
   }
 
   async patchAgent(
@@ -1516,8 +3226,14 @@ export class WorkspaceServerStore {
       );
       if (allowed.rows[0]?.allowed !== true) throw new WorkspaceServerError("room_not_available", 404);
       const result = await sql.query<AgentRoomPermissionRow>(
-        `SELECT workspace_id, room_id, agent_id, can_view, can_edit, can_execute, version, created_by, created_at, updated_at
-         FROM workspace_agent_room_permissions WHERE workspace_id = $1 AND room_id = $2 ORDER BY agent_id`,
+        `SELECT permission.workspace_id, permission.room_id, permission.agent_id,
+                permission.can_view, permission.can_edit, permission.can_execute,
+                permission.version, permission.created_by, permission.created_at, permission.updated_at
+         FROM workspace_agent_room_permissions AS permission
+         JOIN rooms AS room ON room.workspace_id = permission.workspace_id AND room.id = permission.room_id
+         WHERE permission.workspace_id = $1 AND permission.room_id = $2
+           AND (room.room_kind <> 'agent_dm' OR room.default_agent_id = permission.agent_id)
+         ORDER BY permission.agent_id`,
         [context.workspaceId, roomId]
       );
       return result.rows.map(agentRoomPermissionFromRow);
@@ -1565,6 +3281,66 @@ export class WorkspaceServerStore {
         roomId: input.roomId,
         kind: "workspace.agent.room_permission.changed",
         payload: { agent_id: input.agentId, can_view: mapped.canView, can_edit: mapped.canEdit, can_execute: mapped.canExecute }
+      });
+      return { permission: mapped, event };
+    });
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  /** Revoke all capabilities for one Agent in one Room without deleting the
+   * permission row. The database function keeps the Room/Workspace boundary,
+   * rejects removing the current default Agent, and leaves in-progress Work
+   * assignments untouched so their historical evidence remains readable. */
+  async removeRoomAgent(context: WorkspaceRequestContext, input: RemoveWorkspaceAgentRoomPermissionInput): Promise<{ permission: WorkspaceAgentRoomPermission; event: WorkspaceEvent; replayed: boolean }> {
+    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    const result = await this.runIdempotentResult(context, {
+      action: "workspace.agent.room_permission.remove",
+      input
+    }, async (sql) => {
+      await this.assertWorkspaceWritable(sql, context.workspaceId);
+      try {
+        await sql.query(
+          "SELECT samurai_remove_workspace_agent_room_permission($1, $2, $3)",
+          [context.workspaceId, input.roomId, input.agentId]
+        );
+      } catch (error) {
+        throw mapRoomWorkPostgresError(error, "workspace_agent_room_permission_remove_failed");
+      }
+      const saved = await sql.query<AgentRoomPermissionRow>(
+        `SELECT workspace_id, room_id, agent_id, can_view, can_edit, can_execute, version, created_by, created_at, updated_at
+         FROM workspace_agent_room_permissions WHERE workspace_id = $1 AND room_id = $2 AND agent_id = $3`,
+        [context.workspaceId, input.roomId, input.agentId]
+      );
+      const permission = saved.rows[0];
+      if (!permission) throw new WorkspaceServerError("workspace_agent_room_permission_remove_failed", 500);
+      const mapped = agentRoomPermissionFromRow(permission);
+      await this.insertAudit(sql, context, {
+        roomId: input.roomId,
+        action: "workspace.agent.room_permission.remove",
+        subjectKind: "workspace_agent_room_permission",
+        subjectId: `${input.agentId}:${input.roomId}`,
+        beforeVersion: Math.max(0, mapped.version - 1),
+        afterVersion: mapped.version,
+        details: {
+          agent_id: input.agentId,
+          room_id: input.roomId,
+          can_view: false,
+          can_edit: false,
+          can_execute: false,
+          in_progress_assignments_unchanged: true
+        }
+      });
+      const event = await this.insertEvent(sql, context, {
+        roomId: input.roomId,
+        kind: "workspace.agent.room_permission.removed",
+        payload: {
+          agent_id: input.agentId,
+          can_view: false,
+          can_edit: false,
+          can_execute: false,
+          version: mapped.version
+        }
       });
       return { permission: mapped, event };
     });
@@ -1733,24 +3509,156 @@ export class WorkspaceServerStore {
     });
   }
 
-  async createRoom(context: WorkspaceRequestContext, input: { id?: string; name: string; parentRoomId?: string; expectedWorkspaceVersion: number }): Promise<WorkspaceRoomCreateResult> {
+  async createRoom(context: WorkspaceRequestContext, input: CreateWorkspaceRoomInput): Promise<WorkspaceRoomCreateResult> {
     if (!input.name.trim()) throw new WorkspaceServerError("room_name_required", 400);
     if (input.parentRoomId) assertOpaqueId(input.parentRoomId, "room_parent_id_invalid");
-    assertExpectedVersion(input.expectedWorkspaceVersion, "workspace_expected_version_invalid", 1);
+    const kind = input.kind ?? "normal";
+    if (kind !== "normal" && kind !== "agent_dm") throw new WorkspaceServerError("room_kind_invalid", 400);
+    if (input.defaultAgentId) assertOpaqueId(input.defaultAgentId, "workspace_default_agent_id_invalid");
+    if (input.dmAccountId) assertOpaqueId(input.dmAccountId, "room_dm_account_id_invalid");
+    if (input.defaultAgentVersion !== undefined) assertExpectedVersion(input.defaultAgentVersion, "workspace_default_agent_version_invalid", 1);
+    if (kind === "normal" && input.dmAccountId) throw new WorkspaceServerError("room_kind_invalid", 400);
+    if (input.defaultAgentId && input.newAgent) {
+      throw new WorkspaceServerError("room_default_agent_selection_conflict", 400);
+    }
+    if (input.defaultAgentVersion !== undefined && !input.defaultAgentId) {
+      throw new WorkspaceServerError("room_default_agent_required", 400);
+    }
+    if (input.agentPermission && !input.defaultAgentId && !input.newAgent) {
+      throw new WorkspaceServerError("room_agent_permission_target_required", 400);
+    }
+    if (input.agentPermission) assertRoomAgentPermission(input.agentPermission);
+    const newAgent = input.newAgent;
+    if (newAgent) {
+      if (!newAgent.name.trim() || newAgent.name.trim().length > 200
+        || !newAgent.role.trim() || newAgent.role.trim().length > 500
+        || !newAgent.instructions.trim() || newAgent.instructions.trim().length > 20_000) {
+        throw new WorkspaceServerError("workspace_agent_input_invalid", 400);
+      }
+      if (newAgent.permission) assertRoomAgentPermission(newAgent.permission);
+      if (input.agentPermission && newAgent.permission
+        && !sameRoomAgentPermission(input.agentPermission, newAgent.permission)) {
+        throw new WorkspaceServerError("room_agent_permission_conflict", 400);
+      }
+    }
+    if (input.expectedWorkspaceVersion !== undefined) {
+      assertExpectedVersion(input.expectedWorkspaceVersion, "workspace_expected_version_invalid", 1);
+    }
     const id = input.id ?? operationScopedId("room", context.workspaceId, context.operationId);
     assertOpaqueId(id, "room_id_invalid");
-    const result = await this.runIdempotentResult(context, { action: "room.create", input: { id, name: input.name, parentRoomId: input.parentRoomId ?? null, expectedWorkspaceVersion: input.expectedWorkspaceVersion } }, async (sql) => {
+    const newAgentId = newAgent
+      ? (newAgent.id ?? operationScopedId("agent", `${context.workspaceId}:room:${id}`, context.operationId))
+      : undefined;
+    if (newAgentId) assertOpaqueId(newAgentId, "workspace_agent_id_invalid");
+    const defaultAgentId = input.defaultAgentId ?? newAgentId;
+    const configuredPermission = input.agentPermission ?? newAgent?.permission;
+    // A Room default must be executable.  A caller can still create an Agent
+    // with a narrower permission in a separate Agent/Room permission command;
+    // this guard prevents creating a default that can never launch work.
+    if (defaultAgentId && configuredPermission && !configuredPermission.canExecute) {
+      throw new WorkspaceServerError("workspace_default_agent_permission_required", 403);
+    }
+    const requestInput = {
+      id,
+      name: input.name,
+      parentRoomId: input.parentRoomId ?? null,
+      defaultAgentId: input.defaultAgentId ?? null,
+      defaultAgentVersion: input.defaultAgentVersion ?? null,
+      kind,
+      dmAccountId: input.dmAccountId ?? null,
+      // The Domain API does not expose a Workspace version for Room create.
+      // Keep an explicitly supplied legacy version in the hash, but do not
+      // manufacture a dynamic internal version here: a retry after the
+      // response was lost must replay even when another operation advanced
+      // the Workspace version in the meantime.
+      ...(input.expectedWorkspaceVersion === undefined ? {} : { expectedWorkspaceVersion: input.expectedWorkspaceVersion }),
+      newAgent: newAgent ? {
+        id: newAgentId,
+        name: newAgent.name.trim(),
+        role: newAgent.role.trim(),
+        instructions: newAgent.instructions.trim(),
+        backendId: normalizeAgentBackendId(newAgent.backendId),
+        enabled: newAgent.enabled ?? true,
+        ...(newAgent.permission ? { permission: newAgent.permission } : {})
+      } : null,
+        ...(input.agentPermission ? { agentPermission: input.agentPermission } : {})
+    };
+    const result = await this.runIdempotentResult(context, { action: "room.create", input: requestInput }, async (sql) => {
+      const currentWorkspace = input.expectedWorkspaceVersion === undefined
+        ? (await sql.query<{ version: number | string }>(
+          "SELECT version FROM workspaces WHERE id = $1", [context.workspaceId]
+        )).rows[0]
+        : undefined;
+      if (input.expectedWorkspaceVersion === undefined && !currentWorkspace) {
+        throw new WorkspaceServerError("workspace_not_found", 404);
+      }
+      const expectedWorkspaceVersion = input.expectedWorkspaceVersion ?? Number(currentWorkspace?.version);
       await this.assertWorkspaceWritable(sql, context.workspaceId);
+      if (newAgent && newAgentId) {
+        try {
+          await sql.query(
+            "SELECT samurai_register_workspace_agent_v1($1, $2, $3, $4, $5, $6, $7)",
+            [
+              context.workspaceId,
+              newAgentId,
+              newAgent.name.trim(),
+              newAgent.role.trim(),
+              newAgent.instructions.trim(),
+              normalizeAgentBackendId(newAgent.backendId),
+              newAgent.enabled ?? true
+            ]
+          );
+        } catch (error) {
+          if (postgresMessage(error).includes("duplicate key")) {
+            throw new WorkspaceServerError("workspace_agent_id_conflict", 409);
+          }
+          throw mapRoomWorkPostgresError(error, "workspace_agent_registration_failed");
+        }
+      }
       try {
-        await sql.query("SELECT samurai_create_room($1, $2, $3, $4, $5, $6)", [context.workspaceId, id, input.name.trim(), input.parentRoomId ?? null, input.expectedWorkspaceVersion, context.operationId]);
+        await sql.query("SELECT samurai_create_room($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", [
+          context.workspaceId,
+          id,
+          input.name.trim(),
+          input.parentRoomId ?? null,
+          defaultAgentId ?? null,
+          input.defaultAgentVersion ?? null,
+          kind,
+          input.dmAccountId ?? null,
+          expectedWorkspaceVersion,
+          context.operationId
+        ]);
       } catch (error) {
         if (postgresMessage(error).includes("workspace_version_conflict")) {
           throw await this.workspaceVersionConflict(sql, context.workspaceId);
         }
-        throw error;
+        throw mapRoomWorkPostgresError(error, "room_creation_failed");
+      }
+      if (defaultAgentId && configuredPermission) {
+        const currentPermission = (await sql.query<{ version: number | string }>(
+          `SELECT version FROM workspace_agent_room_permissions
+           WHERE workspace_id = $1 AND room_id = $2 AND agent_id = $3`,
+          [context.workspaceId, id, defaultAgentId]
+        )).rows[0];
+        try {
+          await sql.query(
+            "SELECT samurai_set_workspace_agent_room_permission($1, $2, $3, $4, $5, $6, $7)",
+            [
+              context.workspaceId,
+              id,
+              defaultAgentId,
+              configuredPermission.canView,
+              configuredPermission.canEdit,
+              configuredPermission.canExecute,
+              currentPermission ? Number(currentPermission.version) : 0
+            ]
+          );
+        } catch (error) {
+          throw mapRoomWorkPostgresError(error, "workspace_agent_room_permission_update_failed");
+        }
       }
       const result = await sql.query<RoomRow>(
-        "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        "SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, id]
       );
       const room = result.rows[0];
@@ -1762,7 +3670,14 @@ export class WorkspaceServerStore {
         subjectId: mapped.id,
         beforeVersion: 0,
         afterVersion: mapped.version,
-        details: { workspace_version: input.expectedWorkspaceVersion, parent_room_id: input.parentRoomId ?? null }
+        details: {
+          workspace_version: expectedWorkspaceVersion,
+          parent_room_id: input.parentRoomId ?? null,
+          default_agent_id: defaultAgentId ?? null,
+          ...(newAgentId ? { new_agent_id: newAgentId } : {}),
+          ...(configuredPermission ? { agent_permission: configuredPermission } : {}),
+          room_kind: kind
+        }
       });
       return mapped;
     }, { lockRoomHierarchy: true });
@@ -1803,7 +3718,7 @@ export class WorkspaceServerStore {
     }, async (sql) => {
       await this.assertWorkspaceWritable(sql, context.workspaceId);
       const before = await sql.query<RoomRow>(
-        "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        "SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, input.roomId]
       );
       await sql.query("SAVEPOINT samurai_room_move");
@@ -1834,7 +3749,7 @@ export class WorkspaceServerStore {
       await sql.query("RELEASE SAVEPOINT samurai_room_move");
       const result = roomMoveResultPayload(moveResult);
       const selected = await sql.query<RoomRow>(
-        "SELECT workspace_id, id, parent_room_id, name, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        "SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, input.roomId]
       );
       const room = selected.rows[0];
@@ -1926,30 +3841,38 @@ export class WorkspaceServerStore {
     assertExpectedVersion(input.expectedVersion, "room_membership_expected_version_invalid", 0);
     const result = await this.runIdempotentResult(context, { action: "room.member.set", input }, async (sql) => {
       const before = await this.selectRoomMember(sql, context.workspaceId, input.roomId, input.accountId);
+      await sql.query("SAVEPOINT samurai_room_member_set");
+      let changed: { rows: Array<{ result: WorkspaceRecordPayload | string }> };
       try {
-        const changed = await sql.query<{ result: WorkspaceRecordPayload | string }>(
+        changed = await sql.query<{ result: WorkspaceRecordPayload | string }>(
           "SELECT samurai_set_room_member_with_impact($1, $2, $3, $4, $5, $6, $7) AS result",
           [context.workspaceId, input.roomId, input.accountId, input.role, input.state, input.expectedVersion, context.operationId]
         );
-        const impact = roomMemberChangeResultPayload(changed.rows[0]?.result);
-        const member = await this.selectRoomMember(sql, context.workspaceId, input.roomId, input.accountId);
-        if (!member) throw new WorkspaceServerError("room_membership_update_failed", 500);
-        await this.insertAudit(sql, context, {
-          action: "room.member.set",
-          roomId: input.roomId,
-          subjectKind: "room_member",
-          subjectId: input.accountId,
-          beforeVersion: before?.version ?? 0,
-          afterVersion: member.version,
-          details: { role: member.role, state: member.state }
-        });
-        return { member, affectedRoomIds: impact.affectedRoomIds };
       } catch (error) {
+        // The guarded SQL function can reject an old Version. PostgreSQL then
+        // marks the current transaction failed, so restore this local
+        // savepoint before reading the latest Version for the caller.
+        await sql.query("ROLLBACK TO SAVEPOINT samurai_room_member_set");
+        await sql.query("RELEASE SAVEPOINT samurai_room_member_set");
         if (postgresMessage(error).includes("room_membership_version_conflict")) {
           throw await this.roomMemberVersionConflict(sql, context.workspaceId, input.roomId, input.accountId);
         }
         throw error;
       }
+      await sql.query("RELEASE SAVEPOINT samurai_room_member_set");
+      const impact = roomMemberChangeResultPayload(changed.rows[0]?.result);
+      const member = await this.selectRoomMember(sql, context.workspaceId, input.roomId, input.accountId);
+      if (!member) throw new WorkspaceServerError("room_membership_update_failed", 500);
+      await this.insertAudit(sql, context, {
+        action: "room.member.set",
+        roomId: input.roomId,
+        subjectKind: "room_member",
+        subjectId: input.accountId,
+        beforeVersion: before?.version ?? 0,
+        afterVersion: member.version,
+        details: { role: member.role, state: member.state }
+      });
+      return { member, affectedRoomIds: impact.affectedRoomIds };
     }, { lockRoomHierarchy: true });
     const visibleAffectedRoomIds = await this.visibleRoomIds(
       { workspaceId: context.workspaceId, accountId: context.accountId },
@@ -3013,6 +4936,150 @@ export class WorkspaceServerStore {
     });
   }
 
+  private async readHumanWorkAggregate(
+    sql: WorkspaceSql,
+    workspaceId: string,
+    workId: string,
+    roomId: string,
+    knownRow?: HumanWorkRow,
+    includeDetails = false
+  ): Promise<WorkspaceHumanWork | WorkspaceHumanWorkView> {
+    const row = knownRow ?? (await sql.query<HumanWorkRow>(
+      `SELECT workspace_id, id, room_id, requester_account_id, default_agent_id,
+              default_agent_version, title, objective, completion_criteria, status,
+              stop_state, instruction_version, control_generation, operation_id,
+              created_at, updated_at
+       FROM workspace_human_works WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, workId]
+    )).rows[0];
+    if (!row || row.room_id !== roomId) throw new WorkspaceServerError("human_work_not_found", 404);
+    const assignmentRows = await sql.query<HumanWorkAssignmentRow>(
+      `SELECT workspace_id, id, work_id, room_id, parent_assignment_id, dependency_assignment_ids, agent_id,
+              agent_version, instruction_version, attempt, priority, status, current_run_id,
+              result, lease_owner, lease_expires_at, created_at, updated_at, started_at, completed_at
+       FROM workspace_human_work_assignments
+       WHERE workspace_id = $1 AND work_id = $2 ORDER BY created_at, id`,
+      [workspaceId, workId]
+    );
+    const work: WorkspaceHumanWork = {
+      workspaceId: row.workspace_id,
+      id: row.id,
+      roomId: row.room_id,
+      requesterAccountId: row.requester_account_id,
+      defaultAgentId: row.default_agent_id,
+      defaultAgentVersion: Number(row.default_agent_version),
+      title: row.title,
+      objective: row.objective,
+      completionCriteria: jsonArray(row.completion_criteria),
+      status: row.status,
+      stopState: row.stop_state,
+      instructionVersion: Number(row.instruction_version),
+      controlGeneration: Number(row.control_generation),
+      operationId: row.operation_id,
+      assignments: assignmentRows.rows.map((assignment) => humanWorkAssignmentFromRow(assignment, Number(row.control_generation))),
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at)
+    };
+    if (!includeDetails) return work;
+    // Keep all detail reads on the same transaction-bound PostgreSQL client
+    // strictly sequential. `pg` does not support overlapping queries on one
+    // client reliably, and parallel calls can also make the RLS snapshot
+    // ordering nondeterministic while a Room Work view is assembled.
+    const instructionRows = await sql.query<HumanWorkInstructionRow>(
+      `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body,
+              samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+              source_kind, source_comment_id, source_comment_version,
+              state, created_by, created_at
+       FROM workspace_human_work_instructions WHERE workspace_id = $1 AND work_id = $2 ORDER BY version`,
+      [workspaceId, workId]
+    );
+    const commentRows = await sql.query<HumanWorkCommentRow>(
+      `SELECT workspace_id, id, work_id, room_id, author_account_id, version, body,
+              samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+              created_at
+       FROM workspace_human_work_comments WHERE workspace_id = $1 AND work_id = $2 ORDER BY version`,
+      [workspaceId, workId]
+    );
+    const controlRows = await sql.query<HumanWorkControlRow>(
+      `SELECT workspace_id, id, work_id, assignment_id, room_id, action, state,
+              actor_account_id, generation, operation_id, details, created_at, updated_at
+       FROM workspace_human_work_controls WHERE workspace_id = $1 AND work_id = $2 ORDER BY created_at, id`,
+      [workspaceId, workId]
+    );
+    const reactionRows = await sql.query<HumanWorkReactionRow>(
+      `SELECT workspace_id, id, work_id, room_id, comment_id, actor_account_id,
+              reaction, enabled, version, created_at, updated_at
+       FROM workspace_human_work_comment_reactions WHERE workspace_id = $1 AND work_id = $2 ORDER BY created_at, id`,
+      [workspaceId, workId]
+    );
+    const reservationRows = await sql.query<HumanWorkReservationRow>(
+      `SELECT workspace_id, id, work_id, assignment_id, room_id, generation, status,
+              operation_id, scheduled_at, lease_owner, lease_expires_at, claimed_at,
+              released_at, created_at, updated_at
+       FROM workspace_human_work_launch_reservations WHERE workspace_id = $1 AND work_id = $2 ORDER BY created_at, id`,
+      [workspaceId, workId]
+    );
+    const appliedByComment = new Map<string, string[]>();
+    for (const instruction of instructionRows.rows) {
+      if (instruction.source_comment_id) {
+        const current = appliedByComment.get(instruction.source_comment_id) ?? [];
+        current.push(instruction.id);
+        appliedByComment.set(instruction.source_comment_id, current);
+      }
+    }
+    const reactionCounts = new Map<string, number>();
+    for (const reaction of reactionRows.rows) {
+      if (!reaction.enabled) continue;
+      reactionCounts.set(reaction.comment_id, (reactionCounts.get(reaction.comment_id) ?? 0) + 1);
+    }
+    const comments = commentRows.rows.map((comment) => humanWorkCommentFromRow(
+      comment,
+      reactionCounts.get(comment.id) ?? 0,
+      appliedByComment.get(comment.id) ?? []
+    ));
+    return {
+      ...work,
+      instructions: instructionRows.rows.map(humanWorkInstructionFromRow),
+      comments,
+      reactions: reactionRows.rows.map(humanWorkReactionFromRow),
+      controls: controlRows.rows.map(humanWorkControlFromRow),
+      launchReservations: reservationRows.rows.map(humanWorkReservationFromRow)
+    };
+  }
+
+  private async readHumanWorkReservation(sql: WorkspaceSql, workspaceId: string, reservationId: string): Promise<WorkspaceHumanWorkLaunchReservation | undefined> {
+    const row = (await sql.query<HumanWorkReservationRow>(
+      `SELECT workspace_id, id, work_id, assignment_id, room_id, generation, status,
+              operation_id, scheduled_at, lease_owner, lease_expires_at, claimed_at,
+              released_at, created_at, updated_at
+       FROM workspace_human_work_launch_reservations WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, reservationId]
+    )).rows[0];
+    return row ? humanWorkReservationFromRow(row) : undefined;
+  }
+
+  /**
+   * Hold the same Room lock as the create function without giving the runtime
+   * role UPDATE on Rooms. The lock stays active until the surrounding action
+   * transaction finishes, so a default-Agent change cannot race a new Work.
+   */
+  private async lockRoomDefaultAgent(
+    sql: WorkspaceSql,
+    workspaceId: string,
+    roomId: string
+  ): Promise<{ default_agent_id: string | null; default_agent_version: number | string | null }> {
+    try {
+      const row = (await sql.query<{ default_agent_id: string | null; default_agent_version: number | string | null }>(
+        "SELECT default_agent_id, default_agent_version FROM samurai_lock_room_default_agent($1, $2)",
+        [workspaceId, roomId]
+      )).rows[0];
+      if (!row) throw new WorkspaceServerError("room_not_available", 404);
+      return row;
+    } catch (error) {
+      throw mapRoomWorkPostgresError(error, "room_default_agent_lock_failed");
+    }
+  }
+
   private async assertWorkspaceWritable(sql: WorkspaceSql, workspaceId: string): Promise<void> {
     const result = await sql.query<{ state: WorkspaceState }>("SELECT state FROM workspaces WHERE id = $1", [workspaceId]);
     const state = result.rows[0]?.state;
@@ -3069,6 +5136,14 @@ export class WorkspaceServerStore {
   private async roomMemberVersionConflict(sql: WorkspaceSql, workspaceId: string, roomId: string, accountId: string): Promise<never> {
     const member = await this.selectRoomMember(sql, workspaceId, roomId, accountId);
     throw new WorkspaceServerError("room_membership_version_conflict", 409, { latest_version: member?.version ?? null });
+  }
+
+  private async roomVersionConflict(sql: WorkspaceSql, workspaceId: string, roomId: string): Promise<never> {
+    const row = (await sql.query<{ version: number | string }>(
+      "SELECT version FROM rooms WHERE workspace_id = $1 AND id = $2",
+      [workspaceId, roomId]
+    )).rows[0];
+    throw new WorkspaceServerError("room_version_conflict", 409, { latest_version: row ? Number(row.version) : null });
   }
 
   private async invitationVersionConflict(sql: WorkspaceSql, workspaceId: string, invitationId: string): Promise<never> {
@@ -3207,12 +5282,195 @@ interface RoomRow {
   workspace_id: string;
   id: string;
   parent_room_id: string | null;
+  room_kind?: WorkspaceRoomKind | null;
+  default_agent_id?: string | null;
+  default_agent_version?: number | string | null;
+  dm_account_id?: string | null;
   name: string;
   version: number | string;
   can_manage?: boolean;
   can_execute?: boolean;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface HumanWorkRow {
+  workspace_id: string;
+  id: string;
+  room_id: string;
+  requester_account_id: string;
+  default_agent_id: string;
+  default_agent_version: number | string;
+  title: string;
+  objective: string;
+  completion_criteria: unknown;
+  status: WorkspaceHumanWorkStatus;
+  stop_state: WorkspaceHumanWorkStopState;
+  instruction_version: number | string;
+  control_generation: number | string;
+  operation_id: string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface HumanWorkAssignmentRow {
+  workspace_id: string;
+  id: string;
+  work_id: string;
+  room_id: string;
+  parent_assignment_id: string | null;
+  dependency_assignment_ids: string[] | null;
+  agent_id: string;
+  agent_version: number | string;
+  instruction_version: number | string;
+  attempt: number | string;
+  priority: number | string;
+  status: WorkspaceHumanWorkAssignmentStatus;
+  current_run_id: string | null;
+  result: unknown;
+  lease_owner: string | null;
+  lease_expires_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  started_at: Date | string | null;
+  completed_at: Date | string | null;
+}
+
+interface HumanWorkInstructionRow {
+  workspace_id: string;
+  id: string;
+  work_id: string;
+  assignment_id: string | null;
+  room_id: string;
+  version: number | string;
+  body: string;
+  attachment_refs: unknown;
+  source_kind: WorkspaceHumanWorkInstructionSource;
+  source_comment_id: string | null;
+  source_comment_version: number | string | null;
+  state: WorkspaceHumanWorkInstructionState;
+  created_by: string;
+  created_at: Date | string;
+}
+
+interface HumanWorkCommentRow {
+  workspace_id: string;
+  id: string;
+  work_id: string;
+  room_id: string;
+  author_account_id: string;
+  version: number | string;
+  body: string;
+  attachment_refs: unknown;
+  created_at: Date | string;
+}
+
+interface HumanWorkReactionRow {
+  workspace_id: string;
+  id: string;
+  work_id: string;
+  room_id: string;
+  comment_id: string;
+  actor_account_id: string;
+  reaction: "like";
+  enabled: boolean;
+  version: number | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface HumanWorkControlRow {
+  workspace_id: string;
+  id: string;
+  work_id: string;
+  assignment_id: string | null;
+  room_id: string;
+  action: WorkspaceHumanWorkControlAction;
+  state: WorkspaceHumanWorkControlState;
+  actor_account_id: string;
+  generation: number | string;
+  operation_id: string;
+  details: unknown;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface HumanWorkReservationRow {
+  workspace_id: string;
+  id: string;
+  work_id: string;
+  assignment_id: string;
+  room_id: string;
+  generation: number | string;
+  status: WorkspaceHumanWorkLaunchReservationStatus;
+  operation_id: string;
+  scheduled_at: Date | string;
+  lease_owner: string | null;
+  lease_expires_at: Date | string | null;
+  claimed_at: Date | string | null;
+  released_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface LegacySessionMapRow {
+  workspace_id: string;
+  id: string;
+  legacy_session_id: string;
+  room_id: string;
+  work_id: string;
+  operation_id: string;
+  created_by: string;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface HumanWorkExecutionRow {
+  workspace_id: string;
+  reservation_id: string;
+  work_id: string;
+  assignment_id: string;
+  room_id: string;
+  generation: number | string;
+  scheduled_at: Date | string;
+  control_generation: number | string;
+  instruction_version: number | string;
+  agent_id: string;
+  agent_configuration_version: number | string | null;
+  current_run_id?: string | null;
+  origin_kind: "normal" | "delegated" | "parent_continuation" | string | null;
+  /** Server SQL filters reassigned parents; mocks may provide this guard directly. */
+  parent_assignment_superseded?: boolean | null;
+  parent_assignment_id: string | null;
+  /** Parent's parent assignment, used to verify nested continuation bindings. */
+  parent_assignment_parent_id?: string | null;
+  parent_backend_id: string | null;
+  parent_agent_id: string | null;
+  parent_backend_session_id: string | null;
+  parent_runtime_binding: unknown;
+  session_id: string | null;
+  instruction: string | null;
+  attachments: unknown;
+  attachments_have_unresolved: boolean;
+}
+
+interface StoredRoomWorkContinuation {
+  sessionId: string;
+  parentAssigneeId: string;
+  continuation?: {
+    backendSessionId: string;
+    parent: {
+      workspaceId: string;
+      roomId: string;
+      sessionId: string;
+      workId: string;
+      assigneeId: string;
+      agentId: string;
+      agentConfigurationVersion: number;
+      backendId: string;
+      generation: number;
+    };
+  };
 }
 
 interface AgentRow {
@@ -3621,10 +5879,142 @@ function roomFromRow(row: RoomRow): WorkspaceRoom {
     id: row.id,
     workspaceId: row.workspace_id,
     ...(row.parent_room_id ? { parentRoomId: row.parent_room_id } : {}),
+    kind: row.room_kind ?? "normal",
+    ...(row.default_agent_id ? { defaultAgentId: row.default_agent_id } : {}),
+    ...(row.default_agent_version === undefined || row.default_agent_version === null ? {} : { defaultAgentVersion: Number(row.default_agent_version) }),
+    ...(row.dm_account_id ? { dmAccountId: row.dm_account_id } : {}),
     name: row.name,
     version: Number(row.version),
     ...(row.can_manage === undefined ? {} : { canManage: row.can_manage === true }),
     ...(row.can_execute === undefined ? {} : { canExecute: row.can_execute === true }),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function humanWorkAssignmentFromRow(row: HumanWorkAssignmentRow, generation: number): WorkspaceHumanWorkAssignment {
+  return {
+    workspaceId: row.workspace_id,
+    id: row.id,
+    workId: row.work_id,
+    roomId: row.room_id,
+    ...(row.parent_assignment_id ? { parentAssignmentId: row.parent_assignment_id } : {}),
+    ...(row.dependency_assignment_ids && row.dependency_assignment_ids.length > 0 ? { dependencyAssignmentIds: [...row.dependency_assignment_ids] } : {}),
+    agentId: row.agent_id,
+    agentVersion: Number(row.agent_version),
+    instructionVersion: Number(row.instruction_version),
+    attempt: Number(row.attempt),
+    priority: Number(row.priority),
+    status: row.status,
+    ...(row.current_run_id ? { currentRunId: row.current_run_id } : {}),
+    ...(row.result === null || row.result === undefined ? {} : { result: jsonObjectOrEmpty(row.result) }),
+    ...(row.lease_owner ? { leaseOwner: row.lease_owner } : {}),
+    ...(row.lease_expires_at ? { leaseExpiresAt: iso(row.lease_expires_at) } : {}),
+    ...(row.started_at ? { startedAt: iso(row.started_at) } : {}),
+    ...(row.completed_at ? { completedAt: iso(row.completed_at) } : {}),
+    generation,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function humanWorkInstructionFromRow(row: HumanWorkInstructionRow): WorkspaceHumanWorkInstruction {
+  return {
+    workspaceId: row.workspace_id,
+    id: row.id,
+    workId: row.work_id,
+    ...(row.assignment_id ? { assignmentId: row.assignment_id } : {}),
+    roomId: row.room_id,
+    version: Number(row.version),
+    body: row.body,
+    attachments: normalizeRoomWorkAttachmentRefsForRead(row.attachment_refs),
+    sourceKind: row.source_kind,
+    ...(row.source_comment_id ? { sourceCommentId: row.source_comment_id } : {}),
+    ...(row.source_comment_version === null || row.source_comment_version === undefined ? {} : { sourceCommentVersion: Number(row.source_comment_version) }),
+    state: row.state,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at)
+  };
+}
+
+function humanWorkCommentFromRow(row: HumanWorkCommentRow, reactionCount: number, appliedInstructionIds: string[]): WorkspaceHumanWorkComment {
+  return {
+    workspaceId: row.workspace_id,
+    id: row.id,
+    workId: row.work_id,
+    roomId: row.room_id,
+    authorAccountId: row.author_account_id,
+    version: Number(row.version),
+    body: row.body,
+    attachments: normalizeRoomWorkAttachmentRefsForRead(row.attachment_refs),
+    reactionCount,
+    appliedInstructionIds,
+    createdAt: iso(row.created_at)
+  };
+}
+
+function humanWorkReactionFromRow(row: HumanWorkReactionRow): WorkspaceHumanWorkReaction {
+  return {
+    workspaceId: row.workspace_id,
+    id: row.id,
+    workId: row.work_id,
+    roomId: row.room_id,
+    commentId: row.comment_id,
+    actorAccountId: row.actor_account_id,
+    reaction: row.reaction,
+    enabled: row.enabled,
+    version: Number(row.version),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function humanWorkControlFromRow(row: HumanWorkControlRow): WorkspaceHumanWorkControl {
+  return {
+    workspaceId: row.workspace_id,
+    id: row.id,
+    workId: row.work_id,
+    ...(row.assignment_id ? { assignmentId: row.assignment_id } : {}),
+    roomId: row.room_id,
+    action: row.action,
+    state: row.state,
+    actorAccountId: row.actor_account_id,
+    generation: Number(row.generation),
+    operationId: row.operation_id,
+    details: jsonObjectOrEmpty(row.details),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function humanWorkReservationFromRow(row: HumanWorkReservationRow): WorkspaceHumanWorkLaunchReservation {
+  return {
+    workspaceId: row.workspace_id,
+    id: row.id,
+    workId: row.work_id,
+    assignmentId: row.assignment_id,
+    roomId: row.room_id,
+    generation: Number(row.generation),
+    status: row.status,
+    operationId: row.operation_id,
+    scheduledAt: iso(row.scheduled_at),
+    ...(row.lease_owner ? { leaseOwner: row.lease_owner } : {}),
+    ...(row.lease_expires_at ? { leaseExpiresAt: iso(row.lease_expires_at) } : {}),
+    ...(row.claimed_at ? { claimedAt: iso(row.claimed_at) } : {}),
+    ...(row.released_at ? { releasedAt: iso(row.released_at) } : {}),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function legacySessionFromRow(row: LegacySessionMapRow): WorkspaceHumanWorkLegacySession {
+  return {
+    workspaceId: row.workspace_id,
+    legacySessionId: row.legacy_session_id,
+    roomId: row.room_id,
+    workId: row.work_id,
+    operationId: row.operation_id,
+    createdBy: row.created_by,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
   };
@@ -3814,6 +6204,279 @@ function jsonObject(value: WorkspaceRecordPayload | string): WorkspaceRecordPayl
   return value;
 }
 
+function jsonObjectOrEmpty(value: unknown): WorkspaceRecordPayload {
+  if (typeof value === "string") {
+    try {
+      return jsonObject(value as WorkspaceRecordPayload | string);
+    } catch {
+      return {};
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value) ? value as WorkspaceRecordPayload : {};
+}
+
+/**
+ * The claim query only exposes a parent Session after the SQL join has
+ * matched the persisted runtime binding. Keep a second projection check here
+ * so a driver/mock returning incomplete JSON cannot turn a provider Session ID
+ * into an untrusted continuation candidate.
+ */
+function roomWorkParentContinuation(
+  row: HumanWorkExecutionRow,
+  childGeneration: number
+): StoredRoomWorkContinuation | undefined {
+  const binding = runtimeBindingObject(row.parent_runtime_binding);
+  const sessionId = nonEmptyText(row.session_id);
+  const parentAssigneeId = nonEmptyText(row.parent_assignment_id);
+  if (row.parent_assignment_superseded === true) return undefined;
+  const agentId = nonEmptyText(row.agent_id);
+  const backendId = nonEmptyText(row.parent_backend_id);
+  const parentAgentId = nonEmptyText(row.parent_agent_id);
+  const reservationGeneration = integerValue(row.generation);
+  // SQL only joins a parent Session for origin_kind=parent_continuation.
+  // The column is NOT NULL on every supported schema version. Treat an
+  // omitted/null projection as untrusted too; a legacy/mock row must not
+  // smuggle a parent Session into a fresh assignment.
+  if (row.origin_kind !== "parent_continuation") return undefined;
+  const assignmentAgentVersion = row.agent_configuration_version === null || row.agent_configuration_version === undefined
+    ? undefined
+    : integerValue(row.agent_configuration_version);
+  if (!binding || !sessionId || !parentAssigneeId || !agentId || !backendId || !parentAgentId
+    || reservationGeneration === undefined || reservationGeneration !== childGeneration
+    || assignmentAgentVersion === undefined) return undefined;
+
+  const workspaceId = nonEmptyText(binding.workspace_id);
+  const roomId = nonEmptyText(binding.room_id);
+  const parentSessionId = nonEmptyText(binding.session_id);
+  const workId = nonEmptyText(binding.work_id);
+  const bindingAssigneeId = nonEmptyText(binding.assignee_id);
+  const bindingAgentId = nonEmptyText(binding.agent_id);
+  const bindingBackendId = nonEmptyText(binding.backend_id);
+  const bindingGeneration = integerValue(binding.generation);
+  const bindingAgentConfigurationVersion = integerValue(binding.agent_configuration_version);
+  const rawBindingParentAssigneeId = binding.parent_assignee_id;
+  const bindingParentAssigneeId = nonEmptyText(rawBindingParentAssigneeId);
+  const rawBindingAgent = binding.agent;
+  const bindingAgent = runtimeBindingObject(rawBindingAgent);
+  const bindingAgentBackendId = nonEmptyText(bindingAgent?.backend_id);
+  const nestedAgentConfigurationVersion = integerValue(bindingAgent?.config_version);
+  const parentAssignmentParentId = nonEmptyText(row.parent_assignment_parent_id);
+  if (!workspaceId || !roomId || !parentSessionId || !workId || !bindingAssigneeId || !bindingAgentId || !bindingBackendId
+    || bindingGeneration === undefined || bindingAgentConfigurationVersion === undefined
+    || workspaceId !== row.workspace_id
+    || workId !== row.work_id
+    || parentSessionId !== sessionId
+    || bindingAssigneeId !== parentAssigneeId
+    || bindingAgentId !== agentId
+    || parentAgentId !== bindingAgentId
+    || backendId !== bindingBackendId
+    || bindingAgentBackendId !== undefined && bindingAgentBackendId !== bindingBackendId
+    || nestedAgentConfigurationVersion !== undefined && nestedAgentConfigurationVersion !== bindingAgentConfigurationVersion
+    || roomId !== row.room_id
+    || bindingGeneration !== reservationGeneration
+    || bindingGeneration !== childGeneration
+    || bindingAgentConfigurationVersion !== assignmentAgentVersion
+    || rawBindingAgent !== undefined && !bindingAgent
+    || row.parent_assignment_parent_id !== undefined
+      && (parentAssignmentParentId ?? undefined) !== (bindingParentAssigneeId ?? undefined)
+    || row.parent_assignment_parent_id === undefined && rawBindingParentAssigneeId !== undefined) {
+    return undefined;
+  }
+
+  const base = {
+    workspaceId,
+    roomId,
+    sessionId,
+    workId,
+    assigneeId: parentAssigneeId,
+    agentId: bindingAgentId,
+    agentConfigurationVersion: bindingAgentConfigurationVersion,
+    backendId: bindingBackendId,
+    generation: bindingGeneration
+  };
+  const backendSessionId = nonEmptyText(row.parent_backend_session_id);
+  return {
+    sessionId,
+    parentAssigneeId,
+    ...(backendSessionId ? {
+      continuation: {
+        backendSessionId,
+        parent: base
+      }
+    } : {})
+  };
+}
+
+function runtimeBindingObject(value: unknown): Record<string, unknown> | undefined {
+  const parsed = typeof value === "string"
+    ? (() => {
+        try { return JSON.parse(value) as unknown; } catch { return undefined; }
+      })()
+    : value;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+}
+
+function nonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function integerValue(value: unknown): number | undefined {
+  const candidate = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : undefined;
+  return candidate !== undefined && Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : undefined;
+}
+
+function jsonArray(value: unknown): unknown[] {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(value) ? value : [];
+}
+
+/**
+ * Room Work attachments are server-owned file references, not arbitrary
+ * ResourceRef metadata.  Keep this parser strict: dropping malformed entries
+ * would make the persisted instruction differ from what the caller asked the
+ * Server to execute.
+ */
+function normalizeRoomWorkAttachmentRefs(value: unknown): WorkspaceFileResourceRef[] {
+  const candidate = value === undefined || value === null
+    ? []
+    : typeof value === "string"
+      ? (() => {
+          try { return JSON.parse(value) as unknown; } catch { return value; }
+      })()
+      : value;
+  const parsed = WorkspaceFileResourceRefSchema.array().max(32).safeParse(candidate);
+  if (!parsed.success) throw new WorkspaceServerError("room_work_attachment_reference_invalid", 400);
+  return parsed.data;
+}
+
+/**
+ * Historical instructions/comments may be projected by PostgreSQL with a
+ * `legacy_unresolved` marker when their original file version no longer
+ * exists.  The marker is evidence for read/export paths, not a public
+ * WorkspaceFileResourceRef, so omit it from the typed DTO without throwing.
+ */
+function normalizeRoomWorkAttachmentRefsForRead(value: unknown): WorkspaceFileResourceRef[] {
+  const candidate = value === undefined || value === null
+    ? []
+    : typeof value === "string"
+      ? (() => {
+          try { return JSON.parse(value) as unknown; } catch { return []; }
+        })()
+      : value;
+  if (!Array.isArray(candidate)) return [];
+  const visible = candidate.filter((entry) => !isLegacyUnresolvedAttachmentMarker(entry));
+  const parsed = WorkspaceFileResourceRefSchema.array().max(32).safeParse(visible);
+  return parsed.success ? parsed.data : [];
+}
+
+function isLegacyUnresolvedAttachmentMarker(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const marker = value as Record<string, unknown>;
+  return marker.kind === "legacy_unresolved"
+    && marker.reason === "reference_unavailable"
+    && marker.ref !== null
+    && typeof marker.ref === "object"
+    && !Array.isArray(marker.ref);
+}
+
+function hasLegacyUnresolvedAttachmentMarker(value: unknown): boolean {
+  const candidate = typeof value === "string"
+    ? (() => {
+        try { return JSON.parse(value) as unknown; } catch { return undefined; }
+      })()
+    : value;
+  return Array.isArray(candidate) && candidate.some(isLegacyUnresolvedAttachmentMarker);
+}
+
+/**
+ * Resolve every attachment against the same transaction-bound Workspace/Room.
+ * The SQL-side trigger is the final invariant for all writers; this adapter
+ * check gives callers a stable error and prevents Work/Comment creation from
+ * reaching that trigger with a foreign, stale, or malformed reference.
+ */
+async function assertRoomWorkAttachmentRefs(
+  sql: WorkspaceSql,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  roomId: string,
+  refs: readonly ResourceRef[]
+): Promise<void> {
+  if (refs.length === 0) return;
+  const parsed = WorkspaceFileResourceRefSchema.array().max(32).safeParse(refs);
+  if (!parsed.success) throw new WorkspaceServerError("room_work_attachment_reference_invalid", 400);
+  for (const ref of parsed.data) {
+    try {
+      assertSafeRelativePath(ref.uri);
+    } catch {
+      throw new WorkspaceServerError("room_work_attachment_uri_invalid", 400);
+    }
+  }
+  const permission = await sql.query<{ allowed: boolean }>(
+    "SELECT samurai_can_room($1, $2, 'read') AS allowed",
+    [context.workspaceId, roomId]
+  );
+  if (permission.rows[0]?.allowed !== true) {
+    throw new WorkspaceServerError("room_read_permission_denied", 403);
+  }
+  const paths = [...new Set(parsed.data.map((ref) => ref.uri))].sort();
+  // Workspace File writes use the same advisory key. Holding these locks for
+  // the enclosing Work/Comment transaction keeps the DB validation and the
+  // guarded insert from accepting a reference immediately before its file is
+  // replaced.
+  for (const filePath of paths) {
+    await sql.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`${context.workspaceId}\u001f${filePath}`]);
+  }
+  const result = await sql.query<{ path: string; version: number | string; sha256: string }>(
+    `SELECT path, version, sha256
+       FROM workspace_files
+      WHERE workspace_id = $1 AND room_id = $2 AND path = ANY($3::TEXT[])`,
+    [context.workspaceId, roomId, paths]
+  );
+  const files = new Map(result.rows.map((row) => [row.path, row]));
+  for (const ref of parsed.data) {
+    const file = files.get(ref.uri);
+    if (!file) throw new WorkspaceServerError("room_work_attachment_not_found", 404);
+    if (file.sha256 !== ref.id) {
+      throw new WorkspaceServerError("room_work_attachment_hash_mismatch", 409);
+    }
+    if (String(file.version) !== ref.version) {
+      throw new WorkspaceServerError("room_work_attachment_version_conflict", 409);
+    }
+  }
+}
+
+function normalizeResourceRefs(value: unknown): ResourceRef[] {
+  return jsonArray(value).flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.kind !== "string" || !candidate.kind.trim()
+      || typeof candidate.id !== "string" || !candidate.id.trim()
+      || typeof candidate.uri !== "string" || !candidate.uri.trim()) return [];
+    return [{
+      kind: candidate.kind,
+      id: candidate.id,
+      uri: candidate.uri,
+      ...(typeof candidate.version === "string" ? { version: candidate.version } : {}),
+      ...(typeof candidate.label === "string" ? { label: candidate.label } : {})
+    }];
+  });
+}
+
+function parseDateInput(value: string | undefined, code: string): Date | undefined {
+  if (value === undefined) return undefined;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new WorkspaceServerError(code, 400);
+  return parsed;
+}
+
 function roomMovePreviewFromPayload(value: WorkspaceRecordPayload | string | undefined): WorkspaceRoomMovePreview {
   const payload = requiredJsonObject(value, "room_move_preview_invalid");
   return {
@@ -3868,6 +6531,24 @@ function assertRole(value: string): asserts value is WorkspaceMembershipRole {
   if (!roleSet.has(value as WorkspaceMembershipRole)) throw new WorkspaceServerError("workspace_role_invalid", 400);
 }
 
+function assertRoomAgentPermission(value: CreateWorkspaceRoomAgentPermissionInput): void {
+  if (typeof value.canView !== "boolean" || typeof value.canEdit !== "boolean" || typeof value.canExecute !== "boolean") {
+    throw new WorkspaceServerError("room_agent_permission_invalid", 400);
+  }
+  if ((value.canEdit || value.canExecute) && !value.canView) {
+    throw new WorkspaceServerError("room_agent_view_required", 400);
+  }
+}
+
+function sameRoomAgentPermission(
+  left: CreateWorkspaceRoomAgentPermissionInput,
+  right: CreateWorkspaceRoomAgentPermissionInput
+): boolean {
+  return left.canView === right.canView
+    && left.canEdit === right.canEdit
+    && left.canExecute === right.canExecute;
+}
+
 function assertExpectedVersion(value: number, code: string, minimum: number): void {
   if (!Number.isSafeInteger(value) || value < minimum) throw new WorkspaceServerError(code, 400);
 }
@@ -3882,6 +6563,104 @@ function normalizeAgentBackendId(value: string | undefined): string {
 
 function postgresMessage(error: unknown): string {
   return error instanceof Error ? error.message : "";
+}
+
+function mapRoomWorkPostgresError(error: unknown, fallback: string): WorkspaceServerError | unknown {
+  if (error instanceof WorkspaceServerError) return error;
+  const message = postgresMessage(error);
+  const known: Array<[string, string, number]> = [
+    ["room_not_available", "room_not_available", 404],
+    ["human_work_not_found", "human_work_not_found", 404],
+    ["human_work_comment_not_found", "room_work_comment_not_found", 404],
+    ["human_work_assignment_not_found", "human_work_assignment_not_found", 404],
+    ["workspace_agent_not_active", "workspace_agent_not_active", 409],
+    ["workspace_default_agent_not_available", "workspace_default_agent_not_available", 409],
+    ["workspace_default_agent_version_conflict", "workspace_default_agent_version_conflict", 409],
+    ["workspace_default_agent_permission_required", "workspace_default_agent_permission_required", 403],
+    ["workspace_admin_permission_required", "workspace_admin_permission_required", 403],
+    ["workspace_agent_input_invalid", "workspace_agent_input_invalid", 400],
+    ["workspace_agent_room_permission_invalid", "room_agent_permission_invalid", 400],
+    ["workspace_agent_room_permission_version_conflict", "room_agent_room_permission_version_conflict", 409],
+    ["workspace_agent_not_found", "workspace_agent_not_found", 404],
+    ["workspace_default_agent_remove_required", "workspace_default_agent_remove_required", 409],
+    ["room_default_agent_lock_input_invalid", "room_default_agent_lock_input_invalid", 400],
+    ["room_execute_permission_denied", "room_execute_permission_denied", 403],
+    ["room_permission_denied", "room_permission_denied", 403],
+    ["human_work_comment_permission_denied", "room_work_comment_permission_denied", 403],
+    ["human_work_control_permission_denied", "room_work_control_permission_denied", 403],
+    ["human_work_delegate_input_invalid", "room_work_delegate_input_invalid", 400],
+    ["human_work_delegate_identity_missing", "room_work_delegate_identity_missing", 403],
+    ["human_work_dm_delegation_forbidden", "room_work_dm_delegation_forbidden", 409],
+    ["human_work_delegate_operation_conflict", "room_work_delegate_operation_conflict", 409],
+    ["human_work_runtime_binding_invalid", "room_work_runtime_binding_invalid", 409],
+    ["human_work_parent_continuation_conflict", "room_work_parent_continuation_conflict", 409],
+    ["human_work_parent_assignment_not_available", "room_work_parent_assignment_not_available", 409],
+    ["human_work_assignment_limit_exceeded", "room_work_assignment_limit_exceeded", 409],
+    ["human_work_concurrency_limit_exceeded", "room_work_concurrency_limit_exceeded", 409],
+    ["human_work_duration_limit_exceeded", "room_work_duration_limit_exceeded", 409],
+    ["human_work_depth_limit_exceeded", "room_work_depth_limit_exceeded", 409],
+    ["human_work_dependency_limit_exceeded", "room_work_dependency_limit_exceeded", 409],
+    ["human_work_dependency_invalid", "room_work_dependency_invalid", 409],
+    ["workspace_bundle_human_work_assignment_dependency_invalid", "workspace_bundle_human_work_assignment_dependency_invalid", 400],
+    ["workspace_agent_room_execute_denied", "workspace_agent_room_execute_denied", 403],
+    ["human_work_reaction_permission_denied", "room_work_reaction_permission_denied", 403],
+    ["human_work_reassign_permission_denied", "room_work_reassign_permission_denied", 403],
+    ["human_work_reassign_outcome_unknown", "room_work_reassign_outcome_unknown", 409],
+    ["human_work_reassign_stop_required", "room_work_reassign_stop_required", 409],
+    ["human_work_reassign_stop_pending", "room_work_reassign_stop_pending", 409],
+    ["human_work_assignment_already_reassigned", "room_work_assignment_already_reassigned", 409],
+    ["human_work_instruction_version_conflict", "room_work_instruction_version_conflict", 409],
+    ["human_work_instruction_target_required", "room_work_instruction_target_required", 409],
+    ["human_work_instruction_child_pending", "room_work_instruction_child_pending", 409],
+    ["human_work_comment_version_conflict", "room_work_comment_version_conflict", 409],
+    ["room_read_permission_denied", "room_read_permission_denied", 403],
+    ["human_work_attachment_reference_invalid", "room_work_attachment_reference_invalid", 400],
+    ["human_work_attachment_kind_invalid", "room_work_attachment_kind_invalid", 400],
+    ["human_work_attachment_not_found", "room_work_attachment_not_found", 404],
+    ["human_work_attachment_hash_mismatch", "room_work_attachment_hash_mismatch", 409],
+    ["human_work_attachment_version_conflict", "room_work_attachment_version_conflict", 409],
+    ["room_work_attachment_reference_unavailable", "room_work_attachment_reference_unavailable", 409],
+    ["human_work_reassign_parent_continuation_forbidden", "room_work_reassign_parent_continuation_forbidden", 409],
+    ["human_work_reaction_version_conflict", "room_work_reaction_version_conflict", 409],
+    ["human_work_control_generation_conflict", "room_work_control_generation_conflict", 409],
+    ["human_work_stop_not_confirmed", "room_work_stop_not_confirmed", 409],
+    ["human_work_stopped", "room_work_stopped", 409],
+    ["human_work_outcome_unknown", "room_work_outcome_unknown", 409],
+    ["human_work_assignment_not_terminal", "room_work_assignment_not_terminal", 409],
+    ["human_work_assignment_not_stoppable", "human_work_assignment_not_stoppable", 409],
+    ["human_work_assignment_not_running", "human_work_assignment_not_running", 409],
+    ["human_work_assignment_lease_conflict", "human_work_assignment_lease_conflict", 409],
+    ["human_work_execution_admission_closed", "room_work_execution_admission_closed", 409],
+    ["human_work_runtime_binding_invalid", "room_work_runtime_binding_invalid", 409],
+    ["human_work_stop_claim_input_invalid", "room_work_stop_claim_input_invalid", 400],
+    ["human_work_stop_settle_input_invalid", "room_work_stop_settle_input_invalid", 400],
+    ["human_work_stop_control_not_found", "room_work_stop_control_not_found", 404],
+    ["human_work_stop_not_dispatchable", "room_work_stop_not_dispatchable", 409],
+    ["human_work_stop_lease_conflict", "room_work_stop_lease_conflict", 409],
+    ["human_work_stop_generation_conflict", "room_work_stop_generation_conflict", 409],
+    ["human_work_stop_assignment_scope_invalid", "room_work_stop_assignment_scope_invalid", 409],
+    ["human_work_stop_run_evidence_missing", "room_work_stop_run_evidence_missing", 409],
+    ["human_work_stop_run_mismatch", "room_work_stop_run_mismatch", 409],
+    ["human_work_stop_run_status_mismatch", "room_work_stop_run_status_mismatch", 409],
+    ["human_work_run_evidence_missing", "room_work_run_evidence_missing", 409],
+    ["human_work_assignment_settle_input_invalid", "human_work_assignment_settle_input_invalid", 400],
+    ["human_work_launch_not_available", "human_work_launch_not_available", 409],
+    ["human_work_launch_generation_conflict", "human_work_launch_generation_conflict", 409],
+    ["human_work_launch_not_found", "human_work_launch_not_found", 404],
+    ["human_work_launch_input_invalid", "human_work_launch_input_invalid", 400],
+    ["legacy_session_not_available", "legacy_session_not_available", 404],
+    ["legacy_session_input_invalid", "legacy_session_input_invalid", 400],
+    ["legacy_session_room_mismatch", "legacy_session_room_mismatch", 409],
+    ["legacy_session_work_conflict", "legacy_session_work_conflict", 409],
+    ["legacy_session_operation_conflict", "legacy_session_operation_conflict", 409],
+    ["human_work_operation_conflict", "room_work_operation_conflict", 409],
+    ["agent_dm_default_agent_immutable", "agent_dm_default_agent_immutable", 409],
+    ["agent_dm_membership_required", "agent_dm_membership_required", 403],
+    ["room_kind_invalid", "room_kind_invalid", 400],
+    ["workspace_read_only", "workspace_read_only", 409]
+  ];
+  const hit = known.find(([needle]) => message.includes(needle));
+  return hit ? new WorkspaceServerError(hit[1], hit[2]) : new WorkspaceServerError(fallback, 500);
 }
 
 function operationErrorCode(error: unknown): string {

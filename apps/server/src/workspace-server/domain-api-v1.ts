@@ -7,6 +7,7 @@ import {
   AgentRecordSchema,
   ArtifactRecordSchema,
   ResourceRefSchema,
+  RoomWorkAssignmentStatusSchema as CoreRoomWorkAssignmentStatusSchema,
   RoomRecordSchema,
   type ActivityRecord,
   type JsonValue,
@@ -18,10 +19,12 @@ import {
   DomainApiRequestSchema,
   DomainApiResponseSchema,
   EventReplayPageSchema,
+  PublicAgentBackendRecordSchema,
   PublicAgentRecordSchema,
   PublicEventEnvelopeSchema,
   PublicWorkspaceDirectorySchema,
   PublicWorkspaceOrganizationAssociationResultSchema,
+  publicOperationInputSchemaFor,
   PublicRoomRecordSchema,
   RunControlActionSchema,
   RunControlInputSchema,
@@ -52,12 +55,14 @@ import {
 } from "@samurai-agent/workspace-server";
 import { PostgresArtifact } from "../adapters/runtime/postgres-artifact";
 import { createPostgresChatSessionThroughDomainOperation } from "../adapters/runtime/postgres-session-domain-operation";
-import { runPostgresChatTurnThroughDomainOperation } from "../adapters/runtime/postgres-chat-domain-operation";
 import { PostgresRuntimeCommandService } from "../adapters/runtime/postgres-runtime-chat";
 import { WorkspaceRealtimeGate } from "./realtime";
 import { RunControlService } from "./run-control-service";
 
 const v1OperationIds = new Set<string>(publicDomainOperationIds);
+/** Session/turn operations remain callable only by the compatibility path.
+ * They are intentionally not included in the normal Workspace catalog. */
+const legacyCompatibilityOperationIds = new Set<string>(["session.create", "chat.turn.run"]);
 const runControlService = new RunControlService();
 
 /** Organization control-plane requests are Account-scoped.  They deliberately
@@ -94,6 +99,54 @@ const organizationRouteOperationIds = new Set<string>([
   ...organizationOperationIds,
   ...organizationCompatibilityOperationIds
 ]);
+
+const roomWorkCommandIds = new Set<string>([
+  "room.work.create",
+  "room.work.reply",
+  "room.work.comment.create",
+  "room.work.comment.apply",
+  "room.work.comment.reaction.set",
+  "room.default_agent.set",
+  "room.work.stop",
+  "room.work.assignee.stop",
+  "room.work.assignee.reassign",
+  "room.work.assignee.delegate",
+  "agent.dm.open"
+]);
+
+const roomAgentCommandIds = new Set<string>([
+  "room.agent.permission.set",
+  "room.agent.remove"
+]);
+
+const roomWorkQueryIds = new Set<string>(["room.work.list", "room.work.view"]);
+
+/**
+ * The persistence package owns SQL and authorization for this aggregate. The
+ * Server adapter intentionally keeps this structural until that package
+ * publishes the concrete Room-work types; it still calls only named methods
+ * and fails closed when a deployment has not migrated yet.
+ */
+type RoomWorkStoreAdapter = WorkspaceServerStore & {
+  /** Compatibility-only bridge: persistence resolves the legacy Session to a
+   * Room work mapping atomically (create on first use, reply thereafter). */
+  migrateLegacyChatTurn?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  createRoomWork?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  replyToRoomWork?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  createRoomWorkComment?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  applyRoomWorkComment?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  setRoomWorkCommentReaction?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  setRoomDefaultAgent?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  setAgentRoomPermission?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  removeRoomAgent?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  stopRoomWork?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  stopRoomWorkAssignee?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  reassignRoomWorkAssignee?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  delegateRoomWorkAssignee?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  openAgentDm?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  listRoomWorks?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  viewRoomWork?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+};
 
 /** The Organization catalog exposes only control-plane operations.  Legacy
  * Organization Workspace CRUD routes remain callable, but are not the public
@@ -137,6 +190,19 @@ type V1Dependencies = {
   organizationContext: (req: Request, organizationId?: string, options?: { mutation?: boolean }) => OrganizationApiRequestContext;
   requestId: (req: Request) => string;
   runtimeFor: (req: Request) => PostgresRuntimeCommandService;
+  backendRegistry: {
+    statuses(): readonly AgentBackendStatusProjection[];
+  };
+};
+
+type AgentBackendStatusProjection = {
+  id: string;
+  kind: string;
+  label: string;
+  configured: boolean;
+  enabled: boolean;
+  connection_state: string;
+  reason?: string;
 };
 
 /** Mounts the first public API slice. Transport authentication remains owned by
@@ -146,7 +212,7 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
   const {
     app, io, store, commands, artifacts, realtimeGate,
     authenticateWorkspace, authenticateAccount, asyncRoute, workspaceContext, operationContext,
-    organizationContext, requestId, runtimeFor
+    organizationContext, requestId, runtimeFor, backendRegistry
   } = dependencies;
 
   app.get("/api/v1/workspaces/:workspaceId/domain/catalog", authenticateWorkspace, asyncRoute(async (_req, res) => {
@@ -157,7 +223,10 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
         kind: definition.kind,
         version: definition.version,
         availability: definition.availability,
-        input_schema: schemaForPublicContract(definition.input, `${definition.id}.input`),
+        input_schema: schemaForPublicContract(
+          publicOperationInputSchemaFor(definition.id, definition.input),
+          `${definition.id}.input`
+        ),
         output_schema: schemaForPublicContract(
           publicOperationOutputSchemaFor(definition.id, definition.output),
           `${definition.id}.output`
@@ -175,7 +244,9 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     const operationId = pathParam(req, "operationId");
     const request = parseDomainRequest(req.body);
     const definition = operationDefinitions.find((candidate) => candidate.id === operationId);
-    if (!definition || definition.kind !== "command" || !v1OperationIds.has(operationId) || !definition.sources.includes("runtime_api")) {
+    if (!definition || definition.kind !== "command"
+      || (!v1OperationIds.has(operationId) && !legacyCompatibilityOperationIds.has(operationId))
+      || !definition.sources.includes("runtime_api")) {
       throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
     }
     const parsedInput = parseOperationInput(definition, request.input, operationId);
@@ -544,12 +615,47 @@ async function executeCommand(input: {
   const { operationId, input: value, requestContext, context, req, operation, dependencies } = input;
   const { commands, artifacts, store, realtimeGate, runtimeFor } = dependencies;
   const { workspaceId, accountId } = operation;
+  if (roomWorkCommandIds.has(operationId)) {
+    return executeRoomWorkCommand({
+      operationId,
+      input: value,
+      requestContext,
+      operation,
+      dependencies
+    });
+  }
+  if (roomAgentCommandIds.has(operationId)) {
+    return executeRoomAgentCommand({
+      operationId,
+      input: value,
+      requestContext,
+      operation,
+      dependencies
+    });
+  }
   if (operationId === "room.create") {
-    const workspace = await store.getWorkspace({ workspaceId, accountId });
-    const result = await realtimeGate.run(workspaceId, () => commands.createRoom(operation, {
+    const newAgent = value.new_agent === undefined ? undefined : recordValue(value.new_agent);
+    const roomCreateInput: Record<string, unknown> = {
       name: stringField(value, "name"),
-      expectedWorkspaceVersion: workspace.version
-    }));
+      ...(value.parent_room_id === undefined ? {} : { parentRoomId: stringField(value, "parent_room_id") }),
+      ...(value.default_agent_id === undefined ? {} : { defaultAgentId: stringField(value, "default_agent_id") }),
+      ...(value.default_agent_version === undefined ? {} : { defaultAgentVersion: numberField(value, "default_agent_version") }),
+      ...(newAgent ? {
+        newAgent: {
+          name: stringField(newAgent, "name"),
+          role: stringField(newAgent, "role"),
+          instructions: stringField(newAgent, "instructions"),
+          backendId: stringField(newAgent, "backend_id"),
+          enabled: booleanField(newAgent, "enabled"),
+          ...(newAgent.permission === undefined ? {} : { permission: roomAgentPermissionInput(newAgent.permission) })
+        }
+      } : {}),
+      ...(value.agent_permission === undefined ? {} : { agentPermission: roomAgentPermissionInput(value.agent_permission) })
+    };
+    const result = await realtimeGate.run(workspaceId, () => commands.createRoom(
+      operation,
+      roomCreateInput as unknown as Parameters<WorkspaceServerCommandService["createRoom"]>[1]
+    ));
     if (!result.replayed) await appendAndEmitPublicEvent(dependencies, operation, { eventType: "workspace.room.changed", roomId: result.room.id, resources: [resourceRef("room", result.room.id, result.room.name)], payload: { room_id: result.room.id, action: "created" } });
     return { value: roomRecord(result.room), replayed: result.replayed };
   }
@@ -599,25 +705,29 @@ async function executeCommand(input: {
     return { value: session as unknown as JsonValue, replayed: false };
   }
   if (operationId === "chat.turn.run") {
-    if (!context.sessionId) throw new WorkspaceServerError("session_id_required", 400);
-    const runtime = runtimeFor(req);
-    const result = await runPostgresChatTurnThroughDomainOperation(runtime, {
-      workspaceId, accountId, sessionId: context.sessionId, idempotencyKey: operation.operationId, input: value
+    // Compatibility callers still identify their legacy Session in the
+    // request context, but the Store resolves that Session to a Room work
+    // mapping atomically. The Runtime is never called from this branch.
+    const sessionId = requestContext.session_id;
+    const roomId = requestContext.room_id;
+    if (!sessionId) throw new WorkspaceServerError("session_id_required", 400);
+    if (!roomId) throw new WorkspaceServerError("room_id_required", 400);
+    const store = dependencies.store as unknown as RoomWorkStoreAdapter;
+    const raw = await invokeRoomWorkStore(store, "migrateLegacyChatTurn", operation, {
+      sessionId,
+      roomId,
+      instruction: stringField(value, "content"),
+      attachments: arrayValue(value, "attachments"),
+      ...(value.agent_id === undefined ? {} : { agentId: stringField(value, "agent_id") })
     });
-    if (!result.backendRun.room_id) throw new WorkspaceServerError("runtime_run_room_missing", 409);
-    if (result.backendRun.status !== "queued" && !result.backendRun.completed_at) {
-      // An in-flight result is still a durable Run admission, not a success claim.
+    const unwrapped = unwrapStoreResult(raw);
+    const migrated = normalizeLegacyChatTurnResult(unwrapped.value);
+    if (!unwrapped.replayed) {
+      const migrationOperation = migrated.mode === "reply" ? "room.work.reply" : "room.work.create";
+      const event = roomWorkEventFor(migrationOperation, roomId, migrated.eventValue, value);
+      if (event) await appendAndEmitPublicEvent(dependencies, operation, event);
     }
-    const replayed = isReplayResult(result);
-    if (!replayed) await appendAndEmitPublicEvent(dependencies, operation, {
-      eventType: "workspace.run.changed",
-      roomId: result.backendRun.room_id,
-      authorizationAction: "execute",
-      resources: [{ kind: "backend_run", id: result.backendRun.id, uri: `samurai://backend-runs/${result.backendRun.id}` }],
-      payload: { run_id: result.backendRun.id, status: result.backendRun.status, action: "started" }
-    });
-    const { replayed: _replayed, ...publicResult } = result;
-    return { value: publicResult as unknown as JsonValue, replayed };
+    return { value: migrated.publicValue, replayed: unwrapped.replayed };
   }
   if (operationId === "artifact.create") {
     const roomId = requireRoom(requestContext);
@@ -662,6 +772,688 @@ async function executeCommand(input: {
   throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
 }
 
+async function executeRoomWorkCommand(input: {
+  operationId: string;
+  input: Record<string, unknown>;
+  requestContext: { room_id?: string; session_id?: string };
+  operation: WorkspaceRequestContext;
+  dependencies: V1Dependencies;
+}): Promise<{ value: JsonValue; replayed: boolean }> {
+  const { operationId, input: value, requestContext, operation, dependencies } = input;
+  if (requestContext.session_id) {
+    // Room work is the public continuity boundary. A caller must not select a
+    // legacy Runtime Session and thereby bypass the work aggregate.
+    throw new WorkspaceServerError("room_work_session_id_forbidden", 400);
+  }
+  const store = dependencies.store as unknown as RoomWorkStoreAdapter;
+  const roomId = operationId === "agent.dm.open" ? undefined : requireRoom(requestContext);
+  let raw: unknown;
+  switch (operationId) {
+    case "room.work.create":
+      raw = await invokeRoomWorkStore(store, "createRoomWork", operation, {
+        roomId,
+        ...(value.instruction === undefined ? {} : { instruction: stringField(value, "instruction") }),
+        attachments: arrayValue(value, "attachments"),
+        ...(value.agent_id === undefined ? {} : { agentId: stringField(value, "agent_id") })
+      });
+      break;
+    case "room.work.reply":
+      raw = await invokeRoomWorkStore(store, "replyToRoomWork", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        ...(value.assignee_id === undefined ? {} : { assigneeId: stringField(value, "assignee_id") }),
+        ...(value.instruction === undefined ? {} : { instruction: stringField(value, "instruction") }),
+        attachments: arrayValue(value, "attachments"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
+        ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
+      });
+      break;
+    case "room.work.comment.create":
+      raw = await invokeRoomWorkStore(store, "createRoomWorkComment", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        ...(value.body === undefined ? {} : { body: typeof value.body === "string" ? value.body : "" }),
+        attachments: arrayValue(value, "attachments"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") })
+      });
+      break;
+    case "room.work.comment.apply":
+      raw = await invokeRoomWorkStore(store, "applyRoomWorkComment", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        commentId: stringField(value, "comment_id"),
+        commentVersion: numberField(value, "comment_version"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
+        ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") }),
+        ...(value.assignee_id === undefined ? {} : { assigneeId: stringField(value, "assignee_id") })
+      });
+      break;
+    case "room.work.comment.reaction.set":
+      raw = await invokeRoomWorkStore(store, "setRoomWorkCommentReaction", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        commentId: stringField(value, "comment_id"),
+        reaction: "like",
+        enabled: booleanField(value, "enabled"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") })
+      });
+      break;
+    case "room.default_agent.set":
+      raw = await invokeRoomWorkStore(store, "setRoomDefaultAgent", operation, {
+        roomId,
+        agentId: stringField(value, "agent_id"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") })
+      });
+      break;
+    case "room.work.stop":
+      raw = await invokeRoomWorkStore(store, "stopRoomWork", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        ...(value.reason === undefined ? {} : { reason: stringField(value, "reason") }),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
+        ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
+      });
+      break;
+    case "room.work.assignee.stop":
+      raw = await invokeRoomWorkStore(store, "stopRoomWorkAssignee", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        assigneeId: stringField(value, "assignee_id"),
+        ...(value.reason === undefined ? {} : { reason: stringField(value, "reason") }),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
+        ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
+      });
+      break;
+    case "room.work.assignee.reassign":
+      raw = await invokeRoomWorkStore(store, "reassignRoomWorkAssignee", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        assigneeId: stringField(value, "assignee_id"),
+        agentId: stringField(value, "agent_id"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
+        ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
+      });
+      break;
+    case "room.work.assignee.delegate":
+      raw = await invokeRoomWorkStore(store, "delegateRoomWorkAssignee", operation, {
+        roomId,
+        workId: stringField(value, "work_id"),
+        assigneeId: stringField(value, "assignee_id"),
+        agentId: stringField(value, "agent_id"),
+        instruction: stringField(value, "instruction"),
+        dependencyAssigneeIds: arrayValue(value, "dependency_assignee_ids"),
+        attachments: arrayValue(value, "attachments"),
+        ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
+        ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
+      });
+      break;
+    case "agent.dm.open":
+      raw = await invokeRoomWorkStore(store, "openAgentDm", operation, { agentId: stringField(value, "agent_id") });
+      break;
+    default:
+      throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+  }
+  const normalized = normalizeRoomWorkValue(operationId, unwrapStoreResult(raw).value);
+  const replayed = unwrapStoreResult(raw).replayed;
+  if (!replayed) {
+    const event = roomWorkEventFor(operationId, roomId, normalized, value);
+    if (event) await appendAndEmitPublicEvent(dependencies, operation, event);
+  }
+  return { value: normalized as JsonValue, replayed };
+}
+
+async function executeRoomAgentCommand(input: {
+  operationId: string;
+  input: Record<string, unknown>;
+  requestContext: { room_id?: string; session_id?: string };
+  operation: WorkspaceRequestContext;
+  dependencies: V1Dependencies;
+}): Promise<{ value: JsonValue; replayed: boolean }> {
+  const { operationId, input: value, requestContext, operation, dependencies } = input;
+  if (requestContext.session_id) throw new WorkspaceServerError("room_agent_session_id_forbidden", 400);
+  const roomId = requireRoom(requestContext);
+  const store = dependencies.store as unknown as RoomWorkStoreAdapter;
+  let raw: unknown;
+  if (operationId === "room.agent.permission.set") {
+    const agentId = stringField(value, "agent_id");
+    const current = await dependencies.store.listAgentRoomPermissions(operation, roomId);
+    const currentPermission = current.find((permission) => permission.agentId === agentId);
+    raw = await invokeRoomAgentStore(store, "setAgentRoomPermission", operation, {
+      roomId,
+      agentId,
+      canView: booleanField(value, "can_view"),
+      canEdit: booleanField(value, "can_edit"),
+      canExecute: booleanField(value, "can_execute"),
+      expectedVersion: currentPermission?.version ?? 0
+    });
+  } else {
+    raw = await invokeRoomAgentStore(store, "removeRoomAgent", operation, {
+      roomId,
+      agentId: stringField(value, "agent_id")
+    });
+  }
+  const unwrapped = unwrapStoreResult(raw);
+  const normalized = roomAgentPermissionRecord(unwrapped.value);
+  if (!unwrapped.replayed) {
+    const agentEvent = roomAgentPermissionEventFor(operationId, roomId, normalized);
+    await appendAndEmitPublicEvent(dependencies, operation, agentEvent);
+  }
+  return { value: normalized as JsonValue, replayed: unwrapped.replayed };
+}
+
+async function invokeRoomAgentStore(
+  store: RoomWorkStoreAdapter,
+  methodName: "setAgentRoomPermission" | "removeRoomAgent",
+  context: WorkspaceRequestContext,
+  input: Record<string, unknown>
+): Promise<unknown> {
+  const method = store[methodName];
+  if (typeof method !== "function") throw new WorkspaceServerError("room_agent_store_api_unavailable", 503, { method: methodName });
+  return (method as unknown as (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>).call(store, context, input);
+}
+
+async function invokeRoomWorkStore(
+  store: RoomWorkStoreAdapter,
+  methodName: keyof RoomWorkStoreAdapter,
+  context: WorkspaceRequestContext,
+  input: Record<string, unknown>
+): Promise<unknown> {
+  const method = store[methodName];
+  if (typeof method !== "function") throw new WorkspaceServerError("room_work_store_api_unavailable", 503, { method: String(methodName) });
+  return (method as unknown as (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>).call(store, context, input);
+}
+
+function unwrapStoreResult(raw: unknown): { value: unknown; replayed: boolean } {
+  const body = recordValue(raw);
+  if (Object.prototype.hasOwnProperty.call(body, "value")) return { value: body.value, replayed: body.replayed === true };
+  if (Object.prototype.hasOwnProperty.call(body, "result")) return { value: body.result, replayed: body.replayed === true };
+  return { value: raw, replayed: body.replayed === true };
+}
+
+function executeRoomWorkQuery(
+  queryId: string,
+  input: Record<string, unknown>,
+  requestContext: { room_id?: string; session_id?: string },
+  operation: WorkspaceRequestContext,
+  dependencies: V1Dependencies
+): Promise<unknown> {
+  if (requestContext.session_id) throw new WorkspaceServerError("room_work_session_id_forbidden", 400);
+  const roomId = requireRoom(requestContext);
+  const store = dependencies.store as unknown as RoomWorkStoreAdapter;
+  if (queryId === "room.work.list") {
+    return invokeRoomWorkStore(store, "listRoomWorks", operation, {
+      roomId,
+      ...(valueString(input, "status") ? { status: valueString(input, "status") } : {}),
+      ...(valueString(input, "cursor") ? { cursor: valueString(input, "cursor") } : {}),
+      limit: numberValue(input, "limit") ?? 50
+    }).then((value) => normalizeRoomWorkValue(queryId, unwrapStoreResult(value).value));
+  }
+  return invokeRoomWorkStore(store, "viewRoomWork", operation, { roomId, workId: stringField(input, "work_id") })
+    .then((value) => normalizeRoomWorkValue(queryId, unwrapStoreResult(value).value));
+}
+
+function normalizeRoomWorkValue(operationId: string, value: unknown): unknown {
+  if (operationId === "room.work.list") {
+    const body = recordValue(value);
+    return listValue(value, "works").length > 0 || Array.isArray(value)
+      ? listValue(value, "works").map(roomWorkRecord)
+      : listValue(body, "room_works").map(roomWorkRecord);
+  }
+  if (operationId === "room.work.view") return roomWorkViewRecord(value);
+  if (operationId === "room.work.create") return roomWorkRecord(value);
+  if (operationId === "room.work.reply" || operationId === "room.work.comment.apply") return roomWorkInstructionRecord(value);
+  if (operationId === "room.work.comment.create") return roomWorkCommentRecord(value);
+  if (operationId === "room.work.comment.reaction.set") return roomWorkReactionRecord(value);
+  if (operationId === "room.default_agent.set") return roomDefaultAgentRecord(value);
+  if (operationId === "room.work.stop" || operationId === "room.work.assignee.stop") return roomWorkControlRecord(value);
+  if (operationId === "room.work.assignee.reassign" || operationId === "room.work.assignee.delegate") return roomWorkAssigneeRecord(value);
+  if (operationId === "agent.dm.open") return agentDmRecord(value);
+  return value;
+}
+
+/** Convert the old chat-turn response to a Session-free compatibility result.
+ * The persistence method decides whether this was the first turn (create) or
+ * a later turn (reply); neither the mapping nor the legacy Session ID crosses
+ * the public response boundary. */
+function normalizeLegacyChatTurnResult(value: unknown): {
+  mode: "create" | "reply";
+  eventValue: unknown;
+  publicValue: JsonValue;
+} {
+  const root = recordValue(value);
+  const modeValue = valueString(root, "mode", "action", "migration_action", "migrationAction");
+  const instructionValue = root.instruction ?? root.workInstruction ?? root.roomWorkInstruction;
+  const workValue = root.work ?? root.roomWork;
+  const mode: "create" | "reply" = modeValue === "reply" || (!workValue && instructionValue) ? "reply" : "create";
+  const publicValue = compactRecord({
+    compatibility: "room_work",
+    operation_id: "chat.turn.run",
+    mode,
+    ...(workValue ? { work: roomWorkRecord(root) } : {}),
+    ...(instructionValue ? { instruction: roomWorkInstructionRecord(instructionValue) } : {})
+  }) as JsonValue;
+  return {
+    mode,
+    eventValue: mode === "reply" ? instructionValue : workValue ?? root,
+    publicValue
+  };
+}
+
+function roomWorkRecord(value: unknown): Record<string, unknown> {
+  const root = recordValue(value);
+  const body = nestedRecord(value, "work", "roomWork");
+  const assignees = listValue(body.assignees ?? body.assignments, "assignees").map(roomWorkAssigneeRecord);
+  const completionCriteria = Array.isArray(body.completion_criteria)
+    ? body.completion_criteria
+    : Array.isArray(body.completionCriteria) ? body.completionCriteria : [];
+  const reservationValues = body.execution_reservations ?? body.executionReservations
+    ?? body.launchReservations ?? root.launchReservation ?? root.launch_reservation ?? root.launchReservations;
+  const reservations = Array.isArray(reservationValues)
+    ? reservationValues
+    : reservationValues && typeof reservationValues === "object" ? [reservationValues] : [];
+  return compactRecord({
+    id: valueString(body, "id", "work_id", "workId"),
+    room_id: valueString(body, "room_id", "roomId"),
+    kind: "human",
+    objective_id: optionalValue(body, "objective_id", "objectiveId"),
+    requester_id: valueString(body, "requester_id", "requesterId", "requester_account_id", "requesterAccountId", "created_by", "createdBy"),
+    front_agent_id: optionalValue(body, "front_agent_id", "frontAgentId"),
+    default_agent_id: valueString(body, "default_agent_id", "defaultAgentId", "agent_id", "agentId"),
+    default_agent_version: numberValue(body, "default_agent_version", "defaultAgentVersion"),
+    title: valueString(body, "title") || valueString(body, "objective", "instruction"),
+    objective: valueString(body, "objective", "instruction"),
+    status: publicRoomWorkStatus(valueString(body, "status")),
+    stop_state: optionalValue(body, "stop_state", "stopState"),
+    completion_criteria: completionCriteria.length > 0 ? completionCriteria : undefined,
+    instruction_version: numberValue(body, "instruction_version", "instructionVersion", "current_instruction_version", "currentInstructionVersion") ?? 1,
+    generation: numberValue(body, "generation", "control_generation", "controlGeneration") ?? 0,
+    version: numberValue(body, "version") ?? 1,
+    assignees,
+    execution_reservations: reservations.map(roomWorkExecutionReservationRecord),
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+function roomWorkExecutionReservationRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "reservation", "executionReservation", "launchReservation", "launch_reservation");
+  return compactRecord({
+    id: valueString(body, "id", "reservation_id", "reservationId", "launch_reservation_id", "launchReservationId"),
+    work_id: valueString(body, "work_id", "workId"),
+    assignment_id: valueString(body, "assignment_id", "assignmentId", "assignee_id", "assigneeId"),
+    room_id: valueString(body, "room_id", "roomId"),
+    generation: numberValue(body, "generation") ?? 1,
+    status: valueString(body, "status") || "reserved",
+    scheduled_at: valueString(body, "scheduled_at", "scheduledAt"),
+    claimed_at: optionalValue(body, "claimed_at", "claimedAt"),
+    released_at: optionalValue(body, "released_at", "releasedAt"),
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+function roomWorkViewRecord(value: unknown): Record<string, unknown> {
+  const root = recordValue(value);
+  const body = nestedRecord(value, "view", "workView", "work", "roomWork");
+  const base = roomWorkRecord(body);
+  const instructions = listValue(body.instructions ?? root.instructions, "instructions").map(roomWorkInstructionRecord);
+  const comments = listValue(body.comments ?? root.comments, "comments").map(roomWorkCommentRecord);
+  const reactions = listValue(body.reactions ?? root.reactions, "reactions").map(roomWorkReactionRecord);
+  const controls = listValue(body.controls ?? root.controls, "controls").map(roomWorkControlRecord);
+  return {
+    ...base,
+    instructions,
+    comments,
+    reactions,
+    controls
+  };
+}
+
+function publicRoomWorkStatus(value: string): string {
+  if (value === "ready") return "queued";
+  if (["queued", "running", "waiting", "completed", "failed", "stopping", "cancelled", "outcome_unknown"].includes(value)) return value;
+  if (value === "blocked") return "blocked";
+  return "queued";
+}
+
+function publicRoomWorkInstructionKind(body: Record<string, unknown>): string {
+  const value = valueString(body, "kind", "source_kind", "sourceKind");
+  if (value === "request") return "initial";
+  if (value === "comment_reflection") return "comment_apply";
+  if (value === "system") return "delegated";
+  if (["initial", "reply", "comment_apply", "delegated"].includes(value)) return value;
+  return "reply";
+}
+
+function publicRoomWorkInstructionStatus(value: string): string {
+  if (["pending", "accepted", "queued", "delivered", "applied", "failed", "rejected"].includes(value)) return value;
+  return "accepted";
+}
+
+function publicRoomWorkControlAction(value: string): string {
+  if (["stop_request", "stop_confirm", "stop_unconfirmed"].includes(value)) return "stop";
+  if (value === "assignment_stop") return "assignee.stop";
+  if (value === "reassign") return "assignee.reassign";
+  if (["stop", "assignee.stop", "assignee.reassign"].includes(value)) return value;
+  return "stop";
+}
+
+function publicRoomWorkControlStatus(value: string): string {
+  if (value === "pending") return "requested";
+  if (value === "confirmed") return "completed";
+  if (["requested", "accepted", "running", "completed", "failed", "unconfirmed", "rejected"].includes(value)) return value;
+  return "accepted";
+}
+
+function roomWorkAssigneeRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "assignee", "assignment", "workAssignee");
+  return compactRecord({
+    id: valueString(body, "id", "assignee_id", "assigneeId"),
+    work_id: valueString(body, "work_id", "workId"),
+    agent_id: valueString(body, "agent_id", "agentId"),
+    parent_assignee_id: optionalValue(body, "parent_assignee_id", "parentAssigneeId"),
+    status: publicRoomWorkStatus(valueString(body, "status")),
+    instruction_version: numberValue(body, "instruction_version", "instructionVersion") ?? 1,
+    generation: numberValue(body, "generation", "control_generation", "controlGeneration") ?? 0,
+    agent_configuration_version: numberValue(body, "agent_configuration_version", "agentConfigurationVersion", "agent_version", "agentVersion"),
+    attempt: numberValue(body, "attempt"),
+    version: numberValue(body, "version") ?? 1,
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+function roomWorkInstructionRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "instruction", "workInstruction");
+  const createdAt = valueString(body, "created_at", "createdAt");
+  return compactRecord({
+    id: valueString(body, "id", "instruction_id", "instructionId"),
+    work_id: valueString(body, "work_id", "workId"),
+    assignee_id: optionalValue(body, "assignee_id", "assigneeId", "assignment_id", "assignmentId"),
+    kind: publicRoomWorkInstructionKind(body),
+    instruction: valueString(body, "instruction", "content", "body"),
+    attachments: Array.isArray(body.attachments)
+      ? body.attachments
+      : Array.isArray(body.attachment_refs) ? body.attachment_refs
+        : Array.isArray(body.attachmentRefs) ? body.attachmentRefs : [],
+    version: numberValue(body, "version") ?? 1,
+    generation: numberValue(body, "generation") ?? 0,
+    status: publicRoomWorkInstructionStatus(valueString(body, "status", "state")),
+    created_by: valueString(body, "created_by", "createdBy", "author_id", "authorId"),
+    source_comment_id: optionalValue(body, "source_comment_id", "sourceCommentId"),
+    created_at: createdAt,
+    updated_at: valueString(body, "updated_at", "updatedAt") || createdAt
+  });
+}
+
+function roomWorkCommentRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "comment", "workComment");
+  const createdAt = valueString(body, "created_at", "createdAt");
+  return compactRecord({
+    id: valueString(body, "id", "comment_id", "commentId"),
+    work_id: valueString(body, "work_id", "workId"),
+    author_id: valueString(body, "author_id", "authorId", "author_account_id", "authorAccountId", "created_by", "createdBy"),
+    body: typeof body.body === "string" ? body.body : "",
+    attachments: Array.isArray(body.attachments) ? body.attachments : Array.isArray(body.attachment_refs) ? body.attachment_refs : [],
+    version: numberValue(body, "version") ?? 1,
+    reaction_count: numberValue(body, "reaction_count", "reactionCount"),
+    applied_instruction_ids: Array.isArray(body.applied_instruction_ids)
+      ? body.applied_instruction_ids
+      : Array.isArray(body.appliedInstructionIds) ? body.appliedInstructionIds : [],
+    created_at: createdAt,
+    updated_at: valueString(body, "updated_at", "updatedAt") || createdAt
+  });
+}
+
+function roomWorkReactionRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "reaction", "workReaction");
+  return compactRecord({
+    id: valueString(body, "id", "reaction_id", "reactionId"),
+    work_id: valueString(body, "work_id", "workId"),
+    comment_id: valueString(body, "comment_id", "commentId"),
+    reaction: valueString(body, "reaction") || "like",
+    enabled: typeof body.enabled === "boolean" ? body.enabled : false,
+    version: numberValue(body, "version") ?? 1,
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+function roomDefaultAgentRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "default_agent", "defaultAgent", "roomDefaultAgent");
+  return compactRecord({
+    room_id: valueString(body, "room_id", "roomId"),
+    agent_id: valueString(body, "agent_id", "agentId"),
+    agent_version: numberValue(body, "agent_version", "agentVersion") ?? 1,
+    enabled: typeof body.enabled === "boolean" ? body.enabled : true,
+    can_execute: typeof body.can_execute === "boolean" ? body.can_execute : body.canExecute !== false,
+    version: numberValue(body, "version") ?? 1,
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+function roomAgentPermissionRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "permission", "agentRoomPermission", "roomAgentPermission");
+  const roomId = valueString(body, "room_id", "roomId");
+  const agentId = valueString(body, "agent_id", "agentId");
+  const canView = typeof body.can_view === "boolean" ? body.can_view : body.canView === true;
+  const canEdit = typeof body.can_edit === "boolean" ? body.can_edit : body.canEdit === true;
+  const canExecute = typeof body.can_execute === "boolean" ? body.can_execute : body.canExecute === true;
+  return compactRecord({
+    id: valueString(body, "id") || `room_agent:${roomId}:${agentId}`,
+    room_id: roomId,
+    agent_id: agentId,
+    can_view: canView,
+    can_edit: canEdit,
+    can_execute: canExecute,
+    version: numberValue(body, "version") ?? 1,
+    created_by: valueString(body, "created_by", "createdBy"),
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt"),
+    removed: !canView && !canEdit && !canExecute
+  });
+}
+
+function roomMemberListRecord(value: unknown): Record<string, unknown> {
+  const body = recordValue(value);
+  const humans = listValue(body, "humans").map((entry) => {
+    const member = recordValue(entry);
+    return compactRecord({
+      id: valueString(member, "id") || `room_member:${valueString(member, "room_id", "roomId")}:${valueString(member, "account_id", "accountId")}`,
+      room_id: valueString(member, "room_id", "roomId"),
+      account_id: valueString(member, "account_id", "accountId"),
+      role: valueString(member, "role") || "member",
+      state: valueString(member, "state") || "active",
+      version: numberValue(member, "version") ?? 1,
+      created_at: valueString(member, "created_at", "createdAt"),
+      updated_at: valueString(member, "updated_at", "updatedAt"),
+      ...(valueString(member, "revoked_at", "revokedAt") ? { revoked_at: valueString(member, "revoked_at", "revokedAt") } : {})
+    });
+  });
+  const agents = listValue(body, "agents").map(roomAgentPermissionRecord);
+  return { humans, agents };
+}
+
+function roomAgentPermissionEventFor(
+  operationId: string,
+  roomId: string,
+  value: Record<string, unknown>
+): {
+  eventType: string;
+  roomId: string;
+  resources: ResourceRef[];
+  authorizationAction: "edit";
+  payload: Record<string, unknown>;
+} {
+  const agentId = valueString(value, "agent_id");
+  return {
+    eventType: "workspace.room_agent.changed",
+    roomId,
+    resources: [resourceRef("room", roomId, roomId), resourceRef("room_agent", `${roomId}:${agentId}`, agentId)],
+    authorizationAction: "edit",
+    payload: {
+      room_id: roomId,
+      agent_id: agentId,
+      action: operationId === "room.agent.remove" ? "removed" : value.removed === true ? "removed" : "permission_changed",
+      can_view: value.can_view === true,
+      can_edit: value.can_edit === true,
+      can_execute: value.can_execute === true,
+      ...(numberValue(value, "version") === undefined ? {} : { version: numberValue(value, "version") })
+    }
+  };
+}
+
+function roomWorkControlRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "control", "workControl");
+  // Stop dispatch evidence remains internal to the persistence control, but
+  // these two compact fields are part of the public Room-work projection: the
+  // Native App must distinguish a request that is still pending from an
+  // unconfirmed external outcome. Do not expose runner leases, raw backend
+  // diagnostics, or provider data from `details`.
+  const details = recordValue(body.details);
+  const unconfirmedAssigneeIds = Array.isArray(details.unconfirmed_assignee_ids)
+    ? details.unconfirmed_assignee_ids
+    : Array.isArray(details.unconfirmedAssigneeIds) ? details.unconfirmedAssigneeIds : [];
+  return compactRecord({
+    id: valueString(body, "id", "control_id", "controlId"),
+    operation_id: optionalValue(body, "operation_id", "operationId"),
+    work_id: valueString(body, "work_id", "workId"),
+    assignee_id: optionalValue(body, "assignee_id", "assigneeId", "assignment_id", "assignmentId"),
+    target_agent_id: optionalValue(body, "target_agent_id", "targetAgentId"),
+    action: publicRoomWorkControlAction(valueString(body, "action")),
+    status: publicRoomWorkControlStatus(valueString(body, "status", "state")),
+    generation: numberValue(body, "generation") ?? 0,
+    version: numberValue(body, "version") ?? 1,
+    terminal_status: optionalValue(body, "terminal_status", "terminalStatus")
+      ?? optionalValue(details, "terminal_status", "terminalStatus"),
+    unconfirmed_assignee_ids: Array.isArray(body.unconfirmed_assignee_ids)
+      ? body.unconfirmed_assignee_ids
+      : Array.isArray(body.unconfirmedAssigneeIds) ? body.unconfirmedAssigneeIds : unconfirmedAssigneeIds,
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt"),
+    completed_at: optionalValue(body, "completed_at", "completedAt")
+  });
+}
+
+function agentDmRecord(value: unknown): Record<string, unknown> {
+  const body = nestedRecord(value, "dm", "agentDm", "agent_dm");
+  const roomId = valueString(body, "room_id", "roomId");
+  return compactRecord({
+    // The persistence projection uses the private Room ID as the DM record
+    // identity; no Runtime Session ID is exposed here.
+    id: valueString(body, "id", "dm_id", "dmId") || roomId,
+    room_id: roomId,
+    workspace_id: valueString(body, "workspace_id", "workspaceId"),
+    kind: "agent_dm",
+    agent_id: valueString(body, "agent_id", "agentId", "default_agent_id", "defaultAgentId"),
+    agent_version: numberValue(body, "agent_version", "agentVersion") ?? 1,
+    version: numberValue(body, "version") ?? 1,
+    created_at: valueString(body, "created_at", "createdAt"),
+    updated_at: valueString(body, "updated_at", "updatedAt")
+  });
+}
+
+export function roomWorkEventFor(
+  operationId: string,
+  roomId: string | undefined,
+  value: unknown,
+  input: Record<string, unknown>
+): {
+  eventType: string;
+  roomId?: string;
+  resources: ResourceRef[];
+  authorizationAction: "edit" | "execute";
+  payload: Record<string, unknown>;
+} | undefined {
+  const body = recordValue(value);
+  const workId = valueString(body, "work_id", "workId", "id") || optionalStringField(input, "work_id");
+  const effectiveRoomId = roomId || valueString(body, "room_id", "roomId");
+  const resourceList = effectiveRoomId
+    ? [resourceRef("room", effectiveRoomId, effectiveRoomId), ...(workId ? [resourceRef("room_work", workId, workId)] : [])]
+    : [];
+  if (operationId === "room.default_agent.set") {
+    const agentId = valueString(body, "agent_id", "agentId") || optionalStringField(input, "agent_id");
+    if (!effectiveRoomId || !agentId) return undefined;
+    return {
+      eventType: "workspace.room_default_agent.changed",
+      roomId: effectiveRoomId,
+      resources: [resourceRef("room", effectiveRoomId, effectiveRoomId), resourceRef("agent", agentId, agentId)],
+      authorizationAction: "edit",
+      payload: {
+        room_id: effectiveRoomId,
+        agent_id: agentId,
+        ...(numberValue(body, "agent_version", "agentVersion") === undefined ? {} : { agent_version: numberValue(body, "agent_version", "agentVersion") }),
+        ...(numberValue(body, "version") === undefined ? {} : { version: numberValue(body, "version") })
+      }
+    };
+  }
+  if (operationId === "agent.dm.open") {
+    const agentId = valueString(body, "agent_id", "agentId") || optionalStringField(input, "agent_id");
+    if (!effectiveRoomId || !agentId) return undefined;
+    return {
+      eventType: "workspace.agent_dm.changed",
+      roomId: effectiveRoomId,
+      resources: [resourceRef("room", effectiveRoomId, effectiveRoomId), resourceRef("agent", agentId, agentId)],
+      authorizationAction: "execute",
+      payload: { room_id: effectiveRoomId, agent_id: agentId, action: "opened", ...(numberValue(body, "version") === undefined ? {} : { version: numberValue(body, "version") }) }
+    };
+  }
+  if (!effectiveRoomId || !workId) return undefined;
+  if (operationId === "room.work.comment.create" || operationId === "room.work.comment.apply" || operationId === "room.work.comment.reaction.set") {
+    const commentId = operationId === "room.work.comment.apply"
+      ? valueString(body, "source_comment_id", "sourceCommentId", "comment_id", "commentId") || optionalStringField(input, "comment_id")
+      : valueString(body, "comment_id", "commentId", "id") || optionalStringField(input, "comment_id");
+    if (!commentId) return undefined;
+    const action = operationId === "room.work.comment.create" ? "created" : operationId === "room.work.comment.apply" ? "applied" : "reaction_changed";
+    return {
+      eventType: "workspace.room_work.comment.changed",
+      roomId: effectiveRoomId,
+      resources: [...resourceList, resourceRef("room_work_comment", commentId, commentId)],
+      authorizationAction: operationId === "room.work.comment.apply" ? "execute" : "edit",
+      payload: { room_id: effectiveRoomId, work_id: workId, comment_id: commentId, action, ...(numberValue(body, "version") === undefined ? {} : { version: numberValue(body, "version") }) }
+    };
+  }
+  if (operationId === "room.work.assignee.stop" || operationId === "room.work.assignee.reassign" || operationId === "room.work.assignee.delegate") {
+    const assigneeId = valueString(body, "assignee_id", "assigneeId", "id") || optionalStringField(input, "assignee_id");
+    if (!assigneeId) return undefined;
+    const action = operationId === "room.work.assignee.stop" ? "stopped" : operationId === "room.work.assignee.reassign" ? "reassigned" : "delegated";
+    const parentAssigneeId = valueString(body, "parent_assignee_id", "parentAssigneeId") || optionalStringField(input, "assignee_id");
+    // A stop operation returns a control receipt whose `status` is the
+    // control lifecycle (for example `accepted` or `completed`).  The
+    // assignee event's optional `status` is instead the assignment lifecycle,
+    // so only publish values accepted by the assignment schema.  In
+    // particular, never project the stop receipt's `accepted` as an
+    // assignment status.
+    const assignmentStatus = action === "stopped"
+      ? undefined
+      : CoreRoomWorkAssignmentStatusSchema.safeParse(valueString(body, "status"));
+    return {
+      eventType: "workspace.room_work.assignee.changed",
+      roomId: effectiveRoomId,
+      resources: [...resourceList, resourceRef("room_work_assignee", assigneeId, assigneeId)],
+      authorizationAction: "execute",
+      payload: { room_id: effectiveRoomId, work_id: workId, assignee_id: assigneeId, action, ...(action === "delegated" && parentAssigneeId ? { parent_assignee_id: parentAssigneeId } : {}), ...(valueString(body, "agent_id", "agentId") ? { agent_id: valueString(body, "agent_id", "agentId") } : {}), ...(assignmentStatus?.success ? { status: assignmentStatus.data } : {}), ...(numberValue(body, "generation") === undefined ? {} : { generation: numberValue(body, "generation") }), ...(numberValue(body, "version") === undefined ? {} : { version: numberValue(body, "version") }) }
+    };
+  }
+  const action = operationId === "room.work.create" ? "created" : operationId === "room.work.reply" ? "replied" : operationId === "room.work.stop" ? "stopped" : "updated";
+  const status = eventRoomWorkStatus(valueString(body, "status"));
+  return {
+    eventType: "workspace.room_work.changed",
+    roomId: effectiveRoomId,
+    resources: resourceList,
+    authorizationAction: "execute",
+    payload: { room_id: effectiveRoomId, work_id: workId, action, ...(status ? { status } : {}), ...(numberValue(body, "generation") === undefined ? {} : { generation: numberValue(body, "generation") }), ...(numberValue(body, "version") === undefined ? {} : { version: numberValue(body, "version") }) }
+  };
+}
+
+/** An instruction or control receipt has its own lifecycle state (for example
+ * `pending` or `confirmed`); it must never be published as the Work status. */
+function eventRoomWorkStatus(value: string): string | undefined {
+  return ["queued", "running", "waiting", "blocked", "completed", "failed", "stopping", "cancelled", "outcome_unknown"].includes(value)
+    ? value
+    : undefined;
+}
+
 async function executeQuery(
   queryId: string,
   input: Record<string, unknown>,
@@ -670,8 +1462,27 @@ async function executeQuery(
   dependencies: V1Dependencies
 ): Promise<JsonValue> {
   const { store, artifacts } = dependencies;
+  if (roomWorkQueryIds.has(queryId)) {
+    return await executeRoomWorkQuery(queryId, input, requestContext, {
+      workspaceId: context.workspaceId,
+      accountId: context.actorId,
+      operationId: context.idempotencyKey ?? context.correlationId
+    }, dependencies) as JsonValue;
+  }
   if (queryId === "room.list") return (await store.listRooms({ workspaceId: context.workspaceId, accountId: context.actorId })).map(roomRecord) as unknown as JsonValue;
   if (queryId === "room.view") return roomRecord(await store.getRoom({ workspaceId: context.workspaceId, accountId: context.actorId }, stringField(input, "id")));
+  if (queryId === "room.member.list") {
+    const roomId = requireRoom(requestContext);
+    const operation = { workspaceId: context.workspaceId, accountId: context.actorId };
+    const [humans, agents] = await Promise.all([
+      store.listRoomMembers(operation, roomId),
+      store.listAgentRoomPermissions(operation, roomId)
+    ]);
+    return roomMemberListRecord({ humans, agents }) as JsonValue;
+  }
+  if (queryId === "agent.backend.list") {
+    return dependencies.backendRegistry.statuses().map(publicAgentBackendRecord) as unknown as JsonValue;
+  }
   if (queryId === "agent.list") return (await store.listAgents({ workspaceId: context.workspaceId, accountId: context.actorId })).map(agentRecord) as unknown as JsonValue;
   if (queryId === "agent.view") return agentRecord(await store.getAgent({ workspaceId: context.workspaceId, accountId: context.actorId }, stringField(input, "id")));
   const roomId = requireRoom(requestContext);
@@ -799,7 +1610,7 @@ function parseRunControlRequest(value: unknown, action: z.infer<typeof RunContro
 }
 
 function parseOperationInput(definition: (typeof operationDefinitions)[number], value: JsonValue, operationId: string): Record<string, unknown> {
-  const parsed = definition.input.safeParse(value);
+  const parsed = publicOperationInputSchemaFor(operationId, definition.input).safeParse(value);
   if (!parsed.success || !parsed.data || typeof parsed.data !== "object" || Array.isArray(parsed.data)) {
     throw new WorkspaceServerError("domain_api_input_invalid", 400, { operation_id: operationId, issue: safeIssue(parsed.success ? undefined : parsed.error.issues[0]) });
   }
@@ -830,12 +1641,21 @@ function apiResponse(req: Request, result: JsonValue, replayed: boolean): Domain
 export function publicOperationResult(operationId: string, result: unknown, accountId?: string): JsonValue {
   const definition = operationDefinitions.find((candidate) => candidate.id === operationId);
   if (!definition) throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+  if (operationId === "chat.turn.run") {
+    return normalizeLegacyChatTurnResult(result).publicValue;
+  }
   const outputSchema = publicOperationOutputSchemaFor(operationId, definition.output);
   const alreadyPublic = outputSchema.safeParse(result);
   if (alreadyPublic.success) return alreadyPublic.data as JsonValue;
   const projected = organizationRouteOperationIds.has(operationId)
     ? normalizeOrganizationValue(operationId, result, accountId)
-    : result;
+    : roomWorkCommandIds.has(operationId) || roomWorkQueryIds.has(operationId)
+      ? normalizeRoomWorkValue(operationId, result)
+      : roomAgentCommandIds.has(operationId)
+        ? roomAgentPermissionRecord(result)
+        : operationId === "room.member.list"
+          ? roomMemberListRecord(result)
+      : result;
   return outputSchema.parse(projected) as JsonValue;
 }
 
@@ -1205,6 +2025,10 @@ function listValue(value: unknown, key: string): unknown[] {
   return Array.isArray(body[key]) ? body[key] : [];
 }
 
+function arrayValue(value: Record<string, unknown>, key: string): unknown[] {
+  return Array.isArray(value[key]) ? value[key] : [];
+}
+
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -1279,12 +2103,28 @@ function toEventEnvelope(event: WorkspacePublicEvent): PublicEventEnvelope {
   });
 }
 
-function roomRecord(room: { id: string; workspaceId: string; parentRoomId?: string; name: string; version: number; canManage?: boolean; canExecute?: boolean; createdAt: string; updatedAt: string }): JsonValue {
+function roomRecord(room: {
+  id: string;
+  workspaceId: string;
+  parentRoomId?: string;
+  name: string;
+  kind?: "normal" | "agent_dm";
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
+  version: number;
+  canManage?: boolean;
+  canExecute?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}): JsonValue {
   return PublicRoomRecordSchema.parse({
     id: room.id,
     workspace_id: room.workspaceId,
     ...(room.parentRoomId ? { parent_room_id: room.parentRoomId } : {}),
     name: room.name,
+    ...(room.kind ? { kind: room.kind } : {}),
+    ...(room.defaultAgentId ? { default_agent_id: room.defaultAgentId } : {}),
+    ...(room.defaultAgentVersion === undefined ? {} : { default_agent_version: room.defaultAgentVersion }),
     version: room.version,
     ...(room.canManage === undefined ? {} : { can_manage: room.canManage }),
     ...(room.canExecute === undefined ? {} : { can_execute: room.canExecute }),
@@ -1309,6 +2149,29 @@ function agentRecord(agent: { workspaceId: string; id: string; displayName: stri
     created_at: agent.createdAt,
     updated_at: agent.updatedAt
   });
+}
+
+/**
+ * Keep the backend registry host-owned. Only the explicitly documented
+ * availability projection crosses the public Domain API boundary; metadata,
+ * credentials, paths, capabilities, and diagnostics never do.
+ */
+export function publicAgentBackendRecord(status: AgentBackendStatusProjection): JsonValue {
+  const reason = safeBackendReason(status.reason);
+  return PublicAgentBackendRecordSchema.parse({
+    id: status.id,
+    kind: status.kind,
+    label: status.label,
+    configured: status.configured,
+    enabled: status.enabled,
+    connection_state: status.connection_state,
+    ...(reason ? { reason } : {})
+  });
+}
+
+function safeBackendReason(reason: string | undefined): string | undefined {
+  if (!reason || reason.length > 256 || !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(reason)) return undefined;
+  return reason;
 }
 
 function resourceRef(kind: string, id: string, label: string): ResourceRef {
@@ -1352,11 +2215,6 @@ function deterministicActivityId(workspaceId: string, roomId: string, dedupeKey:
   return `activity_${createHash("sha256").update(`${workspaceId}|${roomId}|${dedupeKey}`).digest("hex").slice(0, 48)}`;
 }
 
-function isReplayResult(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value)
-    && (value as { replayed?: unknown }).replayed === true);
-}
-
 function stringField(value: Record<string, unknown>, name: string): string {
   if (typeof value[name] !== "string" || !value[name].trim()) throw new WorkspaceServerError(`${name}_required`, 400);
   return value[name] as string;
@@ -1381,6 +2239,15 @@ function numberFieldOptional(value: Record<string, unknown>, name: string): numb
 function booleanField(value: Record<string, unknown>, name: string): boolean {
   if (typeof value[name] !== "boolean") throw new WorkspaceServerError(`${name}_invalid`, 400);
   return value[name] as boolean;
+}
+
+function roomAgentPermissionInput(value: unknown): Record<string, boolean> {
+  const body = recordValue(value);
+  return {
+    canView: booleanField(body, "can_view"),
+    canEdit: booleanField(body, "can_edit"),
+    canExecute: booleanField(body, "can_execute")
+  };
 }
 
 function objectField(value: Record<string, unknown>, name: string): Record<string, JsonValue> {

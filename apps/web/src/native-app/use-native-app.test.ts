@@ -1,6 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   backendRunForChatRequest,
+  createNativeWorkspaceContentRefreshCoordinator,
+  createNativeRoomWorkClient,
+  nativeAgentBackendsFromUnknown,
+  nativeRoomAgentIsAvailable,
+  nativeRoomCreateErrorIsExplicitServerFailure,
+  nativeRoomCreateOperationId,
+  nativeRoomCreateResponseIsCurrent,
+  nativeRoomsAfterRoomCreate,
+  nativeDraftRequestIsCurrent,
+  nativeRoomWorkListRequestIsCurrent,
+  nativeRoomWorkErrorIsExplicitServerFailure,
+  nativeRoomWorkFromUnknown,
+  nativeWorkspaceContentRefreshRequestIsCurrent,
+  nativeWorkspaceRealtimeEventAction,
   shouldDiscardWorkspaceTargetAfterReauthorizationFailure,
   streamingAgentMessageFromBackendEvents,
   textDeltaContentForRun,
@@ -89,6 +103,460 @@ describe("Persisted chat stream projection", () => {
   it("does not render malformed or empty text payloads", () => {
     const malformed = { ...textEvent("event-empty", "run-a", 1, ""), payload: { text: 42 } } as BackendEventRecord;
     expect(textDeltaContentForRun([malformed], "run-a")).toBe("");
+  });
+});
+
+describe("Workspace realtime navigation boundary", () => {
+  it("refreshes content for ordinary events without re-activating the Workspace", () => {
+    expect(nativeWorkspaceRealtimeEventAction("event")).toBe("refresh_content");
+  });
+
+  it("keeps access changes on the re-authorization path and revokes on the safe path", () => {
+    expect(nativeWorkspaceRealtimeEventAction("access_changed")).toBe("reauthorize_workspace");
+    expect(nativeWorkspaceRealtimeEventAction("room_access_changed")).toBe("reauthorize_workspace");
+    expect(nativeWorkspaceRealtimeEventAction("room_access_revoked")).toBe("reauthorize_workspace");
+    expect(nativeWorkspaceRealtimeEventAction("access_revoked")).toBe("close_workspace");
+  });
+});
+
+describe("Room creation backend projection", () => {
+  it("keeps only renderer-safe availability fields from the Server projection", () => {
+    expect(nativeAgentBackendsFromUnknown({
+      backends: [{
+        id: "samurai-native",
+        label: "Samurai Native",
+        kind: "samurai_native",
+        configured: true,
+        enabled: true,
+        connection_state: "ready",
+        reason: "ready",
+        metadata: { secret: "must-not-reach-renderer" },
+        api_key: "must-not-reach-renderer"
+      }, {
+        id: "codex",
+        label: "Codex",
+        configured: false,
+        enabled: true,
+        connection_state: "unconfigured"
+      }]
+    })).toEqual([
+      { id: "samurai-native", label: "Samurai Native", kind: "samurai_native", configured: true, enabled: true, connectionState: "ready", reason: "ready" },
+      { id: "codex", label: "Codex", configured: false, enabled: true, connectionState: "unconfigured" }
+    ]);
+  });
+
+  it("shows an existing Agent only when its configured Backend is ready", () => {
+    const agent = { id: "agent_research", displayName: "Research", backendId: "samurai-native", enabled: true, status: "active" };
+    expect(nativeRoomAgentIsAvailable(agent, [{ id: "samurai-native", label: "Native", configured: true, enabled: true, connectionState: "ready" }])).toBe(true);
+    expect(nativeRoomAgentIsAvailable(agent, [{ id: "samurai-native", label: "Native", configured: false, enabled: true, connectionState: "unconfigured" }])).toBe(false);
+    expect(nativeRoomAgentIsAvailable(agent, [{ id: "samurai-native", label: "Native", configured: true, enabled: false, connectionState: "disabled" }])).toBe(false);
+    expect(nativeRoomAgentIsAvailable(agent, [{ id: "samurai-native", label: "Native", configured: true, enabled: true, connectionState: "degraded" }])).toBe(false);
+  });
+
+  it("rejects a Room response after the selected target changes", () => {
+    const result = {
+      target: source,
+      room: { id: "room_a", workspace_id: source.workspaceId }
+    };
+    expect(nativeRoomCreateResponseIsCurrent(result, source, source)).toBe(true);
+    expect(nativeRoomCreateResponseIsCurrent(result, source, destination)).toBe(false);
+    expect(nativeRoomCreateResponseIsCurrent({ ...result, target: destination }, source, source)).toBe(false);
+  });
+
+  it("keeps one Room when a replay response is applied twice", () => {
+    const room = { id: "room_replayed", workspaceId: source.workspaceId, name: "Replay", version: 1, createdAt: "", updatedAt: "" };
+    const once = nativeRoomsAfterRoomCreate([], room);
+    const twice = nativeRoomsAfterRoomCreate(once, room);
+    expect(twice).toHaveLength(1);
+    expect(twice[0]).toEqual(room);
+  });
+
+  it("retains the same operation ID for a retry and retires explicit failures", () => {
+    expect(nativeRoomCreateOperationId("room_create_retry")).toBe("room_create_retry");
+    expect(nativeRoomCreateOperationId("room_create_retry")).toBe("room_create_retry");
+    expect(nativeRoomCreateErrorIsExplicitServerFailure(new Error("room_agent_backend_unavailable"))).toBe(true);
+    expect(nativeRoomCreateErrorIsExplicitServerFailure(new Error("room_default_agent_permission_required:400"))).toBe(true);
+    expect(nativeRoomCreateErrorIsExplicitServerFailure(new Error("workspace_navigation_changed"))).toBe(false);
+    expect(nativeRoomCreateErrorIsExplicitServerFailure(new Error("workspace_room_response_scope_invalid"))).toBe(false);
+    expect(nativeRoomCreateErrorIsExplicitServerFailure(new Error("network_timeout"))).toBe(false);
+  });
+});
+
+describe("Workspace realtime refresh coordination", () => {
+  it("coalesces a burst into one in-flight refresh and one dirty follow-up", async () => {
+    const release: Array<() => void> = [];
+    const refresh = vi.fn(() => new Promise<void>((resolve) => release.push(resolve)));
+    const coordinator = createNativeWorkspaceContentRefreshCoordinator(refresh);
+
+    coordinator.request();
+    coordinator.request();
+    coordinator.request();
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    release.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    release.shift()?.();
+    await coordinator.whenIdle();
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an older same-Room response after a newer list request", () => {
+    const older = { sequence: 1, roomOpenId: 4, roomId: "room_a", workspaceTargetKey: "server\nworkspace" };
+    const newer = { sequence: 2, roomOpenId: 4, roomId: "room_a", workspaceTargetKey: "server\nworkspace" };
+    expect(nativeRoomWorkListRequestIsCurrent(older, newer)).toBe(false);
+    expect(nativeRoomWorkListRequestIsCurrent(newer, newer)).toBe(true);
+    expect(nativeRoomWorkListRequestIsCurrent(
+      { ...newer, roomOpenId: 5 },
+      newer
+    )).toBe(false);
+    expect(nativeRoomWorkListRequestIsCurrent(
+      { ...newer, workspaceTargetKey: "other\nworkspace" },
+      newer
+    )).toBe(false);
+  });
+
+  it("does not apply Room A refresh failure after navigation to Room B", () => {
+    const roomA = {
+      roomOpenId: 7,
+      roomId: "room_a",
+      workspaceTargetKey: "server\nworkspace",
+      workListSequence: 12
+    };
+    const roomB = {
+      roomOpenId: 8,
+      roomId: "room_b",
+      workspaceTargetKey: "server\nworkspace",
+      workListSequence: 13
+    };
+
+    expect(nativeWorkspaceContentRefreshRequestIsCurrent(roomA, roomB)).toBe(false);
+    expect(nativeWorkspaceContentRefreshRequestIsCurrent(roomA, { ...roomA })).toBe(true);
+  });
+});
+
+describe("Room work bridge adapter", () => {
+  it("uses Room/Work operation inputs without exposing a Session identifier", async () => {
+    const calls: Array<{ operation: string; roomId: string; payload: Record<string, unknown>; operationId: string }> = [];
+    const bridge = {
+      runWorkspaceRoomWorkOperation: vi.fn(async (input: typeof calls[number]) => {
+        calls.push(input);
+        if (input.operation === "room.work.list") return { works: [] };
+        return {
+          id: "work_public",
+          room_id: input.roomId,
+          requester_id: "account_owner",
+          default_agent_id: "agent_research",
+          title: "調査",
+          objective: "公開情報を調べる",
+          status: "queued",
+          instruction_version: 1,
+          generation: 0,
+          version: 1,
+          assignees: []
+        };
+      })
+    };
+    const client = createNativeRoomWorkClient(bridge);
+
+    expect(client).toBeDefined();
+    await client?.list("room_public");
+    const created = await client?.create({ roomId: "room_public", instruction: "公開情報を調べる", operationId: "op_public" });
+
+    expect(created?.roomId).toBe("room_public");
+    expect(calls[0]).toMatchObject({ operation: "room.work.list", roomId: "room_public", payload: { limit: 100 } });
+    expect(calls[1]).toMatchObject({
+      operation: "room.work.create",
+      roomId: "room_public",
+      payload: { instruction: "公開情報を調べる" },
+      operationId: "op_public"
+    });
+    expect(calls.every((call) => !Object.prototype.hasOwnProperty.call(call.payload, "session_id"))).toBe(true);
+  });
+
+  it("forwards the Workspace target to default-Agent and DM mutations and rejects a mismatched DM", async () => {
+    const target = { connectionId: "server_a", workspaceId: "workspace_a" };
+    const setDefaultAgent = vi.fn(async (input: { roomId: string; agentId: string; operationId: string; target?: typeof target }) => ({
+      room_id: input.roomId,
+      agent_id: input.agentId,
+      enabled: true,
+      can_execute: true,
+      version: 2
+    }));
+    const openWorkspaceAgentDm = vi.fn(async (input: { agentId: string; operationId: string; target?: typeof target }) => ({
+      id: "dm_a",
+      room_id: "room_dm_a",
+      workspace_id: input.target?.workspaceId,
+      kind: "agent_dm",
+      agent_id: input.agentId,
+      agent_version: 1,
+      version: 1
+    }));
+    const client = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })),
+      setWorkspaceRoomDefaultAgent: setDefaultAgent,
+      openWorkspaceAgentDm
+    });
+
+    await client?.setDefaultAgent({ roomId: "room_a", agentId: "agent_a", operationId: "default_1", target });
+    const dm = await client?.openDm("agent_a", "dm_1", target);
+
+    expect(setDefaultAgent).toHaveBeenCalledWith(expect.objectContaining({ operationId: "default_1", target }));
+    expect(openWorkspaceAgentDm).toHaveBeenCalledWith({ agentId: "agent_a", operationId: "dm_1", target });
+    expect(dm).toMatchObject({ workspaceId: target.workspaceId, agentId: "agent_a", kind: "agent_dm" });
+
+    const mismatchedClient = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })),
+      openWorkspaceAgentDm: vi.fn(async () => ({
+        id: "dm_wrong",
+        room_id: "room_dm_wrong",
+        workspace_id: target.workspaceId,
+        kind: "normal",
+        agent_id: "agent_other",
+        agent_version: 1,
+        version: 1
+      }))
+    });
+    await expect(mismatchedClient?.openDm("agent_a", "dm_wrong", target)).rejects.toThrow("agent_dm_response_invalid");
+  });
+
+  it("forwards only the server-issued attachment reference on Room work creation", async () => {
+    const attachment = {
+      kind: "file" as const,
+      id: "b".repeat(64),
+      uri: "attachments/brief.pdf",
+      version: "2",
+      label: "attachments/brief.pdf"
+    };
+    const createWorkspaceRoomWork = vi.fn(async (input: { roomId: string; attachments?: typeof attachment[]; operationId: string }) => ({
+      id: "work_with_attachment",
+      room_id: input.roomId,
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "資料確認",
+      objective: "",
+      status: "queued",
+      instruction_version: 1,
+      generation: 0,
+      version: 1,
+      assignees: [],
+      instructions: [{
+        id: "instruction_with_attachment",
+        work_id: "work_with_attachment",
+        kind: "initial",
+        instruction: "",
+        attachments: input.attachments ?? [],
+        status: "accepted",
+        version: 1,
+        generation: 0,
+        created_by: "account_owner"
+      }]
+    }));
+    const client = createNativeRoomWorkClient({ listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })), createWorkspaceRoomWork });
+
+    await client?.create({ roomId: "room_public", attachments: [attachment], operationId: "op_attachment" });
+
+    expect(createWorkspaceRoomWork).toHaveBeenCalledWith(expect.objectContaining({
+      roomId: "room_public",
+      attachments: [attachment],
+      operationId: "op_attachment"
+    }));
+  });
+
+  it("carries an explicitly selected assignee through the reply adapter", async () => {
+    const reply = vi.fn(async (input: { workId: string; assigneeId?: string; instruction?: string }) => ({
+      id: "instruction_reply",
+      work_id: input.workId,
+      assignee_id: input.assigneeId,
+      kind: "reply",
+      instruction: input.instruction,
+      status: "accepted",
+      version: 4,
+      generation: 2,
+      created_by: "account_owner"
+    }));
+    const client = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })),
+      replyWorkspaceRoomWork: reply
+    });
+
+    const input = {
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_specialist",
+      instruction: "担当を指定して続行",
+      operationId: "op_reply"
+    };
+    const result = await client?.reply(input);
+    await client?.reply(input);
+
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_specialist",
+      instruction: "担当を指定して続行",
+      operationId: "op_reply"
+    }));
+    expect(reply).toHaveBeenCalledTimes(2);
+    expect(reply.mock.calls[1]?.[0]).toMatchObject({ operationId: "op_reply" });
+    expect(result).toMatchObject({ workId: "work_public", assigneeId: "assignment_specialist", kind: "reply" });
+  });
+
+  it("carries explicit multi-Agent delegation through the public Room operation", async () => {
+    const delegate = vi.fn(async (input: { roomId: string; workId: string; assigneeId: string; agentId: string; instruction: string; dependencyAssigneeIds?: string[]; operationId: string }) => ({
+      id: "assignment_child",
+      work_id: input.workId,
+      parent_assignee_id: input.assigneeId,
+      agent_id: input.agentId,
+      status: "waiting",
+      instruction_version: 4,
+      generation: 1,
+      version: 1
+    }));
+    const client = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })),
+      delegateWorkspaceRoomWorkAssignee: delegate
+    });
+
+    const result = await client?.delegate({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_public",
+      agentId: "agent_specialist",
+      instruction: "一次資料を比較する",
+      dependencyAssigneeIds: ["assignment_review"],
+      operationId: "op_delegate"
+    });
+
+    expect(delegate).toHaveBeenCalledWith(expect.objectContaining({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_public",
+      agentId: "agent_specialist",
+      instruction: "一次資料を比較する",
+      dependencyAssigneeIds: ["assignment_review"],
+      operationId: "op_delegate"
+    }));
+    expect(result).toMatchObject({ workId: "work_public", parentAssigneeId: "assignment_public", agentId: "agent_specialist" });
+  });
+
+  it("accepts a delegated public projection without optional parent scope and rejects conflicting scope", async () => {
+    const delegated: Record<string, unknown> = {
+      id: "assignment_child",
+      work_id: "work_public",
+      agent_id: "agent_specialist",
+      status: "waiting",
+      instruction_version: 4,
+      generation: 1,
+      version: 1
+    };
+    const delegate = vi.fn(async () => delegated);
+    const client = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })),
+      delegateWorkspaceRoomWorkAssignee: delegate
+    });
+
+    await expect(client?.delegate({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_public",
+      agentId: "agent_specialist",
+      instruction: "一次資料を比較する",
+      operationId: "op_delegate_without_parent_projection"
+    })).resolves.toMatchObject({
+      id: "assignment_child",
+      workId: "work_public",
+      agentId: "agent_specialist"
+    });
+
+    delegate.mockResolvedValueOnce({ ...delegated, id: "assignment_public" });
+    await expect(client?.delegate({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_public",
+      agentId: "agent_specialist",
+      instruction: "親Assignmentを返す異常応答",
+      operationId: "op_delegate_parent_as_child"
+    })).rejects.toThrow("room_work_delegate_response_scope_invalid");
+
+    delegate.mockResolvedValueOnce({ ...delegated, parent_assignee_id: "assignment_other" });
+    await expect(client?.delegate({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_public",
+      agentId: "agent_specialist",
+      instruction: "別の親を返す異常応答",
+      operationId: "op_delegate_wrong_parent"
+    })).rejects.toThrow("room_work_delegate_response_scope_invalid");
+  });
+
+  it("keeps a pending instruction in the public Room work projection", () => {
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_public",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "調査",
+      objective: "公開情報を調べる",
+      status: "running",
+      instruction_version: 2,
+      generation: 1,
+      version: 3,
+      assignees: [{
+        id: "assignment_public",
+        work_id: "work_public",
+        agent_id: "agent_research",
+        status: "running",
+        instruction_version: 2,
+        generation: 1,
+        version: 2
+      }],
+      instructions: [{
+        id: "instruction_pending",
+        work_id: "work_public",
+        assignee_id: "assignment_public",
+        kind: "reply",
+        instruction: "反映待ちの追加指示",
+        status: "pending",
+        version: 2,
+        generation: 1,
+        created_by: "account_owner"
+      }]
+    });
+
+    expect(projected.instructions?.[0]).toMatchObject({ id: "instruction_pending", status: "pending" });
+  });
+});
+
+describe("Room work draft request stamp", () => {
+  it("rejects a late completion from an older Room or draft key", () => {
+    expect(nativeDraftRequestIsCurrent(
+      { key: "workspace\nroom_a\nnew", roomOpenId: 1 },
+      { key: "workspace\nroom_b\nnew", roomOpenId: 2 }
+    )).toBe(false);
+    expect(nativeDraftRequestIsCurrent(
+      { key: "workspace\nroom_a\nreply_a", roomOpenId: 1 },
+      { key: "workspace\nroom_a\nnew", roomOpenId: 1 }
+    )).toBe(false);
+    expect(nativeDraftRequestIsCurrent(
+      { key: "workspace\nroom_a\nnew", roomOpenId: 3 },
+      { key: "workspace\nroom_a\nnew", roomOpenId: 3 }
+    )).toBe(true);
+  });
+});
+
+describe("Room work mutation retry classification", () => {
+  it("keeps unknown transport and response-shape failures replayable", () => {
+    expect(nativeRoomWorkErrorIsExplicitServerFailure(new Error("Failed to fetch"))).toBe(false);
+    expect(nativeRoomWorkErrorIsExplicitServerFailure(new Error("room_work_reply_response_invalid"))).toBe(false);
+  });
+
+  it("retires an operation after a definitive validation or HTTP failure", () => {
+    expect(nativeRoomWorkErrorIsExplicitServerFailure(new Error("room_work_assignee_required"))).toBe(true);
+    expect(nativeRoomWorkErrorIsExplicitServerFailure(new Error("room_work_reply_forbidden:403"))).toBe(true);
+    expect(nativeRoomWorkErrorIsExplicitServerFailure({ status: 409 })).toBe(true);
   });
 });
 

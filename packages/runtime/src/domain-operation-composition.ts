@@ -75,6 +75,21 @@ type OrganizationOperationId =
 
 type OrganizationOperationPorts = Pick<DomainOperationPorts, OrganizationOperationId>;
 
+/** Backend availability is a host-owned Server projection.  The standalone
+ * Runtime binds the generated query so its registry stays complete, but it
+ * must not invent a registry or expose backend configuration from here. */
+type AgentBackendOperationPorts = Pick<DomainOperationPorts, "agent.backend.list">;
+
+function createAgentBackendOperationPorts(): AgentBackendOperationPorts {
+  return {
+    "agent.backend.list": readOnlyQueryPort<AgentBackendOperationPorts["agent.backend.list"]>({
+      listAgentBackends: () => {
+        throw new Error("domain_operation_requires_workspace_server:agent.backend.list");
+      }
+    })
+  };
+}
+
 function organizationOperationUnavailable(operationId: OrganizationOperationId): never {
   throw new Error(`domain_operation_requires_organization_api:${operationId}`);
 }
@@ -165,6 +180,95 @@ function createOrganizationOperationPorts(): OrganizationOperationPorts {
   };
 }
 
+/**
+ * Room work is implemented by the Workspace Server's atomic Store.  Runtime
+ * only binds the authenticated RoomAgent service here; that service either
+ * forwards to the Store adapter or returns an explicit capability error.  In
+ * particular, this composition must never fall back to the generic
+ * skill-optimization worker or expose a Session as a public input.
+ */
+type RoomWorkOperationId =
+  | "agent.dm.open"
+  | "room.default_agent.set"
+  | "room.work.assignee.delegate"
+  | "room.work.assignee.reassign"
+  | "room.work.assignee.stop"
+  | "room.work.comment.apply"
+  | "room.work.comment.create"
+  | "room.work.comment.reaction.set"
+  | "room.work.create"
+  | "room.work.list"
+  | "room.work.reply"
+  | "room.work.stop"
+  | "room.work.view";
+
+type RoomWorkOperationPorts = Pick<DomainOperationPorts, RoomWorkOperationId>;
+type RoomWorkAssigneeDelegatePort = RoomWorkOperationPorts["room.work.assignee.delegate"];
+
+/**
+ * The Runtime service is intentionally allowed to be deployed without the
+ * PostgreSQL Room-work Store.  Keep the generated operation bound in that
+ * case, but fail explicitly at execution instead of falling back to a
+ * generic Objective/skill worker.
+ */
+function delegateRoomWorkAssigneePort(
+  services: Pick<RuntimeDomainServices, "roomAgentDomainService">,
+  context: Parameters<RoomWorkAssigneeDelegatePort["delegateRoomWorkAssignee"]>[0],
+  input: Parameters<RoomWorkAssigneeDelegatePort["delegateRoomWorkAssignee"]>[1]
+): ReturnType<RoomWorkAssigneeDelegatePort["delegateRoomWorkAssignee"]> {
+  const service = services.roomAgentDomainService as unknown as {
+    delegateRoomWorkAssignee?: RoomWorkAssigneeDelegatePort["delegateRoomWorkAssignee"];
+  };
+  if (typeof service.delegateRoomWorkAssignee !== "function") {
+    throw new Error("domain_operation_requires_workspace_server:delegateRoomWorkAssignee");
+  }
+  return service.delegateRoomWorkAssignee(context, input);
+}
+
+function createRoomWorkDomainServicePorts(services: Pick<RuntimeDomainServices, "roomAgentDomainService">): RoomWorkOperationPorts {
+  return {
+    "agent.dm.open": {
+      openAgentDm: (context, input) => services.roomAgentDomainService.openAgentDm(context, input)
+    },
+    "room.default_agent.set": {
+      setRoomDefaultAgent: (context, input) => services.roomAgentDomainService.setRoomDefaultAgent(context, input)
+    },
+    "room.work.assignee.delegate": {
+      delegateRoomWorkAssignee: (context, input) => delegateRoomWorkAssigneePort(services, context, input)
+    },
+    "room.work.assignee.reassign": {
+      reassignRoomWorkAssignee: (context, input) => services.roomAgentDomainService.reassignRoomWorkAssignee(context, input)
+    },
+    "room.work.assignee.stop": {
+      stopRoomWorkAssignee: (context, input) => services.roomAgentDomainService.stopRoomWorkAssignee(context, input)
+    },
+    "room.work.comment.apply": {
+      applyRoomWorkComment: (context, input) => services.roomAgentDomainService.applyRoomWorkComment(context, input)
+    },
+    "room.work.comment.create": {
+      createRoomWorkComment: (context, input) => services.roomAgentDomainService.createRoomWorkComment(context, input)
+    },
+    "room.work.comment.reaction.set": {
+      setRoomWorkCommentReaction: (context, input) => services.roomAgentDomainService.setRoomWorkCommentReaction(context, input)
+    },
+    "room.work.create": {
+      createRoomWork: (context, input) => services.roomAgentDomainService.createRoomWork(context, input)
+    },
+    "room.work.list": readOnlyQueryPort<RoomWorkOperationPorts["room.work.list"]>({
+      listRoomWorks: (context, input) => services.roomAgentDomainService.listRoomWorks(context, input)
+    }),
+    "room.work.reply": {
+      replyToRoomWork: (context, input) => services.roomAgentDomainService.replyToRoomWork(context, input)
+    },
+    "room.work.stop": {
+      stopRoomWork: (context, input) => services.roomAgentDomainService.stopRoomWork(context, input)
+    },
+    "room.work.view": readOnlyQueryPort<RoomWorkOperationPorts["room.work.view"]>({
+      viewRoomWork: (context, input) => services.roomAgentDomainService.viewRoomWork(context, input)
+    })
+  };
+}
+
 export function createDomainOperationPorts(services: RuntimeDomainServices): DomainOperationPorts {
   const ports = {
     ...createArtifactDomainServicePorts(services),
@@ -195,12 +299,14 @@ export function createDomainOperationPorts(services: RuntimeDomainServices): Dom
     ...createWikiDomainServicePorts(services),
     ...createSearchDomainServicePorts(services),
     ...createRoomAgentDomainServicePorts(services),
+    ...createRoomWorkDomainServicePorts(services),
     ...createActivityHistoryDomainServicePorts(services),
     ...createResourceVersionDomainServicePorts(services),
     ...createWorkspaceContextDomainServicePorts(services),
     ...createHumanChangeRequestDomainServicePorts(services),
     ...createResourceTransferDomainServicePorts(services),
     ...createResourceRedactionDomainServicePorts(services),
+    ...createAgentBackendOperationPorts(),
     ...createOrganizationOperationPorts()
   };
   const missingQueryPorts = domainQueryIds.filter((id) => !(id in ports));

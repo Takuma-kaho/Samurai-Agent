@@ -190,6 +190,7 @@ function stablePrompt(locale: SupportedLocale): string {
     "Normal conversation must be plain natural language content, not JSON.",
     "Use tools only for state-changing or boundary-crossing intents.",
     "Use create_artifact only when the user asks to create a durable local artifact or draft.",
+    "Use subagent_delegate only when a bounded child assignment is needed for a specialist Agent already permitted in this Room. The tool receives only the target Agent, instruction, optional Server-issued attachments, and optional dependency assignment IDs; Room, Work, parent assignment, requester, and generation are server-bound.",
     "Use request_external_send when the user asks to send, publish, post, or otherwise affect an external channel.",
     "Use remember_topic only when the user explicitly asks you to remember a preference or reusable fact.",
     "You must not claim that external sends, publishing, deletion, or destructive actions were executed.",
@@ -481,6 +482,56 @@ const artifactParameters = requireDomainCommandEntry("artifact.create").input_sc
 const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
 const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
+/**
+ * Native delegation is intentionally narrower than the public Room-work
+ * command schema.  The admitted Run supplies Work, parent assignment, Room,
+ * requester, and generation; exposing any of those fields to the provider
+ * would let model output look like authority.  Attachments remain opaque
+ * Server-issued references and never contain local paths or file contents.
+ */
+const nativeDelegationParameters = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    agent_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: 512,
+      description: "ID of a specialist Agent that is already permitted to execute in the current Room."
+    },
+    instruction: {
+      type: "string",
+      minLength: 1,
+      maxLength: 1_000_000,
+      description: "The bounded instruction for the child assignment."
+    },
+    dependency_assignee_ids: {
+      type: "array",
+      maxItems: 100,
+      items: { type: "string", minLength: 1, maxLength: 512 },
+      description: "Optional IDs of assignments in the same Work that must complete first."
+    },
+    attachments: {
+      type: "array",
+      maxItems: 100,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", minLength: 1 },
+          id: { type: "string", minLength: 1 },
+          uri: { type: "string", minLength: 1 },
+          version: { type: "string", minLength: 1 },
+          label: { type: "string", minLength: 1 }
+        },
+        required: ["kind", "id", "uri"]
+      },
+      description: "Optional Server-issued resource references. Do not provide local paths or inline file data."
+    }
+  },
+  required: ["agent_id", "instruction"]
+} as const;
+
 function toolDefinitions(availableTools?: readonly string[]) {
   const definitions = [
     {
@@ -497,6 +548,11 @@ function toolDefinitions(availableTools?: readonly string[]) {
       name: "remember_topic",
       description: "Create a topic memory only when the user explicitly asks you to remember something.",
       parameters: rememberTopicParameters
+    },
+    {
+      name: "subagent_delegate",
+      description: "Create one bounded child assignment for a permitted specialist Agent in the current Room.",
+      parameters: nativeDelegationParameters
     }
   ] as const;
   if (availableTools === undefined) return definitions;
@@ -508,6 +564,7 @@ function domainCommandIdForProviderTool(toolName: string): string {
   if (toolName === "create_artifact") return "artifact.create";
   if (toolName === "request_external_send") return "external.send.prepare";
   if (toolName === "remember_topic") return "memory.topic.create";
+  if (toolName === "subagent_delegate") return "room.work.assignee.delegate";
   return toolName;
 }
 

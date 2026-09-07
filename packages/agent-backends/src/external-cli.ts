@@ -54,6 +54,8 @@ export interface ExternalCliBackendOptions {
   args?: string[];
   artifactMcpScript?: string;
   resumeArgs?: string[];
+  /** Grace period used for graceful process-group cancellation before SIGKILL. */
+  stopGraceMs?: number;
   capabilityProbeResults?: Array<Omit<BackendCapabilityStatus, "backend_id" | "checked_at"> & { checked_at?: string }>;
 }
 
@@ -68,6 +70,7 @@ export class ExternalCliBackend implements AgentBackend {
   private readonly args: string[];
   private readonly artifactMcpScript?: string;
   private readonly resumeArgs?: string[];
+  private readonly stopGraceMs: number;
   private readonly capabilityProbeResults: ExternalCliBackendOptions["capabilityProbeResults"];
   private readonly activeRuns = new Map<string, { child: ChildProcessWithoutNullStreams; cancelled: boolean; controller: AbortController }>();
   private liveVerification?: BackendLiveVerification;
@@ -81,6 +84,9 @@ export class ExternalCliBackend implements AgentBackend {
     this.args = options.args ?? [];
     this.artifactMcpScript = options.artifactMcpScript?.trim() || process.env.SAMURAI_ARTIFACT_MCP_SCRIPT?.trim() || undefined;
     this.resumeArgs = options.resumeArgs && options.resumeArgs.length > 0 ? options.resumeArgs : undefined;
+    this.stopGraceMs = options.stopGraceMs !== undefined && Number.isFinite(options.stopGraceMs)
+      ? Math.max(0, options.stopGraceMs)
+      : 2_000;
     this.sessionPolicy = { acquisition: "provider_event", resume: this.resumeArgs ? "native" : "unsupported" };
     this.resumeRun = this.resumeArgs ? (runId, input = {}) => this.runResumeCommand(runId, input) : undefined;
     this.capabilityProbeResults = options.capabilityProbeResults;
@@ -240,7 +246,8 @@ export class ExternalCliBackend implements AgentBackend {
             this.activeRuns.delete(input.run_id);
           }
         },
-        expectedBackendSessionId: input.backend_session_id
+        expectedBackendSessionId: input.backend_session_id,
+        stopGraceMs: this.stopGraceMs
       })) {
         yield event;
       }
@@ -252,7 +259,11 @@ export class ExternalCliBackend implements AgentBackend {
   async cancelRun(runId: string): Promise<BackendCancelResult> {
     const state = this.activeRuns.get(runId);
     if (!state) {
-      return { kind: "unsupported" };
+      // The active process registry is intentionally in-memory.  After a
+      // restart (or after this process never owned the run), there is no safe
+      // evidence that a remote process is stopped.  Never return a settled
+      // cancellation for this state.
+      return { kind: "unsupported", state: "unknown", reason: "active_run_not_tracked" };
     }
     state.cancelled = true;
     state.controller.abort();
@@ -346,7 +357,8 @@ export class ExternalCliBackend implements AgentBackend {
             this.activeRuns.delete(runId);
           }
         },
-        expectedBackendSessionId: backendSessionId
+        expectedBackendSessionId: backendSessionId,
+        stopGraceMs: this.stopGraceMs
       })) {
         yield event;
       }
@@ -372,6 +384,7 @@ interface CommandRunInput {
   isCancelled?: () => boolean;
   unregisterChild?: (child: ChildProcessWithoutNullStreams) => void;
   expectedBackendSessionId?: string;
+  stopGraceMs?: number;
 }
 
 async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendOutputEvent> {
@@ -457,7 +470,8 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
       registerChild: input.registerChild,
       markChildCancelled: input.markChildCancelled,
       isCancelled: input.isCancelled,
-      unregisterChild: input.unregisterChild
+      unregisterChild: input.unregisterChild,
+      stopGraceMs: input.stopGraceMs
     })) {
       if (processEvent.kind === "aborted_before_start") {
         yield cancelledBeforeStartEvent(input.label);
@@ -477,9 +491,19 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
 
     if (stdoutLineBuffer.trim()) parseLine(stdoutLineBuffer);
 
-    const close = closeEvent ?? { kind: "close" as const, exitCode: null, signal: null, stdout: "", stderr: "", cancelled: false };
-    const cancellationRequested = close.cancelled || input.isCancelled?.() === true || input.abortSignal?.aborted === true;
-    const cancellationConfirmed = cancellationRequested && (close.signal === "SIGTERM" || close.signal === "SIGKILL" || close.exitCode === 143 || close.exitCode === 0);
+    const close = closeEvent ?? {
+      kind: "close" as const,
+      exitCode: null,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      cancelled: false,
+      stop_requested: false,
+      stop_dispatch: { status: "not_requested" as const },
+      stop_confirmation: { status: "not_requested" as const }
+    };
+    const cancellationRequested = close.stop_requested || close.cancelled || input.isCancelled?.() === true || input.abortSignal?.aborted === true;
+    const cancellationConfirmed = cancellationRequested && close.stop_confirmation.status === "confirmed";
     const providerFailure = input.provider.processFailure?.(close.stderr);
     const failureCode = providerFailure?.code ?? "backend_failed";
     const failureMessage = providerFailure?.message ?? `${input.label} failed.`;
@@ -548,8 +572,6 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
       if (cancellationRequested && !providerTerminalBeforeCancellation && !terminalIsCompleted) {
         if (cancellationConfirmed) {
           yield { event_type: "run_failed", terminal_evidence: { kind: "cancelled", source: "process_exit" }, payload: { error_code: "backend_cancelled", message: `${input.label} was cancelled.`, reason: "cancelled", retryable: false, ...(close.exitCode !== null ? { exit_code: close.exitCode } : {}), ...(close.signal ? { signal: close.signal } : {}) } } satisfies BackendOutputEvent;
-        } else if (closeEvent) {
-          yield processFailure("backend_cancelled_process_exit", `${input.label} exited after cancellation was requested.`);
         } else {
           yield { event_type: "run_failed", terminal_evidence: { kind: "indeterminate", reason: "cancel_unconfirmed", providerStarted: true, mayHaveSideEffects: true }, payload: { error_code: "backend_cancel_unconfirmed", message: `${input.label} stop could not be confirmed.`, reason: "cancel_unconfirmed", retryable: false } } satisfies BackendOutputEvent;
         }
@@ -567,8 +589,6 @@ async function* runCommandEvents(input: CommandRunInput): AsyncIterable<BackendO
     if (cancellationRequested) {
       if (cancellationConfirmed) {
         yield { event_type: "run_failed", terminal_evidence: { kind: "cancelled", source: "process_exit" }, payload: { error_code: "backend_cancelled", message: `${input.label} was cancelled.`, reason: "cancelled", retryable: false, ...(close.exitCode !== null ? { exit_code: close.exitCode } : {}), ...(close.signal ? { signal: close.signal } : {}) } } satisfies BackendOutputEvent;
-      } else if (closeEvent) {
-        yield processFailure("backend_cancelled_process_exit", `${input.label} exited after cancellation was requested.`);
       } else {
         yield { event_type: "run_failed", terminal_evidence: { kind: "indeterminate", reason: "cancel_unconfirmed", providerStarted, mayHaveSideEffects: providerStarted }, payload: { error_code: "backend_cancel_unconfirmed", message: `${input.label} stop could not be confirmed.`, reason: "cancel_unconfirmed", retryable: false } } satisfies BackendOutputEvent;
       }

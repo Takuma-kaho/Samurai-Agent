@@ -162,8 +162,6 @@ export class RunControl {
     if (run.status !== "waiting_for_backend_input") throw new Error(`run_not_waiting:${runId}`);
     const safeInput = validateResumeInput(input);
     const backend = this.backendFor(run.backend_id);
-    const recordedResume = await this.recordResumeInput(run, safeInput);
-    run = recordedResume;
     if (!backend?.resumeRun || backend.sessionPolicy.resume !== "native") {
       const failure = { code: "backend_resume_unsupported", message: "Backend does not support resume.", retryable: false, causeCategory: "configuration" as const };
       const pending = await this.prepareTerminal(run, { kind: "not_started", source: "preflight_rejection" }, failure, false, undefined, "resume_unsupported");
@@ -175,6 +173,10 @@ export class RunControl {
       return this.commitPending(pending, undefined, failure);
     }
 
+    // Only record a submitted input after the Backend has passed its resume
+    // capability and Session checks. An unsupported answer must not look like
+    // an accepted or delivered approval/steer request.
+    run = await this.recordResumeInput(run, safeInput);
     try {
       const backendInput = { ...safeInput, backend_session_id: run.backend_session_id };
       const prepared = await this.prepareResumeInput?.({ run, resumeInput: safeInput });
@@ -202,7 +204,10 @@ export class RunControl {
   async sync(runId: string): Promise<BackendRunRecord> {
     const run = await this.requireRun(runId);
     requireSessionBoundRun(run);
-    if (hasSettledOutcome(run)) return run;
+    // An unknown outcome is a durable uncertainty marker, not a final
+    // success/failure.  An explicit stream sync is allowed to reconcile a
+    // late terminal event; it must never start a fresh turn.
+    if (hasFinalOutcome(run)) return run;
     const backend = this.backendFor(run.backend_id);
     if (!backend?.streamEvents) {
       const diagnostic = await this.eventJournal.appendCanonicalEvent({
@@ -383,6 +388,10 @@ function requireSessionBoundRun(run: BackendRunRecord): asserts run is BackendRu
 
 function hasSettledOutcome(run: BackendRunRecord): boolean {
   return run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "outcome_unknown";
+}
+
+function hasFinalOutcome(run: BackendRunRecord): boolean {
+  return run.status === "completed" || run.status === "failed" || run.status === "cancelled";
 }
 
 function isPreExternalPhase(phase: BackendRunRecord["phase"]): boolean {

@@ -19,6 +19,20 @@ function makeExecutionJobWorker() {
   };
 }
 
+function makeRoomWorkWorker() {
+  return {
+    runTick: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined)
+  };
+}
+
+function makeRoomWorkStopWorker() {
+  return {
+    runStopTick: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined)
+  };
+}
+
 const context = { workspaceId: "workspace_one", accountId: "account_one" };
 
 describe("WorkspaceWorkerSupervisor", () => {
@@ -112,6 +126,84 @@ describe("WorkspaceWorkerSupervisor", () => {
     expect(order).toEqual(["execution", "maintenance"]);
 
     await supervisor.stop();
+    vi.useRealTimers();
+  });
+
+  it("keeps normal Room work in its own lane before Completion maintenance", async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner();
+    const maintenance = makeMaintenance();
+    const roomWorkWorker = makeRoomWorkWorker();
+    const order: string[] = [];
+    vi.mocked(roomWorkWorker.runTick).mockImplementation(async () => {
+      order.push("room_work");
+    });
+    vi.mocked(maintenance.runTick).mockImplementation(async () => {
+      order.push("maintenance");
+    });
+    const supervisor = new WorkspaceWorkerSupervisor({
+      learningRunner: runner,
+      maintenance,
+      roomWorkWorker,
+      resolveContext: async () => ({ state: "enabled", context }),
+      intervalMs: 10_000
+    });
+
+    await supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(roomWorkWorker.runTick).toHaveBeenCalledTimes(1);
+    expect(roomWorkWorker.runTick.mock.calls[0]?.[0]).toMatchObject(context);
+    expect(roomWorkWorker.runTick.mock.calls[0]?.[1]).toMatchObject({
+      workerId: expect.stringMatching(/^workspace_worker_/),
+      maxRuns: 100,
+      signal: expect.any(AbortSignal)
+    });
+    expect(order).toEqual(["room_work", "maintenance"]);
+
+    await supervisor.stop();
+    expect(roomWorkWorker.close).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("keeps the Room-work stop lane running while launch waits for an external Run", async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner();
+    const maintenance = makeMaintenance();
+    const roomWorkWorker = makeRoomWorkWorker();
+    const roomWorkStopWorker = makeRoomWorkStopWorker();
+    let releaseLaunch!: () => void;
+    vi.mocked(roomWorkWorker.runTick).mockImplementation(() => new Promise<void>((resolve) => {
+      releaseLaunch = resolve;
+    }));
+    const supervisor = new WorkspaceWorkerSupervisor({
+      learningRunner: runner,
+      maintenance,
+      roomWorkWorker,
+      roomWorkStopWorker,
+      resolveContext: async () => ({ state: "enabled", context }),
+      intervalMs: 1_000
+    });
+
+    await supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(roomWorkWorker.runTick).toHaveBeenCalledTimes(1);
+    expect(roomWorkStopWorker.runStopTick).toHaveBeenCalledTimes(1);
+    expect(roomWorkStopWorker.runStopTick.mock.calls[0]?.[0]).toMatchObject(context);
+    expect(roomWorkStopWorker.runStopTick.mock.calls[0]?.[1]).toMatchObject({
+      workerId: expect.stringMatching(/^workspace_worker_/),
+      maxRuns: 100,
+      signal: expect.any(AbortSignal)
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(roomWorkStopWorker.runStopTick).toHaveBeenCalledTimes(2);
+    expect(roomWorkWorker.runTick).toHaveBeenCalledTimes(1);
+
+    releaseLaunch();
+    await vi.advanceTimersByTimeAsync(0);
+    await supervisor.stop();
+    expect(roomWorkStopWorker.close).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
 

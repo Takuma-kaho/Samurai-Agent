@@ -620,6 +620,74 @@ describe("agent backend registry", () => {
     expect(events.at(-1)?.payload.signal).toBe("SIGKILL");
   });
 
+  it("does not report a successful cancellation for a run lost across backend restart", async () => {
+    const restarted = new ExternalCliBackend({
+      id: "restarted-cli",
+      kind: "external",
+      label: "Restarted CLI"
+    });
+
+    await expect(restarted.cancelRun("run-lost-after-restart")).resolves.toEqual({
+      kind: "unsupported",
+      state: "unknown",
+      reason: "active_run_not_tracked"
+    });
+  });
+
+  it.skipIf(process.platform === "win32")("stops a spawned child through the owned POSIX process group", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-process-group-"));
+    roots.push(root);
+    const executable = path.join(root, "process-group-parent");
+    const childMarker = path.join(root, "child-stopped");
+    const childPidFile = path.join(root, "child-pid");
+    const childReady = path.join(root, "child-ready");
+    const childScript = [
+      "const fs = require('node:fs');",
+      "const marker = process.argv.at(-1);",
+      "process.on('SIGTERM', () => { fs.writeFileSync(marker, 'stopped'); process.exit(143); });",
+      `fs.writeFileSync(${JSON.stringify(childReady)}, 'ready');`,
+      "setInterval(() => {}, 1000);"
+    ].join("\n");
+    await writeFile(executable, [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "const { spawn } = require('node:child_process');",
+      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}, ${JSON.stringify(childMarker)}], { stdio: 'ignore' });`,
+      `fs.writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));`,
+      `const readyTimer = setInterval(() => { if (fs.existsSync(${JSON.stringify(childReady)})) { clearInterval(readyTimer); process.stdout.write(JSON.stringify({ event_type: 'run_started', payload: {} }) + '\\n'); process.stdout.write(JSON.stringify({ event_type: 'text_delta', payload: { text: 'READY' } }) + '\\n'); } }, 5);`
+    ].join("\n"), "utf8");
+    await chmod(executable, 0o755);
+
+    const backend = new ExternalCliBackend({
+      id: "process-group-cli",
+      kind: "external",
+      label: "Process Group CLI",
+      command: executable,
+      stopGraceMs: 500
+    });
+    const iterator = backend.runTurn(backendInput("run-process-group"))[Symbol.asyncIterator]();
+    try {
+      let ready = false;
+      while (!ready) {
+        const next = await iterator.next();
+        if (next.done) break;
+        ready = next.value.event_type === "text_delta" && next.value.payload.text === "READY";
+      }
+      expect(ready).toBe(true);
+      await waitFor(() => fileExists(childPidFile));
+
+      await expect(backend.cancelRun("run-process-group")).resolves.toEqual({ kind: "requested" });
+      const events = await collectEvents(iterator as AsyncIterable<BackendOutputEvent>);
+
+      expect(events.at(-1)?.terminal_evidence).toEqual({ kind: "cancelled", source: "process_exit" });
+      expect(await fileExists(childMarker)).toBe(true);
+      const childPid = Number.parseInt(await readFile(childPidFile, "utf8"), 10);
+      await waitFor(() => !isProcessAlive(childPid));
+    } finally {
+      await cleanupCliFixture(backend, iterator, childPidFile);
+    }
+  });
+
   it("propagates an in-flight AbortSignal to the owned child and waits for close", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-abort-running-"));
     roots.push(root);
@@ -1591,6 +1659,16 @@ async function collectEvents(events: AsyncIterable<BackendOutputEvent>): Promise
 
 async function fileExists(filePath: string): Promise<boolean> {
   return access(filePath).then(() => true, () => false);
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
+  }
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {

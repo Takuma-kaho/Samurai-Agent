@@ -149,6 +149,21 @@ export interface AgentBackendStatus {
   reason?: string;
 }
 
+/**
+ * Public Domain Query projection used by the Native Agent settings surface.
+ * Runtime capabilities, session policy, metadata, credentials, and diagnostics
+ * intentionally do not belong to this renderer-facing DTO.
+ */
+export interface AgentBackendAvailability {
+  id: string;
+  kind: "mock" | "samurai_native" | "claude_code" | "codex" | "external";
+  label: string;
+  configured: boolean;
+  enabled: boolean;
+  connection_state: "ready" | "unconfigured" | "disabled" | "degraded" | "unverified";
+  reason?: string;
+}
+
 export type DomainCommandInputSource =
   | "surface_operation"
   | "provider_tool_call"
@@ -429,10 +444,257 @@ export interface DesktopWorkspaceRoom {
   parentRoomId?: string;
   name: string;
   version: number;
+  /** Public Room kind; the internal continuation Session is never exposed. */
+  kind?: "normal" | "agent_dm";
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
+  /** State of the configured default Agent, when the Server includes it. */
+  defaultAgentEnabled?: boolean;
+  defaultAgentCanExecute?: boolean;
   /** Capability for this Room only; it does not grant access to descendants. */
   canManage?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Minimal authorized Agent directory used by the Room work surface. */
+export interface DesktopWorkspaceAgent {
+  id: string;
+  workspaceId: string;
+  displayName: string;
+  role?: string;
+  backendId?: string;
+  enabled: boolean;
+  status?: string;
+  canExecute?: boolean;
+  version?: number;
+  /** Only present after an explicit agent.view/editor request. */
+  instructions?: string;
+  description?: string;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface DesktopWorkspaceRoomAgentMember {
+  id: string;
+  roomId: string;
+  agentId: string;
+  canView: boolean;
+  canEdit: boolean;
+  canExecute: boolean;
+  version: number;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  removed: boolean;
+}
+
+export interface DesktopWorkspaceRoomAgentMemberList {
+  roomId: string;
+  agents: DesktopWorkspaceRoomAgentMember[];
+}
+
+/** Public Room work projections.  Session and Backend Session identifiers are
+ * intentionally absent: the Room/Work IDs are the only renderer references. */
+export type DesktopWorkspaceRoomWorkStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "stopping"
+  | "cancelled"
+  | "outcome_unknown";
+
+export type DesktopWorkspaceRoomWorkAssigneeStatus =
+  | "queued"
+  | "ready"
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "stopping"
+  | "cancelled"
+  | "outcome_unknown";
+export type DesktopWorkspaceRoomWorkInstructionKind = "initial" | "reply" | "comment_apply" | "delegated";
+export type DesktopWorkspaceRoomWorkInstructionStatus = "pending" | "accepted" | "queued" | "delivered" | "applied" | "failed" | "rejected";
+export type DesktopWorkspaceRoomWorkControlAction = "stop" | "assignee.stop" | "assignee.reassign";
+export type DesktopWorkspaceRoomWorkControlStatus = "accepted" | "pending" | "requested" | "running" | "completed" | "confirmed" | "failed" | "unconfirmed" | "rejected";
+
+export interface DesktopWorkspaceRoomWorkAssignee {
+  id: string;
+  workId: string;
+  agentId: string;
+  parentAssigneeId?: string;
+  status: DesktopWorkspaceRoomWorkAssigneeStatus;
+  instructionVersion: number;
+  generation: number;
+  agentConfigurationVersion?: number;
+  attempt?: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkInstruction {
+  id: string;
+  workId: string;
+  assigneeId?: string;
+  kind: DesktopWorkspaceRoomWorkInstructionKind;
+  instruction: string;
+  attachments: ResourceRef[];
+  version: number;
+  generation: number;
+  status: DesktopWorkspaceRoomWorkInstructionStatus;
+  acceptedAt?: string;
+  deliveredAt?: string;
+  appliedAt?: string;
+  createdBy: string;
+  sourceCommentId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkComment {
+  id: string;
+  workId: string;
+  authorId: string;
+  body: string;
+  attachments: ResourceRef[];
+  version: number;
+  reactionCount?: number;
+  appliedInstructionIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkControl {
+  id: string;
+  operationId?: string;
+  workId: string;
+  assigneeId?: string;
+  targetAgentId?: string;
+  action: DesktopWorkspaceRoomWorkControlAction;
+  status: DesktopWorkspaceRoomWorkControlStatus;
+  generation: number;
+  version: number;
+  stopRequestStatus?: "requested" | "accepted" | "rejected";
+  terminalStatus?: "pending" | "confirmed" | "unconfirmed";
+  unconfirmedAssigneeIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface DesktopWorkspaceRoomWork {
+  id: string;
+  roomId: string;
+  objectiveId?: string;
+  requesterId: string;
+  frontAgentId?: string;
+  defaultAgentId: string;
+  defaultAgentVersion?: number;
+  title: string;
+  objective: string;
+  completionCriteria?: string[];
+  kind?: "human";
+  status: DesktopWorkspaceRoomWorkStatus;
+  stopState?: "none" | "requested" | "confirmed" | "unconfirmed";
+  instructionVersion: number;
+  generation: number;
+  version: number;
+  assignees: DesktopWorkspaceRoomWorkAssignee[];
+  executionReservations?: DesktopWorkspaceRoomWorkExecutionReservation[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkExecutionReservation {
+  id: string;
+  workId: string;
+  assignmentId: string;
+  roomId: string;
+  generation: number;
+  status: "reserved" | "claimed" | "released" | "cancelled";
+  scheduledAt: string;
+  claimedAt?: string;
+  releasedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkReaction {
+  id: string;
+  workId: string;
+  commentId: string;
+  reaction: "like";
+  enabled: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkView extends DesktopWorkspaceRoomWork {
+  instructions: DesktopWorkspaceRoomWorkInstruction[];
+  comments: DesktopWorkspaceRoomWorkComment[];
+  reactions: DesktopWorkspaceRoomWorkReaction[];
+  controls: DesktopWorkspaceRoomWorkControl[];
+}
+
+export interface DesktopWorkspaceRoomDefaultAgent {
+  roomId: string;
+  agentId: string;
+  agentVersion: number;
+  enabled: boolean;
+  canExecute: boolean;
+  version: number;
+  updatedAt: string;
+}
+
+/** DM metadata only.  The DM body is obtained through the normal Room work
+ * APIs after the server has checked the caller's explicit membership. */
+export interface DesktopWorkspaceAgentDm {
+  id: string;
+  roomId: string;
+  workspaceId: string;
+  kind: "agent_dm";
+  agentId: string;
+  agentVersion: number;
+  version: number;
+  visibility?: "private";
+  membershipMode?: "explicit_participants";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopWorkspaceRoomWorkListResult {
+  works: DesktopWorkspaceRoomWork[];
+  /** Echoed request scope so a late response cannot be rendered in another Room. */
+  roomId?: string;
+  nextCursor?: string;
+}
+
+export interface DesktopWorkspacePublicEvent {
+  eventId: string;
+  eventType: string;
+  eventVersion: string;
+  cursor: string;
+  occurredAt: string;
+  actor: { kind: "human" | "agent" | "system"; id?: string };
+  scope: { workspaceId?: string; roomId?: string };
+  resources: ResourceRef[];
+  operationId?: string;
+  correlationId?: string;
+  payload: Record<string, JsonValue>;
+}
+
+export interface DesktopWorkspacePublicEventPage {
+  events: DesktopWorkspacePublicEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
 }
 
 export interface DesktopWorkspaceRoomMembership {
@@ -529,6 +791,11 @@ export interface DesktopWorkspaceRealtimeEvent {
   connectionId?: string;
   roomId?: string;
   kind?: string;
+  eventId?: string;
+  eventVersion?: string;
+  cursor?: string;
+  operationId?: string;
+  correlationId?: string;
 }
 
 export interface WorkspaceAttachmentUploadResult {
@@ -538,6 +805,8 @@ export interface WorkspaceAttachmentUploadResult {
     sha256: string;
     size: number;
   };
+  /** Server-issued reference; local paths are never accepted by Room work APIs. */
+  resource_ref: ResourceRef;
   replayed?: boolean;
 }
 
@@ -621,7 +890,32 @@ declare global {
       getWorkspaceSettings?: () => Promise<SettingsRecord>;
       patchWorkspaceSettings?: (input: { patch: Partial<Omit<SettingsRecord, "updated_at">>; operationId: string }) => Promise<{ settings: SettingsRecord; replayed?: boolean }>;
       listWorkspaceRooms?: () => Promise<{ rooms: DesktopWorkspaceRoom[] }>;
-      listWorkspaceAgentBackends?: () => Promise<AgentBackendStatus[]>;
+      /** Authorized minimal Agent directory; instructions and credentials never cross this seam. */
+      listWorkspaceAgents?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<{ agents: DesktopWorkspaceAgent[] }>;
+      viewWorkspaceAgent?: (input: { agentId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgent>;
+      createWorkspaceAgent?: (input: { name: string; role: string; instructions: string; backendId: string; enabled: boolean; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgent & { replayed?: boolean }>;
+      patchWorkspaceAgent?: (input: { agentId: string; name?: string; role?: string; instructions?: string; enabled?: boolean; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgent & { replayed?: boolean }>;
+      bindWorkspaceAgentBackend?: (input: { agentId: string; backendId: string; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgent & { replayed?: boolean }>;
+      listWorkspaceRoomAgentMembers?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomAgentMemberList>;
+      setWorkspaceRoomAgentPermission?: (input: { roomId: string; agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomAgentMember & { replayed?: boolean }>;
+      removeWorkspaceRoomAgent?: (input: { roomId: string; agentId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomAgentMember & { replayed?: boolean }>;
+      /** Room work API: the renderer carries Room/Work IDs, never Session IDs. */
+      listWorkspaceRoomWorks?: (input: { roomId: string; status?: DesktopWorkspaceRoomWorkStatus; cursor?: string; limit?: number }) => Promise<DesktopWorkspaceRoomWorkListResult>;
+      getWorkspaceRoomWork?: (input: { roomId: string; workId: string }) => Promise<DesktopWorkspaceRoomWorkView>;
+      createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId: string }) => Promise<DesktopWorkspaceRoomWork & { replayed?: boolean }>;
+      replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
+      createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkComment & { replayed?: boolean }>;
+      applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; assigneeId?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
+      reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction?: "like"; enabled?: boolean; expectedVersion?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkReaction & { replayed?: boolean }>;
+      stopWorkspaceRoomWork?: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>;
+      stopWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>;
+      reassignWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>;
+      /** Name used by the Native Room work adapter. */
+      reassignWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>;
+      setWorkspaceRoomDefaultAgent?: (input: { roomId: string; agentId: string; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomDefaultAgent & { replayed?: boolean }>;
+      openWorkspaceAgentDm?: (input: { agentId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgentDm & { replayed?: boolean }>;
+      listWorkspaceEvents?: (input: { roomId?: string; afterCursor?: string; limit?: number }) => Promise<DesktopWorkspacePublicEventPage>;
+      listWorkspaceAgentBackends?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<AgentBackendAvailability[]>;
       getWorkspaceSurfaceContract?: (source?: DomainCommandInputSource) => Promise<SurfaceContractPayload>;
       listWorkspaceChatSessions?: () => Promise<SessionRecord[]>;
       createWorkspaceChatSession?: (input: { roomId: string; title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale; operationId: string }) => Promise<SessionRecord>;
@@ -642,6 +936,7 @@ declare global {
         contentBase64: string;
         expectedVersion: number;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<WorkspaceAttachmentUploadResult>;
       listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
       getWorkspaceCompletionResource?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceDetail>;
@@ -881,15 +1176,87 @@ export const api = {
     if (bridge?.listWorkspaceChatSessions) return bridge.listWorkspaceChatSessions();
     return workspaceRequestRequired<SessionRecord[]>("chat.session.list");
   },
+  listWorkspaceAgents() {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceAgents) return bridge.listWorkspaceAgents();
+    return workspaceRequestRequired<{ agents: DesktopWorkspaceAgent[] }>("agent.list");
+  },
+  listRoomWorks(input: { roomId: string; status?: DesktopWorkspaceRoomWorkStatus; cursor?: string; limit?: number }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceRoomWorks) return bridge.listWorkspaceRoomWorks(input);
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkListResult>("room.work.list");
+  },
+  getRoomWork(input: { roomId: string; workId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceRoomWork) return bridge.getWorkspaceRoomWork(input);
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkView>("room.work.view");
+  },
+  createRoomWork(input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.createWorkspaceRoomWork) return bridge.createWorkspaceRoomWork({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWork & { replayed?: boolean }>("room.work.create");
+  },
+  replyRoomWork(input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.replyWorkspaceRoomWork) return bridge.replyWorkspaceRoomWork({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>("room.work.reply");
+  },
+  createRoomWorkComment(input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.createWorkspaceRoomWorkComment) return bridge.createWorkspaceRoomWorkComment({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkComment & { replayed?: boolean }>("room.work.comment.create");
+  },
+  reactRoomWorkComment(input: { roomId: string; workId: string; commentId: string; reaction?: "like"; enabled?: boolean; expectedVersion?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.reactWorkspaceRoomWorkComment) return bridge.reactWorkspaceRoomWorkComment({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkReaction & { replayed?: boolean }>("room.work.comment.reaction.set");
+  },
+  applyRoomWorkComment(input: { roomId: string; workId: string; commentId: string; commentVersion: number; assigneeId?: string; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.applyWorkspaceRoomWorkComment) return bridge.applyWorkspaceRoomWorkComment({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>("room.work.comment.apply");
+  },
+  stopRoomWork(input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.stopWorkspaceRoomWork) return bridge.stopWorkspaceRoomWork({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>("room.work.stop");
+  },
+  stopRoomWorkAssignee(input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.stopWorkspaceRoomWorkAssignee) return bridge.stopWorkspaceRoomWorkAssignee({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>("room.work.assignee.stop");
+  },
+  reassignRoomWork(input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.reassignWorkspaceRoomWorkAssignee) return bridge.reassignWorkspaceRoomWorkAssignee({ ...input, operationId });
+    if (bridge?.reassignWorkspaceRoomWork) return bridge.reassignWorkspaceRoomWork({ ...input, operationId });
+    return workspaceRequestRequired<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>("room.work.assignee.reassign");
+  },
+  setRoomDefaultAgent(input: { roomId: string; agentId: string; expectedVersion?: number; operationId?: string; target?: DesktopWorkspaceTarget }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.setWorkspaceRoomDefaultAgent) return bridge.setWorkspaceRoomDefaultAgent({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceRoomDefaultAgent & { replayed?: boolean }>("room.default_agent.set");
+  },
+  openAgentDm(input: { agentId: string; operationId?: string; target?: DesktopWorkspaceTarget }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.openWorkspaceAgentDm) return bridge.openWorkspaceAgentDm({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
+    return workspaceRequestRequired<DesktopWorkspaceAgentDm & { replayed?: boolean }>("agent.dm.open");
+  },
+  listWorkspaceEvents(input: { roomId?: string; afterCursor?: string; limit?: number } = {}) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceEvents) return bridge.listWorkspaceEvents(input);
+    return workspaceRequestRequired<DesktopWorkspacePublicEventPage>("workspace.events.list");
+  },
   getSession(sessionId: string) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.getWorkspaceChatSession) return bridge.getWorkspaceChatSession({ sessionId });
     return workspaceRequestRequired<SessionDetail>("chat.session.get");
   },
-  listAgentBackends() {
+  listAgentBackends(input?: { target?: DesktopWorkspaceTarget }) {
     const bridge = activeWorkspaceBridge();
-    if (bridge?.listWorkspaceAgentBackends) return bridge.listWorkspaceAgentBackends();
-    return workspaceRequestRequired<AgentBackendStatus[]>("agent-backends.list");
+    if (bridge?.listWorkspaceAgentBackends) return bridge.listWorkspaceAgentBackends(input);
+    return workspaceRequestRequired<AgentBackendAvailability[]>("agent-backends.list");
   },
   getSurfaceContract(source?: DomainCommandInputSource) {
     const bridge = activeWorkspaceBridge();
@@ -1030,6 +1397,7 @@ export const api = {
     contentBase64: string;
     expectedVersion: number;
     operationId: string;
+    target?: DesktopWorkspaceTarget;
   }) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.writeWorkspaceAttachment) return bridge.writeWorkspaceAttachment(input);

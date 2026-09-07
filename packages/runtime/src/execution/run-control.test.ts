@@ -47,6 +47,7 @@ describe("RunControl", () => {
     });
     expect(JSON.stringify(result.metadata)).not.toContain("must-not-persist");
     expect(result.metadata).not.toHaveProperty("resume_input");
+    expect(store.events.some((event) => event.event_type === "backend_native_input_submitted")).toBe(false);
   });
 
   it("uses the same typed evidence path for stream sync", async () => {
@@ -232,6 +233,35 @@ describe("RunControl", () => {
     expect(result).toBe(existing);
     expect(cancelCalls).toBe(0);
     expect(result.phase).toBe("settled");
+  });
+
+  it("reconciles a late terminal event for an unknown outcome without retrying the turn", async () => {
+    const store = new ControlStore(run("outcome_unknown", "settled"));
+    let streamSyncCalls = 0;
+    let turnCalls = 0;
+    const backend = backendWith({
+      runTurn: () => {
+        turnCalls += 1;
+        return eventsOf();
+      },
+      streamEvents: () => {
+        streamSyncCalls += 1;
+        return eventsOf({
+          event_type: "run_completed",
+          terminal_evidence: { kind: "completed", source: "provider_terminal_response" },
+          payload: { output_summary: "confirmed after cancellation timeout" },
+          source_event_id: "late-terminal-confirmation"
+        });
+      }
+    });
+    const control = controlFor(store, backend);
+
+    const result = await control.sync("run-1");
+
+    expect(result).toMatchObject({ status: "completed", phase: "settled" });
+    expect(streamSyncCalls).toBe(1);
+    expect(turnCalls).toBe(0);
+    expect(store.events.filter((event) => event.source_event_id === "late-terminal-confirmation")).toHaveLength(1);
   });
 
   it("sanitizes a thrown cancel error before persisting failure metadata", async () => {

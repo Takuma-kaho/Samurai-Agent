@@ -6,7 +6,18 @@ import {
   type AgentRecord,
   type RoomRecord
 } from "@samurai-agent/core-schemas";
-import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
+import type {
+  AgentDm,
+  RoomDefaultAgent,
+  RoomWork,
+  RoomWorkAssignee,
+  RoomWorkComment,
+  RoomWorkControl,
+  RoomWorkInstruction,
+  RoomWorkReaction,
+  RoomWorkView,
+  TrustedDomainContext
+} from "@samurai-agent/domain-operations";
 import type {
   AgentWorkspacePermissionRecord,
   ResourceAccessBoundaryRecord,
@@ -24,6 +35,111 @@ export type RoomAgentStorePort = RuntimeRoomAgentPort;
 export interface RoomParticipantList {
   humans: RoomMemberRecord[];
   agents: RoomAgentPermissionRecord[];
+}
+
+/**
+ * A current-membership snapshot used by the human-work control policy.
+ *
+ * This is intentionally a small, persistence-neutral shape.  The policy
+ * never consumes Workspace role alone: both the actor and the original
+ * requester must still have current Room membership.
+ */
+export interface HumanWorkMembershipSnapshot {
+  participantId: string;
+  role: RoomHumanRole;
+  removedAt?: string;
+}
+
+export interface HumanWorkControlPolicyInput {
+  actorParticipantId: string;
+  requesterParticipantId: string;
+  actorWorkspaceMembership?: HumanWorkMembershipSnapshot;
+  requesterWorkspaceMembership?: HumanWorkMembershipSnapshot;
+  actorRoomMembership?: HumanWorkMembershipSnapshot;
+  requesterRoomMembership?: HumanWorkMembershipSnapshot;
+}
+
+export interface HumanWorkControlPolicyDecision {
+  allowed: boolean;
+  reason:
+    | "allowed"
+    | "workspace_membership_required"
+    | "requester_membership_required"
+    | "room_membership_required"
+    | "room_role_denied";
+}
+
+/**
+ * Pure policy for stopping/reassigning human Room work.
+ *
+ * The requester is not re-authorized for execution here.  A current
+ * requester membership is only the continuity/control precondition; the
+ * Owner/Admin exception is still based on an explicit current Room role.
+ */
+export function evaluateHumanWorkControlPolicy(input: HumanWorkControlPolicyInput): HumanWorkControlPolicyDecision {
+  const current = (membership: HumanWorkMembershipSnapshot | undefined, participantId: string): boolean => Boolean(
+    membership
+      && !membership.removedAt
+      && membership.participantId === participantId
+  );
+  const actorRoomMembership = input.actorRoomMembership;
+  if (!current(input.actorWorkspaceMembership, input.actorParticipantId)) {
+    return { allowed: false, reason: "workspace_membership_required" };
+  }
+  if (!current(input.requesterWorkspaceMembership, input.requesterParticipantId)) {
+    return { allowed: false, reason: "requester_membership_required" };
+  }
+  if (!actorRoomMembership || !current(actorRoomMembership, input.actorParticipantId)) {
+    return { allowed: false, reason: "room_membership_required" };
+  }
+  if (!current(input.requesterRoomMembership, input.requesterParticipantId)) {
+    return { allowed: false, reason: "requester_membership_required" };
+  }
+  if (input.actorParticipantId === input.requesterParticipantId) {
+    return { allowed: true, reason: "allowed" };
+  }
+  if (actorRoomMembership.role === "owner" || actorRoomMembership.role === "admin") {
+    return { allowed: true, reason: "allowed" };
+  }
+  return { allowed: false, reason: "room_role_denied" };
+}
+
+export function assertHumanWorkControlPolicy(input: HumanWorkControlPolicyInput): HumanWorkControlPolicyDecision {
+  const decision = evaluateHumanWorkControlPolicy(input);
+  if (!decision.allowed) throw new Error(`human_work_control_denied:${decision.reason}`);
+  return decision;
+}
+
+/** Runtime can inject this pure policy as a testable port without coupling it to a Store. */
+export interface HumanWorkControlPolicyPort {
+  evaluate(input: HumanWorkControlPolicyInput): HumanWorkControlPolicyDecision;
+  assert(input: HumanWorkControlPolicyInput): HumanWorkControlPolicyDecision;
+}
+
+export const humanWorkControlPolicyPort: HumanWorkControlPolicyPort = Object.freeze({
+  evaluate: evaluateHumanWorkControlPolicy,
+  assert: assertHumanWorkControlPolicy
+});
+
+/**
+ * Human-work operations are Server/Store-owned.  Runtime only exposes the
+ * adapter boundary; it does not create a second aggregate or route these
+ * calls through the skill-optimization worker.
+ */
+interface HumanWorkStoreAdapter {
+  openAgentDm?(context: TrustedDomainContext, input: { agentId: string }): Promise<AgentDm>;
+  setRoomDefaultAgent?(context: TrustedDomainContext, input: { roomId: string; agentId: string; expectedVersion?: number }): Promise<RoomDefaultAgent>;
+  createRoomWork?(context: TrustedDomainContext, input: { roomId: string; instruction?: string; attachments: unknown[]; agentId?: string }): Promise<RoomWork>;
+  listRoomWorks?(context: TrustedDomainContext, input: { roomId: string; status?: RoomWork["status"]; cursor?: string; limit: number }): Promise<RoomWork[]>;
+  viewRoomWork?(context: TrustedDomainContext, input: { roomId: string; workId: string }): Promise<RoomWorkView>;
+  replyToRoomWork?(context: TrustedDomainContext, input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments: unknown[]; expectedVersion?: number; expectedGeneration?: number }): Promise<RoomWorkInstruction>;
+  createRoomWorkComment?(context: TrustedDomainContext, input: { roomId: string; workId: string; body?: string; attachments: unknown[]; expectedVersion?: number }): Promise<RoomWorkComment>;
+  applyRoomWorkComment?(context: TrustedDomainContext, input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string }): Promise<RoomWorkInstruction>;
+  setRoomWorkCommentReaction?(context: TrustedDomainContext, input: { roomId: string; workId: string; commentId: string; reaction: "like"; enabled: boolean; expectedVersion?: number }): Promise<RoomWorkReaction>;
+  stopRoomWork?(context: TrustedDomainContext, input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number }): Promise<RoomWorkControl>;
+  stopRoomWorkAssignee?(context: TrustedDomainContext, input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number }): Promise<RoomWorkControl>;
+  reassignRoomWorkAssignee?(context: TrustedDomainContext, input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number }): Promise<RoomWorkAssignee>;
+  getHumanWorkRequester?(context: TrustedDomainContext, input: { roomId: string; workId: string }): Promise<string | undefined>;
 }
 
 /**
@@ -136,6 +252,188 @@ export class RoomAgentDomainService {
     await this.authorization.assertRoom(this.principal(context), roomId, "read");
     const [humans, agents] = await Promise.all([this.store.listRoomMembers(roomId), this.store.listRoomAgents(roomId)]);
     return { humans, agents };
+  }
+
+  /**
+   * Human work is a Workspace Server aggregate.  These methods only perform
+   * the Runtime-side authorization and forward the already validated input;
+   * no Objective/Session/work row is created in this service.
+   */
+  async createRoomWork(context: TrustedDomainContext, input: {
+    roomId: string;
+    instruction?: string;
+    attachments: unknown[];
+    agentId?: string;
+  }): Promise<RoomWork> {
+    const principal = this.principal(context);
+    await this.authorization.assertRoom(principal, input.roomId, "execute");
+    if (input.agentId) {
+      const delegated = delegatedParticipant(principal);
+      if (delegated.kind !== "human" && delegated.kind !== "agent") {
+        throw this.requestError("forbidden", "room_human_participant_required");
+      }
+      await this.authorization.assertAgentExecution({
+        requesterParticipantId: delegated.kind === "human" ? delegated.participantId : delegated.requestedByParticipantId,
+        roomId: input.roomId,
+        agentId: input.agentId
+      });
+    }
+    const store = this.humanWorkStore();
+    if (!store.createRoomWork) return this.humanWorkStoreUnavailable("createRoomWork");
+    return store.createRoomWork(context, input);
+  }
+
+  async listRoomWorks(context: TrustedDomainContext, input: {
+    roomId: string;
+    status?: RoomWork["status"];
+    cursor?: string;
+    limit: number;
+  }): Promise<RoomWork[]> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "read");
+    const store = this.humanWorkStore();
+    if (!store.listRoomWorks) return this.humanWorkStoreUnavailable("listRoomWorks");
+    return store.listRoomWorks(context, input);
+  }
+
+  async viewRoomWork(context: TrustedDomainContext, input: { roomId: string; workId: string }): Promise<RoomWorkView> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "read");
+    const store = this.humanWorkStore();
+    if (!store.viewRoomWork) return this.humanWorkStoreUnavailable("viewRoomWork");
+    return store.viewRoomWork(context, input);
+  }
+
+  async replyToRoomWork(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    assigneeId?: string;
+    instruction?: string;
+    attachments: unknown[];
+    expectedVersion?: number;
+    expectedGeneration?: number;
+  }): Promise<RoomWorkInstruction> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "execute");
+    const store = this.humanWorkStore();
+    if (!store.replyToRoomWork) return this.humanWorkStoreUnavailable("replyToRoomWork");
+    return store.replyToRoomWork(context, input);
+  }
+
+  async createRoomWorkComment(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    body?: string;
+    attachments: unknown[];
+    expectedVersion?: number;
+  }): Promise<RoomWorkComment> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "edit");
+    const store = this.humanWorkStore();
+    if (!store.createRoomWorkComment) return this.humanWorkStoreUnavailable("createRoomWorkComment");
+    return store.createRoomWorkComment(context, input);
+  }
+
+  async applyRoomWorkComment(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    commentId: string;
+    commentVersion: number;
+    expectedVersion?: number;
+    expectedGeneration?: number;
+    assigneeId?: string;
+  }): Promise<RoomWorkInstruction> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "execute");
+    const store = this.humanWorkStore();
+    if (!store.applyRoomWorkComment) return this.humanWorkStoreUnavailable("applyRoomWorkComment");
+    return store.applyRoomWorkComment(context, input);
+  }
+
+  async setRoomWorkCommentReaction(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    commentId: string;
+    reaction: "like";
+    enabled: boolean;
+    expectedVersion?: number;
+  }): Promise<RoomWorkReaction> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "edit");
+    const store = this.humanWorkStore();
+    if (!store.setRoomWorkCommentReaction) return this.humanWorkStoreUnavailable("setRoomWorkCommentReaction");
+    return store.setRoomWorkCommentReaction(context, input);
+  }
+
+  async setRoomDefaultAgent(context: TrustedDomainContext, input: {
+    roomId: string;
+    agentId: string;
+    expectedVersion?: number;
+  }): Promise<RoomDefaultAgent> {
+    await this.authorization.assertRoom(this.principal(context), input.roomId, "manage_settings");
+    if (!await this.store.getAgent(input.agentId)) throw this.requestError("not_found", `agent_not_found:${input.agentId}`);
+    const store = this.humanWorkStore();
+    if (!store.setRoomDefaultAgent) return this.humanWorkStoreUnavailable("setRoomDefaultAgent");
+    return store.setRoomDefaultAgent(context, input);
+  }
+
+  /** Stop admission is deliberately separate from generic Room execute. */
+  async stopRoomWork(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    reason?: string;
+    expectedVersion?: number;
+    expectedGeneration?: number;
+  }): Promise<RoomWorkControl> {
+    await this.assertHumanWorkControl(context, input.roomId, input.workId);
+    const store = this.humanWorkStore();
+    if (!store.stopRoomWork) return this.humanWorkStoreUnavailable("stopRoomWork");
+    return store.stopRoomWork(context, input);
+  }
+
+  async stopRoomWorkAssignee(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    assigneeId: string;
+    reason?: string;
+    expectedVersion?: number;
+    expectedGeneration?: number;
+  }): Promise<RoomWorkControl> {
+    await this.assertHumanWorkControl(context, input.roomId, input.workId);
+    const store = this.humanWorkStore();
+    if (!store.stopRoomWorkAssignee) return this.humanWorkStoreUnavailable("stopRoomWorkAssignee");
+    return store.stopRoomWorkAssignee(context, input);
+  }
+
+  async reassignRoomWorkAssignee(context: TrustedDomainContext, input: {
+    roomId: string;
+    workId: string;
+    assigneeId: string;
+    agentId: string;
+    expectedVersion?: number;
+    expectedGeneration?: number;
+  }): Promise<RoomWorkAssignee> {
+    await this.assertHumanWorkControl(context, input.roomId, input.workId);
+    const delegated = delegatedParticipant(this.principal(context));
+    if (delegated.kind !== "human" && delegated.kind !== "agent") {
+      throw this.requestError("forbidden", "room_human_participant_required");
+    }
+    await this.authorization.assertAgentExecution({
+      requesterParticipantId: delegated.kind === "human" ? delegated.participantId : delegated.requestedByParticipantId,
+      roomId: input.roomId,
+      agentId: input.agentId
+    });
+    const store = this.humanWorkStore();
+    if (!store.reassignRoomWorkAssignee) return this.humanWorkStoreUnavailable("reassignRoomWorkAssignee");
+    return store.reassignRoomWorkAssignee(context, input);
+  }
+
+  async openAgentDm(context: TrustedDomainContext, input: { agentId: string }): Promise<AgentDm> {
+    const principal = this.principal(context);
+    const delegated = delegatedParticipant(principal);
+    if (delegated.kind !== "human" && delegated.kind !== "agent") {
+      throw this.requestError("forbidden", "room_human_participant_required");
+    }
+    const requesterParticipantId = delegated.kind === "human" ? delegated.participantId : delegated.requestedByParticipantId;
+    await this.authorization.assertWorkspace({ kind: "human", participantId: requesterParticipantId }, "create_room");
+    if (delegated.kind === "agent") await this.authorization.assertWorkspace(delegated, "create_room");
+    const store = this.humanWorkStore();
+    if (!store.openAgentDm) return this.humanWorkStoreUnavailable("openAgentDm");
+    return store.openAgentDm(context, input);
   }
 
   async addRoomMember(context: TrustedDomainContext, input: { roomId: string; participantId: string; role: Exclude<RoomHumanRole, "owner"> }): Promise<RoomMemberRecord> {
@@ -294,6 +592,52 @@ export class RoomAgentDomainService {
     const agent = await this.store.getAgent(id);
     if (!agent) throw this.requestError("not_found", `agent_not_found:${id}`);
     return agent;
+  }
+
+  private humanWorkStore(): HumanWorkStoreAdapter {
+    return this.store as unknown as HumanWorkStoreAdapter;
+  }
+
+  private humanWorkStoreUnavailable(method: string): never {
+    throw this.requestError("conflict", `domain_operation_requires_workspace_server:${method}`);
+  }
+
+  private async assertHumanWorkControl(context: TrustedDomainContext, roomId: string, workId: string): Promise<void> {
+    const actor = this.humanPrincipal(context);
+    const [actorWorkspace, actorRoom] = await Promise.all([
+      this.store.getWorkspaceMember(actor.participantId),
+      this.store.getRoomMember(roomId, actor.participantId)
+    ]);
+    const store = this.humanWorkStore();
+    // The transport context carries only the actor.  Without the persisted
+    // requester lookup, treating the actor as requester would let a member
+    // stop/reassign another person's work.  Fail closed until the Server
+    // aggregate supplies this identity and its current memberships.
+    if (!store.getHumanWorkRequester) return this.humanWorkStoreUnavailable("getHumanWorkRequester");
+    const requesterParticipantId = (await store.getHumanWorkRequester(context, { roomId, workId }))?.trim() ?? "";
+    if (!requesterParticipantId) return this.humanWorkStoreUnavailable("getHumanWorkRequester");
+    const [requesterWorkspace, requesterRoom] = requesterParticipantId === actor.participantId
+      ? [actorWorkspace, actorRoom]
+      : await Promise.all([
+          this.store.getWorkspaceMember(requesterParticipantId),
+          this.store.getRoomMember(roomId, requesterParticipantId)
+        ]);
+    const membership = (record: WorkspaceMemberRecord | RoomMemberRecord | undefined): HumanWorkMembershipSnapshot | undefined => record
+      ? {
+          participantId: record.participant_id,
+          role: record.role as RoomHumanRole,
+          ...(record.removed_at ? { removedAt: record.removed_at } : {})
+        }
+      : undefined;
+    const decision = humanWorkControlPolicyPort.evaluate({
+      actorParticipantId: actor.participantId,
+      requesterParticipantId,
+      actorWorkspaceMembership: membership(actorWorkspace),
+      requesterWorkspaceMembership: membership(requesterWorkspace),
+      actorRoomMembership: membership(actorRoom),
+      requesterRoomMembership: membership(requesterRoom)
+    });
+    if (!decision.allowed) throw this.requestError("forbidden", `human_work_control_denied:${decision.reason}`);
   }
 
   private principal(context: TrustedDomainContext) {

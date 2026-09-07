@@ -1,11 +1,98 @@
 import { describe, expect, it } from "vitest";
 import {
+  workspaceAgentBackendBindRequest,
+  workspaceAgentCreateRequest,
+  workspaceAgentDmRequest,
+  workspaceAgentPatchRequest,
+  workspaceAgentViewRequest,
+  workspaceRoomAgentMemberListRequest,
+  workspaceRoomAgentPermissionRequest,
+  workspaceRoomAgentRemoveRequest,
   workspaceRoomCreateRequest,
+  workspaceRoomDefaultAgentRequest,
   workspaceRoomMemberRequest,
   workspaceRoomMoveRequest
 } from "./workspace-room-requests";
 
 describe("Desktop Room operation boundary", () => {
+  it("keeps Agent operations on the public contract and target boundary", () => {
+    expect(workspaceAgentCreateRequest({
+      name: "Research Agent",
+      role: "調査担当",
+      instructions: "根拠を添えて調査する。",
+      backendId: "samurai-native",
+      enabled: true,
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      operationId: "agent_create_1",
+      privateKey: "must-not-cross-the-boundary"
+    })).toEqual({
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      operationId: "agent_create_1",
+      body: { name: "Research Agent", role: "調査担当", instructions: "根拠を添えて調査する。", backend_id: "samurai-native", enabled: true }
+    });
+    expect(workspaceAgentViewRequest({ agentId: "agent_research", target: { connectionId: "server_a", workspaceId: "workspace_a" } })).toEqual({
+      agentId: "agent_research",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    });
+    expect(workspaceAgentPatchRequest({ agentId: "agent_research", role: "編集後", expectedVersion: 3, operationId: "agent_patch_1" })).toEqual({
+      operationId: "agent_patch_1",
+      body: { id: "agent_research", role: "編集後", expected_version: 3 }
+    });
+    expect(workspaceAgentBackendBindRequest({ agentId: "agent_research", backendId: "samurai-native", operationId: "agent_bind_1" })).toEqual({
+      operationId: "agent_bind_1",
+      body: { id: "agent_research", backend_id: "samurai-native" }
+    });
+  });
+
+  it("keeps Room Agent membership changes in typed public operations", () => {
+    expect(workspaceRoomAgentMemberListRequest({ roomId: "room_a", target: { connectionId: "server_a", workspaceId: "workspace_a" } })).toEqual({
+      roomId: "room_a",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    });
+    expect(workspaceRoomAgentPermissionRequest({ roomId: "room_a", agentId: "agent_research", canView: true, canEdit: true, canExecute: false, operationId: "permission_1" })).toEqual({
+      roomId: "room_a",
+      agentId: "agent_research",
+      operationId: "permission_1",
+      body: { agent_id: "agent_research", can_view: true, can_edit: true, can_execute: false }
+    });
+    expect(workspaceRoomAgentRemoveRequest({ roomId: "room_a", agentId: "agent_research", operationId: "remove_1" })).toEqual({
+      roomId: "room_a",
+      agentId: "agent_research",
+      operationId: "remove_1",
+      body: { agent_id: "agent_research" }
+    });
+    expect(() => workspaceRoomAgentPermissionRequest({ roomId: "room_a", agentId: "agent_research", canView: false, canEdit: true, canExecute: false, operationId: "permission_invalid" })).toThrow("room_agent_view_required");
+  });
+
+  it("binds default-Agent and DM mutations to the renderer target", () => {
+    const target = { connectionId: "server_a", workspaceId: "workspace_a" };
+    expect(workspaceRoomDefaultAgentRequest({
+      roomId: "room_a",
+      agentId: "agent_research",
+      expectedVersion: 4,
+      operationId: "default_agent_1",
+      target,
+      privateKey: "must-not-cross-the-boundary"
+    })).toEqual({
+      roomId: "room_a",
+      agentId: "agent_research",
+      operationId: "default_agent_1",
+      target,
+      body: { agent_id: "agent_research", expected_version: 4 }
+    });
+    expect(workspaceAgentDmRequest({
+      agentId: "agent_research",
+      operationId: "agent_dm_1",
+      target,
+      sessionId: "must-not-cross-the-boundary"
+    })).toEqual({
+      agentId: "agent_research",
+      operationId: "agent_dm_1",
+      target,
+      body: { agent_id: "agent_research" }
+    });
+  });
+
   it("makes a fixed create request without accepting a renderer supplied key or URL", () => {
     expect(workspaceRoomCreateRequest({
       name: " Child Room ",
@@ -18,6 +105,102 @@ describe("Desktop Room operation boundary", () => {
       operationId: "room_create_1",
       body: { name: "Child Room", parent_room_id: "room_parent", expected_workspace_version: 3 }
     });
+  });
+
+  it("keeps an existing default Agent, version, permission, operation, and workspace version", () => {
+    expect(workspaceRoomCreateRequest({
+      name: "既存AgentのRoom",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      defaultAgentId: "agent_research",
+      defaultAgentVersion: 4,
+      agentPermission: { can_view: true, can_edit: false, can_execute: true },
+      expectedWorkspaceVersion: 9,
+      operationId: "room_create_existing"
+    })).toEqual({
+      operationId: "room_create_existing",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      body: {
+        name: "既存AgentのRoom",
+        expected_workspace_version: 9,
+        default_agent_id: "agent_research",
+        default_agent_version: 4,
+        agent_permission: { can_view: true, can_edit: false, can_execute: true }
+      }
+    });
+  });
+
+  it("keeps a new Agent profile and Room permission without accepting secrets", () => {
+    expect(workspaceRoomCreateRequest({
+      name: "新規AgentのRoom",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      expectedWorkspaceVersion: 2,
+      operationId: "room_create_new",
+      newAgent: {
+        name: "Research Agent",
+        role: "調査担当",
+        instructions: "根拠を添えて調査する。",
+        backend_id: "samurai-native",
+        enabled: true
+      },
+      agentPermission: { can_view: true, can_edit: true, can_execute: true },
+      apiKey: "must-not-cross-the-boundary",
+      privateKey: "must-not-cross-the-boundary"
+    })).toEqual({
+      operationId: "room_create_new",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      body: {
+        name: "新規AgentのRoom",
+        expected_workspace_version: 2,
+        new_agent: {
+          name: "Research Agent",
+          role: "調査担当",
+          instructions: "根拠を添えて調査する。",
+          backend_id: "samurai-native",
+          enabled: true
+        },
+        agent_permission: { can_view: true, can_edit: true, can_execute: true }
+      }
+    });
+  });
+
+  it("rejects conflicting Agent selection and unsafe default permissions", () => {
+    expect(() => workspaceRoomCreateRequest({
+      name: "競合",
+      defaultAgentId: "agent_a",
+      newAgent: { name: "New", role: "role", instructions: "instructions", backend_id: "samurai-native" },
+      expectedWorkspaceVersion: 1,
+      operationId: "room_create_conflict"
+    })).toThrow("room_default_agent_selection_conflict");
+    expect(() => workspaceRoomCreateRequest({
+      name: "実行不可",
+      defaultAgentId: "agent_a",
+      agentPermission: { can_view: true, can_edit: false, can_execute: false },
+      expectedWorkspaceVersion: 1,
+      operationId: "room_create_invalid_permission"
+    })).toThrow("room_default_agent_permission_required");
+    expect(() => workspaceRoomCreateRequest({
+      name: "Backendなし",
+      expectedWorkspaceVersion: 1,
+      operationId: "room_create_backend_missing",
+      newAgent: { name: "New", role: "role", instructions: "instructions", backend_id: "" }
+    })).toThrow("new_agent_backend_id_invalid");
+    expect(() => workspaceRoomCreateRequest({
+      name: "無効Agent",
+      expectedWorkspaceVersion: 1,
+      operationId: "room_create_disabled",
+      newAgent: { name: "New", role: "role", instructions: "instructions", backend_id: "samurai-native", enabled: false }
+    })).toThrow("room_default_agent_enabled_required");
+  });
+
+  it("keeps the complete renderer target without placing it in the public Domain input", () => {
+    const request = workspaceRoomCreateRequest({
+      name: "Target bound",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      expectedWorkspaceVersion: 3,
+      operationId: "room_create_target"
+    });
+    expect(request.target).toEqual({ connectionId: "server_a", workspaceId: "workspace_a" });
+    expect(request.body).not.toHaveProperty("target");
   });
 
   it("requires an explicit root destination and current versions for a move", () => {

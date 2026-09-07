@@ -71,11 +71,283 @@ export interface NativeRoom {
   workspaceId: string;
   name: string;
   parentRoomId?: string;
+  /** Server-issued Room membership capabilities. Missing values are unknown. */
+  canView?: boolean;
+  canEdit?: boolean;
   canExecute?: boolean;
   canManage?: boolean;
+  canStop?: boolean;
+  capabilities?: NativeRoomCapabilities;
+  /** Room-facing projection. The continuation Session is intentionally absent. */
+  kind?: "normal" | "agent_dm";
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
   version?: number;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface NativeRoomCapabilities {
+  canView?: boolean;
+  canEdit?: boolean;
+  canExecute?: boolean;
+  canManage?: boolean;
+  canStop?: boolean;
+}
+
+export type NativeRoomWorkStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "stopping"
+  | "cancelled"
+  | "outcome_unknown";
+
+export type NativeRoomWorkAssigneeStatus =
+  | "queued"
+  | "ready"
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "stopping"
+  | "cancelled"
+  | "outcome_unknown";
+
+export type NativeRoomWorkInstructionStatus = "pending" | "accepted" | "queued" | "delivered" | "applied" | "failed" | "rejected";
+
+export interface NativeRoomWorkAssignee {
+  id: string;
+  workId: string;
+  agentId: string;
+  parentAssigneeId?: string;
+  status: NativeRoomWorkAssigneeStatus;
+  instructionVersion: number;
+  generation: number;
+  version: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface NativeRoomWorkInstruction {
+  id: string;
+  workId: string;
+  assigneeId?: string;
+  kind: "initial" | "reply" | "comment_apply" | "delegated";
+  instruction: string;
+  attachments: ResourceRef[];
+  version: number;
+  generation: number;
+  status: NativeRoomWorkInstructionStatus;
+  createdBy: string;
+  sourceCommentId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface NativeRoomWorkComment {
+  id: string;
+  workId: string;
+  authorId: string;
+  body: string;
+  attachments: ResourceRef[];
+  version: number;
+  reactionCount?: number;
+  appliedInstructionIds: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface NativeRoomWorkReaction {
+  id: string;
+  workId: string;
+  commentId: string;
+  reaction: "like";
+  enabled: boolean;
+  version: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type NativeRoomWorkControlAction = "stop" | "assignee.stop" | "assignee.reassign";
+export type NativeRoomWorkControlStatus = "pending" | "requested" | "accepted" | "running" | "completed" | "confirmed" | "failed" | "unconfirmed" | "rejected";
+
+export interface NativeRoomWorkControl {
+  id: string;
+  operationId?: string;
+  workId: string;
+  assigneeId?: string;
+  targetAgentId?: string;
+  action: NativeRoomWorkControlAction;
+  status: NativeRoomWorkControlStatus;
+  generation: number;
+  version: number;
+  unconfirmedAssigneeIds: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+}
+
+/** Public Room work projection; no Session ID or external conversation ID is accepted. */
+export interface NativeRoomWork {
+  id: string;
+  roomId: string;
+  requesterId: string;
+  defaultAgentId: string;
+  title: string;
+  objective: string;
+  status: NativeRoomWorkStatus;
+  instructionVersion: number;
+  generation: number;
+  version: number;
+  assignees: NativeRoomWorkAssignee[];
+  stopState?: "none" | "requested" | "confirmed" | "unconfirmed";
+  instructions?: NativeRoomWorkInstruction[];
+  comments?: NativeRoomWorkComment[];
+  reactions?: NativeRoomWorkReaction[];
+  controls?: NativeRoomWorkControl[];
+  /** Optional server-provided result projection. Absence is not success. */
+  resultSummary?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface NativeRoomDefaultAgent {
+  roomId: string;
+  agentId: string;
+  agentVersion?: number;
+  enabled: boolean;
+  canExecute: boolean;
+  version?: number;
+  updatedAt?: string;
+}
+
+export interface NativeAgent {
+  id: string;
+  displayName: string;
+  role?: string;
+  backendId?: string;
+  enabled: boolean;
+  status?: string;
+  canExecute?: boolean;
+  version?: number;
+  /** Returned only by an explicitly opened agent.view/editor request. */
+  instructions?: string;
+  description?: string;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Server-owned, renderer-safe backend projection used by Room creation. */
+export interface NativeAgentBackend {
+  id: string;
+  label: string;
+  kind?: string;
+  configured: boolean;
+  enabled: boolean;
+  connectionState?: "ready" | "unconfigured" | "disabled" | "degraded" | "unverified";
+  reason?: string;
+}
+
+export interface NativeRoomAgentPermission {
+  canView: boolean;
+  canEdit: boolean;
+  canExecute: boolean;
+}
+
+/** Room-local Agent membership. The Server keeps disabled rows for history. */
+export interface NativeRoomAgentMember extends NativeRoomAgentPermission {
+  id: string;
+  roomId: string;
+  agentId: string;
+  version: number;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  removed: boolean;
+}
+
+export interface NativeRoomNewAgentInput {
+  name: string;
+  role: string;
+  instructions: string;
+  backendId: string;
+  enabled: boolean;
+  permission?: NativeRoomAgentPermission;
+}
+
+export interface NativeRoomCreateInput {
+  name: string;
+  parentRoomId?: string;
+  /** The renderer's complete connection + Workspace selection snapshot. */
+  target: NativeWorkspaceTarget;
+  expectedWorkspaceVersion: number;
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
+  newAgent?: NativeRoomNewAgentInput;
+  agentPermission?: NativeRoomAgentPermission;
+  operationId: string;
+}
+
+export interface NativeAgentDm {
+  id: string;
+  roomId: string;
+  workspaceId: string;
+  kind: "agent_dm";
+  agentId: string;
+  roomName?: string;
+  agentVersion?: number;
+  version?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Small renderer-safe seam for the Room work API.  The Desktop/browser bridge
+ * can implement these methods later without making Session a UI input.  A
+ * generic operation method is retained for bridges that expose one endpoint.
+ */
+export interface NativeRoomWorkBridge {
+  listWorkspaceAgents?: (input?: { target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  viewWorkspaceAgent?: (input: { agentId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  createWorkspaceAgent?: (input: { name: string; role: string; instructions: string; backendId: string; enabled: boolean; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  patchWorkspaceAgent?: (input: { agentId: string; name?: string; role?: string; instructions?: string; enabled?: boolean; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  bindWorkspaceAgentBackend?: (input: { agentId: string; backendId: string; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  listWorkspaceRoomAgentMembers?: (input: { roomId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  setWorkspaceRoomAgentPermission?: (input: { roomId: string; agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  removeWorkspaceRoomAgent?: (input: { roomId: string; agentId: string; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  listWorkspaceAgentBackends?: (input?: { target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  createWorkspaceRoom?: (input: NativeRoomCreateInput) => Promise<unknown>;
+  listWorkspaceRoomWorks?: (input: { roomId: string; status?: NativeRoomWorkStatus; cursor?: string; limit?: number }) => Promise<unknown>;
+  getWorkspaceRoomWork?: (input: { roomId: string; workId: string }) => Promise<unknown>;
+  createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId: string }) => Promise<unknown>;
+  replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
+  createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string }) => Promise<unknown>;
+  applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string; operationId: string }) => Promise<unknown>;
+  reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction: "like"; enabled?: boolean; expectedVersion?: number; operationId: string }) => Promise<unknown>;
+  setWorkspaceRoomDefaultAgent?: (input: { roomId: string; agentId: string; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  stopWorkspaceRoomWork?: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
+  stopWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
+  reassignWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
+  delegateWorkspaceRoomWorkAssignee?: (input: {
+    roomId: string;
+    workId: string;
+    assigneeId: string;
+    agentId: string;
+    instruction: string;
+    dependencyAssigneeIds?: string[];
+    attachments?: ResourceRef[];
+    expectedVersion?: number;
+    expectedGeneration?: number;
+    operationId: string;
+  }) => Promise<unknown>;
+  openWorkspaceAgentDm?: (input: { agentId: string; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  runWorkspaceRoomWorkOperation?: (input: { operation: string; roomId: string; payload: Record<string, unknown>; operationId: string }) => Promise<unknown>;
 }
 
 export interface NativeOrganizationMember {

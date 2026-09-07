@@ -37,6 +37,26 @@ export interface WorkspaceExecutionJobWorkerPort {
   close?(): Promise<void>;
 }
 
+/** Process-owned lane for normal Room work.  This is deliberately separate
+ * from the skill-optimization worker: human requests are Room work records,
+ * not learning jobs, and must keep their own reservation/lease/generation
+ * lifecycle. */
+export interface WorkspaceRoomWorkWorkerPort {
+  runTick(context: WorkspaceRequestContext, input: { workerId: string; maxRuns: number; signal: AbortSignal }): Promise<unknown>;
+  close?(): Promise<void>;
+}
+
+/**
+ * A Room-work stop dispatcher is deliberately a separate supervisor lane from
+ * normal launch/settlement.  A provider Run can remain in runChatTurn for an
+ * arbitrarily long time; stop requests must still be claimed and reconciled
+ * while that launch lane is waiting.
+ */
+export interface WorkspaceRoomWorkStopWorkerPort {
+  runStopTick(context: WorkspaceRequestContext, input: { workerId: string; maxRuns: number; signal: AbortSignal }): Promise<unknown>;
+  close?(): Promise<void>;
+}
+
 export interface WorkspaceAutomationSchedulerPort {
   runTick(context: WorkspaceRequestContext, input: { workerId: string; signal: AbortSignal }): Promise<unknown>;
   close?(): Promise<void>;
@@ -95,6 +115,8 @@ export interface WorkspaceWorkerSupervisorOptions {
   retryMaxMs?: number;
   maxRuns?: number;
   executionJobWorker?: WorkspaceExecutionJobWorkerPort;
+  roomWorkWorker?: WorkspaceRoomWorkWorkerPort;
+  roomWorkStopWorker?: WorkspaceRoomWorkStopWorkerPort;
   automationScheduler?: WorkspaceAutomationSchedulerPort;
   clientEventQueue?: WorkspaceClientEventQueuePort;
   gatewayMaintenance?: WorkspaceGatewayMaintenancePort;
@@ -124,7 +146,9 @@ export class WorkspaceWorkerSupervisor {
   private stopPromise?: Promise<void>;
   private permanentlyStopped = false;
   private timer?: ReturnType<typeof setTimeout>;
+  private stopTimer?: ReturnType<typeof setTimeout>;
   private activeTick?: Promise<void>;
+  private activeStopTick?: Promise<void>;
   private context?: WorkspaceWorkerContext;
   private contexts: WorkspaceWorkerContext[] = [];
   private externalAbortCleanup?: () => void;
@@ -215,6 +239,7 @@ export class WorkspaceWorkerSupervisor {
         consecutiveFailures: 0
       };
       this.schedule(0);
+      this.scheduleStop(0);
       return this.status();
     } catch (error) {
       if (signal.aborted || this.current.state === "stopping") return this.status();
@@ -230,18 +255,29 @@ export class WorkspaceWorkerSupervisor {
     this.current = { ...this.current, state: "stopping", stopReason: reason, nextRetryAt: undefined };
     this.controller?.abort(new Error(`workspace_worker_${reason}`));
     this.clearTimer();
+    this.clearStopTimer();
     this.externalAbortCleanup?.();
     this.externalAbortCleanup = undefined;
 
     const starting = this.startPromise;
     const activeTick = this.activeTick;
-    const runnerClose = Promise.resolve().then(() => this.options.learningRunner.close());
-    const executionClose = Promise.resolve().then(() => this.options.executionJobWorker?.close?.());
-    const automationClose = Promise.resolve().then(() => this.options.automationScheduler?.close?.());
-    const clientEventClose = Promise.resolve().then(() => this.options.clientEventQueue?.close?.());
-    const gatewayClose = Promise.resolve().then(() => this.options.gatewayMaintenance?.close?.());
-    const skillOptimizationClose = Promise.resolve().then(() => this.options.skillOptimizationWorker?.close?.());
-    const results = await Promise.allSettled([starting, activeTick, runnerClose, executionClose, automationClose, clientEventClose, gatewayClose, skillOptimizationClose]);
+    const activeStopTick = this.activeStopTick;
+    const closePromises: Promise<void>[] = [];
+    const closedPorts = new Set<unknown>();
+    const closePort = (port: { close?(): Promise<void> } | undefined) => {
+      if (!port || closedPorts.has(port)) return;
+      closedPorts.add(port);
+      closePromises.push(Promise.resolve().then(() => port.close?.()).then(() => undefined));
+    };
+    closePort(this.options.learningRunner);
+    closePort(this.options.executionJobWorker);
+    closePort(this.options.roomWorkWorker);
+    closePort(this.options.roomWorkStopWorker);
+    closePort(this.options.automationScheduler);
+    closePort(this.options.clientEventQueue);
+    closePort(this.options.gatewayMaintenance);
+    closePort(this.options.skillOptimizationWorker);
+    const results = await Promise.allSettled([starting, activeTick, activeStopTick, ...closePromises]);
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
     this.permanentlyStopped = true;
     this.current = {
@@ -277,6 +313,22 @@ export class WorkspaceWorkerSupervisor {
     }, delayMs);
   }
 
+  private scheduleStop(delayMs: number): void {
+    if (this.stopTimer || this.current.state === "stopping" || this.current.state === "stopped" || !this.context || !this.options.roomWorkStopWorker) return;
+    this.stopTimer = setTimeout(() => {
+      this.stopTimer = undefined;
+      const tick = this.runScheduledStopTick();
+      this.activeStopTick = tick;
+      const clearActiveStopTick = () => {
+        if (this.activeStopTick === tick) this.activeStopTick = undefined;
+      };
+      void tick.then(clearActiveStopTick, (error) => {
+        this.notifyError(error);
+        clearActiveStopTick();
+      });
+    }, delayMs);
+  }
+
   private scheduleActivationRetry(signal: AbortSignal): void {
     if (this.timer || signal.aborted || this.current.state === "stopping" || this.current.state === "stopped") return;
     const exponent = Math.max(0, Math.min(this.current.consecutiveFailures - 1, 30));
@@ -298,6 +350,13 @@ export class WorkspaceWorkerSupervisor {
         const context: WorkspaceRequestContext = { ...workerContext, operationId };
         if (this.options.executionJobWorker) {
           await this.options.executionJobWorker.runTick(context, {
+            workerId: this.options.workerId,
+            maxRuns: this.options.maxRuns,
+            signal: this.controller.signal
+          });
+        }
+        if (this.options.roomWorkWorker) {
+          await this.options.roomWorkWorker.runTick(context, {
             workerId: this.options.workerId,
             maxRuns: this.options.maxRuns,
             signal: this.controller.signal
@@ -359,6 +418,37 @@ export class WorkspaceWorkerSupervisor {
     }
   }
 
+  /**
+   * Runs only the durable Room-work stop dispatch lane.  It intentionally has
+   * its own timer and in-flight promise so a long-running launch tick cannot
+   * starve cancellation/reconciliation.
+   */
+  private async runScheduledStopTick(): Promise<void> {
+    if (!this.controller || this.contexts.length === 0 || this.controller.signal.aborted) return;
+    try {
+      const stopWorker = this.options.roomWorkStopWorker;
+      if (!stopWorker) return;
+      for (const [index, workerContext] of this.contexts.entries()) {
+        if (this.controller.signal.aborted || this.current.state === "stopping") return;
+        const operationId = `workspace_worker_stop_tick_${randomUUID().replaceAll("-", "")}_${index}`;
+        const context: WorkspaceRequestContext = { ...workerContext, operationId };
+        await stopWorker.runStopTick(context, {
+          workerId: this.options.workerId,
+          maxRuns: this.options.maxRuns,
+          signal: this.controller.signal
+        });
+      }
+      this.scheduleStop(this.options.intervalMs);
+    } catch (error) {
+      if (this.controller.signal.aborted || this.current.state === "stopping") return;
+      this.recordFailure(error);
+      this.notifyError(error);
+      const exponent = Math.min(this.current.consecutiveFailures - 1, 30);
+      const delay = Math.min(this.options.retryMaxMs, this.options.retryBaseMs * 2 ** exponent);
+      this.scheduleStop(delay);
+    }
+  }
+
   private async resolveWorkerContexts(signal: AbortSignal): Promise<WorkspaceWorkerContextsResolution> {
     if (this.options.resolveContexts) return this.options.resolveContexts(signal);
     const resolved = await this.options.resolveContext(signal);
@@ -384,6 +474,11 @@ export class WorkspaceWorkerSupervisor {
   private clearTimer(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+  }
+
+  private clearStopTimer(): void {
+    if (this.stopTimer) clearTimeout(this.stopTimer);
+    this.stopTimer = undefined;
   }
 
   private notifyError(error: unknown): void {

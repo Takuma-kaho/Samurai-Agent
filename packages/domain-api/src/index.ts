@@ -3,8 +3,22 @@ import {
   ActivityVerificationRecordSchema,
   ArtifactRecordSchema,
   ArtifactRevisionRecordSchema,
+  PublicAgentDmRecordSchema as CorePublicAgentDmRecordSchema,
+  PublicRoomWorkAssigneeSchema as CorePublicRoomWorkAssigneeSchema,
+  PublicRoomWorkCommentSchema as CorePublicRoomWorkCommentSchema,
+  PublicRoomWorkControlSchema as CorePublicRoomWorkControlSchema,
+  PublicRoomWorkInstructionSchema as CorePublicRoomWorkInstructionSchema,
+  PublicRoomWorkReactionSchema as CorePublicRoomWorkReactionSchema,
+  PublicRoomWorkRecordSchema as CorePublicRoomWorkRecordSchema,
+  PublicRoomWorkViewSchema as CorePublicRoomWorkViewSchema,
   ResourceRefSchema,
+  WorkspaceFileResourceRefSchema,
+  RoomKindSchema as CoreRoomKindSchema,
+  RoomWorkAssignmentStatusSchema as CoreRoomWorkAssignmentStatusSchema,
+  RoomWorkStatusSchema as CoreRoomWorkStatusSchema,
   ResourceUsageRecordSchema,
+  AgentBackendKindSchema,
+  BackendConnectionStateSchema,
   jsonValueSchema,
   toStrictJsonSchema,
   type JsonValue,
@@ -54,6 +68,10 @@ export const PublicRoomRecordSchema = z.object({
   workspace_id: z.string().trim().min(1),
   parent_room_id: z.string().trim().min(1).optional(),
   name: z.string().trim().min(1).max(200),
+  /** Existing Rooms may be read before the default Agent is configured. */
+  kind: CoreRoomKindSchema.optional(),
+  default_agent_id: z.string().trim().min(1).optional(),
+  default_agent_version: z.number().int().positive().optional(),
   version: z.number().int().nonnegative(),
   can_manage: z.boolean().optional(),
   can_execute: z.boolean().optional(),
@@ -61,6 +79,58 @@ export const PublicRoomRecordSchema = z.object({
   updated_at: z.string().datetime()
 }).strict();
 export type PublicRoomRecord = z.infer<typeof PublicRoomRecordSchema>;
+
+/** Room creation may select an existing Agent or create one together with its
+ * initial permission and default assignment. The Server owns the transaction
+ * and the authenticated creator; neither is accepted from this DTO. */
+export const PublicRoomAgentPermissionSchema = z.object({
+  can_view: z.boolean(),
+  can_edit: z.boolean(),
+  can_execute: z.boolean()
+}).strict().refine((value) => (!value.can_edit && !value.can_execute) || value.can_view, "room_agent_view_required");
+export type PublicRoomAgentPermission = z.infer<typeof PublicRoomAgentPermissionSchema>;
+
+export const PublicRoomNewAgentSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  role: z.string().trim().min(1).max(500),
+  instructions: z.string().trim().min(1).max(20_000),
+  backend_id: z.string().trim().min(1).max(512),
+  enabled: z.boolean().default(true),
+  permission: PublicRoomAgentPermissionSchema.optional()
+}).strict();
+export type PublicRoomNewAgent = z.input<typeof PublicRoomNewAgentSchema>;
+
+export const PublicRoomCreateInputSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  parent_room_id: z.string().trim().min(1).max(512).optional(),
+  default_agent_id: z.string().trim().min(1).max(512).optional(),
+  default_agent_version: z.number().int().positive().optional(),
+  new_agent: PublicRoomNewAgentSchema.optional(),
+  agent_permission: PublicRoomAgentPermissionSchema.optional()
+}).strict().superRefine((value, issue) => {
+  if (value.default_agent_id !== undefined && value.new_agent !== undefined) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["default_agent_id"], message: "room_default_agent_selection_conflict" });
+  }
+  if (value.agent_permission !== undefined && value.default_agent_id === undefined && value.new_agent === undefined) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_permission"], message: "room_agent_permission_target_required" });
+  }
+  if (value.default_agent_version !== undefined && value.default_agent_id === undefined) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["default_agent_version"], message: "room_default_agent_required" });
+  }
+  const defaultPermission = value.agent_permission ?? value.new_agent?.permission;
+  if ((value.default_agent_id !== undefined || value.new_agent !== undefined)
+    && defaultPermission !== undefined
+    && (!defaultPermission.can_view || !defaultPermission.can_execute)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_permission"], message: "room_default_agent_permission_required" });
+  }
+  if (value.agent_permission !== undefined && value.new_agent?.permission !== undefined
+    && (value.agent_permission.can_view !== value.new_agent.permission.can_view
+      || value.agent_permission.can_edit !== value.new_agent.permission.can_edit
+      || value.agent_permission.can_execute !== value.new_agent.permission.can_execute)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_permission"], message: "room_agent_permission_conflict" });
+  }
+});
+export type PublicRoomCreateInput = z.input<typeof PublicRoomCreateInputSchema>;
 
 export const PublicAgentRecordSchema = z.object({
   id: z.string().trim().min(1),
@@ -78,6 +148,256 @@ export const PublicAgentRecordSchema = z.object({
   updated_at: z.string().datetime()
 }).strict();
 export type PublicAgentRecord = z.infer<typeof PublicAgentRecordSchema>;
+
+/** Host-owned backend availability projection. Sensitive backend metadata,
+ * credentials, paths, runtime capabilities, and diagnostics are excluded. */
+export const PublicAgentBackendRecordSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  kind: AgentBackendKindSchema,
+  label: z.string().trim().min(1).max(200),
+  configured: z.boolean(),
+  enabled: z.boolean(),
+  connection_state: BackendConnectionStateSchema,
+  reason: z.string().trim().min(1).max(256).optional()
+}).strict();
+export type PublicAgentBackendRecord = z.infer<typeof PublicAgentBackendRecordSchema>;
+
+/**
+ * Room-first collaboration DTOs. These projections intentionally contain
+ * only identifiers, user-authored text, versions, and state needed by a
+ * client. Backend Session references, credentials, and raw diagnostics stay
+ * behind the Server boundary.
+ */
+const publicCollaborationId = z.string().trim().min(1).max(512);
+const publicCollaborationVersion = z.number().int().positive();
+const publicCollaborationGeneration = z.number().int().nonnegative();
+const publicCollaborationTimestamp = z.string().datetime();
+
+export const PublicRoomKindSchema = CoreRoomKindSchema;
+export type PublicRoomKind = z.infer<typeof PublicRoomKindSchema>;
+
+/** Server-issued resource references used by work, instruction, and comment attachments. */
+export const PublicRoomWorkAttachmentSchema = WorkspaceFileResourceRefSchema;
+export type PublicRoomWorkAttachment = z.infer<typeof PublicRoomWorkAttachmentSchema>;
+
+export const PublicRoomDefaultAgentRecordSchema = z.object({
+  room_id: publicCollaborationId,
+  agent_id: publicCollaborationId,
+  agent_version: publicCollaborationVersion,
+  enabled: z.boolean(),
+  can_execute: z.boolean(),
+  version: publicCollaborationVersion,
+  updated_at: publicCollaborationTimestamp
+}).strict();
+export type PublicRoomDefaultAgentRecord = z.infer<typeof PublicRoomDefaultAgentRecordSchema>;
+/** Short alias used by clients that treat the default Agent as a Room field. */
+export const PublicRoomDefaultAgentSchema = PublicRoomDefaultAgentRecordSchema;
+export type PublicRoomDefaultAgent = PublicRoomDefaultAgentRecord;
+
+export const PublicRoomWorkStatusSchema = CoreRoomWorkStatusSchema;
+export type PublicRoomWorkStatus = z.infer<typeof PublicRoomWorkStatusSchema>;
+
+export const PublicRoomWorkAssigneeSchema = CorePublicRoomWorkAssigneeSchema;
+export type PublicRoomWorkAssignee = z.infer<typeof PublicRoomWorkAssigneeSchema>;
+
+export const PublicRoomWorkInstructionSchema = CorePublicRoomWorkInstructionSchema;
+export type PublicRoomWorkInstruction = z.infer<typeof PublicRoomWorkInstructionSchema>;
+
+export const PublicRoomWorkCommentSchema = CorePublicRoomWorkCommentSchema;
+export type PublicRoomWorkComment = z.infer<typeof PublicRoomWorkCommentSchema>;
+
+/** Explicit human reaction state. It is not an approval and does not start a Run. */
+export const PublicRoomWorkReactionSchema = CorePublicRoomWorkReactionSchema;
+export type PublicRoomWorkReaction = z.infer<typeof PublicRoomWorkReactionSchema>;
+/** Compatibility alias for callers that name all public projections `Record`. */
+export const PublicRoomWorkReactionRecordSchema = PublicRoomWorkReactionSchema;
+export type PublicRoomWorkReactionRecord = PublicRoomWorkReaction;
+
+export const PublicRoomWorkControlSchema = CorePublicRoomWorkControlSchema;
+export type PublicRoomWorkControl = z.infer<typeof PublicRoomWorkControlSchema>;
+
+export const PublicRoomWorkRecordSchema = CorePublicRoomWorkRecordSchema;
+export type PublicRoomWorkRecord = z.infer<typeof PublicRoomWorkRecordSchema>;
+
+export const PublicRoomWorkViewSchema = CorePublicRoomWorkViewSchema;
+export type PublicRoomWorkView = z.infer<typeof PublicRoomWorkViewSchema>;
+
+/** Agent DM is a private Room projection. The caller's Account is inferred by the Server. */
+export const PublicAgentDmRecordSchema = CorePublicAgentDmRecordSchema;
+export type PublicAgentDmRecord = z.infer<typeof PublicAgentDmRecordSchema>;
+
+export const PublicRoomRequestContextSchema = z.object({ room_id: publicCollaborationId }).strict();
+export type PublicRoomRequestContext = z.infer<typeof PublicRoomRequestContextSchema>;
+
+const publicRoomWorkInstructionOrAttachment = (bodyField: "instruction" | "body") => z.object({
+  ...(bodyField === "instruction"
+    ? { instruction: z.string().trim().min(1).max(1_000_000).optional() }
+    : { body: z.string().max(100_000).optional() }),
+  attachments: z.array(PublicRoomWorkAttachmentSchema).max(100).default([])
+}).strict();
+
+const requirePublicRoomWorkTextOrAttachment = <T extends z.ZodTypeAny>(schema: T, bodyField: "instruction" | "body") => schema.superRefine((input: Record<string, unknown>, issue) => {
+  const text = input[bodyField];
+  const attachments = input.attachments;
+  if (!(typeof text === "string" && text.trim()) && !(Array.isArray(attachments) && attachments.length > 0)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: [bodyField], message: "room_work_requires_text_or_attachment" });
+  }
+});
+
+export const PublicRoomWorkCreateInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachment("instruction").extend({
+  agent_id: publicCollaborationId.optional()
+}).strict(), "instruction");
+export type PublicRoomWorkCreateInput = z.input<typeof PublicRoomWorkCreateInputSchema>;
+
+export const PublicRoomWorkReplyInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachment("instruction").extend({
+  work_id: publicCollaborationId,
+  assignee_id: publicCollaborationId.optional(),
+  expected_version: publicCollaborationVersion.optional(),
+  expected_generation: publicCollaborationGeneration.optional()
+}).strict(), "instruction");
+export type PublicRoomWorkReplyInput = z.input<typeof PublicRoomWorkReplyInputSchema>;
+
+export const PublicRoomWorkCommentCreateInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachment("body").extend({
+  work_id: publicCollaborationId,
+  expected_version: publicCollaborationVersion.optional()
+}).strict(), "body");
+export type PublicRoomWorkCommentCreateInput = z.input<typeof PublicRoomWorkCommentCreateInputSchema>;
+
+export const PublicRoomWorkCommentApplyInputSchema = z.object({
+  work_id: publicCollaborationId,
+  comment_id: publicCollaborationId,
+  comment_version: publicCollaborationVersion,
+  expected_version: publicCollaborationVersion.optional(),
+  expected_generation: publicCollaborationGeneration.optional(),
+  assignee_id: publicCollaborationId.optional()
+}).strict();
+export type PublicRoomWorkCommentApplyInput = z.input<typeof PublicRoomWorkCommentApplyInputSchema>;
+
+export const PublicRoomWorkCommentReactionSetInputSchema = z.object({
+  work_id: publicCollaborationId,
+  comment_id: publicCollaborationId,
+  reaction: z.literal("like"),
+  enabled: z.boolean(),
+  expected_version: publicCollaborationVersion.optional()
+}).strict();
+export type PublicRoomWorkCommentReactionSetInput = z.infer<typeof PublicRoomWorkCommentReactionSetInputSchema>;
+
+export const PublicRoomDefaultAgentSetInputSchema = z.object({
+  agent_id: publicCollaborationId,
+  expected_version: publicCollaborationVersion.optional()
+}).strict();
+export type PublicRoomDefaultAgentSetInput = z.input<typeof PublicRoomDefaultAgentSetInputSchema>;
+
+/** Room-local Agent membership is managed separately from the Agent profile.
+ * Setting a permission creates the membership when it does not exist. */
+export const PublicRoomAgentPermissionSetInputSchema = z.object({
+  agent_id: publicCollaborationId,
+  can_view: z.boolean(),
+  can_edit: z.boolean(),
+  can_execute: z.boolean()
+}).strict().refine((value) => (!value.can_edit && !value.can_execute) || value.can_view, "room_agent_view_required");
+export type PublicRoomAgentPermissionSetInput = z.infer<typeof PublicRoomAgentPermissionSetInputSchema>;
+
+/** Removing a Room Agent is a permission revocation. The Server keeps the
+ * historical row and returns it with all capabilities disabled. */
+export const PublicRoomAgentRemoveInputSchema = z.object({
+  agent_id: publicCollaborationId
+}).strict();
+export type PublicRoomAgentRemoveInput = z.infer<typeof PublicRoomAgentRemoveInputSchema>;
+
+export const PublicRoomAgentPermissionRecordSchema = z.object({
+  id: publicCollaborationId,
+  room_id: publicCollaborationId,
+  agent_id: publicCollaborationId,
+  can_view: z.boolean(),
+  can_edit: z.boolean(),
+  can_execute: z.boolean(),
+  version: publicCollaborationVersion,
+  created_by: publicCollaborationId,
+  created_at: publicCollaborationTimestamp,
+  updated_at: publicCollaborationTimestamp,
+  removed: z.boolean()
+}).strict();
+export type PublicRoomAgentPermissionRecord = z.infer<typeof PublicRoomAgentPermissionRecordSchema>;
+
+export const PublicRoomMemberRecordSchema = z.object({
+  id: publicCollaborationId,
+  room_id: publicCollaborationId,
+  account_id: publicCollaborationId,
+  role: z.enum(["owner", "admin", "member", "guest"]),
+  state: z.enum(["active", "revoked"]),
+  version: publicCollaborationVersion,
+  created_at: publicCollaborationTimestamp,
+  updated_at: publicCollaborationTimestamp,
+  revoked_at: publicCollaborationTimestamp.optional()
+}).strict();
+export type PublicRoomMemberRecord = z.infer<typeof PublicRoomMemberRecordSchema>;
+
+export const PublicRoomMemberListRecordSchema = z.object({
+  humans: z.array(PublicRoomMemberRecordSchema),
+  agents: z.array(PublicRoomAgentPermissionRecordSchema)
+}).strict();
+export type PublicRoomMemberListRecord = z.infer<typeof PublicRoomMemberListRecordSchema>;
+
+export const PublicAgentDmOpenInputSchema = z.object({ agent_id: publicCollaborationId }).strict();
+export type PublicAgentDmOpenInput = z.infer<typeof PublicAgentDmOpenInputSchema>;
+
+export const PublicRoomWorkListInputSchema = z.object({
+  status: PublicRoomWorkStatusSchema.optional(),
+  cursor: z.string().trim().min(1).max(512).optional(),
+  limit: z.number().int().positive().max(200).default(50)
+}).strict();
+export type PublicRoomWorkListInput = z.input<typeof PublicRoomWorkListInputSchema>;
+
+export const PublicRoomWorkViewInputSchema = z.object({ work_id: publicCollaborationId }).strict();
+export type PublicRoomWorkViewInput = z.input<typeof PublicRoomWorkViewInputSchema>;
+
+export const PublicRoomWorkStopInputSchema = z.object({
+  work_id: publicCollaborationId,
+  reason: z.string().trim().min(1).max(2_000).optional(),
+  expected_version: publicCollaborationVersion.optional(),
+  expected_generation: publicCollaborationGeneration.optional()
+}).strict();
+export type PublicRoomWorkStopInput = z.input<typeof PublicRoomWorkStopInputSchema>;
+
+export const PublicRoomWorkAssigneeStopInputSchema = z.object({
+  work_id: publicCollaborationId,
+  assignee_id: publicCollaborationId,
+  reason: z.string().trim().min(1).max(2_000).optional(),
+  expected_version: publicCollaborationVersion.optional(),
+  expected_generation: publicCollaborationGeneration.optional()
+}).strict();
+export type PublicRoomWorkAssigneeStopInput = z.input<typeof PublicRoomWorkAssigneeStopInputSchema>;
+
+export const PublicRoomWorkAssigneeReassignInputSchema = z.object({
+  work_id: publicCollaborationId,
+  assignee_id: publicCollaborationId,
+  agent_id: publicCollaborationId,
+  expected_version: publicCollaborationVersion.optional(),
+  expected_generation: publicCollaborationGeneration.optional()
+}).strict();
+export type PublicRoomWorkAssigneeReassignInput = z.input<typeof PublicRoomWorkAssigneeReassignInputSchema>;
+
+/** Delegation accepts only the child intent and graph references. The Server
+ * derives the authenticated requester, Work, and parent binding from the
+ * operation context; none of those authority fields are client-controlled. */
+export const PublicRoomWorkAssigneeDelegateInputSchema = z.object({
+  work_id: publicCollaborationId,
+  assignee_id: publicCollaborationId,
+  agent_id: publicCollaborationId,
+  instruction: z.string().trim().min(1).max(1_000_000),
+  dependency_assignee_ids: z.array(publicCollaborationId).max(100).default([]),
+  attachments: z.array(PublicRoomWorkAttachmentSchema).max(100).default([]),
+  expected_version: publicCollaborationVersion.optional(),
+  expected_generation: publicCollaborationGeneration.optional()
+}).strict();
+export type PublicRoomWorkAssigneeDelegateInput = z.input<typeof PublicRoomWorkAssigneeDelegateInputSchema>;
+
+export const PublicRoomDomainApiRequestSchema = z.object({
+  context: PublicRoomRequestContextSchema,
+  input: jsonValueSchema
+}).strict();
+export type PublicRoomDomainApiRequest = z.infer<typeof PublicRoomDomainApiRequestSchema>;
 
 /**
  * Account-scoped Workspace metadata.  Organization membership is deliberately
@@ -335,13 +655,16 @@ export const PublicWorkspaceTransferReceiptSchema = z.object({
 });
 export type PublicWorkspaceTransferReceipt = z.infer<typeof PublicWorkspaceTransferReceiptSchema>;
 
-/** The first public product slice. Keep this list in the shared contract
- * package so the Server catalog and generated documentation cannot drift. */
+/** The normal Room-first public product slice. Keep legacy Session entry
+ * points out of this list so a catalog consumer cannot discover them as the
+ * supported way to start work. */
 export const publicDomainOperationIds = Object.freeze([
   "room.list", "room.view", "room.create", "room.patch",
-  "agent.list", "agent.view", "agent.create", "agent.patch", "agent.backend.bind",
+  "room.member.list", "room.agent.permission.set", "room.agent.remove",
+  "room.work.list", "room.work.view", "room.work.create", "room.work.reply", "room.work.comment.create", "room.work.comment.apply", "room.work.comment.reaction.set",
+  "room.default_agent.set", "room.work.stop", "room.work.assignee.stop", "room.work.assignee.reassign", "room.work.assignee.delegate", "agent.dm.open",
+  "agent.backend.list", "agent.list", "agent.view", "agent.create", "agent.patch", "agent.backend.bind",
   "artifact.list", "artifact.view", "artifact.create", "artifact.revise", "artifact.restore_revision", "artifact.repair",
-  "session.create", "chat.turn.run",
   "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
   "organization.member.list", "organization.member.invite", "organization.member.accept", "organization.member.role.change", "organization.member.remove", "organization.member.leave",
   "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue", "organization.invitation.extend",
@@ -350,6 +673,48 @@ export const publicDomainOperationIds = Object.freeze([
   "workspace.bundle.export", "workspace.bundle.restore"
 ] as const);
 export type PublicDomainOperationId = (typeof publicDomainOperationIds)[number];
+
+/** Explicit compatibility-only entries. They remain callable through a
+ * Server legacy allowlist, but are deliberately absent from the normal
+ * catalog and Room-first SDK surface. */
+export const publicLegacyDomainOperationIds = Object.freeze([
+  "session.create", "chat.turn.run"
+] as const);
+export const legacyPublicDomainOperationIds = publicLegacyDomainOperationIds;
+export type PublicLegacyDomainOperationId = (typeof publicLegacyDomainOperationIds)[number];
+
+/**
+ * Legacy Session entry points are intentionally described outside the normal
+ * catalog.  A compatibility caller may use them only after the Server has
+ * resolved the legacy Session to an authorized Room/work context; this table
+ * is not an invitation to create a Session from a Room-first client.
+ */
+export const PublicLegacyDomainOperationCompatibilitySchema = z.object({
+  id: z.enum(["session.create", "chat.turn.run"]),
+  availability: z.literal("deprecated_command"),
+  replacement_operation_ids: z.array(z.string().trim().min(1).max(512)).min(1).max(8),
+  scope: z.literal("legacy_session_compatibility"),
+  description: z.string().trim().min(1).max(2_000)
+}).strict();
+export type PublicLegacyDomainOperationCompatibility = z.infer<typeof PublicLegacyDomainOperationCompatibilitySchema>;
+
+export const publicLegacyDomainOperationCompatibility: readonly PublicLegacyDomainOperationCompatibility[] = Object.freeze([
+  {
+    id: "session.create",
+    availability: "deprecated_command",
+    replacement_operation_ids: ["room.work.create"],
+    scope: "legacy_session_compatibility",
+    description: "Resolve the legacy Session request to an authorized Room before continuing; Room-first clients use room.work.create."
+  },
+  {
+    id: "chat.turn.run",
+    availability: "deprecated_command",
+    replacement_operation_ids: ["room.work.create", "room.work.reply"],
+    scope: "legacy_session_compatibility",
+    description: "Resolve the legacy Session to an authorized Room work before execution; Room-first clients use room.work.create or room.work.reply."
+  }
+].map((entry) => PublicLegacyDomainOperationCompatibilitySchema.parse(entry)));
+export const legacyPublicDomainOperationCompatibility = publicLegacyDomainOperationCompatibility;
 
 const publicArtifactMutationOutputSchema = z.object({
   artifact: ArtifactRecordSchema,
@@ -364,6 +729,19 @@ const publicArtifactMutationOutputSchema = z.object({
 export function publicOperationOutputSchemaFor(operationId: string, fallback: z.ZodTypeAny): z.ZodTypeAny {
   if (operationId === "room.list") return z.array(PublicRoomRecordSchema);
   if (["room.view", "room.create", "room.patch"].includes(operationId)) return PublicRoomRecordSchema;
+  if (operationId === "room.member.list") return PublicRoomMemberListRecordSchema;
+  if (["room.agent.permission.set", "room.agent.remove"].includes(operationId)) return PublicRoomAgentPermissionRecordSchema;
+  if (operationId === "room.work.list") return z.array(PublicRoomWorkRecordSchema);
+  if (operationId === "room.work.view") return PublicRoomWorkViewSchema;
+  if (["room.work.create"].includes(operationId)) return PublicRoomWorkRecordSchema;
+  if (["room.work.reply", "room.work.comment.apply"].includes(operationId)) return PublicRoomWorkInstructionSchema;
+  if (operationId === "room.work.comment.create") return PublicRoomWorkCommentSchema;
+  if (operationId === "room.work.comment.reaction.set") return PublicRoomWorkReactionRecordSchema;
+  if (operationId === "room.default_agent.set") return PublicRoomDefaultAgentRecordSchema;
+  if (["room.work.stop", "room.work.assignee.stop"].includes(operationId)) return PublicRoomWorkControlSchema;
+  if (["room.work.assignee.reassign", "room.work.assignee.delegate"].includes(operationId)) return PublicRoomWorkAssigneeSchema;
+  if (operationId === "agent.dm.open") return PublicAgentDmRecordSchema;
+  if (operationId === "agent.backend.list") return z.array(PublicAgentBackendRecordSchema);
   if (operationId === "agent.list") return z.array(PublicAgentRecordSchema);
   if (["agent.view", "agent.create", "agent.patch", "agent.backend.bind"].includes(operationId)) return PublicAgentRecordSchema;
   if (["artifact.create", "artifact.revise", "artifact.restore_revision", "artifact.repair"].includes(operationId)) return publicArtifactMutationOutputSchema;
@@ -383,6 +761,16 @@ export function publicOperationOutputSchemaFor(operationId: string, fallback: z.
   if (operationId === "workspace.organization.move.status") return PublicWorkspaceMoveStatusRecordSchema;
   if (operationId === "workspace.bundle.export") return PublicWorkspaceBundleExportResultSchema;
   if (operationId === "workspace.bundle.restore") return PublicWorkspaceBundleRestoreResultSchema;
+  return fallback;
+}
+
+/** Public input projections may intentionally be narrower than the internal
+ * operation definition. Keep the Room Agent membership commands on the same
+ * versioned contract as the rest of the Room-first API. */
+export function publicOperationInputSchemaFor(operationId: string, fallback: z.ZodTypeAny): z.ZodTypeAny {
+  if (operationId === "room.member.list") return z.object({}).strict();
+  if (operationId === "room.agent.permission.set") return PublicRoomAgentPermissionSetInputSchema;
+  if (operationId === "room.agent.remove") return PublicRoomAgentRemoveInputSchema;
   return fallback;
 }
 
@@ -464,6 +852,54 @@ const eventPayloadSchemas = {
   "workspace.activity.ingested": z.object({ activity_id: z.string().trim().min(1), status: z.string().trim().min(1), source_event_id: z.string().trim().min(1), payload_hash: z.string().regex(/^[a-f0-9]{64}$/i) }).strict(),
   "workspace.run.changed": z.object({ run_id: z.string().trim().min(1), status: z.string().trim().min(1), action: z.string().trim().min(1) }).strict(),
   "workspace.room.changed": z.object({ room_id: z.string().trim().min(1), action: z.enum(["created", "patched"]) }).strict(),
+  "workspace.room_work.changed": z.object({
+    room_id: publicCollaborationId,
+    work_id: publicCollaborationId,
+    action: z.enum(["created", "updated", "replied", "comment_applied", "stopped", "assignee_stopped", "assignee_reassigned"]),
+    status: PublicRoomWorkStatusSchema.optional(),
+    generation: publicCollaborationGeneration.optional(),
+    version: publicCollaborationVersion.optional()
+  }).strict(),
+  "workspace.room_work.comment.changed": z.object({
+    room_id: publicCollaborationId,
+    work_id: publicCollaborationId,
+    comment_id: publicCollaborationId,
+    action: z.enum(["created", "applied", "reaction_changed"]),
+    version: publicCollaborationVersion.optional()
+  }).strict(),
+  "workspace.room_work.assignee.changed": z.object({
+    room_id: publicCollaborationId,
+    work_id: publicCollaborationId,
+    assignee_id: publicCollaborationId,
+    action: z.enum(["created", "updated", "stopped", "reassigned", "delegated"]),
+    delegated: z.boolean().optional(),
+    agent_id: publicCollaborationId.optional(),
+    parent_assignee_id: publicCollaborationId.optional(),
+    status: CoreRoomWorkAssignmentStatusSchema.optional(),
+    generation: publicCollaborationGeneration.optional(),
+    version: publicCollaborationVersion.optional()
+  }).strict(),
+  "workspace.room_default_agent.changed": z.object({
+    room_id: publicCollaborationId,
+    agent_id: publicCollaborationId,
+    agent_version: publicCollaborationVersion.optional(),
+    version: publicCollaborationVersion.optional()
+  }).strict(),
+  "workspace.room_agent.changed": z.object({
+    room_id: publicCollaborationId,
+    agent_id: publicCollaborationId,
+    action: z.enum(["permission_changed", "removed"]),
+    can_view: z.boolean(),
+    can_edit: z.boolean(),
+    can_execute: z.boolean(),
+    version: publicCollaborationVersion.optional()
+  }).strict(),
+  "workspace.agent_dm.changed": z.object({
+    room_id: publicCollaborationId,
+    agent_id: publicCollaborationId,
+    action: z.enum(["opened", "reused"]),
+    version: publicCollaborationVersion.optional()
+  }).strict(),
   "workspace.agent.changed": z.object({ agent_id: z.string().trim().min(1), action: z.enum(["created", "patched", "backend_bound"]) }).strict(),
   "workspace.artifact.changed": z.object({ artifact_id: z.string().trim().min(1), action: z.enum(["created", "revised", "restored", "repaired"]), revision_id: z.string().trim().min(1).optional() }).strict(),
   // Organization events carry stable resource IDs and role/state facts only.
@@ -486,6 +922,12 @@ const eventResourceKinds: Record<keyof typeof eventPayloadSchemas, string[]> = {
   "workspace.activity.ingested": ["activity"],
   "workspace.run.changed": ["backend_run"],
   "workspace.room.changed": ["room"],
+  "workspace.room_work.changed": ["room", "room_work"],
+  "workspace.room_work.comment.changed": ["room", "room_work", "room_work_comment"],
+  "workspace.room_work.assignee.changed": ["room", "room_work", "room_work_assignee"],
+  "workspace.room_default_agent.changed": ["room", "agent"],
+  "workspace.room_agent.changed": ["room", "room_agent", "agent"],
+  "workspace.agent_dm.changed": ["room", "agent"],
   "workspace.agent.changed": ["agent"],
   "workspace.artifact.changed": ["artifact", "artifact_revision"],
   "organization.created": ["organization"],
@@ -811,6 +1253,78 @@ export class DomainApiClient {
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/domain/queries/${encodeURIComponent(queryId)}`,
       body: request
     });
+  }
+
+  createRoom<T = PublicRoomRecord>(workspaceId: string, input: PublicRoomCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.create", { context: {}, input }, options);
+  }
+
+  listRoomWorks<T = PublicRoomWorkRecord[]>(workspaceId: string, roomId: string, input: PublicRoomWorkListInput = {}): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "room.work.list", { context: { room_id: roomId }, input });
+  }
+
+  viewRoomWork<T = PublicRoomWorkView>(workspaceId: string, roomId: string, input: PublicRoomWorkViewInput): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "room.work.view", { context: { room_id: roomId }, input });
+  }
+
+  createRoomWork<T = PublicRoomWorkRecord>(workspaceId: string, roomId: string, input: PublicRoomWorkCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.create", { context: { room_id: roomId }, input }, options);
+  }
+
+  replyRoomWork<T = PublicRoomWorkInstruction>(workspaceId: string, roomId: string, input: PublicRoomWorkReplyInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.reply", { context: { room_id: roomId }, input }, options);
+  }
+
+  createRoomWorkComment<T = PublicRoomWorkComment>(workspaceId: string, roomId: string, input: PublicRoomWorkCommentCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.comment.create", { context: { room_id: roomId }, input }, options);
+  }
+
+  applyRoomWorkComment<T = PublicRoomWorkInstruction>(workspaceId: string, roomId: string, input: PublicRoomWorkCommentApplyInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.comment.apply", { context: { room_id: roomId }, input }, options);
+  }
+
+  setRoomWorkCommentReaction<T = PublicRoomWorkReactionRecord>(workspaceId: string, roomId: string, input: PublicRoomWorkCommentReactionSetInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.comment.reaction.set", { context: { room_id: roomId }, input }, options);
+  }
+
+  setRoomDefaultAgent<T = PublicRoomDefaultAgentRecord>(workspaceId: string, roomId: string, input: PublicRoomDefaultAgentSetInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.default_agent.set", { context: { room_id: roomId }, input }, options);
+  }
+
+  listRoomMembers<T = PublicRoomMemberListRecord>(workspaceId: string, roomId: string): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "room.member.list", { context: { room_id: roomId }, input: {} });
+  }
+
+  listAgentBackends<T = PublicAgentBackendRecord[]>(workspaceId: string): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "agent.backend.list", { context: {}, input: {} });
+  }
+
+  setRoomAgentPermission<T = PublicRoomAgentPermissionRecord>(workspaceId: string, roomId: string, input: PublicRoomAgentPermissionSetInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.agent.permission.set", { context: { room_id: roomId }, input }, options);
+  }
+
+  removeRoomAgent<T = PublicRoomAgentPermissionRecord>(workspaceId: string, roomId: string, input: PublicRoomAgentRemoveInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.agent.remove", { context: { room_id: roomId }, input }, options);
+  }
+
+  openAgentDm<T = PublicAgentDmRecord>(workspaceId: string, input: PublicAgentDmOpenInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "agent.dm.open", { context: {}, input }, options);
+  }
+
+  stopRoomWork<T = PublicRoomWorkControl>(workspaceId: string, roomId: string, input: PublicRoomWorkStopInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.stop", { context: { room_id: roomId }, input }, options);
+  }
+
+  stopRoomWorkAssignee<T = PublicRoomWorkControl>(workspaceId: string, roomId: string, input: PublicRoomWorkAssigneeStopInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.assignee.stop", { context: { room_id: roomId }, input }, options);
+  }
+
+  reassignRoomWorkAssignee<T = PublicRoomWorkAssignee>(workspaceId: string, roomId: string, input: PublicRoomWorkAssigneeReassignInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.assignee.reassign", { context: { room_id: roomId }, input }, options);
+  }
+
+  delegateRoomWorkAssignee<T = PublicRoomWorkAssignee>(workspaceId: string, roomId: string, input: PublicRoomWorkAssigneeDelegateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "room.work.assignee.delegate", { context: { room_id: roomId }, input }, options);
   }
 
   ingestActivity<T = JsonValue>(workspaceId: string, request: ActivityIngestRequest, options: { operationId?: string; idempotencyKey?: string } = {}): Promise<DomainApiResponse<T>> {

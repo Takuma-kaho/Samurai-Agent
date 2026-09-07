@@ -44,10 +44,10 @@ function register(classification: DomainAccessClassification, ...ids: readonly s
 // These operations use the Room/Workspace participant service, which performs
 // their target-specific checks before it changes membership or ownership.
 register({ scope: "room_collaboration" },
-  "agent.backend.bind", "agent.create", "agent.list", "agent.patch", "agent.view", "agent.workspace_permission.set",
+  "agent.backend.bind", "agent.backend.list", "agent.create", "agent.list", "agent.patch", "agent.view", "agent.workspace_permission.set",
   "room.agent.permission.set", "room.agent.remove", "room.create", "room.list", "room.member.add", "room.member.list",
   "room.member.remove", "room.member.role.change", "room.owner.recover", "room.owner.transfer", "room.ownerless.list", "room.patch",
-  "room.resource.share", "room.resource.share.list", "room.resource.share.revoke", "room.view",
+  "room.resource.share", "room.resource.share.list", "room.resource.share.revoke", "room.view", "room.default_agent.set", "agent.dm.open",
   "workspace.member.add", "workspace.member.list", "workspace.member.remove", "workspace.member.role.change", "workspace.owner.transfer"
 );
 
@@ -92,7 +92,7 @@ register({ scope: "legacy_owner" },
   "automation.memory_review.run", "curator.pause", "curator.restore", "curator.resume", "curator.run", "curator.snapshot.create", "curator.snapshot.list", "learning.snapshot.prune"
 );
 
-register({ scope: "room_content", action: "edit" }, "artifact.create", "graph.create", "generated_surface.create", "memory.session.create", "memory.topic.create", "message.presentation.update", "objective.create", "objective.transition", "wiki.proposal.create");
+register({ scope: "room_content", action: "edit" }, "artifact.create", "graph.create", "generated_surface.create", "memory.session.create", "memory.topic.create", "message.presentation.update", "objective.create", "objective.transition", "wiki.proposal.create", "room.work.comment.create", "room.work.comment.reaction.set");
 register({ scope: "room_content", action: "edit" },
   "automation.job.save", "automation.job.set_status", "automation.job.rebind_authority",
   "automation.job.manager_stop", "automation.job.manager_resume", "automation.job.reauthorize"
@@ -101,14 +101,14 @@ register({ scope: "room_content", action: "edit", target: {
   resourceRefField: "source_ref",
   allowedKinds: ["artifact", "memory", "wiki", "skill", "collection_record"]
 } }, "resource.translation.save", "resource.translation_job.save");
-register({ scope: "room_content", action: "execute" }, "artifact.export_pdf", "browser.download_to_workspace", "browser.extract", "browser.interact", "browser.navigate", "browser.screenshot", "chat.turn.run", "evaluation.run", "external.send", "external.send.dispatch", "external.send.prepare", "image.generate", "learning.background_review.apply", "mcp.call", "presentation.plan", "policy.change.request", "profile.change.request", "reflection.run", "reflection.suggestion.apply", "sandbox.exec", "session.create", "skill.optimization.cancel", "skill.optimization.promote", "skill.optimization.reject", "skill.optimization.rollback", "skill.optimization.start", "soul.change.request", "work_item.follow_up", "work_item.steer");
+register({ scope: "room_content", action: "execute" }, "artifact.export_pdf", "browser.download_to_workspace", "browser.extract", "browser.interact", "browser.navigate", "browser.screenshot", "chat.turn.run", "evaluation.run", "external.send", "external.send.dispatch", "external.send.prepare", "image.generate", "learning.background_review.apply", "mcp.call", "presentation.plan", "policy.change.request", "profile.change.request", "reflection.run", "reflection.suggestion.apply", "sandbox.exec", "session.create", "skill.optimization.cancel", "skill.optimization.promote", "skill.optimization.reject", "skill.optimization.rollback", "skill.optimization.start", "soul.change.request", "work_item.follow_up", "work_item.steer", "room.work.create", "room.work.reply", "room.work.comment.apply", "room.work.stop", "room.work.assignee.stop", "room.work.assignee.reassign", "room.work.assignee.delegate");
 // `resource.version.get` validates the exact resource through its own narrow
 // Room-authorized read service after this room-level admission.  Its dynamic
 // resource kind cannot be inferred safely from an operation name.
 // workspace.context.get checks that its requested Room equals the trusted
 // target before loading human-owned metadata; it must not infer a Room from a
 // caller-controlled Workspace field.
-register({ scope: "room_content", action: "read" }, "activity.history.list", "artifact.list", "artifact.view", "collection.schema.docs", "collection.search", "file.list", "memory.search", "resource.version.get", "session.search", "skill.search", "wiki.search", "workspace.context.get");
+register({ scope: "room_content", action: "read" }, "activity.history.list", "artifact.list", "artifact.view", "collection.schema.docs", "collection.search", "file.list", "memory.search", "resource.version.get", "session.search", "skill.search", "wiki.search", "workspace.context.get", "room.work.list", "room.work.view");
 register({ scope: "room_content", action: "edit", target: { kind: "artifact", idField: "artifact_id" } }, "artifact.repair", "artifact.restore_revision", "artifact.revise", "graph.patch", "image.edit");
 register({ scope: "room_content", action: "edit", target: [
   { kind: "collection_schema", idField: "collection_id" },

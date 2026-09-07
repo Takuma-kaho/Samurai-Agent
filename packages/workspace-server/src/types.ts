@@ -1,4 +1,4 @@
-import type { ResourceRef } from "@samurai-agent/core-schemas";
+import type { ResourceRef, WorkspaceFileResourceRef as CoreWorkspaceFileResourceRef } from "@samurai-agent/core-schemas";
 
 export const workspaceServerModes = ["hosted", "self_host"] as const;
 export type WorkspaceServerMode = (typeof workspaceServerModes)[number];
@@ -322,6 +322,14 @@ export interface WorkspaceRoom {
   workspaceId: string;
   /** Undefined means this Room is directly under the Workspace. */
   parentRoomId?: string;
+  /** Existing rows are normalized to `normal`; this remains optional for
+   * compatibility with callers that read a pre-v89 projection. */
+  kind?: WorkspaceRoomKind;
+  /** The default Agent is intentionally nullable for legacy Rooms. */
+  defaultAgentId?: string;
+  defaultAgentVersion?: number;
+  /** Internal DM owner marker; never expose it as a grant to another caller. */
+  dmAccountId?: string;
   name: string;
   version: number;
   /** Current caller capability; it does not grant access to any other Room. */
@@ -330,6 +338,211 @@ export interface WorkspaceRoom {
   canExecute?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export const workspaceRoomKinds = ["normal", "agent_dm"] as const;
+export type WorkspaceRoomKind = (typeof workspaceRoomKinds)[number];
+
+export const workspaceHumanWorkStatuses = ["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"] as const;
+export type WorkspaceHumanWorkStatus = (typeof workspaceHumanWorkStatuses)[number];
+
+export const workspaceHumanWorkStopStates = ["none", "requested", "confirmed", "unconfirmed"] as const;
+export type WorkspaceHumanWorkStopState = (typeof workspaceHumanWorkStopStates)[number];
+
+export const workspaceHumanWorkAssignmentStatuses = ["queued", "ready", "running", "waiting", "blocked", "completed", "failed", "cancelled", "outcome_unknown"] as const;
+export type WorkspaceHumanWorkAssignmentStatus = (typeof workspaceHumanWorkAssignmentStatuses)[number];
+
+export const workspaceHumanWorkInstructionSources = ["request", "reply", "comment_reflection", "system"] as const;
+export type WorkspaceHumanWorkInstructionSource = (typeof workspaceHumanWorkInstructionSources)[number];
+
+export const workspaceHumanWorkInstructionStates = ["pending", "accepted", "delivered", "applied", "failed"] as const;
+export type WorkspaceHumanWorkInstructionState = (typeof workspaceHumanWorkInstructionStates)[number];
+
+export const workspaceHumanWorkControlActions = ["stop_request", "stop_confirm", "stop_unconfirmed", "resume", "assignment_stop", "reassign"] as const;
+export type WorkspaceHumanWorkControlAction = (typeof workspaceHumanWorkControlActions)[number];
+
+export const workspaceHumanWorkControlStates = ["accepted", "pending", "confirmed", "failed", "unconfirmed"] as const;
+export type WorkspaceHumanWorkControlState = (typeof workspaceHumanWorkControlStates)[number];
+
+export const workspaceHumanWorkLaunchReservationStatuses = ["reserved", "claimed", "released", "cancelled"] as const;
+export type WorkspaceHumanWorkLaunchReservationStatus = (typeof workspaceHumanWorkLaunchReservationStatuses)[number];
+
+export interface WorkspaceRoomDefaultAgent {
+  roomId: string;
+  agentId: string;
+  agentVersion: number;
+  enabled: boolean;
+  canExecute: boolean;
+  version: number;
+  updatedAt: string;
+}
+
+export interface WorkspaceAgentDm {
+  workspaceId: string;
+  roomId: string;
+  kind: "agent_dm";
+  agentId: string;
+  agentVersion: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceHumanWorkAssignment {
+  workspaceId: string;
+  id: string;
+  workId: string;
+  roomId: string;
+  parentAssignmentId?: string;
+  dependencyAssignmentIds?: string[];
+  agentId: string;
+  agentVersion: number;
+  instructionVersion: number;
+  /** Attempt is incremented only when a durable launch reservation is claimed. */
+  attempt: number;
+  priority: number;
+  status: WorkspaceHumanWorkAssignmentStatus;
+  currentRunId?: string;
+  result?: WorkspaceRecordPayload;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  /** Work control generation at the point this projection was read. */
+  generation: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceHumanWorkInstruction {
+  workspaceId: string;
+  id: string;
+  workId: string;
+  assignmentId?: string;
+  roomId: string;
+  version: number;
+  body: string;
+  attachments: WorkspaceFileResourceRef[];
+  sourceKind: WorkspaceHumanWorkInstructionSource;
+  sourceCommentId?: string;
+  sourceCommentVersion?: number;
+  state: WorkspaceHumanWorkInstructionState;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface WorkspaceHumanWorkComment {
+  workspaceId: string;
+  id: string;
+  workId: string;
+  roomId: string;
+  authorAccountId: string;
+  version: number;
+  body: string;
+  attachments: WorkspaceFileResourceRef[];
+  reactionCount?: number;
+  appliedInstructionIds?: string[];
+  createdAt: string;
+}
+
+/** One explicit human reaction. Reactions never imply approval or execution. */
+export interface WorkspaceHumanWorkReaction {
+  workspaceId: string;
+  id: string;
+  workId: string;
+  roomId: string;
+  commentId: string;
+  actorAccountId: string;
+  reaction: "like";
+  enabled: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceHumanWorkControl {
+  workspaceId: string;
+  id: string;
+  workId: string;
+  assignmentId?: string;
+  roomId: string;
+  action: WorkspaceHumanWorkControlAction;
+  state: WorkspaceHumanWorkControlState;
+  actorAccountId: string;
+  generation: number;
+  operationId: string;
+  details: WorkspaceRecordPayload;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface WorkspaceHumanWorkLaunchReservation {
+  workspaceId: string;
+  id: string;
+  workId: string;
+  assignmentId: string;
+  roomId: string;
+  generation: number;
+  status: WorkspaceHumanWorkLaunchReservationStatus;
+  operationId: string;
+  scheduledAt: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  claimedAt?: string;
+  releasedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceHumanWork {
+  workspaceId: string;
+  id: string;
+  roomId: string;
+  requesterAccountId: string;
+  defaultAgentId: string;
+  defaultAgentVersion: number;
+  title: string;
+  objective: string;
+  completionCriteria: unknown[];
+  status: WorkspaceHumanWorkStatus;
+  stopState: WorkspaceHumanWorkStopState;
+  instructionVersion: number;
+  controlGeneration: number;
+  operationId: string;
+  assignments: WorkspaceHumanWorkAssignment[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceHumanWorkView extends WorkspaceHumanWork {
+  instructions: WorkspaceHumanWorkInstruction[];
+  comments: WorkspaceHumanWorkComment[];
+  reactions: WorkspaceHumanWorkReaction[];
+  controls: WorkspaceHumanWorkControl[];
+  launchReservations?: WorkspaceHumanWorkLaunchReservation[];
+}
+
+/**
+ * Internal-only bridge from a retired Runtime Session to the Room-work
+ * aggregate.  The compatibility adapter may use this record for lookup, but
+ * it must never be projected as a public Room-work DTO.
+ */
+export interface WorkspaceHumanWorkLegacySession {
+  workspaceId: string;
+  legacySessionId: string;
+  roomId: string;
+  workId: string;
+  operationId: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceHumanWorkCreateResult {
+  work: WorkspaceHumanWork;
+  launchReservation: WorkspaceHumanWorkLaunchReservation;
+  replayed: boolean;
 }
 
 export interface WorkspaceAgent {
@@ -485,6 +698,9 @@ export interface WorkspaceFile {
   createdAt: string;
   updatedAt: string;
 }
+
+/** Stable Server-issued reference used when a file is attached to Room Work. */
+export type WorkspaceFileResourceRef = CoreWorkspaceFileResourceRef;
 
 export interface WorkspaceJob {
   workspaceId: string;

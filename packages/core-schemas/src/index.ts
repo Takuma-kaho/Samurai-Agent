@@ -82,6 +82,20 @@ export const backendSessionAcquisitionModes = ["provider_event", "start_session"
 export const backendSessionResumeModes = ["native", "unsupported", "replay_forbidden"] as const;
 export const backendRunStatuses = ["queued", "running", "waiting_for_backend_input", "completed", "failed", "cancelled", "outcome_unknown"] as const;
 export const backendRunPhases = ["admitted", "preparing", "backend_starting", "external_running", "waiting", "cancelling", "finalizing", "post_turn", "settled"] as const;
+/** Room is the durable collaboration boundary.  Session remains an internal
+ * continuity reference and is intentionally absent from the public work DTOs. */
+export const roomKinds = ["normal", "agent_dm"] as const;
+export const roomWorkKinds = ["human"] as const;
+export const roomWorkStatuses = ["queued", "running", "waiting", "blocked", "completed", "failed", "stopping", "cancelled", "outcome_unknown"] as const;
+export const roomWorkAssignmentStatuses = ["queued", "ready", "running", "waiting", "blocked", "completed", "failed", "stopping", "cancelled", "outcome_unknown"] as const;
+export const roomWorkInstructionSources = ["request", "reply", "comment_reflection", "system", "initial", "delegated"] as const;
+export const roomWorkInstructionStates = ["pending", "accepted", "queued", "delivered", "applied", "failed", "rejected"] as const;
+export const roomWorkControlActions = ["stop_request", "stop_confirm", "stop_unconfirmed", "resume", "assignment_stop", "reassign", "stop", "assignee.stop", "assignee.reassign"] as const;
+export const roomWorkControlStates = ["accepted", "pending", "requested", "running", "completed", "confirmed", "failed", "unconfirmed", "rejected"] as const;
+export const roomWorkStopStates = ["none", "requested", "confirmed", "unconfirmed"] as const;
+export const roomWorkLaunchReservationStatuses = ["reserved", "claimed", "released", "cancelled"] as const;
+export const roomWorkContinuityStates = ["active", "retired", "recovery_required"] as const;
+export const roomWorkReactionKinds = ["like"] as const;
 export const BackendRunPhaseSchema = z.enum(backendRunPhases);
 export type BackendRunPhase = z.infer<typeof BackendRunPhaseSchema>;
 export const backendEventTypes = [
@@ -203,6 +217,18 @@ export const BackendExecutionOwnerSchema = z.enum(backendExecutionOwners);
 export const BackendSessionAcquisitionModeSchema = z.enum(backendSessionAcquisitionModes);
 export const BackendSessionResumeModeSchema = z.enum(backendSessionResumeModes);
 export const BackendRunStatusSchema = z.enum(backendRunStatuses);
+export const RoomKindSchema = z.enum(roomKinds);
+export const RoomWorkKindSchema = z.enum(roomWorkKinds);
+export const RoomWorkStatusSchema = z.enum(roomWorkStatuses);
+export const RoomWorkAssignmentStatusSchema = z.enum(roomWorkAssignmentStatuses);
+export const RoomWorkInstructionSourceSchema = z.enum(roomWorkInstructionSources);
+export const RoomWorkInstructionStateSchema = z.enum(roomWorkInstructionStates);
+export const RoomWorkControlActionSchema = z.enum(roomWorkControlActions);
+export const RoomWorkControlStateSchema = z.enum(roomWorkControlStates);
+export const RoomWorkStopStateSchema = z.enum(roomWorkStopStates);
+export const RoomWorkLaunchReservationStatusSchema = z.enum(roomWorkLaunchReservationStatuses);
+export const RoomWorkContinuityStateSchema = z.enum(roomWorkContinuityStates);
+export const RoomWorkReactionKindSchema = z.enum(roomWorkReactionKinds);
 export const BackendEventTypeSchema = z.enum(backendEventTypes);
 export const ClientTargetKindSchema = z.enum(clientTargetKinds);
 export const ClientEventStatusSchema = z.enum(clientEventStatuses);
@@ -276,6 +302,18 @@ export type BackendExecutionOwner = z.infer<typeof BackendExecutionOwnerSchema>;
 export type BackendSessionAcquisitionMode = z.infer<typeof BackendSessionAcquisitionModeSchema>;
 export type BackendSessionResumeMode = z.infer<typeof BackendSessionResumeModeSchema>;
 export type BackendRunStatus = z.infer<typeof BackendRunStatusSchema>;
+export type RoomKind = z.infer<typeof RoomKindSchema>;
+export type RoomWorkKind = z.infer<typeof RoomWorkKindSchema>;
+export type RoomWorkStatus = z.infer<typeof RoomWorkStatusSchema>;
+export type RoomWorkAssignmentStatus = z.infer<typeof RoomWorkAssignmentStatusSchema>;
+export type RoomWorkInstructionSource = z.infer<typeof RoomWorkInstructionSourceSchema>;
+export type RoomWorkInstructionState = z.infer<typeof RoomWorkInstructionStateSchema>;
+export type RoomWorkControlAction = z.infer<typeof RoomWorkControlActionSchema>;
+export type RoomWorkControlState = z.infer<typeof RoomWorkControlStateSchema>;
+export type RoomWorkStopState = z.infer<typeof RoomWorkStopStateSchema>;
+export type RoomWorkLaunchReservationStatus = z.infer<typeof RoomWorkLaunchReservationStatusSchema>;
+export type RoomWorkContinuityState = z.infer<typeof RoomWorkContinuityStateSchema>;
+export type RoomWorkReactionKind = z.infer<typeof RoomWorkReactionKindSchema>;
 export type BackendEventType = z.infer<typeof BackendEventTypeSchema>;
 export type ClientTargetKind = z.infer<typeof ClientTargetKindSchema>;
 export type ClientEventStatus = z.infer<typeof ClientEventStatusSchema>;
@@ -419,6 +457,26 @@ export const ResourceRefSchema = z.object({
 }).strict();
 export type ResourceRef = z.infer<typeof ResourceRefSchema>;
 
+/**
+ * Server-issued Workspace file reference used by Room Work.  This is
+ * intentionally narrower than ResourceRefSchema: other resource kinds keep
+ * their existing contracts, while a Room Work attachment always identifies a
+ * concrete immutable file version by its SHA-256 id.
+ */
+export const WorkspaceFileResourceRefSchema = z.object({
+  kind: z.literal("file"),
+  id: z.string().regex(/^[a-f0-9]{64}$/),
+  uri: z.string().trim().min(1).max(4_096)
+    .refine((value) => !value.startsWith("/")
+      && !value.includes("\\")
+      && !value.includes("\0")
+      && !value.includes("//")
+      && !value.split("/").some((part) => part === "" || part === "." || part === ".."), "workspace_file_resource_uri_invalid"),
+  version: z.string().regex(/^[1-9][0-9]*$/),
+  label: z.string().trim().min(1).max(4_096).optional()
+}).strict();
+export type WorkspaceFileResourceRef = z.infer<typeof WorkspaceFileResourceRefSchema>;
+
 export const ProvenanceSchema = z.object({
   kind: z.enum(["user_authored", "generated_local", "external_provider", "imported", "system"]),
   summary: z.string(),
@@ -511,6 +569,13 @@ export type BackendCapabilityStatus = z.infer<typeof BackendCapabilityStatusSche
 export const RoomRecordSchema = z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1).max(200),
+  /** Existing Rooms may remain unconfigured until an administrator selects an Agent. */
+  kind: RoomKindSchema.optional().default("normal"),
+  default_agent_id: z.string().trim().min(1).optional(),
+  default_agent_version: z.number().int().positive().optional(),
+  configuration_version: z.number().int().positive().optional().default(1),
+  /** Present only for a private Agent DM; ordinary Rooms omit this relation. */
+  dm_account_id: z.string().trim().min(1).optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 }).strict();
@@ -524,10 +589,36 @@ export const AgentRecordSchema = z.object({
   instructions: z.string().trim().min(1).max(20_000),
   backend_id: z.string().trim().min(1),
   enabled: z.boolean(),
+  /** Snapshot used by a WorkItem; old Agent records default to version 1. */
+  configuration_version: z.number().int().positive().optional().default(1),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
 }).strict();
 export type AgentRecord = z.infer<typeof AgentRecordSchema>;
+
+/** The private human↔Agent relationship used by Agent DM Rooms. */
+export const AgentDmParticipantRelationSchema = z.object({
+  workspace_id: z.string().trim().min(1),
+  room_id: z.string().trim().min(1),
+  human_participant_id: z.string().trim().min(1),
+  agent_id: z.string().trim().min(1),
+  visibility: z.literal("private"),
+  membership_mode: z.literal("explicit_participants")
+}).strict();
+export type AgentDmParticipantRelation = z.infer<typeof AgentDmParticipantRelationSchema>;
+
+/**
+ * A DM is represented as an explicit private participant relation.  There is
+ * deliberately no Workspace/Admin inheritance field here: that access rule
+ * is enforced by Room authorization and cannot be inferred from this DTO.
+ */
+export const AgentDmRoomRecordSchema = RoomRecordSchema.extend({
+  kind: z.literal("agent_dm"),
+  default_agent_id: z.string().trim().min(1),
+  dm_account_id: z.string().trim().min(1),
+  dm_participants: AgentDmParticipantRelationSchema
+}).strict();
+export type AgentDmRoomRecord = z.infer<typeof AgentDmRoomRecordSchema>;
 
 /**
  * A reference to an app-owned conversation or work unit.  It is metadata only:
@@ -3729,6 +3820,14 @@ export const ObjectiveRecordSchema = z.object({
   id: z.string().min(1),
   session_id: z.string().min(1).optional(),
   room_id: z.string().min(1).optional(),
+  /** Optional discriminator keeps legacy learning objectives readable while
+   * allowing human Room work to be selected explicitly. */
+  kind: RoomWorkKindSchema.optional(),
+  workspace_id: z.string().min(1).optional(),
+  requester_id: z.string().min(1).optional(),
+  front_agent_id: z.string().min(1).optional(),
+  default_agent_id: z.string().min(1).optional(),
+  default_agent_version: z.number().int().positive().optional(),
   title: z.string().min(1),
   objective: z.string().min(1),
   completion_criteria: z.array(z.string().min(1)).min(1),
@@ -3737,6 +3836,9 @@ export const ObjectiveRecordSchema = z.object({
   time_budget_ms: z.number().int().positive().optional(),
   max_attempts: z.number().int().positive().optional(),
   current_checkpoint_id: z.string().min(1).optional(),
+  current_instruction_version: z.number().int().positive().optional(),
+  control_generation: z.number().int().nonnegative().optional(),
+  created_operation_id: z.string().min(1).optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime(),
   completed_at: z.string().datetime().optional()
@@ -3747,7 +3849,16 @@ export const WorkItemRecordSchema = z.object({
   id: z.string().min(1),
   objective_id: z.string().min(1),
   room_id: z.string().min(1).optional(),
+  workspace_id: z.string().min(1).optional(),
+  /** Optional discriminator prevents the generic work-item scheduler from
+   * accidentally consuming a human Room work row. */
+  kind: RoomWorkKindSchema.optional(),
   parent_work_item_id: z.string().min(1).optional(),
+  assignee_agent_id: z.string().min(1).optional(),
+  agent_configuration_version: z.number().int().positive().optional(),
+  generation: z.number().int().nonnegative().optional(),
+  instruction_version: z.number().int().positive().optional(),
+  dependency_work_item_ids: z.array(z.string().min(1)).optional(),
   instruction: z.string().min(1),
   status: WorkItemStatusSchema,
   priority: z.number().int(),
@@ -3759,6 +3870,8 @@ export const WorkItemRecordSchema = z.object({
   heartbeat_at: z.string().datetime().optional(),
   retry_after_at: z.string().datetime().optional(),
   backend_run_id: z.string().min(1).optional(),
+  execution_reservation_id: z.string().min(1).optional(),
+  continuity_association_id: z.string().min(1).optional(),
   current_checkpoint_id: z.string().min(1).optional(),
   failure_kind: WorkFailureKindSchema.optional(),
   error: z.string().optional(),
@@ -3768,6 +3881,449 @@ export const WorkItemRecordSchema = z.object({
   completed_at: z.string().datetime().optional()
 });
 export type WorkItemRecord = z.infer<typeof WorkItemRecordSchema>;
+
+const roomWorkId = z.string().trim().min(1).max(512);
+const roomWorkTimestamp = z.string().datetime();
+/** Room Work attachments are immutable Server-issued Workspace file refs. */
+const roomWorkAttachments = z.array(WorkspaceFileResourceRefSchema).max(100);
+
+/** A human Room work is an Objective-backed aggregate, not a new scheduler. */
+export const HumanWorkObjectiveRecordSchema = ObjectiveRecordSchema.extend({
+  kind: z.literal("human"),
+  workspace_id: roomWorkId,
+  room_id: roomWorkId,
+  requester_id: roomWorkId,
+  front_agent_id: roomWorkId,
+  default_agent_id: roomWorkId,
+  default_agent_version: z.number().int().positive(),
+  current_instruction_version: z.number().int().positive(),
+  control_generation: z.number().int().nonnegative(),
+  created_operation_id: roomWorkId
+}).strict();
+export type HumanWorkObjectiveRecord = z.infer<typeof HumanWorkObjectiveRecordSchema>;
+
+/**
+ * The Room-facing work identity. `id` is the Work ID and the Objective ID is
+ * represented by the same durable aggregate in the human-work store.  The
+ * optional projection field lets importers expose an explicit Objective ID
+ * without forcing legacy rows to invent one.
+ */
+export const RoomWorkRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  room_id: roomWorkId,
+  kind: z.literal("human"),
+  objective_id: roomWorkId.optional(),
+  requester_id: roomWorkId,
+  front_agent_id: roomWorkId,
+  default_agent_id: roomWorkId,
+  default_agent_version: z.number().int().positive(),
+  title: z.string().trim().min(1).max(200),
+  objective: z.string().trim().min(1).max(1_000_000),
+  completion_criteria: z.array(z.string().trim().min(1)).min(1),
+  status: RoomWorkStatusSchema,
+  stop_state: RoomWorkStopStateSchema,
+  instruction_version: z.number().int().positive(),
+  control_generation: z.number().int().nonnegative(),
+  operation_id: roomWorkId,
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkRecord = z.infer<typeof RoomWorkRecordSchema>;
+
+/** One Agent assignment within a human Work. */
+export const RoomWorkAssignmentRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  room_id: roomWorkId,
+  parent_assignment_id: roomWorkId.optional(),
+  dependency_assignment_ids: z.array(roomWorkId).max(100).optional(),
+  agent_id: roomWorkId,
+  /** `agent_version` is the persistence-facing name for the configuration snapshot. */
+  agent_version: z.number().int().positive(),
+  agent_configuration_version: z.number().int().positive().optional(),
+  instruction_version: z.number().int().positive(),
+  generation: z.number().int().nonnegative().default(0),
+  attempt: z.number().int().nonnegative(),
+  priority: z.number().int(),
+  status: RoomWorkAssignmentStatusSchema,
+  current_run_id: roomWorkId.optional(),
+  result: jsonValueSchema.optional(),
+  result_ref: ResourceRefSchema.optional(),
+  lease_owner: roomWorkId.optional(),
+  lease_expires_at: roomWorkTimestamp.optional(),
+  heartbeat_at: roomWorkTimestamp.optional(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp,
+  started_at: roomWorkTimestamp.optional(),
+  completed_at: roomWorkTimestamp.optional(),
+  execution_reservation_id: roomWorkId.optional(),
+  continuity_association_id: roomWorkId.optional()
+}).strict();
+export type RoomWorkAssignmentRecord = z.infer<typeof RoomWorkAssignmentRecordSchema>;
+
+/** One versioned instruction, with acceptance, delivery, and application kept distinct. */
+export const RoomWorkInstructionRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  assignment_id: roomWorkId.optional(),
+  room_id: roomWorkId,
+  version: z.number().int().positive(),
+  generation: z.number().int().nonnegative().default(0),
+  body: z.string().trim().min(1).max(1_000_000),
+  instruction: z.string().trim().min(1).max(1_000_000).optional(),
+  source_kind: z.enum(["request", "reply", "comment_reflection", "system"]),
+  source_comment_id: roomWorkId.optional(),
+  source_comment_version: z.number().int().positive().optional(),
+  /** State is a receipt, not evidence that the Agent completed the work. */
+  state: RoomWorkInstructionStateSchema,
+  accepted_at: roomWorkTimestamp.optional(),
+  delivered_at: roomWorkTimestamp.optional(),
+  applied_at: roomWorkTimestamp.optional(),
+  failure_reason: z.string().trim().min(1).max(2_000).optional(),
+  attachments: roomWorkAttachments.default([]),
+  created_by: roomWorkId,
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp.optional()
+}).strict().superRefine((record, issue) => {
+  if ((record.source_comment_id === undefined) !== (record.source_comment_version === undefined)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["source_comment_id"], message: "room_work_comment_snapshot_incomplete" });
+  }
+  if (record.delivered_at && !record.accepted_at) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["delivered_at"], message: "room_work_instruction_acceptance_required" });
+  }
+  if (record.applied_at && !record.delivered_at) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["applied_at"], message: "room_work_instruction_delivery_required" });
+  }
+});
+export type RoomWorkInstructionRecord = z.infer<typeof RoomWorkInstructionRecordSchema>;
+
+/** Human discussion is not an instruction and cannot start or steer a Run. */
+export const RoomWorkCommentRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  room_id: roomWorkId,
+  author_account_id: roomWorkId,
+  author_id: roomWorkId.optional(),
+  version: z.number().int().positive(),
+  body: z.string().max(100_000),
+  attachment_refs: roomWorkAttachments.default([]),
+  attachments: roomWorkAttachments.optional(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkCommentRecord = z.infer<typeof RoomWorkCommentRecordSchema>;
+
+/** A reaction is an explicit human signal, never an approval or execution instruction. */
+export const RoomWorkReactionRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  room_id: roomWorkId,
+  comment_id: roomWorkId,
+  actor_account_id: roomWorkId,
+  reaction: RoomWorkReactionKindSchema,
+  enabled: z.boolean(),
+  version: z.number().int().positive(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkReactionRecord = z.infer<typeof RoomWorkReactionRecordSchema>;
+
+/** Immutable snapshot captured when a human explicitly applies a comment to an Agent. */
+export const RoomWorkCommentApplySnapshotSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  room_id: roomWorkId,
+  comment_id: roomWorkId,
+  comment_version: z.number().int().positive(),
+  instruction_id: roomWorkId,
+  instruction_version: z.number().int().positive(),
+  body: z.string().trim().min(1).max(100_000),
+  attachment_refs: roomWorkAttachments.default([]),
+  applied_by_account_id: roomWorkId,
+  applied_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkCommentApplySnapshot = z.infer<typeof RoomWorkCommentApplySnapshotSchema>;
+
+/** Stop request admission is separate from the terminal evidence state. */
+export const RoomWorkStopRequestSchema = z.object({
+  state: z.enum(["requested", "accepted", "rejected"]),
+  requested_by: roomWorkId,
+  operation_id: roomWorkId,
+  requested_at: roomWorkTimestamp,
+  accepted_at: roomWorkTimestamp.optional(),
+  rejected_at: roomWorkTimestamp.optional()
+}).strict();
+export type RoomWorkStopRequest = z.infer<typeof RoomWorkStopRequestSchema>;
+
+export const RoomWorkTerminalStatusSchema = z.enum(["pending", "confirmed", "unconfirmed"]);
+export type RoomWorkTerminalStatus = z.infer<typeof RoomWorkTerminalStatusSchema>;
+
+export const RoomWorkTerminalRecordSchema = z.object({
+  status: RoomWorkTerminalStatusSchema,
+  confirmed_at: roomWorkTimestamp.optional(),
+  unconfirmed_at: roomWorkTimestamp.optional(),
+  evidence: BackendTerminalEvidenceSchema.optional(),
+  unconfirmed_assignee_ids: z.array(roomWorkId).max(100).default([])
+}).strict();
+export type RoomWorkTerminalRecord = z.infer<typeof RoomWorkTerminalRecordSchema>;
+
+/** Control history may contain either stop admission or later terminal evidence. */
+export const RoomWorkControlRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  assignment_id: roomWorkId.optional(),
+  room_id: roomWorkId,
+  action: RoomWorkControlActionSchema,
+  state: RoomWorkControlStateSchema,
+  actor_account_id: roomWorkId,
+  generation: z.number().int().nonnegative(),
+  operation_id: roomWorkId,
+  details: z.record(jsonValueSchema).default({}),
+  stop_request: RoomWorkStopRequestSchema.optional(),
+  terminal: RoomWorkTerminalRecordSchema.optional(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkControlRecord = z.infer<typeof RoomWorkControlRecordSchema>;
+
+/** DB-backed reservation created before any Backend process is started. */
+export const RoomWorkLaunchReservationRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  work_id: roomWorkId,
+  assignment_id: roomWorkId,
+  room_id: roomWorkId,
+  generation: z.number().int().nonnegative(),
+  status: RoomWorkLaunchReservationStatusSchema,
+  operation_id: roomWorkId,
+  scheduled_at: roomWorkTimestamp,
+  lease_owner: roomWorkId.optional(),
+  lease_expires_at: roomWorkTimestamp.optional(),
+  claimed_at: roomWorkTimestamp.optional(),
+  released_at: roomWorkTimestamp.optional(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkLaunchReservationRecord = z.infer<typeof RoomWorkLaunchReservationRecordSchema>;
+
+/** Execution reservation is the public/internal-neutral name for the launch row. */
+export const RoomWorkExecutionReservationRecordSchema = RoomWorkLaunchReservationRecordSchema;
+export type RoomWorkExecutionReservationRecord = RoomWorkLaunchReservationRecord;
+
+/** Internal-only association for resuming an engine conversation. */
+export const RoomWorkContinuityAssociationRecordSchema = z.object({
+  id: roomWorkId,
+  workspace_id: roomWorkId,
+  room_id: roomWorkId,
+  work_id: roomWorkId,
+  assignment_id: roomWorkId,
+  agent_id: roomWorkId,
+  agent_configuration_version: z.number().int().positive(),
+  backend_id: roomWorkId,
+  generation: z.number().int().nonnegative(),
+  state: z.enum(["active", "retired", "recovery_required"]),
+  backend_run_id: roomWorkId.optional(),
+  /** This field is internal and must never be copied to a public work DTO. */
+  session_ref: SessionRefSchema.optional(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type RoomWorkContinuityAssociationRecord = z.infer<typeof RoomWorkContinuityAssociationRecordSchema>;
+
+/** Complete internal aggregate used by persistence/runtime adapters. */
+export const RoomWorkAggregateSchema = z.object({
+  work: RoomWorkRecordSchema,
+  objective: HumanWorkObjectiveRecordSchema,
+  assignments: z.array(RoomWorkAssignmentRecordSchema).max(100),
+  instructions: z.array(RoomWorkInstructionRecordSchema).max(1_000),
+  comments: z.array(RoomWorkCommentRecordSchema).max(1_000),
+  reactions: z.array(RoomWorkReactionRecordSchema).max(5_000),
+  comment_apply_snapshots: z.array(RoomWorkCommentApplySnapshotSchema).max(1_000),
+  controls: z.array(RoomWorkControlRecordSchema).max(500),
+  execution_reservations: z.array(RoomWorkExecutionReservationRecordSchema).max(100),
+  continuity_associations: z.array(RoomWorkContinuityAssociationRecordSchema).max(100)
+}).superRefine((aggregate, issue) => {
+  if (aggregate.work.id !== aggregate.objective.id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["objective", "id"], message: "human_work_objective_identity_mismatch" });
+  }
+  if (aggregate.work.objective_id && aggregate.work.objective_id !== aggregate.objective.id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["work", "objective_id"], message: "human_work_objective_identity_mismatch" });
+  }
+});
+export type RoomWorkAggregate = z.infer<typeof RoomWorkAggregateSchema>;
+
+/** Public reservation projection intentionally carries no Session or credential. */
+export const PublicRoomWorkExecutionReservationSchema = RoomWorkLaunchReservationRecordSchema.pick({
+  id: true,
+  work_id: true,
+  assignment_id: true,
+  room_id: true,
+  generation: true,
+  status: true,
+  scheduled_at: true,
+  claimed_at: true,
+  released_at: true,
+  created_at: true,
+  updated_at: true
+}).strict();
+export type PublicRoomWorkExecutionReservation = z.infer<typeof PublicRoomWorkExecutionReservationSchema>;
+
+/** Public assignment projection; Backend Session and process details stay internal. */
+export const PublicRoomWorkAssigneeSchema = z.object({
+  id: roomWorkId,
+  work_id: roomWorkId,
+  agent_id: roomWorkId,
+  parent_assignee_id: roomWorkId.optional(),
+  status: RoomWorkAssignmentStatusSchema,
+  instruction_version: z.number().int().positive(),
+  generation: z.number().int().nonnegative(),
+  agent_configuration_version: z.number().int().positive().optional(),
+  attempt: z.number().int().nonnegative().optional(),
+  version: z.number().int().positive(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type PublicRoomWorkAssignee = z.infer<typeof PublicRoomWorkAssigneeSchema>;
+
+/** Public instruction receipts retain lifecycle state, never external Session IDs. */
+export const PublicRoomWorkInstructionSchema = z.object({
+  id: roomWorkId,
+  work_id: roomWorkId,
+  assignee_id: roomWorkId.optional(),
+  kind: z.enum(["initial", "reply", "comment_apply", "delegated"]),
+  instruction: z.string().trim().min(1).max(1_000_000),
+  attachments: roomWorkAttachments,
+  version: z.number().int().positive(),
+  generation: z.number().int().nonnegative(),
+  status: RoomWorkInstructionStateSchema,
+  accepted_at: roomWorkTimestamp.optional(),
+  delivered_at: roomWorkTimestamp.optional(),
+  applied_at: roomWorkTimestamp.optional(),
+  created_by: roomWorkId,
+  source_comment_id: roomWorkId.optional(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type PublicRoomWorkInstruction = z.infer<typeof PublicRoomWorkInstructionSchema>;
+
+export const PublicRoomWorkCommentSchema = z.object({
+  id: roomWorkId,
+  work_id: roomWorkId,
+  author_id: roomWorkId,
+  body: z.string().max(100_000),
+  attachments: roomWorkAttachments,
+  version: z.number().int().positive(),
+  reaction_count: z.number().int().nonnegative().optional(),
+  applied_instruction_ids: z.array(roomWorkId).max(100).default([]),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type PublicRoomWorkComment = z.infer<typeof PublicRoomWorkCommentSchema>;
+
+export const PublicRoomWorkReactionSchema = z.object({
+  id: roomWorkId,
+  work_id: roomWorkId,
+  comment_id: roomWorkId,
+  reaction: RoomWorkReactionKindSchema,
+  enabled: z.boolean(),
+  version: z.number().int().positive(),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type PublicRoomWorkReaction = z.infer<typeof PublicRoomWorkReactionSchema>;
+
+export const PublicRoomWorkControlSchema = z.object({
+  id: roomWorkId,
+  operation_id: roomWorkId.optional(),
+  work_id: roomWorkId,
+  assignee_id: roomWorkId.optional(),
+  target_agent_id: roomWorkId.optional(),
+  action: z.enum(["stop", "assignee.stop", "assignee.reassign"]),
+  status: z.enum(["requested", "accepted", "running", "completed", "failed", "unconfirmed", "rejected"]),
+  generation: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
+  stop_request_status: z.enum(["requested", "accepted", "rejected"]).optional(),
+  terminal_status: RoomWorkTerminalStatusSchema.optional(),
+  unconfirmed_assignee_ids: z.array(roomWorkId).max(100).default([]),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp,
+  completed_at: roomWorkTimestamp.optional()
+}).strict();
+export type PublicRoomWorkControl = z.infer<typeof PublicRoomWorkControlSchema>;
+
+/** Public aggregate; internal continuity associations are intentionally absent. */
+export const PublicRoomWorkRecordSchema = z.object({
+  id: roomWorkId,
+  room_id: roomWorkId,
+  objective_id: roomWorkId.optional(),
+  requester_id: roomWorkId,
+  front_agent_id: roomWorkId.optional(),
+  default_agent_id: roomWorkId,
+  default_agent_version: z.number().int().positive().optional(),
+  title: z.string().trim().min(1).max(200),
+  objective: z.string().trim().min(1).max(1_000_000),
+  completion_criteria: z.array(z.string().trim().min(1)).min(1).optional(),
+  kind: z.literal("human").default("human"),
+  status: RoomWorkStatusSchema,
+  stop_state: RoomWorkStopStateSchema.optional(),
+  instruction_version: z.number().int().positive(),
+  generation: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
+  assignees: z.array(PublicRoomWorkAssigneeSchema).max(100),
+  execution_reservations: z.array(PublicRoomWorkExecutionReservationSchema).max(100).default([]),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type PublicRoomWorkRecord = z.infer<typeof PublicRoomWorkRecordSchema>;
+
+export const PublicRoomWorkViewSchema = PublicRoomWorkRecordSchema.extend({
+  instructions: z.array(PublicRoomWorkInstructionSchema).max(1_000),
+  comments: z.array(PublicRoomWorkCommentSchema).max(1_000),
+  reactions: z.array(PublicRoomWorkReactionSchema).max(5_000).default([]),
+  controls: z.array(PublicRoomWorkControlSchema).max(500)
+}).strict();
+export type PublicRoomWorkView = z.infer<typeof PublicRoomWorkViewSchema>;
+
+/** Public DM projection contains only the private Room relationship. */
+export const PublicAgentDmRecordSchema = z.object({
+  id: roomWorkId,
+  room_id: roomWorkId,
+  workspace_id: roomWorkId,
+  kind: z.literal("agent_dm"),
+  agent_id: roomWorkId,
+  agent_version: z.number().int().positive(),
+  version: z.number().int().positive(),
+  visibility: z.literal("private").optional().default("private"),
+  membership_mode: z.literal("explicit_participants").optional().default("explicit_participants"),
+  created_at: roomWorkTimestamp,
+  updated_at: roomWorkTimestamp
+}).strict();
+export type PublicAgentDmRecord = z.infer<typeof PublicAgentDmRecordSchema>;
+
+/** Compatibility names for persistence adapters keyed to the table family. */
+export const HumanWorkRecordSchema = RoomWorkRecordSchema;
+export type HumanWorkRecord = RoomWorkRecord;
+export const HumanWorkAssignmentRecordSchema = RoomWorkAssignmentRecordSchema;
+export type HumanWorkAssignmentRecord = RoomWorkAssignmentRecord;
+export const HumanWorkInstructionRecordSchema = RoomWorkInstructionRecordSchema;
+export type HumanWorkInstructionRecord = RoomWorkInstructionRecord;
+export const HumanWorkCommentRecordSchema = RoomWorkCommentRecordSchema;
+export type HumanWorkCommentRecord = RoomWorkCommentRecord;
+export const HumanWorkReactionRecordSchema = RoomWorkReactionRecordSchema;
+export type HumanWorkReactionRecord = RoomWorkReactionRecord;
+export const HumanWorkControlRecordSchema = RoomWorkControlRecordSchema;
+export type HumanWorkControlRecord = RoomWorkControlRecord;
+export const HumanWorkLaunchReservationRecordSchema = RoomWorkLaunchReservationRecordSchema;
+export type HumanWorkLaunchReservationRecord = RoomWorkLaunchReservationRecord;
+export const AgentDmRecordSchema = AgentDmRoomRecordSchema;
+export type AgentDmRecord = AgentDmRoomRecord;
 
 export const WorkDependencyRecordSchema = z.object({
   id: z.string().min(1),

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BackendEventRecordSchema,
   BackendReleaseReadinessHealthSchema,
+  AgentDmRoomRecordSchema,
   ChangeHistoryEntrySchema,
   ClientEventRecordSchema,
   ContextFreezeResponseSchema,
@@ -27,6 +28,7 @@ import {
   GatewayRoutingPolicyRecordSchema,
   KnowledgeWikiDiagnosticsReportSchema,
   MessageEnvelopeSchema,
+  ObjectiveRecordSchema,
   OperationRecordSchema,
   PluginDiagnosticsReportSchema,
   ReflectionDiagnosticsReportSchema,
@@ -38,6 +40,22 @@ import {
   SkillIndexEntryReadModelSchema,
   SkillUsageRecordSchema,
   ToolRunDiagnosticsReportSchema,
+  PublicAgentDmRecordSchema,
+  PublicRoomWorkControlSchema,
+  PublicRoomWorkInstructionSchema,
+  PublicRoomWorkRecordSchema,
+  RoomWorkAggregateSchema,
+  RoomWorkCommentApplySnapshotSchema,
+  RoomWorkCommentRecordSchema,
+  RoomWorkContinuityAssociationRecordSchema,
+  RoomWorkControlRecordSchema,
+  RoomWorkExecutionReservationRecordSchema,
+  RoomWorkInstructionRecordSchema,
+  RoomWorkReactionRecordSchema,
+  RoomWorkRecordSchema,
+  RoomWorkAssignmentRecordSchema,
+  RoomRecordSchema,
+  WorkItemRecordSchema,
   createId,
   nowIso,
   stableDigest,
@@ -45,6 +63,382 @@ import {
 } from "./index";
 
 describe("core schemas", () => {
+  it("keeps legacy Room, Objective, and WorkItem records readable while adding Room defaults", () => {
+    const now = nowIso();
+    const room = RoomRecordSchema.parse({
+      id: "room_legacy",
+      name: "Legacy Room",
+      created_at: now,
+      updated_at: now
+    });
+    expect(room.kind).toBe("normal");
+    expect(room.configuration_version).toBe(1);
+    expect(room.default_agent_id).toBeUndefined();
+
+    const objective = ObjectiveRecordSchema.parse({
+      id: "objective_legacy",
+      room_id: room.id,
+      title: "Legacy objective",
+      objective: "Keep the old scheduler record readable",
+      completion_criteria: ["The record remains parseable"],
+      status: "active",
+      created_at: now,
+      updated_at: now
+    });
+    expect(objective.kind).toBeUndefined();
+
+    const workItem = WorkItemRecordSchema.parse({
+      id: "work_legacy",
+      objective_id: objective.id,
+      room_id: room.id,
+      instruction: "Continue the legacy work",
+      status: "ready",
+      priority: 0,
+      attempt: 0,
+      max_attempts: 1,
+      idempotency_key: "legacy-key",
+      created_at: now,
+      updated_at: now
+    });
+    expect(workItem.kind).toBeUndefined();
+  });
+
+  it("models a human Room work as an Objective-backed aggregate with separated evidence", () => {
+    const now = nowIso();
+    const workId = "work_human_1";
+    const roomId = "room_1";
+    const agentId = "agent_1";
+    const assignmentId = "assignment_1";
+    const objective = {
+      id: workId,
+      kind: "human" as const,
+      workspace_id: "workspace_1",
+      room_id: roomId,
+      requester_id: "account_1",
+      front_agent_id: agentId,
+      default_agent_id: agentId,
+      default_agent_version: 3,
+      title: "Prepare a brief",
+      objective: "Prepare a short brief from the attached source",
+      completion_criteria: ["Record the answer and execution result"],
+      status: "active" as const,
+      current_instruction_version: 1,
+      control_generation: 1,
+      created_operation_id: "op_create_1",
+      created_at: now,
+      updated_at: now
+    };
+    const work = RoomWorkRecordSchema.parse({
+      id: workId,
+      workspace_id: "workspace_1",
+      room_id: roomId,
+      kind: "human",
+      objective_id: workId,
+      requester_id: "account_1",
+      front_agent_id: agentId,
+      default_agent_id: agentId,
+      default_agent_version: 3,
+      title: objective.title,
+      objective: objective.objective,
+      completion_criteria: objective.completion_criteria,
+      status: "queued",
+      stop_state: "none",
+      instruction_version: 1,
+      control_generation: 1,
+      operation_id: objective.created_operation_id,
+      created_at: now,
+      updated_at: now
+    });
+    const assignment = RoomWorkAssignmentRecordSchema.parse({
+      id: assignmentId,
+      workspace_id: "workspace_1",
+      work_id: workId,
+      room_id: roomId,
+      agent_id: agentId,
+      agent_version: 3,
+      instruction_version: 1,
+      generation: 1,
+      attempt: 0,
+      priority: 0,
+      status: "ready",
+      created_at: now,
+      updated_at: now
+    });
+    const instruction = RoomWorkInstructionRecordSchema.parse({
+      id: "instruction_1",
+      workspace_id: "workspace_1",
+      work_id: workId,
+      assignment_id: assignmentId,
+      room_id: roomId,
+      version: 1,
+      generation: 1,
+      body: objective.objective,
+      source_kind: "request",
+      state: "accepted",
+      accepted_at: now,
+      attachments: [],
+      created_by: "account_1",
+      created_at: now,
+      updated_at: now
+    });
+    const comment = RoomWorkCommentRecordSchema.parse({
+      id: "comment_1",
+      workspace_id: "workspace_1",
+      work_id: workId,
+      room_id: roomId,
+      author_account_id: "account_2",
+      version: 1,
+      body: "Please emphasize the decision",
+      attachment_refs: [],
+      created_at: now,
+      updated_at: now
+    });
+    const reaction = RoomWorkReactionRecordSchema.parse({
+      id: "reaction_1",
+      workspace_id: "workspace_1",
+      work_id: workId,
+      room_id: roomId,
+      comment_id: comment.id,
+      actor_account_id: "account_1",
+      reaction: "like",
+      enabled: true,
+      version: 1,
+      created_at: now,
+      updated_at: now
+    });
+    const snapshot = RoomWorkCommentApplySnapshotSchema.parse({
+      id: "snapshot_1",
+      workspace_id: "workspace_1",
+      work_id: workId,
+      room_id: roomId,
+      comment_id: comment.id,
+      comment_version: comment.version,
+      instruction_id: "instruction_2",
+      instruction_version: 2,
+      body: comment.body,
+      attachment_refs: [],
+      applied_by_account_id: "account_1",
+      applied_at: now
+    });
+    const control = RoomWorkControlRecordSchema.parse({
+      id: "control_1",
+      workspace_id: "workspace_1",
+      work_id: workId,
+      room_id: roomId,
+      action: "stop_request",
+      state: "accepted",
+      actor_account_id: "account_1",
+      generation: 1,
+      operation_id: "op_stop_1",
+      details: {},
+      created_at: now,
+      updated_at: now
+    });
+    const reservation = RoomWorkExecutionReservationRecordSchema.parse({
+      id: "reservation_1",
+      workspace_id: "workspace_1",
+      work_id: workId,
+      assignment_id: assignmentId,
+      room_id: roomId,
+      generation: 1,
+      status: "reserved",
+      operation_id: "op_create_1",
+      scheduled_at: now,
+      created_at: now,
+      updated_at: now
+    });
+    const continuity = RoomWorkContinuityAssociationRecordSchema.parse({
+      id: "continuity_1",
+      workspace_id: "workspace_1",
+      room_id: roomId,
+      work_id: workId,
+      assignment_id: assignmentId,
+      agent_id: agentId,
+      agent_configuration_version: 3,
+      backend_id: "samurai-native",
+      generation: 1,
+      state: "active",
+      session_ref: { app_id: "internal-runtime", session_id: "opaque-session" },
+      created_at: now,
+      updated_at: now
+    });
+
+    const aggregate = RoomWorkAggregateSchema.parse({
+      work,
+      objective,
+      assignments: [assignment],
+      instructions: [instruction],
+      comments: [comment],
+      reactions: [reaction],
+      comment_apply_snapshots: [snapshot],
+      controls: [control],
+      execution_reservations: [reservation],
+      continuity_associations: [continuity]
+    });
+    expect(aggregate.work.id).toBe(aggregate.objective.id);
+    expect(aggregate.continuity_associations[0]?.session_ref?.session_id).toBe("opaque-session");
+    expect(aggregate.instructions[0]?.state).toBe("accepted");
+
+    const publicWork = PublicRoomWorkRecordSchema.parse({
+      id: workId,
+      room_id: roomId,
+      objective_id: workId,
+      requester_id: "account_1",
+      front_agent_id: agentId,
+      default_agent_id: agentId,
+      default_agent_version: 3,
+      title: work.title,
+      objective: work.objective,
+      completion_criteria: work.completion_criteria,
+      status: "stopping",
+      stop_state: "requested",
+      instruction_version: 1,
+      generation: 1,
+      version: 1,
+      assignees: [{
+        id: assignmentId,
+        work_id: workId,
+        agent_id: agentId,
+        status: "stopping",
+        instruction_version: 1,
+        generation: 1,
+        agent_configuration_version: 3,
+        attempt: 0,
+        version: 1,
+        created_at: now,
+        updated_at: now
+      }],
+      execution_reservations: [],
+      created_at: now,
+      updated_at: now
+    });
+    expect(publicWork.kind).toBe("human");
+    expect(publicWork).not.toHaveProperty("continuity_associations");
+    expect(() => PublicRoomWorkRecordSchema.parse({ ...publicWork, session_ref: "external-session" })).toThrow();
+
+    const dm = AgentDmRoomRecordSchema.parse({
+      id: "room_dm_1",
+      name: "DM",
+      kind: "agent_dm",
+      default_agent_id: agentId,
+      dm_account_id: "account_1",
+      dm_participants: {
+        workspace_id: "workspace_1",
+        room_id: "room_dm_1",
+        human_participant_id: "account_1",
+        agent_id: agentId,
+        visibility: "private",
+        membership_mode: "explicit_participants"
+      },
+      created_at: now,
+      updated_at: now
+    });
+    expect(dm.dm_participants.membership_mode).toBe("explicit_participants");
+    const publicDm = PublicAgentDmRecordSchema.parse({
+      id: dm.id,
+      room_id: dm.id,
+      workspace_id: "workspace_1",
+      kind: "agent_dm",
+      agent_id: agentId,
+      agent_version: 3,
+      version: 1,
+      created_at: now,
+      updated_at: now
+    });
+    expect(publicDm.visibility).toBe("private");
+    expect(publicDm).not.toHaveProperty("human_participant_id");
+  });
+
+  it("does not treat a stop request or an incomplete instruction receipt as terminal", () => {
+    const now = nowIso();
+    expect(() => RoomWorkInstructionRecordSchema.parse({
+      id: "instruction_bad",
+      workspace_id: "workspace_1",
+      work_id: "work_1",
+      room_id: "room_1",
+      version: 1,
+      body: "Change the draft",
+      source_kind: "reply",
+      state: "applied",
+      applied_at: now,
+      attachments: [],
+      created_by: "account_1",
+      created_at: now
+    })).toThrow();
+
+    const control = PublicRoomWorkControlSchema.parse({
+      id: "control_pending",
+      work_id: "work_1",
+      action: "stop",
+      status: "requested",
+      generation: 2,
+      version: 1,
+      stop_request_status: "requested",
+      terminal_status: "pending",
+      unconfirmed_assignee_ids: [],
+      created_at: now,
+      updated_at: now
+    });
+    expect(control.stop_request_status).toBe("requested");
+    expect(control.terminal_status).toBe("pending");
+  });
+
+  it("accepts generation zero for the initial Room work projections", () => {
+    const now = nowIso();
+    const work = RoomWorkRecordSchema.parse({
+      id: "work_generation_zero",
+      workspace_id: "workspace_1",
+      room_id: "room_1",
+      kind: "human",
+      requester_id: "account_1",
+      front_agent_id: "agent_1",
+      default_agent_id: "agent_1",
+      default_agent_version: 1,
+      title: "Initial work",
+      objective: "Persist before the first execution generation",
+      completion_criteria: ["The initial reservation is durable"],
+      status: "queued",
+      stop_state: "none",
+      instruction_version: 1,
+      control_generation: 0,
+      operation_id: "operation_generation_zero",
+      created_at: now,
+      updated_at: now
+    });
+    const assignment = RoomWorkAssignmentRecordSchema.parse({
+      id: "assignment_generation_zero",
+      workspace_id: work.workspace_id,
+      work_id: work.id,
+      room_id: work.room_id,
+      agent_id: "agent_1",
+      agent_version: 1,
+      instruction_version: 1,
+      generation: 0,
+      attempt: 0,
+      priority: 0,
+      status: "ready",
+      created_at: now,
+      updated_at: now
+    });
+    const reservation = RoomWorkExecutionReservationRecordSchema.parse({
+      id: "reservation_generation_zero",
+      workspace_id: work.workspace_id,
+      work_id: work.id,
+      assignment_id: assignment.id,
+      room_id: work.room_id,
+      generation: 0,
+      status: "reserved",
+      operation_id: work.operation_id,
+      scheduled_at: now,
+      created_at: now,
+      updated_at: now
+    });
+
+    expect(work.control_generation).toBe(0);
+    expect(assignment.generation).toBe(0);
+    expect(reservation.generation).toBe(0);
+  });
+
   it("provides a wider digest for durable identity checks", () => {
     expect(stableDigest({ value: 1 })).toMatch(/^[a-f0-9]{32}$/);
     expect(stableDigest({ value: 1 })).not.toBe(stableDigest({ value: 2 }));

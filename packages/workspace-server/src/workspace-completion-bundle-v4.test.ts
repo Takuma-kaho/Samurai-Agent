@@ -35,6 +35,16 @@ const recordCountKeys = [
   "runtime_automation_runs", "runtime_sessions", "runtime_messages", "runtime_runs", "runtime_events", "runtime_changes",
   "runtime_resource_usage", "redactions", "agents", "agent_room_permissions", "connection_descriptors"
 ] as const;
+const humanWorkFiles = [
+  ["workspace_human_works", "human-works.jsonl"],
+  ["workspace_human_work_assignments", "human-work-assignments.jsonl"],
+  ["workspace_human_work_instructions", "human-work-instructions.jsonl"],
+  ["workspace_human_work_comments", "human-work-comments.jsonl"],
+  ["workspace_human_work_comment_reactions", "human-work-comment-reactions.jsonl"],
+  ["workspace_human_work_controls", "human-work-controls.jsonl"],
+  ["workspace_human_work_launch_reservations", "human-work-launch-reservations.jsonl"],
+  ["workspace_human_work_legacy_sessions", "human-work-legacy-sessions.jsonl"]
+] as const;
 
 describe("Workspace Bundle v4 HTTP transport", () => {
   it("round-trips a verified transfer bundle without changing its transfer identity", async () => {
@@ -436,6 +446,126 @@ describe("Workspace Bundle v4 HTTP transport", () => {
     }
   });
 
+  it("validates a settled Human Work runtime binding against its source graph", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-runtime-binding-"));
+    try {
+      const agentId = "agent_bundle_runtime_binding";
+      const workId = "work_bundle_runtime_binding";
+      const assignmentId = "assignment_bundle_runtime_binding";
+      const runId = "run_bundle_runtime_binding";
+      const roomId = "room_bundle_attachment";
+      const agent = {
+        workspace_id: workspaceId,
+        id: agentId,
+        display_name: "Runtime binding agent",
+        description: "",
+        role: "assistant",
+        instructions: "Keep the source binding intact",
+        backend_id: "samurai-native",
+        enabled: true,
+        status: "active",
+        version: 1,
+        created_by: "account_owner",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const work = {
+        workspace_id: workspaceId,
+        id: workId,
+        room_id: roomId,
+        requester_account_id: "account_owner",
+        default_agent_id: agentId,
+        default_agent_version: 1,
+        title: "Runtime binding history",
+        objective: "Keep settled evidence portable",
+        completion_criteria: [],
+        status: "completed",
+        stop_state: "none",
+        instruction_version: 1,
+        control_generation: 0,
+        operation_id: "operation_bundle_runtime_binding",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const assignment = {
+        workspace_id: workspaceId,
+        id: assignmentId,
+        work_id: workId,
+        room_id: roomId,
+        parent_assignment_id: null,
+        dependency_assignment_ids: [],
+        origin_kind: "normal",
+        agent_id: agentId,
+        agent_version: 1,
+        instruction_version: 1,
+        attempt: 1,
+        priority: 0,
+        status: "completed",
+        current_run_id: runId,
+        result: { status: "completed", run_id: runId },
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: timestamp,
+        completed_at: timestamp
+      };
+      const instruction = {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_runtime_binding",
+        work_id: workId,
+        assignment_id: assignmentId,
+        room_id: roomId,
+        version: 1,
+        body: "Keep settled evidence portable",
+        attachment_refs: [],
+        source_kind: "request",
+        state: "applied",
+        created_by: "account_owner",
+        created_at: timestamp
+      };
+      const binding = {
+        workspace_id: workspaceId,
+        room_id: roomId,
+        work_id: workId,
+        assignee_id: assignmentId,
+        agent_id: agentId,
+        backend_id: "samurai-native",
+        generation: 0,
+        agent_configuration_version: 1
+      };
+      const runtimeRun = {
+        workspace_id: workspaceId,
+        id: runId,
+        session_id: "session_bundle_runtime_binding",
+        room_id: roomId,
+        agent_id: agentId,
+        backend_id: "samurai-native",
+        backend_session_id: null,
+        status: "completed",
+        phase: "settled",
+        metadata: { runtime_binding: binding }
+      };
+      const valid = path.join(root, "valid");
+      await writeMinimalV4Bundle(valid, {
+        agents: [agent],
+        runtimeRuns: [runtimeRun],
+        humanWork: { work, instruction, assignments: [assignment], fileHash: hash("portable attachment\n"), fileContent: "portable attachment\n" }
+      });
+      await expect(verifyWorkspaceBundleV4(valid)).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+
+      const invalid = path.join(root, "invalid");
+      await writeMinimalV4Bundle(invalid, {
+        agents: [agent],
+        runtimeRuns: [{ ...runtimeRun, metadata: { runtime_binding: { ...binding, workspace_id: "workspace_other" } } }],
+        humanWork: { work, instruction, assignments: [assignment], fileHash: hash("portable attachment\n"), fileContent: "portable attachment\n" }
+      });
+      await expect(verifyWorkspaceBundleV4(invalid)).rejects.toThrow("workspace_bundle_v4_runtime_history_reference_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("sanitizes provider-native Runtime identifiers through the source exporter", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-runtime-sanitization-"));
     try {
@@ -701,6 +831,1237 @@ describe("Workspace Bundle v4 HTTP transport", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("requires human-work attachment refs to match the portable Room file", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-attachments-"));
+    try {
+      const valid = path.join(root, "valid");
+      const invalid = path.join(root, "invalid");
+      const agent = {
+        workspace_id: workspaceId,
+        id: "agent_bundle_attachment",
+        created_by: "account_owner",
+        version: 1,
+        status: "active",
+        enabled: true,
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const work = {
+        workspace_id: workspaceId,
+        id: "work_bundle_attachment",
+        room_id: "room_bundle_attachment",
+        requester_account_id: "account_owner",
+        default_agent_id: "agent_bundle_attachment",
+        default_agent_version: 1,
+        title: "Attached work",
+        objective: "Review the file",
+        completion_criteria: [],
+        status: "queued",
+        stop_state: "none",
+        instruction_version: 1,
+        control_generation: 0,
+        operation_id: "operation_bundle_attachment",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const fileHash = hash("portable attachment\n");
+      const ref = { kind: "file", id: fileHash, uri: "notes/brief.md", version: "1", label: "brief.md" };
+      const instruction = {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_attachment",
+        work_id: work.id,
+        room_id: work.room_id,
+        version: 1,
+        body: "Review this file",
+        attachment_refs: [ref],
+        source_kind: "request",
+        state: "pending",
+        created_by: "account_owner",
+        created_at: timestamp
+      };
+      await writeMinimalV4Bundle(valid, {
+        agents: [agent],
+        humanWork: { work, instruction, fileHash, fileContent: "portable attachment\n" }
+      });
+      await expect(verifyWorkspaceBundleV4(valid)).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+
+      await writeMinimalV4Bundle(invalid, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: { ...instruction, attachment_refs: [{ ...ref, id: "b".repeat(64) }] },
+          fileHash,
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(invalid)).rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an unresolved legacy attachment marker readable and portable", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-legacy-attachment-marker-"));
+    try {
+      const source = path.join(root, "source");
+      await writeMinimalV4Bundle(source, {
+        agents: [{
+          workspace_id: workspaceId,
+          id: "agent_bundle_legacy_attachment",
+          display_name: "Legacy attachment agent",
+          description: "",
+          role: "assistant",
+          instructions: "",
+          backend_id: "samurai-native",
+          enabled: true,
+          status: "active",
+          version: 1,
+          created_by: "account_owner",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        humanWork: {
+          work: {
+            workspace_id: workspaceId,
+            id: "work_bundle_legacy_attachment",
+            room_id: "room_bundle_attachment",
+            requester_account_id: "account_owner",
+            default_agent_id: "agent_bundle_legacy_attachment",
+            default_agent_version: 1,
+            title: "Legacy attachment work",
+            objective: "Review the historical file",
+            completion_criteria: [],
+            status: "failed",
+            stop_state: "none",
+            instruction_version: 1,
+            control_generation: 0,
+            operation_id: "operation_bundle_legacy_attachment",
+            created_at: timestamp,
+            updated_at: timestamp
+          },
+          instruction: {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_legacy_attachment",
+            work_id: "work_bundle_legacy_attachment",
+            room_id: "room_bundle_attachment",
+            version: 1,
+            body: "Review the historical file",
+            attachment_refs: [{
+              kind: "legacy_unresolved",
+              reason: "reference_unavailable",
+              ref: { kind: "file", id: "a".repeat(64), uri: "notes/removed.md", version: "4", label: "removed.md" }
+            }],
+            source_kind: "request",
+            state: "failed",
+            created_by: "account_owner",
+            created_at: timestamp
+          },
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+      const transport = await readWorkspaceBundleV4Transport(source);
+      const instruction = JSON.parse(Buffer.from(
+        transport.entries.find((entry) => entry.path === "completion/human-work-instructions.jsonl")!.content_base64,
+        "base64"
+      ).toString("utf8")) as Record<string, unknown>;
+      expect(instruction.attachment_refs).toEqual([expect.objectContaining({ kind: "legacy_unresolved" })]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects delegated assignments restored into an Agent DM", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-dm-delegation-"));
+    try {
+      const source = path.join(root, "source");
+      const agentId = "agent_bundle_dm_default";
+      const workId = "work_bundle_dm_delegation";
+      await writeMinimalV4Bundle(source, {
+        agents: [{
+          workspace_id: workspaceId,
+          id: agentId,
+          display_name: "DM Agent",
+          description: "",
+          role: "assistant",
+          instructions: "",
+          backend_id: "samurai-native",
+          enabled: true,
+          status: "active",
+          version: 1,
+          created_by: "account_owner",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        agentRoomPermissions: [{
+          workspace_id: workspaceId,
+          room_id: "room_bundle_attachment",
+          agent_id: agentId,
+          can_view: true,
+          can_edit: true,
+          can_execute: true,
+          version: 1,
+          created_by: "account_owner",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        humanWork: {
+          roomKind: "agent_dm",
+          dmAccountId: "account_owner",
+          work: {
+            workspace_id: workspaceId,
+            id: workId,
+            room_id: "room_bundle_attachment",
+            requester_account_id: "account_owner",
+            default_agent_id: agentId,
+            default_agent_version: 1,
+            title: "DM delegated work",
+            objective: "Keep DM private",
+            completion_criteria: [],
+            status: "waiting",
+            stop_state: "none",
+            instruction_version: 1,
+            control_generation: 0,
+            operation_id: "operation_bundle_dm_delegation",
+            created_at: timestamp,
+            updated_at: timestamp
+          },
+          instruction: {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_dm_delegation",
+            work_id: workId,
+            assignment_id: "assignment_bundle_dm_parent",
+            room_id: "room_bundle_attachment",
+            version: 1,
+            body: "Keep DM private",
+            attachment_refs: [],
+            source_kind: "request",
+            state: "applied",
+            created_by: "account_owner",
+            created_at: timestamp
+          },
+          assignments: [{
+            workspace_id: workspaceId,
+            id: "assignment_bundle_dm_parent",
+            work_id: workId,
+            room_id: "room_bundle_attachment",
+            parent_assignment_id: null,
+            dependency_assignment_ids: [],
+            origin_kind: "normal",
+            agent_id: agentId,
+            agent_version: 1,
+            instruction_version: 1,
+            attempt: 1,
+            priority: 0,
+            status: "completed",
+            current_run_id: null,
+            result: { status: "completed" },
+            lease_owner: null,
+            lease_expires_at: null,
+            created_at: timestamp,
+            updated_at: timestamp,
+            started_at: timestamp,
+            completed_at: timestamp
+          }, {
+            workspace_id: workspaceId,
+            id: "assignment_bundle_dm_child",
+            work_id: workId,
+            room_id: "room_bundle_attachment",
+            parent_assignment_id: "assignment_bundle_dm_parent",
+            dependency_assignment_ids: [],
+            origin_kind: "delegated",
+            agent_id: agentId,
+            agent_version: 1,
+            instruction_version: 1,
+            attempt: 0,
+            priority: 0,
+            status: "waiting",
+            current_run_id: null,
+            result: null,
+            lease_owner: null,
+            lease_expires_at: null,
+            created_at: timestamp,
+            updated_at: timestamp,
+            started_at: null,
+            completed_at: null
+          }],
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an inconsistent parent-continuation Agent version in a V4 Bundle", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-continuation-origin-"));
+    try {
+      const agent = {
+        workspace_id: workspaceId,
+        id: "agent_bundle_continuation",
+        display_name: "Continuation Agent",
+        description: "",
+        role: "assistant",
+        instructions: "Keep the work context",
+        backend_id: "codex",
+        enabled: true,
+        status: "active",
+        version: 2,
+        created_by: "account_owner",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const work = {
+        workspace_id: workspaceId,
+        id: "work_bundle_continuation",
+        room_id: "room_bundle_attachment",
+        requester_account_id: "account_owner",
+        default_agent_id: agent.id,
+        default_agent_version: 2,
+        title: "Continuation work",
+        objective: "Continue the work",
+        completion_criteria: [],
+        status: "waiting",
+        stop_state: "none",
+        instruction_version: 2,
+        control_generation: 0,
+        operation_id: "operation_bundle_continuation",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const assignment = (id: string, parent_assignment_id: string | null, origin_kind: string, status: string, agent_version: number) => ({
+        workspace_id: workspaceId,
+        id,
+        work_id: work.id,
+        room_id: work.room_id,
+        parent_assignment_id,
+        dependency_assignment_ids: [],
+        origin_kind,
+        agent_id: agent.id,
+        agent_version,
+        instruction_version: parent_assignment_id ? 2 : 1,
+        attempt: 0,
+        priority: 0,
+        status,
+        current_run_id: null,
+        result: parent_assignment_id ? null : { status: "completed" },
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: null,
+        completed_at: parent_assignment_id ? null : timestamp
+      });
+      const invalid = path.join(root, "invalid");
+      await writeMinimalV4Bundle(invalid, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_continuation_root",
+            work_id: work.id,
+            assignment_id: "assignment_bundle_continuation_root",
+            room_id: work.room_id,
+            version: 1,
+            body: "Original work",
+            attachment_refs: [],
+            source_kind: "request",
+            state: "applied",
+            created_by: "account_owner",
+            created_at: timestamp
+          },
+          instructions: [{
+            workspace_id: workspaceId,
+            id: "instruction_bundle_continuation_root",
+            work_id: work.id,
+            assignment_id: "assignment_bundle_continuation_root",
+            room_id: work.room_id,
+            version: 1,
+            body: "Original work",
+            attachment_refs: [],
+            source_kind: "request",
+            state: "applied",
+            created_by: "account_owner",
+            created_at: timestamp
+          }, {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_continuation_child",
+            work_id: work.id,
+            assignment_id: "assignment_bundle_continuation_child",
+            room_id: work.room_id,
+            version: 2,
+            body: "Continue work",
+            attachment_refs: [],
+            source_kind: "reply",
+            state: "pending",
+            created_by: "account_owner",
+            created_at: timestamp
+          }],
+          assignments: [
+            assignment("assignment_bundle_continuation_root", null, "normal", "completed", 2),
+            assignment("assignment_bundle_continuation_child", "assignment_bundle_continuation_root", "parent_continuation", "ready", 1)
+          ],
+          reservations: [{
+            workspace_id: workspaceId,
+            id: "reservation_bundle_continuation_root",
+            work_id: work.id,
+            assignment_id: "assignment_bundle_continuation_root",
+            room_id: work.room_id,
+            generation: 0,
+            status: "released",
+            operation_id: "operation_bundle_continuation_root",
+            scheduled_at: timestamp,
+            lease_owner: null,
+            lease_expires_at: null,
+            claimed_at: null,
+            released_at: timestamp,
+            created_at: timestamp,
+            updated_at: timestamp
+          }, {
+            workspace_id: workspaceId,
+            id: "reservation_bundle_continuation_child",
+            work_id: work.id,
+            assignment_id: "assignment_bundle_continuation_child",
+            room_id: work.room_id,
+            generation: 0,
+            status: "reserved",
+            operation_id: "operation_bundle_continuation_child",
+            scheduled_at: timestamp,
+            lease_owner: null,
+            lease_expires_at: null,
+            claimed_at: null,
+            released_at: null,
+            created_at: timestamp,
+            updated_at: timestamp
+          }],
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(invalid)).rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a direct comment-reflection parent continuation without a delegated sibling", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-comment-continuation-"));
+    try {
+      const agentId = "agent_bundle_comment_continuation";
+      const workId = "work_bundle_comment_continuation";
+      const roomId = "room_bundle_attachment";
+      const rootAssignmentId = "assignment_bundle_comment_root";
+      const childAssignmentId = "assignment_bundle_comment_child";
+      const commentId = "comment_bundle_continuation";
+      const agent = {
+        workspace_id: workspaceId,
+        id: agentId,
+        display_name: "Comment continuation agent",
+        description: "",
+        role: "assistant",
+        instructions: "Continue from applied comments",
+        backend_id: "samurai-native",
+        enabled: true,
+        status: "active",
+        version: 1,
+        created_by: "account_owner",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const work = {
+        workspace_id: workspaceId,
+        id: workId,
+        room_id: roomId,
+        requester_account_id: "account_owner",
+        default_agent_id: agentId,
+        default_agent_version: 1,
+        title: "Comment continuation work",
+        objective: "Continue from a human comment",
+        completion_criteria: [],
+        status: "waiting",
+        stop_state: "none",
+        instruction_version: 2,
+        control_generation: 0,
+        operation_id: "operation_bundle_comment_continuation",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const assignments = [{
+        workspace_id: workspaceId,
+        id: rootAssignmentId,
+        work_id: workId,
+        room_id: roomId,
+        parent_assignment_id: null,
+        dependency_assignment_ids: [],
+        origin_kind: "normal",
+        agent_id: agentId,
+        agent_version: 1,
+        instruction_version: 1,
+        attempt: 1,
+        priority: 0,
+        status: "completed",
+        current_run_id: null,
+        result: { status: "completed" },
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: timestamp,
+        completed_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: childAssignmentId,
+        work_id: workId,
+        room_id: roomId,
+        parent_assignment_id: rootAssignmentId,
+        dependency_assignment_ids: [],
+        origin_kind: "parent_continuation",
+        agent_id: agentId,
+        agent_version: 1,
+        instruction_version: 2,
+        attempt: 0,
+        priority: 0,
+        status: "ready",
+        current_run_id: null,
+        result: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: null,
+        completed_at: null
+      }];
+      const instructions = [{
+        workspace_id: workspaceId,
+        id: "instruction_bundle_comment_root",
+        work_id: workId,
+        assignment_id: rootAssignmentId,
+        room_id: roomId,
+        version: 1,
+        body: "Original work",
+        attachment_refs: [],
+        source_kind: "request",
+        state: "applied",
+        created_by: "account_owner",
+        created_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_comment_child",
+        work_id: workId,
+        assignment_id: childAssignmentId,
+        room_id: roomId,
+        version: 2,
+        body: "Apply this comment and continue",
+        attachment_refs: [],
+        source_kind: "comment_reflection",
+        source_comment_id: commentId,
+        source_comment_version: 1,
+        state: "pending",
+        created_by: "account_owner",
+        created_at: timestamp
+      }];
+      const reservations = [{
+        workspace_id: workspaceId,
+        id: "reservation_bundle_comment_root",
+        work_id: workId,
+        assignment_id: rootAssignmentId,
+        room_id: roomId,
+        generation: 0,
+        status: "released",
+        operation_id: "operation_bundle_comment_root",
+        scheduled_at: timestamp,
+        lease_owner: null,
+        lease_expires_at: null,
+        claimed_at: null,
+        released_at: timestamp,
+        created_at: timestamp,
+        updated_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "reservation_bundle_comment_child",
+        work_id: workId,
+        assignment_id: childAssignmentId,
+        room_id: roomId,
+        generation: 0,
+        status: "reserved",
+        operation_id: "operation_bundle_comment_child",
+        scheduled_at: timestamp,
+        lease_owner: null,
+        lease_expires_at: null,
+        claimed_at: null,
+        released_at: null,
+        created_at: timestamp,
+        updated_at: timestamp
+      }];
+      await writeMinimalV4Bundle(path.join(root, "source"), {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          comments: [{
+            workspace_id: workspaceId,
+            id: commentId,
+            work_id: workId,
+            room_id: roomId,
+            version: 1,
+            author_account_id: "account_owner",
+            body: "Please continue with this correction",
+            attachment_refs: [],
+            created_at: timestamp
+          }],
+          assignments,
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV4(path.join(root, "source"))).resolves.toMatchObject({
+        manifest: { workspace_id: workspaceId }
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a system instruction masquerading as a parent continuation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-system-continuation-"));
+    try {
+      const agent = {
+        workspace_id: workspaceId,
+        id: "agent_bundle_system_continuation",
+        display_name: "System continuation agent",
+        description: "",
+        role: "assistant",
+        instructions: "",
+        backend_id: "samurai-native",
+        enabled: true,
+        status: "active",
+        version: 1,
+        created_by: "account_owner",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const workId = "work_bundle_system_continuation";
+      const roomId = "room_bundle_attachment";
+      const rootAssignmentId = "assignment_bundle_system_root";
+      const childAssignmentId = "assignment_bundle_system_child";
+      const work = {
+        workspace_id: workspaceId,
+        id: workId,
+        room_id: roomId,
+        requester_account_id: "account_owner",
+        default_agent_id: agent.id,
+        default_agent_version: 1,
+        title: "System continuation work",
+        objective: "Reject forged continuation evidence",
+        completion_criteria: [],
+        status: "waiting",
+        stop_state: "none",
+        instruction_version: 2,
+        control_generation: 0,
+        operation_id: "operation_bundle_system_continuation",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const assignments = [{
+        workspace_id: workspaceId,
+        id: rootAssignmentId,
+        work_id: workId,
+        room_id: roomId,
+        parent_assignment_id: null,
+        dependency_assignment_ids: [],
+        origin_kind: "normal",
+        agent_id: agent.id,
+        agent_version: 1,
+        instruction_version: 1,
+        attempt: 1,
+        priority: 0,
+        status: "completed",
+        current_run_id: null,
+        result: { status: "completed" },
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: timestamp,
+        completed_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: childAssignmentId,
+        work_id: workId,
+        room_id: roomId,
+        parent_assignment_id: rootAssignmentId,
+        dependency_assignment_ids: [],
+        origin_kind: "parent_continuation",
+        agent_id: agent.id,
+        agent_version: 1,
+        instruction_version: 2,
+        attempt: 0,
+        priority: 0,
+        status: "ready",
+        current_run_id: null,
+        result: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: null,
+        completed_at: null
+      }];
+      const instructions = [{
+        workspace_id: workspaceId,
+        id: "instruction_bundle_system_root",
+        work_id: workId,
+        assignment_id: rootAssignmentId,
+        room_id: roomId,
+        version: 1,
+        body: "Original request",
+        attachment_refs: [],
+        source_kind: "request",
+        state: "applied",
+        created_by: "account_owner",
+        created_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_system_child",
+        work_id: workId,
+        assignment_id: childAssignmentId,
+        room_id: roomId,
+        version: 2,
+        body: JSON.stringify({ kind: "parent_continuation", parent_assignment_id: rootAssignmentId }),
+        attachment_refs: [],
+        source_kind: "system",
+        state: "pending",
+        created_by: "account_owner",
+        created_at: timestamp
+      }];
+      await writeMinimalV4Bundle(path.join(root, "source"), {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          assignments,
+          reservations: [{
+            workspace_id: workspaceId,
+            id: "reservation_bundle_system_root",
+            work_id: workId,
+            assignment_id: rootAssignmentId,
+            room_id: roomId,
+            generation: 0,
+            status: "released",
+            operation_id: "operation_bundle_system_root",
+            scheduled_at: timestamp,
+            lease_owner: null,
+            lease_expires_at: null,
+            claimed_at: null,
+            released_at: timestamp,
+            created_at: timestamp,
+            updated_at: timestamp
+          }, {
+            workspace_id: workspaceId,
+            id: "reservation_bundle_system_child",
+            work_id: workId,
+            assignment_id: childAssignmentId,
+            room_id: roomId,
+            generation: 0,
+            status: "reserved",
+            operation_id: "operation_bundle_system_child",
+            scheduled_at: timestamp,
+            lease_owner: null,
+            lease_expires_at: null,
+            claimed_at: null,
+            released_at: null,
+            created_at: timestamp,
+            updated_at: timestamp
+          }],
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(path.join(root, "source")))
+        .rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a structurally proven v95 reply continuation while preserving its raw origin", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-legacy-reply-continuation-"));
+    try {
+      const source = path.join(root, "source");
+      const agentId = "agent_bundle_legacy_reply";
+      const workId = "work_bundle_legacy_reply";
+      const rootAssignmentId = "assignment_bundle_legacy_root";
+      const delegatedSiblingAssignmentId = "assignment_bundle_legacy_delegated";
+      const childAssignmentId = "assignment_bundle_legacy_reply";
+      const agent = {
+        workspace_id: workspaceId,
+        id: agentId,
+        display_name: "Legacy reply agent",
+        description: "",
+        role: "assistant",
+        instructions: "Keep the Room context",
+        backend_id: "samurai-native",
+        enabled: true,
+        status: "active",
+        version: 2,
+        created_by: "account_owner",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const work = {
+        workspace_id: workspaceId,
+        id: workId,
+        room_id: "room_bundle_attachment",
+        requester_account_id: "account_owner",
+        default_agent_id: agentId,
+        default_agent_version: 2,
+        title: "Legacy reply work",
+        objective: "Continue the historical Room work",
+        completion_criteria: [],
+        status: "waiting",
+        stop_state: "none",
+        instruction_version: 3,
+        control_generation: 0,
+        operation_id: "operation_bundle_legacy_reply",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const assignments = [{
+        workspace_id: workspaceId,
+        id: rootAssignmentId,
+        work_id: workId,
+        room_id: work.room_id,
+        parent_assignment_id: null,
+        dependency_assignment_ids: [],
+        origin_kind: "normal",
+        agent_id: agentId,
+        agent_version: 2,
+        instruction_version: 1,
+        attempt: 1,
+        priority: 0,
+        status: "completed",
+        current_run_id: null,
+        result: { status: "completed" },
+        lease_owner: null,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+        started_at: timestamp,
+        completed_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: delegatedSiblingAssignmentId,
+        work_id: workId,
+        room_id: work.room_id,
+        parent_assignment_id: rootAssignmentId,
+        dependency_assignment_ids: [],
+        agent_id: agentId,
+        agent_version: 2,
+        instruction_version: 2,
+        attempt: 1,
+        priority: 0,
+        status: "completed",
+        current_run_id: null,
+        result: { status: "completed" },
+        lease_owner: null,
+        lease_expires_at: null,
+        started_at: timestamp,
+        completed_at: timestamp,
+        created_at: timestamp,
+        updated_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: childAssignmentId,
+        work_id: workId,
+        room_id: work.room_id,
+        parent_assignment_id: rootAssignmentId,
+        dependency_assignment_ids: [],
+        // v95/v96 had no server-side origin metadata for either the
+        // delegated sibling or this historical reply child.
+        agent_id: agentId,
+        agent_version: 2,
+        instruction_version: 3,
+        attempt: 0,
+        priority: 0,
+        status: "waiting",
+        current_run_id: null,
+        result: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        started_at: null,
+        completed_at: null,
+        created_at: timestamp,
+        updated_at: timestamp
+      }];
+      // Deliberately keep the delegated system instruction after the reply;
+      // normalization must use structural keys, not JSONL order.
+      const instructions = [{
+        workspace_id: workspaceId,
+        id: "instruction_bundle_legacy_root",
+        work_id: workId,
+        assignment_id: rootAssignmentId,
+        room_id: work.room_id,
+        version: 1,
+        body: "Original request",
+        attachment_refs: [],
+        source_kind: "request",
+        state: "applied",
+        created_by: "account_owner",
+        created_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_legacy_reply",
+        work_id: workId,
+        assignment_id: childAssignmentId,
+        room_id: work.room_id,
+        version: 3,
+        body: "Continue the work",
+        attachment_refs: [],
+        source_kind: "reply",
+        state: "pending",
+        created_by: "account_owner",
+        created_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_legacy_delegated",
+        work_id: workId,
+        assignment_id: delegatedSiblingAssignmentId,
+        room_id: work.room_id,
+        version: 2,
+        body: "Delegate the supporting work",
+        attachment_refs: [],
+        source_kind: "system",
+        state: "applied",
+        created_by: "account_owner",
+        created_at: timestamp
+      }];
+      const reservations = [{
+        workspace_id: workspaceId,
+        id: "reservation_bundle_legacy_root",
+        work_id: workId,
+        assignment_id: rootAssignmentId,
+        room_id: work.room_id,
+        generation: 0,
+        status: "released",
+        operation_id: "operation_bundle_legacy_root",
+        scheduled_at: timestamp,
+        lease_owner: null,
+        lease_expires_at: null,
+        claimed_at: null,
+        released_at: timestamp,
+        created_at: timestamp,
+        updated_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "reservation_bundle_legacy_delegated",
+        work_id: workId,
+        assignment_id: delegatedSiblingAssignmentId,
+        room_id: work.room_id,
+        generation: 0,
+        status: "released",
+        operation_id: "operation_bundle_legacy_delegated",
+        scheduled_at: timestamp,
+        lease_owner: null,
+        lease_expires_at: null,
+        claimed_at: null,
+        released_at: timestamp,
+        created_at: timestamp,
+        updated_at: timestamp
+      }, {
+        workspace_id: workspaceId,
+        id: "reservation_bundle_legacy_reply",
+        work_id: workId,
+        assignment_id: childAssignmentId,
+        room_id: work.room_id,
+        generation: 0,
+        status: "reserved",
+        operation_id: "operation_bundle_legacy_reply",
+        scheduled_at: timestamp,
+        lease_owner: null,
+        lease_expires_at: null,
+        claimed_at: null,
+        released_at: null,
+        created_at: timestamp,
+        updated_at: timestamp
+      }];
+      await writeMinimalV4Bundle(source, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          assignments,
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+      const transport = await readWorkspaceBundleV4Transport(source);
+      const rawAssignments = Buffer.from(
+        transport.entries.find((entry) => entry.path === "completion/human-work-assignments.jsonl")!.content_base64,
+        "base64"
+      ).toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rawAssignments.find((assignment) => assignment.id === delegatedSiblingAssignmentId)).not.toHaveProperty("origin_kind");
+      expect(rawAssignments.find((assignment) => assignment.id === childAssignmentId)).not.toHaveProperty("origin_kind");
+
+      const restored = await writeWorkspaceBundleV4Transport({
+        transport,
+        destination: path.join(root, "restored")
+      });
+      expect(restored.manifest.workspace_id).toBe(workspaceId);
+
+      const forgedSystemContinuation = path.join(root, "forged-system-continuation");
+      await writeMinimalV4Bundle(forgedSystemContinuation, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions: instructions.map((instruction) => instruction.id === "instruction_bundle_legacy_delegated"
+            ? { ...instruction, body: JSON.stringify({ kind: "parent_continuation", parent_assignment_id: rootAssignmentId }) }
+            : instruction),
+          assignments,
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(forgedSystemContinuation))
+        .rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+
+      const reassignedSibling = path.join(root, "reassigned-sibling");
+      await writeMinimalV4Bundle(reassignedSibling, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          assignments: assignments.map((assignment) => assignment.id === delegatedSiblingAssignmentId
+            ? { ...assignment, result: { status: "cancelled", reason: "reassigned" } }
+            : assignment),
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(reassignedSibling))
+        .rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+
+      const nonTerminalSibling = path.join(root, "non-terminal-sibling");
+      await writeMinimalV4Bundle(nonTerminalSibling, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          assignments: assignments.map((assignment) => assignment.id === delegatedSiblingAssignmentId
+            ? { ...assignment, status: "running", completed_at: null }
+            : assignment),
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(nonTerminalSibling))
+        .rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+
+      const nonTerminalDescendant = path.join(root, "non-terminal-descendant");
+      const delegatedSibling = assignments.find((assignment) => assignment.id === delegatedSiblingAssignmentId)!;
+      await writeMinimalV4Bundle(nonTerminalDescendant, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          assignments: [
+            ...assignments,
+            {
+              ...delegatedSibling,
+              id: "assignment_bundle_legacy_delegated_child",
+              parent_assignment_id: delegatedSiblingAssignmentId,
+              origin_kind: "delegated",
+              instruction_version: 2,
+              status: "queued",
+              result: null,
+              started_at: null,
+              completed_at: null
+            }
+          ],
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(nonTerminalDescendant))
+        .rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+
+      const missingSibling = path.join(root, "missing-sibling");
+      await writeMinimalV4Bundle(missingSibling, {
+        agents: [agent],
+        humanWork: {
+          work,
+          instruction: instructions[0]!,
+          instructions,
+          assignments: assignments.filter((assignment) => assignment.id !== delegatedSiblingAssignmentId),
+          reservations,
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(missingSibling))
+        .rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an ambiguous legacy normal parent reply fail-closed", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-legacy-reply-ambiguous-"));
+    try {
+      const source = path.join(root, "source");
+      const child = {
+        workspace_id: workspaceId,
+        id: "assignment_bundle_ambiguous_child",
+        work_id: "work_bundle_ambiguous_reply",
+        room_id: "room_bundle_attachment",
+        parent_assignment_id: "assignment_bundle_ambiguous_root",
+        dependency_assignment_ids: [],
+        origin_kind: "normal",
+        agent_id: "agent_bundle_ambiguous_reply",
+        agent_version: 1,
+        instruction_version: 2,
+        attempt: 0,
+        priority: 0,
+        status: "waiting",
+        current_run_id: null,
+        result: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        started_at: null,
+        completed_at: null,
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      await writeMinimalV4Bundle(source, {
+        agents: [{
+          workspace_id: workspaceId,
+          id: "agent_bundle_ambiguous_reply",
+          display_name: "Ambiguous reply agent",
+          description: "",
+          role: "assistant",
+          instructions: "",
+          backend_id: "samurai-native",
+          enabled: true,
+          status: "active",
+          version: 1,
+          created_by: "account_owner",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        humanWork: {
+          work: {
+            workspace_id: workspaceId,
+            id: "work_bundle_ambiguous_reply",
+            room_id: "room_bundle_attachment",
+            requester_account_id: "account_owner",
+            default_agent_id: "agent_bundle_ambiguous_reply",
+            default_agent_version: 1,
+            title: "Ambiguous reply work",
+            objective: "Reject ambiguous history",
+            completion_criteria: [],
+            status: "waiting",
+            stop_state: "none",
+            instruction_version: 2,
+            control_generation: 0,
+            operation_id: "operation_bundle_ambiguous_reply",
+            created_at: timestamp,
+            updated_at: timestamp
+          },
+          instruction: {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_ambiguous_root",
+            work_id: "work_bundle_ambiguous_reply",
+            assignment_id: "assignment_bundle_ambiguous_root",
+            room_id: "room_bundle_attachment",
+            version: 1,
+            body: "Original request",
+            attachment_refs: [],
+            source_kind: "request",
+            state: "applied",
+            created_by: "account_owner",
+            created_at: timestamp
+          },
+          instructions: [{
+            workspace_id: workspaceId,
+            id: "instruction_bundle_ambiguous_root",
+            work_id: "work_bundle_ambiguous_reply",
+            assignment_id: "assignment_bundle_ambiguous_root",
+            room_id: "room_bundle_attachment",
+            version: 1,
+            body: "Original request",
+            attachment_refs: [],
+            source_kind: "request",
+            state: "applied",
+            created_by: "account_owner",
+            created_at: timestamp
+          }, {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_ambiguous_child",
+            work_id: "work_bundle_ambiguous_reply",
+            assignment_id: "assignment_bundle_ambiguous_child",
+            room_id: "room_bundle_attachment",
+            version: 2,
+            body: "Reply",
+            attachment_refs: [],
+            source_kind: "reply",
+            state: "pending",
+            created_by: "account_owner",
+            created_at: timestamp
+          }],
+          assignments: [
+            {
+              ...child,
+              id: "assignment_bundle_ambiguous_root",
+              parent_assignment_id: null,
+              instruction_version: 1,
+              status: "completed",
+              result: { status: "completed" },
+              attempt: 1,
+              started_at: timestamp,
+              completed_at: timestamp
+            },
+            child,
+            {
+              ...child,
+              id: "assignment_bundle_ambiguous_sibling",
+              instruction_version: 2,
+              status: "failed",
+              result: { status: "failed" },
+              started_at: timestamp,
+              completed_at: timestamp
+            }
+          ],
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(source)).rejects.toThrow("workspace_bundle_v4_human_work_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function writeMinimalV4Bundle(
@@ -708,6 +2069,7 @@ async function writeMinimalV4Bundle(
   input: {
     migrationReceipts?: readonly Record<string, unknown>[];
     agents?: readonly Record<string, unknown>[];
+    agentRoomPermissions?: readonly Record<string, unknown>[];
     chatSessions?: readonly Record<string, unknown>[];
     chatMessages?: readonly Record<string, unknown>[];
     runtimeRuns?: readonly Record<string, unknown>[];
@@ -715,6 +2077,18 @@ async function writeMinimalV4Bundle(
     runtimeChanges?: readonly Record<string, unknown>[];
     runtimeActivities?: readonly Record<string, unknown>[];
     runtimeResourceUsage?: readonly Record<string, unknown>[];
+    humanWork?: {
+      work: Record<string, unknown>;
+      instruction: Record<string, unknown>;
+      instructions?: readonly Record<string, unknown>[];
+      comments?: readonly Record<string, unknown>[];
+      assignments?: readonly Record<string, unknown>[];
+      reservations?: readonly Record<string, unknown>[];
+      fileHash: string;
+      fileContent: string;
+      roomKind?: "normal" | "agent_dm";
+      dmAccountId?: string;
+    };
     provenance?: { sourceOrganizationId: string; schemaRevision: number };
   } = {}
 ): Promise<void> {
@@ -753,9 +2127,56 @@ async function writeMinimalV4Bundle(
     "audits.jsonl": "",
     "files.jsonl": ""
   };
+  if (input.humanWork) {
+    const room = {
+      workspace_id: workspaceId,
+      id: "room_bundle_attachment",
+      name: "Attachments",
+      version: 1,
+      created_by: "account_owner",
+      created_at: timestamp,
+      updated_at: timestamp,
+      ...(input.humanWork.roomKind === "agent_dm" ? {
+        room_kind: "agent_dm",
+        default_agent_id: input.humanWork.work.default_agent_id,
+        default_agent_version: input.humanWork.work.default_agent_version,
+        dm_account_id: input.humanWork.dmAccountId ?? "account_owner"
+      } : {})
+    };
+    const file = {
+      workspace_id: workspaceId,
+      room_id: room.id,
+      path: "notes/brief.md",
+      version: 1,
+      sha256: input.humanWork.fileHash,
+      size: Buffer.byteLength(input.humanWork.fileContent),
+      created_by: "account_owner",
+      updated_by: "account_owner",
+      created_at: timestamp,
+      updated_at: timestamp
+    };
+    baseFiles["rooms.jsonl"] = `${canonicalJson(room)}\n`;
+    baseFiles["room-memberships.jsonl"] = `${canonicalJson({
+      workspace_id: workspaceId,
+      room_id: room.id,
+      account_id: "account_owner",
+      role: "owner",
+      state: "active",
+      version: 1,
+      created_at: timestamp,
+      updated_at: timestamp,
+      revoked_at: null
+    })}\n`;
+    baseFiles["files.jsonl"] = `${canonicalJson(file)}\n`;
+  }
   const baseHashes = Object.fromEntries(Object.entries(baseFiles).map(([name, content]) => [name, hash(content)]));
   for (const [name, content] of Object.entries(baseFiles)) await writeFile(path.join(base, name), content, "utf8");
-  const baseRecordCounts = { rooms: 0, memberships: 1, room_memberships: 0, records: 0, events: 0, jobs: 0, operations: 0, invitations: 0, audits: 0, files: 0 };
+  if (input.humanWork) {
+    await mkdir(path.join(base, "files", "notes"), { recursive: true, mode: 0o700 });
+    await writeFile(path.join(base, "files", "notes", "brief.md"), input.humanWork.fileContent, { flag: "wx", mode: 0o600 });
+    baseHashes["files/notes/brief.md"] = input.humanWork.fileHash;
+  }
+  const baseRecordCounts = { rooms: input.humanWork ? 1 : 0, memberships: 1, room_memberships: input.humanWork ? 1 : 0, records: 0, events: 0, jobs: 0, operations: 0, invitations: 0, audits: 0, files: input.humanWork ? 1 : 0 };
   const baseProvenance = input.provenance;
   const baseIntegrityPayload = baseProvenance
     ? {
@@ -796,6 +2217,7 @@ async function writeMinimalV4Bundle(
   await mkdir(completionRoot, { recursive: true, mode: 0o700 });
   const migrationReceipts = input.migrationReceipts ?? [];
   const agents = input.agents ?? [];
+  const agentRoomPermissions = input.agentRoomPermissions ?? [];
   const chatSessions = input.chatSessions ?? [];
   const chatMessages = input.chatMessages ?? [];
   const runtimeRuns = input.runtimeRuns ?? [];
@@ -808,6 +2230,8 @@ async function writeMinimalV4Bundle(
       ? migrationReceipts
       : file === "agents.jsonl"
         ? agents
+        : file === "agent-room-permissions.jsonl"
+          ? agentRoomPermissions
         : file === "runtime-sessions.jsonl"
           ? chatSessions
           : file === "runtime-messages.jsonl"
@@ -826,6 +2250,27 @@ async function writeMinimalV4Bundle(
     const content = rows.map((row) => canonicalJson(row)).join("\n") + (rows.length ? "\n" : "");
     await writeFile(path.join(completionRoot, file), content, { flag: "wx", mode: 0o600 });
   }
+  if (input.humanWork) {
+    const instructions = input.humanWork.instructions ?? [input.humanWork.instruction];
+    const comments = input.humanWork.comments ?? [];
+    const assignments = input.humanWork.assignments ?? [];
+    const reservations = input.humanWork.reservations ?? [];
+    for (const [table, file] of humanWorkFiles) {
+      const rows = table === "workspace_human_works"
+        ? [input.humanWork.work]
+        : table === "workspace_human_work_instructions"
+          ? instructions
+          : table === "workspace_human_work_comments"
+            ? comments
+          : table === "workspace_human_work_assignments"
+            ? assignments
+            : table === "workspace_human_work_launch_reservations"
+              ? reservations
+          : [];
+      const content = rows.map((row) => canonicalJson(row)).join("\n") + (rows.length ? "\n" : "");
+      await writeFile(path.join(completionRoot, file), content, { flag: "wx", mode: 0o600 });
+    }
+  }
   const files = await hashFiles(root);
   const recordCounts = Object.fromEntries(recordCountKeys.map((key) => [
     key,
@@ -833,6 +2278,8 @@ async function writeMinimalV4Bundle(
       ? migrationReceipts.length
       : key === "agents"
         ? agents.length
+        : key === "agent_room_permissions"
+          ? agentRoomPermissions.length
         : key === "runtime_sessions"
           ? chatSessions.length
           : key === "runtime_messages"
@@ -849,6 +2296,19 @@ async function writeMinimalV4Bundle(
                     ? runtimeResourceUsage.length
                     : 0
   ]));
+  if (input.humanWork) {
+    const humanWorkRows: Record<string, readonly Record<string, unknown>[]> = {
+      workspace_human_works: [input.humanWork.work],
+      workspace_human_work_assignments: input.humanWork.assignments ?? [],
+      workspace_human_work_instructions: input.humanWork.instructions ?? [input.humanWork.instruction],
+      workspace_human_work_comments: input.humanWork.comments ?? [],
+      workspace_human_work_launch_reservations: input.humanWork.reservations ?? []
+    };
+    Object.assign(recordCounts, Object.fromEntries(humanWorkFiles.map(([table]) => [
+      table.replace(/^workspace_/, ""),
+      humanWorkRows[table]?.length ?? 0
+    ])));
+  }
   const v4RecordCounts = recordCounts;
   const v4ManifestBase = {
     format_version: 4,
