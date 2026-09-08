@@ -1,10 +1,10 @@
 # Native App 製品設計
 
-- 状態: 合意済みの目標設計。Phase 3・4・6の未実装部分を含み、実機確認の完了を意味しない
-- 対象: React、Electron、Workspace / Roomナビゲーション、既定Agentとの仕事、専門Agent、仕事のコメント、Agent DM、任意Organization管理、証拠確認、再接続
+- 状態: 合意済みの目標設計。2026-09-08にPhase 5の機能評価とPhase 7の接続要件を反映。詳細な画面構成は実装前の設計案。実装・実機確認の到達点はreportsで管理する
+- 対象: React、Electron、Workspace / Roomナビゲーション、既定Agentとの仕事、専門Agent、仕事のコメント、Agent DM、任意Organization管理、Knowledge/Skill管理、検索・設定、Room管理、承認/入力待ち、自動化管理、成果物・Surface、証拠確認、再接続
 - 正本: [PRODUCT.md](../../PRODUCT.md)、[ARCHITECTURE.md](../../ARCHITECTURE.md)
-- 関連設計: [Organization](organization.md)、[RoomとAgentの共同作業](room-agent-work.md)、[Agent Backend](agent-backends.md)
-- 実装計画: [Phase 3・4・6統合プラン](../../plans/room-agent-collaboration-plan-phase3-4-6.md)、[Workspace-first・Organization再設計マスタープラン](../../plans/workspace-first-organization-realignment-master-plan.md)
+- 関連設計: [Organization](organization.md)、[RoomとAgentの共同作業](room-agent-work.md)、[Agent Backend](agent-backends.md)、[Artifact・Surface](artifact-surface.md)
+- 実装計画: [Phase 3・4・6統合プラン](../../plans/room-agent-collaboration-plan-phase3-4-6.md)、[Phase 5残作業・7プラン](../../plans/native-artifact-surface-plan-phase5-7.md)、[Workspace-first・Organization再設計マスタープラン](../../plans/workspace-first-organization-realignment-master-plan.md)
 
 ## 1. 目的
 
@@ -32,9 +32,13 @@ Organizationを使う場合は、この体験を壊さず、Workspaceのグル�
 
 ## 2. 設計の範囲
 
-この文書は画面構成、利用者の操作、表示状態を定義する。仕事のデータ・制御権限・委譲・停止は[RoomとAgentの共同作業設計](room-agent-work.md)、エンジン接続は[Agent Backend設計](agent-backends.md)を参照する。
+この文書は画面構成、利用者の操作、表示状態を定義する。仕事のデータ・制御権限・委譲・停止は[RoomとAgentの共同作業設計](room-agent-work.md)、エンジン接続は[Agent Backend設計](agent-backends.md)、成果物の版・保存・操作画面の境界は[Artifact・Surface設計](artifact-surface.md)を参照する。
 
 Workspace-firstと任意Organizationの境界を維持しながら、既定Agentとの仕事、専門Agent、コメント、DMを同じNative Appへ組み込む。現在のコードとの差分・実装順序・検証の到達点は実装計画とreportsで管理する。
+
+Phase 5の目標は、今の製品設計に必要な操作がReact Appで完結することである。旧Vueの全機能一致やSession中心の画面構成は求めない。基本の仕事に加え、知識・手順の管理、Roomと人間の権限管理、検索、必要な設定、実行確認、自動化の基本管理を必要時に開く。Phase 7は、このAppへ成果物の表示・直接編集・操作画面を組み込む。
+
+ReactとElectronを製品のClient構成とする。Vueは製品の予備画面として保持せず、利用可能な共通処理を抽出して整理する。削除の順番・依存一覧・完了証拠は実装計画で管理し、画面の整理を保存データの削除や保存形式統合と結び付けない。
 
 ## 3. 体験の原則
 
@@ -63,6 +67,7 @@ flowchart LR
   CH --> E[Evidence inspector]
   CH --> C[仕事のコメント]
   CH --> P[専門Agentの担当と制御]
+  CH --> AS[成果物と必要な操作画面]
   W --> B[Agent一覧]
   B --> DM[Agent DM]
   S[Server<br/>配置先] -.-> T
@@ -81,6 +86,12 @@ flowchart LR
 | 仕事のコメント | 人間同士で相談し、選んだ内容をAgentへ反映する | 投稿による自動実行 |
 | Agent DM | 選んだAgentとの個人的な依頼と継続 | 他人のDM、共有Roomへの自動公開 |
 | Evidence inspector | Activity、実行証拠、実ファイル、再利用Knowledgeを確認する | 許可外Workspaceの情報 |
+| Knowledge / Skill | 内容、保存先、根拠、履歴を確認し、許可された編集・保管・状態変更を行う | 自動で統合された別資源、未許可Roomの内容 |
+| Room管理 | 子Room作成、移動、参加・解除・role変更と影響確認 | Account IDだけで与えられる権限、DMの公開化 |
+| Room検索 | 現在のRoomの仕事・履歴・成果物・知識を探して開く | Session管理、全Server横断検索、許可外の抜粋 |
+| 確認待ち | 仕事の操作内容・対象・期限を確認し、許可された応答を行う | 旧Runへの承認転用、全許可設定 |
+| 自動化 / 基本設定 | 既存jobの予定・履歴・停止/再開、言語・学習基本状態・接続設定 | 新規scheduler、学習最適化の詳細editor |
+| 成果物・Surfaceパネル | 文書・表・画像・PDF・HTMLの確認、文章・表データの編集、入力保存、Agentへの修正依頼 | Office互換編集、画像・PDFの手動編集、生成画面へのApp権限の受渡し |
 | Organization management | Organization、Member、招待、Workspace追加・解除を管理する | contentの自動閲覧、課金、Compute、SSO |
 
 ### 4.1 Sidebar
@@ -153,9 +164,57 @@ Roomのヘッダーに既定Agentを示す。通常の入力から送信する�
 - Agent DMは同じ仕事の操作を使い、本人とAgentの非公開の会話として表示する。「Roomへ共有」は選んだ結果と資料だけを共有する操作にする。
 - Roomのメンバー追加は既存の認可と招待を通す。仕事へのリンクだけでアクセスを与えない。
 
-### 4.8 将来の実行画面
+### 4.8 成果物と必要な操作画面
+
+Phase 5残作業・7では、仕事の結果から成果物カードを開き、Chat横のパネルに内容を表示する。狭い画面では同じ内容を広い専用表示へ切り替える。Roomの成果物一覧と元の仕事から、保存済みの結果を再び開けるようにする。
+
+- 文書・表・画像・PDF・HTMLを表示し、実ファイルをダウンロードできる。
+- 文章・表データは人が直接編集・保存でき、履歴確認と以前の版からの復元ができる。
+- 「Agentに修正を依頼」で対象の成果物・版・必要な選択箇所を既存の仕事の入力へ渡す。既存仕事の制御権限がない場合は、許可された別の依頼として扱う。
+- 画像・PDFの手動編集、Word・Excel互換編集は今回含めない。
+- Surfaceは必要なときに開き、表示・絞り込み・フォーム入力・データ保存を扱う。保存先はWorkspace Coreで管理する。
+- 保存中・未保存・競合・失敗を区別し、編集中の内容や表示をAgentの更新で奪わない。
+
+成果物の履歴、入力先データ、iframeの隔離、権限と再送の詳細は[Artifact・Surface設計](artifact-surface.md)に従う。
+
+### 4.9 将来の実行画面
 
 仕事または担当作業から、実行先の画面を開ける配置上の余地を残す。Computer Useのライブ表示、操作引継ぎ、VMの作成は今回の画面へダミー機能として入れない。対応する実行先が実装された時点で、その能力に応じて表示する。
+
+### 4.10 Knowledge・Skillの確認と基本管理
+
+- Roomの補助メニューと仕事の根拠から開き、同じChatへ戻れる。Room知識とWorkspace共通知識は保存先が分かるように示す。
+- 一覧、本文、資源種別、根拠、変更履歴を確認する。Knowledgeの作成・編集・保管/復元・AI更新固定、Skillの本文編集・有効状態変更を既存の権限と資源の版で行う。
+- 旧Memory、Knowledge Wiki、Completion resourceを一つの保存形式へ変換しない。種別とIDを維持し、旧Memoryは閲覧・保管を基本にする。対応する編集操作のない資源は読取表示と理由を示す。
+- 読み取った版で保存し、競合時は先行変更と利用者の下書きを保持する。AI更新固定と人の編集権限を混同しない。
+- 「仕事で使う」は認可された資源refを入力へ添える。別Roomへの複製・昇格・共有は暗黙に行わない。
+- 学習の生成・評価・Skill最適化を管理画面の追加と同時に再設計しない。詳細な学習体験はPhase 8で扱う。
+
+### 4.11 Room構造と人間メンバー
+
+子Room作成、Room移動、人間メンバーの参加・解除・role変更はRoom設定から行う。Agentの閲覧・編集・実行権限とは別の操作として示す。
+
+移動先やメンバー変更の影響を確認してから実行し、確定時にもServerで現在の権限と版を検査する。親Roomへの参加条件、最後のOwner保護、非許可Roomの名前の非表示を守る。移動や権限変更後はナビゲーションと開いている内容を再認可する。Agent DMは本人とAgentの非公開の範囲を維持し、人間メンバー追加で通常Roomへ変えない。
+
+### 4.12 検索と基本設定
+
+検索は現在のRoomを範囲として、仕事・履歴・成果物・知識へ到達する補助機能とする。検索結果の本文・抜粋にも認可を適用する。内部Session参照はServer側で現在のRoom/仕事へ解決し、利用者へSessionの選択を要求しない。対応する仕事がない旧履歴は、認可されたRoom内の読取表示へ案内する。
+
+設定は表示/出力言語、接続・Agentの設定と認証状態、学習の有効状態とWorkspace標準/Room上書きを扱う。保存先のscopeを明示し、別Account・Serverへ設定を混ぜない。学習Engine/model/予算の詳細編集はPhase 8で扱い、旧設定群の一括再現はしない。接続不能・認証切れは既存の復旧/公式認証導線へ案内し、利用者向け画面へ資格情報の本文を再表示しない。
+
+### 4.13 仕事の確認待ちと証拠
+
+仕事や担当の近くに確認待ちを示し、必要時に操作の対象・影響・期限・許可された応答を開く。Activity、実行状態、参照したKnowledge、変更した資源は同じ仕事から確認できる。
+
+Coreの承認要求とBackendの入力要求を区別し、要求ID・Run・担当・対象版に対応する応答だけを送る。受付と実行完了を別に表示し、再接続後はServerから未解決要求を読み直す。取消・停止・期限切れ・処理済み・権限失効後の応答を新しい実行へ転用しない。Surfaceもこの確認UIを共有し、iframeのメッセージや`confirmed`値だけで承認を完了させない。
+
+復元はArtifactのrevision等、対象資源に定義されたDomain操作を通す。利用できる保存先も復旧契約もない汎用の「元に戻す」ボタンは置かない。構造化した承認/入力の橋渡しができないBackendは利用不能を示し、全許可や自動応答で代替しない。
+
+### 4.14 自動化と補助画面の共通動作
+
+Roomの既存自動化の予定、有効状態、最近の実行結果を必要時に開き、管理権限に従って停止/再開できる。予約を止める操作と実行中の仕事を止める操作は区別し、実行中の停止は仕事の制御へつなぐ。新しいschedulerや汎用job editorはこの画面の前提にしない。
+
+補助画面を閉じると元のRoom/仕事へ戻る。未保存入力を保護し、Agentの更新で編集中の画面を奪わない。長い一覧、keyboard、IME、狭い画面でも主要操作に到達でき、失敗・読取専用・再試行の理由を示す。設定・確認・成果物を一つの巨大な画面や状態管理に集中させない。
 
 ## 5. 起動、選択、再認可
 
@@ -224,6 +283,8 @@ flowchart LR
 - Roomと仕事の参照で通常操作を完結させる。Sessionの選択・新規作成・外部Session IDの受渡しをReactの送信前提にしない。
 - 通常の公開catalogと生成ClientもRoom / 仕事の契約を使う。旧Session入力の互換入口は非推奨として分け、通常UIや新規Clientの契約へ含めない。互換入口も同じ認可・仕事の制御を通す。
 - コメント、指示、制御は別の型・操作として扱い、本文中の`@`や画面表示だけで実行可否を決めない。
+- Knowledge/Skill、検索、Room管理、設定、自動化も共通公開Query/Domain Operationへ接続する。不足する公開契約は既存サービスへ接続し、旧Vue用APIを新UIの恒久経路にしない。
+- 旧Clientの削除はCoreや外部Clientが利用するAPIの削除を意味しない。現在の利用元・公開契約を確認した単位で共有処理を保持する。
 
 ## 8. 状態と失敗表示
 
@@ -247,6 +308,11 @@ flowchart LR
 | DMから共有 | 共有先と対象の結果・資料を示し、元DM全体を公開しない |
 | Organization解除・削除 | Workspace一覧を再取得し、独立Workspaceを選び直せるようにする |
 | Server / App restart | local candidateを使うが、Server再認可後にだけ画面を復元する |
+| 管理画面の保存競合 | 現在版と下書きを保持し、再読込・再確認へ案内する |
+| Room移動・権限変更 | 古い影響確認を無条件に使わず、確定時の再検査と表示更新を行う |
+| 承認・入力の期限切れ/停止 | 応答を無効にし、新しい要求へ転用しない |
+| 検索中のRoom切替 | 遅延した結果・抜粋を新しいRoomへ表示しない |
+| 自動化の停止 | 予約停止の結果を表示し、実行中の仕事の状態を別に示す |
 
 ## 9. 実機確認
 
@@ -267,6 +333,8 @@ Phase 3・4・6では、実装担当はSamurai Nativeと利用者が以前共有
 11. 別Accountが仕事へコメントしてもAgentが動かず、権限のある人の「Agentに反映」でだけ指示が変わることを確認する。
 12. 仕事全体・個別担当の停止、指示変更、担当変更を実Agentで行い、残った子作業・未確認の停止・書込み競合を正しく表示する。
 13. 同じAgentを別Room・別AccountのDMで使い、履歴が混ざらず、選択した結果だけを共有できることを確認する。
+14. Knowledge/Skillの基本管理、Room移動・人間の権限管理、検索、設定、自動化の停止/再開、確認待ちへの応答をReactから実Serverへ通す。旧データの参照・版競合・期限切れ・再接続も照合する。
+15. Vueを整理した最終bundleで通常利用・再起動・補助画面への到達を確認し、利用者による操作確認の結果を技術検証と分けて記録する。
 
 実際に実行した環境、手順、画面、DB、ファイル、未検証範囲はreports配下へ記録する。画面mock、HTTP mock、単体testだけでは実機確認の代わりにならない。
 
@@ -276,7 +344,7 @@ Phase 3・4・6では、実装担当はSamurai Nativeと利用者が以前共有
 
 実Agent接続と複数Agentの共同作業はPhase 3・4・6の現在の対象である。接続方式はAgent Backend設計に従う。
 
-後続で扱うのは、Artifact / Surface UIの本格化、学習・評価の高度化、外部Client向け接続の拡充、Computer Use、Computeと配布である。実使用に基づくUI調整は継続する。
+Phase 5は基本の仕事と管理・確認・設定のReact完結と旧Vue整理、Phase 7はArtifact / Surfaceの表示・編集・入力保存を対象とする。後続で扱うのは、学習・評価の高度化、外部Client向け接続の拡充、Computer Use、Computeと配布である。実使用に基づくUI調整は継続する。
 
 現段階では、決済、課金、SSO、SCIM、SMTP、詳細な利用量、複雑な企業監査、専用Compute、Compute共有、複数Server横断Organization、署名・Installer・自動更新を実装しない。
 
