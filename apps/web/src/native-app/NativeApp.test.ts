@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, CreateDialog, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey, patchAgentEditorState } from "./NativeApp";
+import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, CreateDialog, nativeRoomResultResourceTarget, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey, patchAgentEditorState } from "./NativeApp";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 
 describe("Native Agent editor state", () => {
@@ -80,6 +80,27 @@ describe("Native Room tool entry", () => {
     expect(nativeRoomToolTarget(target, { ...room, workspaceId: "workspace_other" })).toBeUndefined();
     expect(nativeRoomToolTarget(undefined, room)).toBeUndefined();
     expect(renderToStaticMarkup(createElement(NativeRoomToolLinks, { onOpen: vi.fn() }))).toBe("");
+  });
+
+  it("binds a result card to the current target and rejects a stale Room", () => {
+    expect(nativeRoomResultResourceTarget(target, room, {
+      kind: "artifact",
+      id: "artifact_plan",
+      uri: "artifacts/artifact_plan/revisions/1.md"
+    })).toEqual({
+      kind: "artifact",
+      id: "artifact_plan",
+      uri: "artifacts/artifact_plan/revisions/1.md",
+      connectionId: "connection_a",
+      workspaceId: "workspace_a",
+      roomId: "room_a"
+    });
+    expect(nativeRoomResultResourceTarget(target, room, {
+      kind: "artifact",
+      id: "artifact_plan",
+      uri: "artifacts/artifact_plan/revisions/1.md",
+      roomId: "room_other"
+    })).toBeUndefined();
   });
 });
 

@@ -35,6 +35,39 @@ type GeneratedSurfaceAction = {
 const generatedSurfaceCsp = "default-src 'none'; base-uri 'none'; form-action 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; media-src data: blob:";
 const maxActionPayloadBytes = 32 * 1024;
 
+type GeneratedSurfaceActionIdentity = Pick<GeneratedSurfaceActionRequest, "surfaceId" | "revisionId" | "actionId">;
+
+function generatedSurfaceActionKey(input: GeneratedSurfaceActionIdentity): string {
+  return JSON.stringify([input.surfaceId, input.revisionId, input.actionId]);
+}
+
+/** Keeps a validated iframe payload only when it still targets the current action. */
+export function generatedSurfaceConfirmationRequest(
+  pending: GeneratedSurfaceActionRequest | undefined,
+  expected: GeneratedSurfaceActionIdentity
+): GeneratedSurfaceActionRequest {
+  if (pending
+    && pending.surfaceId === expected.surfaceId
+    && pending.revisionId === expected.revisionId
+    && pending.actionId === expected.actionId) {
+    return pending;
+  }
+  return { ...expected, payload: {} };
+}
+
+/**
+ * Consumes only the exact iframe request that was submitted for approval.
+ *
+ * A newer iframe message for the same action must remain available rather than
+ * being erased when an earlier approval request finishes.
+ */
+export function shouldConsumeGeneratedSurfaceConfirmationRequest(
+  pending: GeneratedSurfaceActionRequest | undefined,
+  submitted: GeneratedSurfaceActionRequest
+): boolean {
+  return pending === submitted;
+}
+
 /**
  * Builds the only document passed to the untrusted Surface iframe.
  *
@@ -86,7 +119,9 @@ export function GeneratedSurfaceFrame({
 }: GeneratedSurfaceFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const requestEpoch = useRef(0);
-  const runActionRef = useRef<((request: GeneratedSurfaceActionRequest, explicitParentAction: boolean) => Promise<void>) | undefined>(undefined);
+  const pendingConfirmationActions = useRef(new Map<string, GeneratedSurfaceActionRequest>());
+  const inFlightActions = useRef(new Set<string>());
+  const runActionRef = useRef<((request: GeneratedSurfaceActionRequest, explicitParentAction: boolean) => Promise<boolean>) | undefined>(undefined);
   const [loadedBundle, setLoadedBundle] = useState<GeneratedSurfaceBundleDetail | undefined>(() => matchingBundle(initialBundle, detail));
   const [loading, setLoading] = useState(false);
   const [busyActionId, setBusyActionId] = useState<string>();
@@ -101,6 +136,15 @@ export function GeneratedSurfaceFrame({
     label: action.label,
     requires_confirmation: action.requires_confirmation === true
   })), [detail.surface.actions]);
+
+  useEffect(() => {
+    pendingConfirmationActions.current.clear();
+    inFlightActions.current.clear();
+    return () => {
+      pendingConfirmationActions.current.clear();
+      inFlightActions.current.clear();
+    };
+  }, [detail.surface.id, revision?.id]);
 
   useEffect(() => {
     const supplied = matchingBundle(initialBundle, detail);
@@ -149,6 +193,7 @@ export function GeneratedSurfaceFrame({
       // A message from an isolated document never counts as a human
       // confirmation. A confirmation flow starts only from the parent UI.
       if (action?.requires_confirmation) {
+        pendingConfirmationActions.current.set(generatedSurfaceActionKey(request), request);
         setNotice("確認が必要な操作は、画面上の操作ボタンから開始してください。");
         return;
       }
@@ -161,39 +206,53 @@ export function GeneratedSurfaceFrame({
   const srcdoc = useMemo(() => loadedBundle ? generatedSurfaceSrcdoc(loadedBundle) : undefined, [loadedBundle]);
   const currentRevisionLabel = revision ? `revision ${revision.revision}` : "版を確認できません";
 
-  async function runAction(request: GeneratedSurfaceActionRequest, explicitParentAction: boolean): Promise<void> {
+  async function runAction(request: GeneratedSurfaceActionRequest, explicitParentAction: boolean): Promise<boolean> {
     const action = actions.find((candidate) => candidate.id === request.actionId);
-    if (!action || busyActionId || disabled) return;
+    const actionKey = generatedSurfaceActionKey(request);
+    if (!action || busyActionId || disabled || inFlightActions.current.has(actionKey)) return false;
     if (action.requires_confirmation) {
-      if (!explicitParentAction) return;
+      if (!explicitParentAction) return false;
       if (!onRequestApproval) {
         setNotice("この操作にはServerの承認経路が必要です。現在の接続では開始できません。");
-        return;
+        return false;
       }
+      inFlightActions.current.add(actionKey);
       setBusyActionId(request.actionId);
       setError(undefined);
       try {
         await onRequestApproval(request);
+        if (shouldConsumeGeneratedSurfaceConfirmationRequest(
+          pendingConfirmationActions.current.get(actionKey),
+          request
+        )) {
+          pendingConfirmationActions.current.delete(actionKey);
+        }
         setNotice("確認要求をServerへ送信しました。結果が確定するまで操作は実行されません。");
+        return true;
       } catch (cause) {
         setError(errorMessage(cause, "確認要求を送信できませんでした。"));
+        return false;
       } finally {
+        inFlightActions.current.delete(actionKey);
         setBusyActionId(undefined);
       }
-      return;
     }
     if (!onRunAction) {
       setNotice("このSurfaceの操作は、現在の接続では利用できません。");
-      return;
+      return false;
     }
+    inFlightActions.current.add(actionKey);
     setBusyActionId(request.actionId);
     setError(undefined);
     try {
       await onRunAction(request);
       setNotice("操作結果をServerへ照会しました。保存済みの変更は再読込時にも確認できます。");
+      return true;
     } catch (cause) {
       setError(errorMessage(cause, "Surface操作を保存できませんでした。"));
+      return false;
     } finally {
+      inFlightActions.current.delete(actionKey);
       setBusyActionId(undefined);
     }
   }
@@ -229,6 +288,19 @@ export function GeneratedSurfaceFrame({
 
   runActionRef.current = runAction;
 
+  function runParentAction(action: GeneratedSurfaceAction): void {
+    if (!revision) return;
+    const expected = {
+      surfaceId: detail.surface.id,
+      revisionId: revision.id,
+      actionId: action.id
+    };
+    const pending = action.requires_confirmation
+      ? pendingConfirmationActions.current.get(generatedSurfaceActionKey(expected))
+      : undefined;
+    void runAction(generatedSurfaceConfirmationRequest(pending, expected), true);
+  }
+
   return <section className="native-generated-surface" aria-label={`${detail.surface.title}の操作画面`}>
     <header className="native-generated-surface-toolbar">
       <div><span className="native-section-eyebrow">Generated surface</span><strong>{detail.surface.title}</strong><small>{currentRevisionLabel}</small></div>
@@ -242,7 +314,7 @@ export function GeneratedSurfaceFrame({
     {error ? <p className="native-inline-error" role="alert">{error}</p> : null}
     {notice ? <p className="native-inline-note" role="status">{notice}</p> : null}
     {srcdoc ? <iframe ref={frameRef} className="native-generated-surface-frame" title={detail.surface.title} sandbox="allow-scripts" srcDoc={srcdoc} /> : !loading ? <p className="native-inline-note">表示できるSurface bundleがありません。保存済みの成果物または文章表示へ戻ってください。</p> : null}
-    {actions.length > 0 ? <div className="native-generated-surface-actions" aria-label="Surface操作">{actions.map((action) => <button key={action.id} type="button" className="native-button" disabled={disabled || Boolean(busyActionId) || !revision} onClick={() => revision && void runAction({ surfaceId: detail.surface.id, revisionId: revision.id, actionId: action.id, payload: {} }, true)}>{busyActionId === action.id ? "送信中…" : action.requires_confirmation ? `${action.label}（確認）` : action.label}</button>)}</div> : null}
+    {actions.length > 0 ? <div className="native-generated-surface-actions" aria-label="Surface操作">{actions.map((action) => <button key={action.id} type="button" className="native-button" disabled={disabled || Boolean(busyActionId) || !revision} onClick={() => runParentAction(action)}>{busyActionId === action.id ? "送信中…" : action.requires_confirmation ? `${action.label}（確認）` : action.label}</button>)}</div> : null}
   </section>;
 }
 

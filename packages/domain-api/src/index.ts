@@ -8,12 +8,14 @@ import {
   GeneratedSurfaceRevisionRecordSchema,
   PublicAgentDmRecordSchema as CorePublicAgentDmRecordSchema,
   PublicRoomWorkAssigneeSchema as CorePublicRoomWorkAssigneeSchema,
+  PublicRoomWorkAssignmentResultSchema as CorePublicRoomWorkAssignmentResultSchema,
   PublicRoomWorkCommentSchema as CorePublicRoomWorkCommentSchema,
   PublicRoomWorkControlSchema as CorePublicRoomWorkControlSchema,
   PublicRoomWorkInstructionSchema as CorePublicRoomWorkInstructionSchema,
   PublicRoomWorkReactionSchema as CorePublicRoomWorkReactionSchema,
   PublicRoomWorkRecordSchema as CorePublicRoomWorkRecordSchema,
   PublicRoomWorkViewSchema as CorePublicRoomWorkViewSchema,
+  PublicRoomWorkResultResourceRefSchema as CorePublicRoomWorkResultResourceRefSchema,
   ResourceRefSchema,
   WorkspaceFileResourceRefSchema,
   RoomKindSchema as CoreRoomKindSchema,
@@ -209,6 +211,10 @@ export const PublicRoomWorkResourceRefInputSchema = z.object({
 }).strict();
 export type PublicRoomWorkResourceRefInput = z.input<typeof PublicRoomWorkResourceRefInputSchema>;
 
+/** Server-issued completion refs exposed on a finished Work assignment. */
+export const PublicRoomWorkResultResourceRefSchema = CorePublicRoomWorkResultResourceRefSchema;
+export type PublicRoomWorkResultResourceRef = z.infer<typeof PublicRoomWorkResultResourceRefSchema>;
+
 export const PublicRoomDefaultAgentRecordSchema = z.object({
   room_id: publicCollaborationId,
   agent_id: publicCollaborationId,
@@ -228,6 +234,8 @@ export type PublicRoomWorkStatus = z.infer<typeof PublicRoomWorkStatusSchema>;
 
 export const PublicRoomWorkAssigneeSchema = CorePublicRoomWorkAssigneeSchema;
 export type PublicRoomWorkAssignee = z.infer<typeof PublicRoomWorkAssigneeSchema>;
+export const PublicRoomWorkAssignmentResultSchema = CorePublicRoomWorkAssignmentResultSchema;
+export type PublicRoomWorkAssignmentResult = z.infer<typeof PublicRoomWorkAssignmentResultSchema>;
 
 export const PublicRoomWorkInstructionSchema = CorePublicRoomWorkInstructionSchema.extend({
   resource_refs: z.array(PublicRoomWorkResourceRefSchema).max(32).default([])

@@ -1,4 +1,8 @@
-import type { ResourceRef, WorkspaceFileResourceRef as CoreWorkspaceFileResourceRef } from "@samurai-agent/core-schemas";
+import type {
+  ResourceRef,
+  RoomWorkResultResourceRef as CoreRoomWorkResultResourceRef,
+  WorkspaceFileResourceRef as CoreWorkspaceFileResourceRef
+} from "@samurai-agent/core-schemas";
 
 export const workspaceServerModes = ["hosted", "self_host"] as const;
 export type WorkspaceServerMode = (typeof workspaceServerModes)[number];
@@ -31,6 +35,13 @@ export const workspaceTransferStates = ["preparing", "exported", "imported", "co
 export type WorkspaceTransferState = (typeof workspaceTransferStates)[number];
 
 export type WorkspaceRecordPayload = Record<string, unknown>;
+
+/** Internal Assignment result shape.  Other legacy result fields remain
+ * open-ended, while completion refs are typed as server-owned resources. */
+export type WorkspaceHumanWorkAssignmentResultResourceRef = CoreRoomWorkResultResourceRef;
+export type WorkspaceHumanWorkAssignmentResult = WorkspaceRecordPayload & {
+  resource_refs?: WorkspaceHumanWorkAssignmentResultResourceRef[];
+};
 
 /**
  * Request provenance is created by the authenticated Server boundary.  It is
@@ -403,7 +414,7 @@ export interface WorkspaceHumanWorkAssignment {
   priority: number;
   status: WorkspaceHumanWorkAssignmentStatus;
   currentRunId?: string;
-  result?: WorkspaceRecordPayload;
+  result?: WorkspaceHumanWorkAssignmentResult;
   leaseOwner?: string;
   leaseExpiresAt?: string;
   startedAt?: string;

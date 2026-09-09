@@ -457,6 +457,48 @@ export const ResourceRefSchema = z.object({
 }).strict();
 export type ResourceRef = z.infer<typeof ResourceRefSchema>;
 
+/** Resource refs that a completed Room Work assignment may expose.  These
+ * are deliberately narrower than the generic ResourceRef: a completion can
+ * expose only durable Artifact/Generated Surface resources, never a model
+ * supplied URI or an internal execution resource. */
+export const RoomWorkResultResourceRefKindSchema = z.enum([
+  "artifact",
+  "artifact_revision",
+  "generated_surface",
+  "generated_surface_revision"
+]);
+export type RoomWorkResultResourceRefKind = z.infer<typeof RoomWorkResultResourceRefKindSchema>;
+
+export const RoomWorkResultResourceRefSchema = z.object({
+  kind: RoomWorkResultResourceRefKindSchema,
+  id: z.string().trim().min(1).max(512),
+  uri: z.string().trim().min(1).max(4_096)
+    .refine((value) => !value.startsWith("/") && !value.includes("\\") && !/[\u0000-\u001f\u007f]/.test(value), "room_work_result_resource_uri_invalid"),
+  // Settlement accepts an unlinked Runtime candidate, but the Store creates
+  // this field before the ref can cross the public boundary.
+  parent_id: z.string().trim().min(1).max(512).optional(),
+  version: z.string().trim().min(1).max(256).optional(),
+  label: z.string().trim().min(1).max(4_096).optional()
+}).strict().superRefine((value, issue) => {
+  const expectedPrefix = value.kind.startsWith("generated_surface") ? "surfaces/" : "artifacts/";
+  if (!value.uri.startsWith(expectedPrefix)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["uri"], message: "room_work_result_resource_uri_kind_mismatch" });
+  }
+});
+export type RoomWorkResultResourceRef = z.infer<typeof RoomWorkResultResourceRefSchema>;
+
+/** Public result refs require Server-established revision ownership. */
+export const PublicRoomWorkResultResourceRefSchema = RoomWorkResultResourceRefSchema.superRefine((value, issue) => {
+  const isRevision = value.kind === "artifact_revision" || value.kind === "generated_surface_revision";
+  if (isRevision && !value.parent_id) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["parent_id"], message: "room_work_result_resource_parent_required" });
+  }
+  if (!isRevision && value.parent_id !== undefined) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["parent_id"], message: "room_work_result_resource_parent_unexpected" });
+  }
+});
+export type PublicRoomWorkResultResourceRef = z.infer<typeof PublicRoomWorkResultResourceRefSchema>;
+
 /**
  * Server-issued Workspace file reference used by Room Work.  This is
  * intentionally narrower than ResourceRefSchema: other resource kinds keep
@@ -4180,6 +4222,15 @@ export const PublicRoomWorkExecutionReservationSchema = RoomWorkLaunchReservatio
 }).strict();
 export type PublicRoomWorkExecutionReservation = z.infer<typeof PublicRoomWorkExecutionReservationSchema>;
 
+/** Public completion evidence is intentionally a small allow-list.  Legacy
+ * Assignment result JSON may contain more internal fields, but only this
+ * summary and server-validated durable resource refs cross Domain API. */
+export const PublicRoomWorkAssignmentResultSchema = z.object({
+  summary: z.string().max(2_000_000).optional(),
+  resource_refs: z.array(PublicRoomWorkResultResourceRefSchema).max(32).optional()
+}).strict();
+export type PublicRoomWorkAssignmentResult = z.infer<typeof PublicRoomWorkAssignmentResultSchema>;
+
 /** Public assignment projection; Backend Session and process details stay internal. */
 export const PublicRoomWorkAssigneeSchema = z.object({
   id: roomWorkId,
@@ -4192,6 +4243,7 @@ export const PublicRoomWorkAssigneeSchema = z.object({
   agent_configuration_version: z.number().int().positive().optional(),
   attempt: z.number().int().nonnegative().optional(),
   version: z.number().int().positive(),
+  result: PublicRoomWorkAssignmentResultSchema.optional(),
   created_at: roomWorkTimestamp,
   updated_at: roomWorkTimestamp
 }).strict();

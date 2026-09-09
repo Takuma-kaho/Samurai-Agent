@@ -118,6 +118,46 @@ export type NativeRoomWorkAssigneeStatus =
   | "cancelled"
   | "outcome_unknown";
 
+export type NativeRoomWorkResultResourceKind =
+  | "artifact"
+  | "artifact_revision"
+  | "generated_surface"
+  | "generated_surface_revision";
+
+export type NativeRoomWorkResultState = "created" | "updated";
+
+/** A validated Server result reference that is safe to turn into a Room tool entry. */
+export interface NativeRoomWorkResultResourceRef {
+  kind: NativeRoomWorkResultResourceKind;
+  id: string;
+  uri: string;
+  /** Required by Server for revision refs; identifies the Artifact/Surface they belong to. */
+  parentId?: string;
+  version?: string;
+  label?: string;
+  connectionId?: string;
+  workspaceId?: string;
+  roomId?: string;
+}
+
+export interface NativeRoomWorkAssignmentResult {
+  resourceRefs?: NativeRoomWorkResultResourceRef[];
+  state?: NativeRoomWorkResultState;
+  summary?: string;
+}
+
+/** The only resource shapes that can be opened directly from a Room Work result. */
+export interface NativeArtifactWorkspaceInitialResource {
+  kind: "artifact" | "generated_surface";
+  id: string;
+  uri: string;
+  revisionId?: string;
+  label?: string;
+  connectionId?: string;
+  workspaceId?: string;
+  roomId?: string;
+}
+
 export type NativeRoomWorkInstructionStatus = "pending" | "accepted" | "queued" | "delivered" | "applied" | "failed" | "rejected";
 
 export interface NativeRoomWorkAssignee {
@@ -129,6 +169,7 @@ export interface NativeRoomWorkAssignee {
   instructionVersion: number;
   generation: number;
   version: number;
+  result?: NativeRoomWorkAssignmentResult;
   createdAt?: string;
   updatedAt?: string;
 }

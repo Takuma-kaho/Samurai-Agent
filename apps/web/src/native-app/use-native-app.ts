@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ResourceRefSchema, WorkspaceFileResourceRefSchema, type ActivityInboxItem, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type MemoryFrontmatter, type MessageRecord, type ResourceRef } from "@samurai-agent/core-schemas";
+import { PublicRoomWorkResultResourceRefSchema, ResourceRefSchema, WorkspaceFileResourceRefSchema, type ActivityInboxItem, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type MemoryFrontmatter, type MessageRecord, type ResourceRef } from "@samurai-agent/core-schemas";
 import {
   api,
   createIdempotencyKey,
@@ -25,12 +25,16 @@ import type {
   NativeOrganizationMember,
   NativeRoom,
   NativeRoomWork,
+  NativeRoomWorkAssignmentResult,
   NativeRoomWorkAssignee,
   NativeRoomWorkAssigneeStatus,
   NativeRoomWorkComment,
   NativeRoomWorkControl,
   NativeRoomWorkInstruction,
   NativeRoomWorkResourceRefInput,
+  NativeRoomWorkResultResourceKind,
+  NativeRoomWorkResultResourceRef,
+  NativeRoomWorkResultState,
   NativeRoomWorkReaction,
   NativeRoomWorkStatus,
   NativeRoomDefaultAgent,
@@ -888,6 +892,10 @@ const nativeRoomWorkAssigneeStatuses: readonly NativeRoomWorkAssigneeStatus[] = 
   "queued", "ready", "running", "waiting", "blocked", "completed", "failed", "stopping", "cancelled", "outcome_unknown"
 ];
 
+const nativeRoomWorkResultResourceKinds: readonly NativeRoomWorkResultResourceKind[] = [
+  "artifact", "artifact_revision", "generated_surface", "generated_surface_revision"
+];
+
 function nativeRoomWorkAssigneeStatus(value: unknown): NativeRoomWorkAssigneeStatus {
   return typeof value === "string" && nativeRoomWorkAssigneeStatuses.includes(value as NativeRoomWorkAssigneeStatus)
     ? value as NativeRoomWorkAssigneeStatus
@@ -902,12 +910,124 @@ function nonNegativeGeneration(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
+function nativeRoomWorkResultResourceUri(kind: NativeRoomWorkResultResourceKind, value: string): boolean {
+  const scheme = value.match(/^([a-z][a-z0-9+.-]*):\/\//i)?.[1]?.toLowerCase();
+  if (scheme && scheme !== "workspace" && scheme !== "runtime") return false;
+  const path = scheme ? value.slice(scheme.length + 3) : value;
+  if (path.startsWith("/") || path.includes("\\") || path.includes("\0")) return false;
+  const parts = path.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) return false;
+  if (kind === "artifact" || kind === "artifact_revision") return parts[0] === "artifacts";
+  return parts[0] === "surfaces";
+}
+
+function nativeRoomWorkResultResourceId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+}
+
+function nativeRoomWorkResultState(value: unknown): NativeRoomWorkResultState | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["created", "create", "generated", "generate", "作成", "生成"].some((candidate) => normalized.includes(candidate))) return "created";
+  if (["updated", "update", "revised", "revise", "patched", "patch", "updated", "更新", "改訂", "修正", "版"].some((candidate) => normalized.includes(candidate))) return "updated";
+  return undefined;
+}
+
+function nativeRoomWorkResultScope(item: Record<string, unknown>): Pick<NativeRoomWorkResultResourceRef, "connectionId" | "workspaceId" | "roomId"> {
+  const connectionId = optionalString(item.connection_id ?? item.connectionId);
+  const workspaceId = optionalString(item.workspace_id ?? item.workspaceId);
+  const roomId = optionalString(item.room_id ?? item.roomId);
+  return {
+    ...(connectionId ? { connectionId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+    ...(roomId ? { roomId } : {})
+  };
+}
+
+/** Parse only result refs that have a direct Room Artifact/Surface opening path. */
+export function nativeRoomWorkResultResourceRefFromUnknown(value: unknown): NativeRoomWorkResultResourceRef | undefined {
+  const item = record(value);
+  // Keep the generic parse first so old, non-openable result kinds remain
+  // harmless to this focused Artifact/Surface renderer. Once a kind is
+  // openable, validate it against the shared public result contract rather
+  // than reimplementing its field constraints in the React client.
+  const parsed = ResourceRefSchema.safeParse({
+    kind: item.kind,
+    id: item.id,
+    uri: item.uri,
+    ...(item.version === undefined ? {} : { version: item.version }),
+    ...(item.label === undefined ? {} : { label: item.label })
+  });
+  if (!parsed.success) throw new Error("room_work_result_resource_ref_invalid");
+  if (!nativeRoomWorkResultResourceKinds.includes(parsed.data.kind as NativeRoomWorkResultResourceKind)) return undefined;
+  const hasSnakeCaseParentId = Object.prototype.hasOwnProperty.call(item, "parent_id");
+  const hasCamelCaseParentId = Object.prototype.hasOwnProperty.call(item, "parentId");
+  if (hasSnakeCaseParentId && hasCamelCaseParentId && item.parent_id !== item.parentId) {
+    throw new Error("room_work_result_resource_ref_invalid");
+  }
+  const parentIdCandidate = hasSnakeCaseParentId ? item.parent_id : item.parentId;
+  const publicRef = PublicRoomWorkResultResourceRefSchema.safeParse({
+    ...parsed.data,
+    ...(parentIdCandidate === undefined ? {} : { parent_id: parentIdCandidate })
+  });
+  if (!publicRef.success) throw new Error("room_work_result_resource_ref_invalid");
+  const kind = publicRef.data.kind as NativeRoomWorkResultResourceKind;
+  if (!nativeRoomWorkResultResourceId(publicRef.data.id) || !nativeRoomWorkResultResourceUri(kind, publicRef.data.uri)) {
+    throw new Error("room_work_result_resource_ref_invalid");
+  }
+  const parentId = publicRef.data.parent_id;
+  const isRevision = kind === "artifact_revision" || kind === "generated_surface_revision";
+  if ((isRevision && (!parentId || !nativeRoomWorkResultResourceId(parentId)))
+    || (!isRevision && parentId !== undefined)) {
+    throw new Error("room_work_result_resource_ref_invalid");
+  }
+  return {
+    kind,
+    id: publicRef.data.id,
+    uri: publicRef.data.uri,
+    ...(parentId ? { parentId } : {}),
+    ...(publicRef.data.version ? { version: publicRef.data.version } : {}),
+    ...(publicRef.data.label ? { label: publicRef.data.label } : {}),
+    ...nativeRoomWorkResultScope(item)
+  };
+}
+
+function nativeRoomWorkResultSummary(item: Record<string, unknown>): string | undefined {
+  return optionalString(item.summary ?? item.result_summary ?? item.resultSummary ?? item.message);
+}
+
+/** Normalizes the persisted Assignment.result without making Session state part of the UI contract. */
+export function nativeRoomWorkAssignmentResultFromUnknown(value: unknown): NativeRoomWorkAssignmentResult | undefined {
+  if (value === undefined || value === null) return undefined;
+  const item = record(value);
+  const output = record(item.output);
+  const rawRefs = item.resource_refs ?? item.resourceRefs ?? output.resource_refs ?? output.resourceRefs;
+  const resourceRefs = Array.isArray(rawRefs)
+    ? rawRefs.flatMap((entry) => {
+      const parsed = nativeRoomWorkResultResourceRefFromUnknown(entry);
+      return parsed ? [parsed] : [];
+    })
+    : undefined;
+  const summary = nativeRoomWorkResultSummary(item) ?? nativeRoomWorkResultSummary(output);
+  const state = nativeRoomWorkResultState(
+    item.state ?? item.action ?? item.operation ?? item.change_type ?? item.changeType
+      ?? output.state ?? output.action ?? output.operation ?? output.change_type ?? output.changeType
+  ) ?? nativeRoomWorkResultState(summary);
+  if (!resourceRefs?.length && !summary && !state) return undefined;
+  return {
+    ...(resourceRefs?.length ? { resourceRefs } : {}),
+    ...(state ? { state } : {}),
+    ...(summary ? { summary } : {})
+  };
+}
+
 function nativeAssignee(value: unknown): NativeRoomWorkAssignee | undefined {
   const item = record(value);
   const id = optionalString(item.id ?? item.assignee_id);
   const workId = optionalString(item.work_id ?? item.workId);
   const agentId = optionalString(item.agent_id ?? item.agentId);
   if (!id || !workId || !agentId) return undefined;
+  const result = nativeRoomWorkAssignmentResultFromUnknown(item.result);
   return {
     id,
     workId,
@@ -917,6 +1037,7 @@ function nativeAssignee(value: unknown): NativeRoomWorkAssignee | undefined {
     instructionVersion: positiveVersion(item.instruction_version ?? item.instructionVersion),
     generation: nonNegativeGeneration(item.generation),
     version: positiveVersion(item.version),
+    ...(result ? { result } : {}),
     ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
     ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
   };
@@ -1090,6 +1211,13 @@ export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
   const defaultAgentId = optionalString(item.default_agent_id ?? item.defaultAgentId);
   if (!id || !roomId || !requesterId || !defaultAgentId) throw new Error("room_work_response_invalid");
   const assigneeRows = Array.isArray(item.assignees) ? item.assignees : Array.isArray(item.assignments) ? item.assignments : [];
+  const assignees = assigneeRows.flatMap((entry) => { const parsed = nativeAssignee(entry); return parsed ? [parsed] : []; });
+  const workspaceId = optionalString(item.workspace_id ?? item.workspaceId);
+  for (const assignee of assignees) {
+    if (assignee.result?.resourceRefs?.some((ref) => (ref.roomId && ref.roomId !== roomId) || (workspaceId && ref.workspaceId && ref.workspaceId !== workspaceId))) {
+      throw new Error("room_work_result_resource_scope_invalid");
+    }
+  }
   const resourceRefs = nativeRoomWorkResourceRefs(item.resource_refs ?? item.resourceRefs);
   const instructions = Array.isArray(item.instructions) ? item.instructions.flatMap((entry) => { const parsed = nativeInstruction(entry); return parsed ? [parsed] : []; }) : undefined;
   const comments = Array.isArray(item.comments) ? item.comments.flatMap((entry) => { const parsed = nativeComment(entry); return parsed ? [parsed] : []; }) : undefined;
@@ -1114,7 +1242,7 @@ export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
     instructionVersion: positiveVersion(item.instruction_version ?? item.instructionVersion),
     generation: nonNegativeGeneration(item.generation),
     version: positiveVersion(item.version),
-    assignees: assigneeRows.flatMap((entry) => { const parsed = nativeAssignee(entry); return parsed ? [parsed] : []; }),
+    assignees,
     ...(resourceRefs.length ? { resourceRefs } : {}),
     ...(stopState ? { stopState } : {}),
     ...(instructions ? { instructions } : {}),

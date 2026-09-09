@@ -71,7 +71,13 @@ import type {
   WorkspaceState,
   WorkspaceSummary
 } from "./types";
-import { ResourceRefSchema, WorkspaceFileResourceRefSchema, type ResourceRef } from "@samurai-agent/core-schemas";
+import {
+  ResourceRefSchema,
+  RoomWorkResultResourceRefSchema,
+  WorkspaceFileResourceRefSchema,
+  type ResourceRef,
+  type RoomWorkResultResourceRef
+} from "@samurai-agent/core-schemas";
 
 const roleSet = new Set<WorkspaceMembershipRole>(["owner", "admin", "member", "guest"]);
 const workspaceHumanWorkStatusSet = new Set<WorkspaceHumanWorkStatus>(["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"]);
@@ -3146,13 +3152,17 @@ export class WorkspaceServerStore {
       )).rows[0];
       if (!row) throw new WorkspaceServerError("human_work_assignment_not_found", 404);
       if (input.workId && input.workId !== row.work_id) throw new WorkspaceServerError("human_work_assignment_scope_invalid", 409);
-      const settlePayload = {
+      const settlePayload: WorkspaceRecordPayload = {
         ...(input.result ?? {}),
         ...(input.runId ? { run_id: input.runId } : {}),
         ...(input.outputSummary ? { output_summary: input.outputSummary } : {}),
         ...(input.errorCode ? { error_code: input.errorCode } : {}),
         ...(input.errorMessage ? { error_message: input.errorMessage } : {})
       };
+      if (input.result && Object.prototype.hasOwnProperty.call(input.result, "resource_refs")) {
+        const resourceRefs = normalizeRoomWorkResultResourceRefs(input.result.resource_refs);
+        settlePayload.resource_refs = await resolveRoomWorkResultResourceRefs(sql, context.workspaceId, row.room_id, resourceRefs);
+      }
       try {
         await sql.query(
           "SELECT samurai_settle_human_work_assignment($1, $2, $3, $4::JSONB, $5, $6, $7, $8)",
@@ -6627,6 +6637,146 @@ async function resolveRoomWorkResourceRefs(
     resolved.push({ kind: ref.kind, id: row.id, uri: row.file_path, version, label: row.title });
   }
   return resolved;
+}
+
+/** Parse completion evidence refs separately from Knowledge/Skill input refs. */
+function normalizeRoomWorkResultResourceRefs(value: unknown): RoomWorkResultResourceRef[] {
+  const candidate = value === undefined || value === null
+    ? []
+    : typeof value === "string"
+      ? (() => {
+          try { return JSON.parse(value) as unknown; } catch { return value; }
+        })()
+      : value;
+  const parsed = RoomWorkResultResourceRefSchema.array().max(32).safeParse(candidate);
+  if (!parsed.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+  return parsed.data;
+}
+
+interface RoomWorkResultRecordRow {
+  record_type: string;
+  room_id: string;
+  id: string;
+  payload: unknown;
+}
+
+/**
+ * Rebuild completion refs from the durable Workspace records.  Runtime event
+ * refs are the source of candidate identities, but the record's Room, URI,
+ * version, and label remain the canonical authority at settlement time.
+ */
+async function resolveRoomWorkResultResourceRefs(
+  sql: WorkspaceSql,
+  workspaceId: string,
+  roomId: string,
+  refs: readonly RoomWorkResultResourceRef[]
+): Promise<RoomWorkResultResourceRef[]> {
+  const resolved: RoomWorkResultResourceRef[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    // Runtime supplies only an identity candidate. Parent linkage is derived
+    // from the durable record below, never accepted from a caller.
+    if (ref.parent_id !== undefined) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    const row = await readRoomWorkResultRecord(sql, workspaceId, ref.kind, ref.id, roomId);
+    const payload = jsonObjectOrEmpty(row.payload);
+    let canonical: RoomWorkResultResourceRef;
+    if (ref.kind === "artifact") {
+      const fileRef = canonicalResourceRef(payload.file_ref, "room_work_resource_reference_invalid");
+      const title = resultRecordText(payload.title);
+      if (row.id !== ref.id || fileRef.kind !== "artifact_revision" || !title) {
+        throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+      }
+      canonical = RoomWorkResultResourceRefSchema.parse({
+        kind: "artifact",
+        id: row.id,
+        uri: fileRef.uri,
+        ...(fileRef.version ? { version: fileRef.version } : {}),
+        label: title
+      });
+    } else if (ref.kind === "artifact_revision") {
+      const fileRef = canonicalResourceRef(payload.file_ref, "room_work_resource_reference_invalid");
+      const artifactId = resultRecordText(payload.artifact_id);
+      if (row.id !== ref.id || fileRef.kind !== "artifact_revision" || fileRef.id !== row.id || !artifactId) {
+        throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+      }
+      await readRoomWorkResultRecord(sql, workspaceId, "artifact", artifactId, roomId);
+      canonical = RoomWorkResultResourceRefSchema.parse({
+        kind: "artifact_revision",
+        id: row.id,
+        uri: fileRef.uri,
+        parent_id: artifactId,
+        ...(fileRef.version ? { version: fileRef.version } : {}),
+        ...(fileRef.label ? { label: fileRef.label } : {})
+      });
+    } else if (ref.kind === "generated_surface") {
+      const title = resultRecordText(payload.title);
+      if (row.id !== ref.id || !title) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+      canonical = RoomWorkResultResourceRefSchema.parse({
+        kind: "generated_surface",
+        id: row.id,
+        uri: `surfaces/${row.id}`,
+        label: title
+      });
+    } else {
+      const htmlRef = canonicalResourceRef(payload.html_ref, "room_work_resource_reference_invalid");
+      const surfaceId = resultRecordText(payload.surface_id);
+      const revision = typeof payload.revision === "number" && Number.isSafeInteger(payload.revision)
+        ? payload.revision
+        : typeof payload.revision === "string" && /^[1-9][0-9]*$/.test(payload.revision) ? Number(payload.revision) : undefined;
+      if (row.id !== ref.id || htmlRef.kind !== "generated_surface_html" || !surfaceId || revision === undefined) {
+        throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+      }
+      const surfaceRow = await readRoomWorkResultRecord(sql, workspaceId, "generated_surface", surfaceId, roomId);
+      const title = resultRecordText(jsonObjectOrEmpty(surfaceRow.payload).title);
+      if (!title) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+      canonical = RoomWorkResultResourceRefSchema.parse({
+        kind: "generated_surface_revision",
+        id: row.id,
+        uri: htmlRef.uri,
+        parent_id: surfaceId,
+        label: `${title} r${revision}`
+      });
+    }
+    if ((ref.version !== undefined && ref.version !== canonical.version)
+      || (ref.label !== undefined && ref.label !== canonical.label)
+      || ref.parent_id !== undefined
+      || ref.uri !== canonical.uri) {
+      throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    }
+    const key = `${canonical.kind}|${canonical.id}|${canonical.uri}|${canonical.version ?? ""}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      resolved.push(canonical);
+    }
+  }
+  return resolved;
+}
+
+async function readRoomWorkResultRecord(
+  sql: WorkspaceSql,
+  workspaceId: string,
+  recordType: string,
+  id: string,
+  roomId: string
+): Promise<RoomWorkResultRecordRow> {
+  const row = (await sql.query<RoomWorkResultRecordRow>(
+    `SELECT record_type, room_id, id, payload FROM workspace_records
+     WHERE workspace_id = $1 AND record_type = $2 AND id = $3`,
+    [workspaceId, recordType, id]
+  )).rows[0];
+  if (!row) throw new WorkspaceServerError("room_work_resource_reference_not_found", 404);
+  if (row.room_id !== roomId) throw new WorkspaceServerError("room_work_resource_reference_scope_invalid", 409);
+  return row;
+}
+
+function canonicalResourceRef(value: unknown, errorCode: string): ResourceRef {
+  const parsed = ResourceRefSchema.safeParse(value);
+  if (!parsed.success) throw new WorkspaceServerError(errorCode, 500);
+  return parsed.data;
+}
+
+function resultRecordText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function parseDateInput(value: string | undefined, code: string): Date | undefined {

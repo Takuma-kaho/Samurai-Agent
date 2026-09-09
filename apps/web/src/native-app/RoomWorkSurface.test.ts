@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
   RoomWorkSurface,
+  nativeRoomWorkResultCards,
   roomWorkControlStatusLabel,
   roomWorkInstructionStatusLabel,
   roomWorkMutationNeedsRetry,
@@ -121,6 +122,36 @@ function renderSurface(overrides: Partial<RoomWorkSurfaceProps> = {}): string {
 }
 
 describe("RoomWorkSurface", () => {
+  it("pairs each direct-open result with only its Server-linked revision", () => {
+    const completedWork: NativeRoomWork = {
+      ...work,
+      status: "completed",
+      assignees: [{
+        ...work.assignees![0]!,
+        status: "completed",
+        result: {
+          resourceRefs: [
+            { kind: "artifact", id: "artifact_plan", uri: "artifacts/artifact_plan/revisions/2.md", label: "計画" },
+            { kind: "artifact_revision", id: "artifact_revision_2", parentId: "artifact_plan", uri: "artifacts/artifact_plan/revisions/2.md" },
+            { kind: "generated_surface", id: "surface_dashboard", uri: "surfaces/surface_dashboard", label: "ダッシュボード" },
+            { kind: "generated_surface_revision", id: "surface_revision_3", parentId: "surface_dashboard", uri: "surfaces/surface_dashboard/revisions/3.html" },
+            { kind: "artifact_revision", id: "artifact_revision_1", parentId: "artifact_plan", uri: "artifacts/artifact_plan/revisions/1.md" }
+          ]
+        }
+      }]
+    };
+
+    const cards = nativeRoomWorkResultCards(completedWork, room);
+
+    expect(cards).toEqual([
+      expect.objectContaining({ resource: expect.objectContaining({ kind: "artifact", id: "artifact_plan" }) }),
+      expect.objectContaining({ resource: expect.objectContaining({ kind: "generated_surface", id: "surface_dashboard", revisionId: "surface_revision_3" }) })
+    ]);
+    // Two revisions for the Artifact make the historical target ambiguous, so
+    // the UI intentionally opens the current durable version instead.
+    expect(cards[0]?.resource.revisionId).toBeUndefined();
+  });
+
   it("uses public work vocabulary and renders server-confirmed progress", () => {
     const html = renderSurface();
 

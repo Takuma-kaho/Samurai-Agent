@@ -11,6 +11,7 @@ import {
 } from "../lib/api";
 import {
   ArtifactSurfacePanel,
+  ArtifactDetailView,
   type ArtifactRevisionTarget,
   type ArtifactSurfaceGateway,
   type NativeArtifactDetail,
@@ -25,7 +26,7 @@ import {
   withNativeWorkspaceTarget,
   type NativeWorkspaceTargetGuardBridge
 } from "./native-workspace-target";
-import type { NativeWorkspaceTarget } from "./types";
+import type { NativeArtifactWorkspaceInitialResource, NativeWorkspaceTarget } from "./types";
 
 export interface NativeArtifactWorkspaceTarget extends NativeWorkspaceTarget {
   roomId: string;
@@ -57,6 +58,8 @@ export interface NativeArtifactWorkspaceProps {
   canEdit?: boolean;
   canExecute?: boolean;
   bridge?: NativeArtifactWorkspaceBridge;
+  /** Optional result ref; when present the list is not queried before opening it. */
+  initialResource?: NativeArtifactWorkspaceInitialResource;
   onClose?: () => void;
   onRequestAgentRevision?: (target: ArtifactRevisionTarget) => void;
 }
@@ -64,6 +67,40 @@ export interface NativeArtifactWorkspaceProps {
 /** Room-specific key; Artifact IDs alone are intentionally never enough. */
 export function nativeArtifactWorkspaceTargetKey(target?: NativeArtifactWorkspaceTarget): string {
   return target ? `${nativeWorkspaceTargetKey(target)}\n${target.roomId}` : "no-artifact-target";
+}
+
+/** Revalidates a result ref at the direct-open boundary before any bridge call. */
+export function nativeArtifactWorkspaceInitialResourceFromUnknown(
+  value: unknown,
+  target?: NativeArtifactWorkspaceTarget
+): NativeArtifactWorkspaceInitialResource | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind;
+  if (kind !== "artifact" && kind !== "generated_surface") return undefined;
+  const id = value.id;
+  const uri = value.uri;
+  if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id)) return undefined;
+  if (typeof uri !== "string" || !nativeArtifactWorkspaceResourceUri(kind, uri)) return undefined;
+  const revisionId = typeof value.revisionId === "string"
+    ? value.revisionId
+    : typeof value.revision_id === "string" ? value.revision_id : undefined;
+  if (revisionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(revisionId)) return undefined;
+  const connectionId = optionalScopeString(value.connectionId ?? value.connection_id);
+  const workspaceId = optionalScopeString(value.workspaceId ?? value.workspace_id);
+  const roomId = optionalScopeString(value.roomId ?? value.room_id);
+  if ((target && connectionId && connectionId !== target.connectionId)
+    || (target && workspaceId && workspaceId !== target.workspaceId)
+    || (target && roomId && roomId !== target.roomId)) return undefined;
+  return {
+    kind,
+    id,
+    uri,
+    ...(revisionId ? { revisionId } : {}),
+    ...(typeof value.label === "string" && value.label.trim() ? { label: value.label.trim().slice(0, 4_096) } : {}),
+    ...(connectionId ? { connectionId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+    ...(roomId ? { roomId } : {})
+  };
 }
 
 /**
@@ -98,7 +135,6 @@ export function nativeArtifactWorkspaceGateway(
   target: NativeArtifactWorkspaceTarget | undefined
 ): ArtifactSurfaceGateway | undefined {
   if (!bridge || !target
-    || !bridge.listWorkspaceArtifacts
     || !bridge.getWorkspaceArtifact
     || !bridge.listWorkspaceArtifactRevisions
     || !bridge.getWorkspaceArtifactRevision
@@ -108,6 +144,7 @@ export function nativeArtifactWorkspaceGateway(
   return {
     list: (roomId) => withNativeWorkspaceTarget(bridge, target, async () => {
       assertRoomId(target, roomId);
+      if (!bridge.listWorkspaceArtifacts) throw new Error("artifact_list_unavailable");
       return (await bridge.listWorkspaceArtifacts!({ roomId })).artifacts;
     }),
     get: (roomId, artifactId) => withNativeWorkspaceTarget(bridge, target, async () => {
@@ -150,27 +187,46 @@ export function nativeArtifactWorkspaceGateway(
 }
 
 /** The React Room surface for Artifact preview/edit/history and isolated Generated Surface display. */
-export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, onClose, onRequestAgentRevision }: NativeArtifactWorkspaceProps) {
+export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, initialResource: initialResourceProp, onClose, onRequestAgentRevision }: NativeArtifactWorkspaceProps) {
   const bridge = suppliedBridge ?? getWorkspaceClientBridge();
   const targetKey = nativeArtifactWorkspaceTargetKey(target);
+  const initialResource = useMemo(() => nativeArtifactWorkspaceInitialResourceFromUnknown(initialResourceProp, target), [initialResourceProp, targetKey]);
+  const initialResourceInvalid = initialResourceProp !== undefined && !initialResource;
+  const initialResourceKey = initialResource
+    ? [initialResource.kind, initialResource.id, initialResource.revisionId ?? "", initialResource.uri].join("\n")
+    : initialResourceInvalid ? "invalid-initial-resource" : "no-initial-resource";
   const generation = useRef(0);
   const surfaceListEpoch = useRef(0);
+  const artifactEpoch = useRef(0);
   const [surface, setSurface] = useState<GeneratedSurfaceDetail>();
+  const [surfaceBundle, setSurfaceBundle] = useState<GeneratedSurfaceBundleDetail>();
   const [surfaceError, setSurfaceError] = useState<string>();
   const [surfaces, setSurfaces] = useState<GeneratedSurfaceDefinition[]>([]);
   const [surfaceListLoading, setSurfaceListLoading] = useState(false);
   const [surfaceListError, setSurfaceListError] = useState<string>();
+  const [artifact, setArtifact] = useState<NativeArtifactDetail>();
+  const [artifactRevisions, setArtifactRevisions] = useState<ArtifactRevisionRecord[]>([]);
+  const [artifactComparison, setArtifactComparison] = useState<NativeArtifactRevisionDetail>();
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string>();
   const gateway = useMemo(() => nativeArtifactWorkspaceGateway(bridge, target), [bridge, target]);
 
   useEffect(() => {
     generation.current += 1;
     surfaceListEpoch.current += 1;
+    artifactEpoch.current += 1;
     setSurface(undefined);
+    setSurfaceBundle(undefined);
     setSurfaceError(undefined);
     setSurfaces([]);
     setSurfaceListLoading(false);
     setSurfaceListError(undefined);
-  }, [targetKey]);
+    setArtifact(undefined);
+    setArtifactRevisions([]);
+    setArtifactComparison(undefined);
+    setArtifactLoading(false);
+    setArtifactError(undefined);
+  }, [initialResourceKey, targetKey]);
 
   const refreshSurfaceList = useCallback(async (): Promise<void> => {
     if (!target || !bridge?.listWorkspaceGeneratedSurfaces) return;
@@ -188,11 +244,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     }
   }, [bridge, target]);
 
-  useEffect(() => {
-    void refreshSurfaceList();
-  }, [refreshSurfaceList]);
-
-  const openGeneratedSurface = useCallback(async (surfaceId: string): Promise<void> => {
+  const openGeneratedSurface = useCallback(async (surfaceId: string, revisionId?: string): Promise<void> => {
     if (!target || !bridge) return;
     const query = bridge.queryWorkspaceGeneratedSurface ?? bridge.getWorkspaceGeneratedSurface;
     if (!query) {
@@ -200,16 +252,143 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       return;
     }
     const requestGeneration = ++generation.current;
+    setArtifact(undefined);
+    setArtifactComparison(undefined);
+    setArtifactError(undefined);
+    setSurfaceBundle(undefined);
     setSurfaceError(undefined);
     try {
       const detail = await withNativeWorkspaceTarget(bridge, target, () => query({ roomId: target.roomId, surfaceId }));
       if (requestGeneration !== generation.current) return;
       if (detail.surface.id !== surfaceId) throw new Error("generated_surface_response_mismatch");
-      setSurface(detail);
+      let nextDetail = detail;
+      let nextBundle: GeneratedSurfaceBundleDetail | undefined;
+      if (revisionId) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(revisionId)) throw new Error("generated_surface_revision_invalid");
+        const revision = detail.revisions.find((candidate) => candidate.id === revisionId);
+        if (revision) {
+          nextDetail = { ...detail, surface: { ...detail.surface, current_revision_id: revision.id, current_revision: revision.revision } };
+        } else {
+          if (!bridge.getWorkspaceGeneratedSurfaceBundle) throw new Error("generated_surface_revision_not_found");
+          nextBundle = await withNativeWorkspaceTarget(bridge, target, async () => {
+            const bundle = await bridge.getWorkspaceGeneratedSurfaceBundle!({ roomId: target.roomId, surfaceId, revisionId });
+            if (bundle.surface.id !== surfaceId || bundle.revision.id !== revisionId) throw new Error("generated_surface_bundle_mismatch");
+            return bundle;
+          });
+          if (requestGeneration !== generation.current) return;
+          nextDetail = {
+            ...detail,
+            surface: { ...detail.surface, current_revision_id: nextBundle.revision.id, current_revision: nextBundle.revision.revision },
+            revisions: [...detail.revisions, nextBundle.revision]
+          };
+        }
+      }
+      setSurfaceBundle(nextBundle);
+      setSurface(nextDetail);
     } catch (cause) {
       if (requestGeneration === generation.current) setSurfaceError(nativeArtifactWorkspaceError(cause));
     }
   }, [bridge, target]);
+
+  const openInitialArtifact = useCallback(async (resource: NativeArtifactWorkspaceInitialResource): Promise<void> => {
+    if (!target || !gateway) {
+      setArtifactError("成果物を開くための既存bridgeが利用できません。");
+      return;
+    }
+    const requestEpoch = ++artifactEpoch.current;
+    generation.current += 1;
+    setSurface(undefined);
+    setSurfaceBundle(undefined);
+    setSurfaceError(undefined);
+    setArtifactLoading(true);
+    setArtifactError(undefined);
+    setArtifactComparison(undefined);
+    try {
+      const [detail, history] = await Promise.all([
+        gateway.get(target.roomId, resource.id),
+        gateway.listRevisions(target.roomId, resource.id)
+      ]);
+      if (requestEpoch !== artifactEpoch.current || detail.artifact.id !== resource.id) throw new Error("artifact_response_mismatch");
+      let nextDetail = detail;
+      if (resource.revisionId) {
+        const revision = await gateway.getRevision(target.roomId, resource.id, resource.revisionId);
+        if (requestEpoch !== artifactEpoch.current || revision.revision.artifact_id !== resource.id || revision.revision.id !== resource.revisionId) {
+          throw new Error("artifact_revision_response_mismatch");
+        }
+        nextDetail = {
+          ...detail,
+          content: revision.content,
+          ...(revision.contentEncoding ? { contentEncoding: revision.contentEncoding } : {}),
+          ...(revision.contentType ? { contentType: revision.contentType } : {}),
+          revision: revision.revision
+        };
+      }
+      setArtifact(nextDetail);
+      setArtifactRevisions([...history].sort((left, right) => right.revision - left.revision));
+    } catch (cause) {
+      if (requestEpoch === artifactEpoch.current) setArtifactError(nativeArtifactWorkspaceError(cause));
+    } finally {
+      if (requestEpoch === artifactEpoch.current) setArtifactLoading(false);
+    }
+  }, [gateway, target]);
+
+  const loadArtifactComparison = useCallback(async (revisionId: string): Promise<void> => {
+    if (!target || !gateway || !artifact) return;
+    const requestEpoch = ++artifactEpoch.current;
+    setArtifactLoading(true);
+    setArtifactError(undefined);
+    try {
+      const revision = await gateway.getRevision(target.roomId, artifact.artifact.id, revisionId);
+      if (requestEpoch !== artifactEpoch.current || revision.revision.artifact_id !== artifact.artifact.id) throw new Error("artifact_revision_response_mismatch");
+      setArtifactComparison(revision);
+    } catch (cause) {
+      if (requestEpoch === artifactEpoch.current) setArtifactError(nativeArtifactWorkspaceError(cause));
+    } finally {
+      if (requestEpoch === artifactEpoch.current) setArtifactLoading(false);
+    }
+  }, [artifact, gateway, target]);
+
+  const saveInitialArtifact = useCallback(async (content: string, baseRevisionId: string, expectedRevision: number, changeSummary: string): Promise<void> => {
+    if (!target || !gateway || !artifact) throw new Error("artifact_save_unavailable");
+    await gateway.revise({ roomId: target.roomId, artifactId: artifact.artifact.id, content, baseRevisionId, expectedRevision, changeSummary, operationId: createIdempotencyKey() });
+    if (initialResource?.kind === "artifact") await openInitialArtifact(initialResource);
+  }, [artifact, gateway, initialResource, openInitialArtifact, target]);
+
+  const restoreInitialArtifact = useCallback(async (): Promise<void> => {
+    if (!target || !gateway || !artifact || !artifactComparison) return;
+    const current = [...artifactRevisions].sort((left, right) => right.revision - left.revision)[0] ?? artifact.revision;
+    if (!current) {
+      setArtifactError("現在の版を確認できないため、復元できません。");
+      return;
+    }
+    setArtifactLoading(true);
+    setArtifactError(undefined);
+    try {
+      await gateway.restore({ roomId: target.roomId, artifactId: artifact.artifact.id, revisionId: artifactComparison.revision.id, baseRevisionId: current.id, expectedRevision: current.revision, operationId: createIdempotencyKey() });
+      setArtifactComparison(undefined);
+      if (initialResource?.kind === "artifact") await openInitialArtifact(initialResource);
+    } catch (cause) {
+      setArtifactError(nativeArtifactWorkspaceError(cause));
+    } finally {
+      setArtifactLoading(false);
+    }
+  }, [artifact, artifactComparison, artifactRevisions, gateway, initialResource, openInitialArtifact, target]);
+
+  useEffect(() => {
+    if (initialResourceInvalid) {
+      setSurfaceError("仕事の結果から受け取った成果物参照が無効です。");
+      return;
+    }
+    if (initialResource?.kind === "generated_surface") {
+      void openGeneratedSurface(initialResource.id, initialResource.revisionId);
+      return;
+    }
+    if (initialResource?.kind === "artifact") {
+      void openInitialArtifact(initialResource);
+      return;
+    }
+    void refreshSurfaceList();
+  }, [initialResource, initialResourceInvalid, openGeneratedSurface, openInitialArtifact, refreshSurfaceList]);
 
   const loadBundle = useCallback(async (input: { surfaceId: string; revisionId: string }): Promise<GeneratedSurfaceBundleDetail> => {
     if (!target || !bridge?.getWorkspaceGeneratedSurfaceBundle) throw new Error("generated_surface_bundle_unavailable");
@@ -262,14 +441,38 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     {surfaceError ? <p className="native-inline-error" role="alert">{surfaceError}</p> : null}
     {surface ? <GeneratedSurfaceFrame
       detail={surface}
+      bundle={surfaceBundle}
       disabled={canExecute === false}
       onLoadBundle={loadBundle}
       onRunAction={runSurfaceAction}
       onRequestApproval={requestSurfaceApproval}
       {...(canEdit ? { onSetState: setSurfaceState } : {})}
       onExport={exportSurface}
-      onClose={() => { generation.current += 1; setSurface(undefined); }}
-    /> : <>
+      onClose={() => {
+        generation.current += 1;
+        setSurface(undefined);
+        setSurfaceBundle(undefined);
+        if (initialResource) onClose?.();
+      }}
+    /> : initialResource?.kind === "artifact" ? <section className="native-artifact-direct" aria-label="結果の成果物">
+      {artifactLoading ? <p className="native-inline-note" role="status">成果物と版履歴を確認しています…</p> : null}
+      {artifactError ? <p className="native-inline-error" role="alert">{artifactError}</p> : null}
+      {artifact ? <ArtifactDetailView
+        detail={artifact}
+        revisions={artifactRevisions}
+        comparison={artifactComparison}
+        canEdit={canEdit}
+        onSave={saveInitialArtifact}
+        onCompare={(revisionId) => void loadArtifactComparison(revisionId)}
+        onRestore={() => void restoreInitialArtifact()}
+        onCloseComparison={() => setArtifactComparison(undefined)}
+        onRequestAgentRevision={onRequestAgentRevision}
+        onOpenGeneratedSurface={(surfaceId) => void openGeneratedSurface(surfaceId)}
+      /> : !artifactLoading && !artifactError ? <p className="native-inline-note">結果の成果物を確認しています…</p> : null}
+    </section> : initialResource?.kind === "generated_surface" ? <section className="native-generated-surface-direct" aria-label="結果の操作画面">
+      {surfaceError ? <p className="native-inline-error" role="alert">{surfaceError}</p> : null}
+      {!surfaceError ? <p className="native-inline-note" role="status">結果の操作画面を開いています…</p> : null}
+    </section> : <>
       <GeneratedSurfaceList
         surfaces={surfaces}
         loading={surfaceListLoading}
@@ -361,6 +564,20 @@ function byteArrayToBase64(value: number[] | undefined): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function optionalScopeString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function nativeArtifactWorkspaceResourceUri(kind: "artifact" | "generated_surface", value: string): boolean {
+  const scheme = value.match(/^([a-z][a-z0-9+.-]*):\/\//i)?.[1]?.toLowerCase();
+  if (scheme && scheme !== "workspace" && scheme !== "runtime") return false;
+  const path = scheme ? value.slice(scheme.length + 3) : value;
+  if (path.startsWith("/") || path.includes("\\") || path.includes("\0")) return false;
+  const parts = path.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) return false;
+  return parts[0] === (kind === "artifact" ? "artifacts" : "surfaces");
 }
 
 function nativeArtifactWorkspaceError(cause: unknown): string {

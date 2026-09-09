@@ -4030,6 +4030,11 @@ export function createPostgresRuntimeToolExecutionPort(
       await commands.assertRoomExecutable(context, roomId);
       const runtimeContext = { ...context, operationId: input.operation.id };
       const source = runtimeArtifactSourceMetadata(input.run, context.workspaceId, roomId);
+      const generatedSurfaceRuntimeContext = {
+        ...runtimeContext,
+        runtimeRunId: input.run.id,
+        ...(typeof source?.source_work_id === "string" ? { runtimeWorkId: source.source_work_id } : {})
+      };
 
       switch (operation) {
         case "artifact.create": {
@@ -4089,7 +4094,7 @@ export function createPostgresRuntimeToolExecutionPort(
         case "generated_surface.create": {
           const payload = parseRuntimeToolInput("generated_surface.create", normalizeGeneratedSurfaceProviderToolArguments(input.event.arguments));
           const created = await generatedSurfaces.create(
-            { ...runtimeContext, runtimeRunId: input.run.id },
+            generatedSurfaceRuntimeContext,
             roomId,
             payload as GeneratedSurfaceCreateInput
           );
@@ -4098,7 +4103,7 @@ export function createPostgresRuntimeToolExecutionPort(
         case "generated_surface.revise": {
           const payload = parseRuntimeToolInput("generated_surface.revise", normalizeGeneratedSurfaceProviderToolArguments(input.event.arguments));
           const revised = await generatedSurfaces.revise(
-            { ...runtimeContext, runtimeRunId: input.run.id },
+            generatedSurfaceRuntimeContext,
             roomId,
             payload as GeneratedSurfaceReviseInput
           );

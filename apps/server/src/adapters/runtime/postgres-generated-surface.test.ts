@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { GeneratedSurfaceDefinition, JsonValue, SurfaceInteractionRecord } from "@samurai-agent/core-schemas";
+import type { GeneratedSurfaceDefinition, GeneratedSurfaceRevisionRecord, JsonValue, SurfaceInteractionRecord } from "@samurai-agent/core-schemas";
 import { WorkspaceServerError, type WorkspaceRecord, type WorkspaceRequestContext } from "@samurai-agent/workspace-server";
 import {
   PostgresGeneratedSurface,
+  applyRuntimeRoomWorkSourceRefs,
+  generatedSurfaceRoomWorkSourceRef,
   type GeneratedSurfaceActionTarget,
   type GeneratedSurfaceTargetCommandResult
 } from "./postgres-generated-surface";
@@ -63,6 +65,52 @@ function createActionRequest(actionPayload: Record<string, JsonValue> = { record
     message_id: "message-r15-action"
   } as const;
 }
+
+function createRevision(): GeneratedSurfaceRevisionRecord {
+  return {
+    id: revisionId,
+    surface_id: surfaceId,
+    revision: 2,
+    source_resource_refs: [{ kind: "room_work", id: "model-forged-work", uri: "samurai://room_work/model-forged-work" }],
+    prompt_fingerprint: "prompt-fingerprint",
+    knowledge_refs: [],
+    skill_refs: [],
+    html_ref: { kind: "generated_surface_html", id: revisionId, uri: "surfaces/surface-r15/revisions/2.html", label: "R15 confirmation surface" },
+    bundle_hash: "bundle-hash",
+    validation_report: {
+      valid: true,
+      issues: [],
+      html_bytes: 1,
+      css_bytes: 0,
+      script_bytes: 0,
+      action_count: 1,
+      csp: "default-src 'none'"
+    },
+    created_at: "2026-09-08T00:00:00.000Z"
+  };
+}
+
+describe("Generated Surface Room Work provenance", () => {
+  it("replaces provider room_work refs with the admitted server-owned Work ref", () => {
+    const value = applyRuntimeRoomWorkSourceRefs({
+      definition: {
+        ...createSurface(),
+        source_refs: [{ kind: "room_work", id: "model-forged-work", uri: "samurai://room_work/model-forged-work" }]
+      },
+      revision: createRevision()
+    }, "work-r15-generated-surface");
+    const sourceRef = generatedSurfaceRoomWorkSourceRef("work-r15-generated-surface");
+
+    expect(value.definition.source_refs).toEqual([sourceRef]);
+    expect(value.revision.source_resource_refs).toEqual([sourceRef]);
+    expect(sourceRef).toEqual({
+      kind: "room_work",
+      id: "work-r15-generated-surface",
+      uri: "samurai://room_work/work-r15-generated-surface",
+      label: "work-r15-generated-surface"
+    });
+  });
+});
 
 function createRecord(
   workspaceId: string,

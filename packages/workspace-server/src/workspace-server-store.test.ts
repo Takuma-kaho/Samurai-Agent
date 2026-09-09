@@ -1851,6 +1851,82 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(calls.some((text) => text.includes("SET status = 'failed'"))).toBe(true);
   });
 
+  it("derives revision parents from durable records before a Work result is persisted", async () => {
+    const workspaceId = "workspace_store_result_refs";
+    const workId = "work_store_result_refs";
+    const assignmentId = "assignment_store_result_refs";
+    const reservationId = "reservation_store_result_refs";
+    const operationId = "operation_store_result_refs";
+    const roomId = "room_store_result_refs";
+    let persisted: Record<string, unknown> | undefined;
+    const store = storeWithQuery(async (text, values) => {
+      if (text.includes("INSERT INTO workspace_operations")) return { rows: [{ id: operationId }] };
+      if (text.includes("SELECT workspace_id, work_id, room_id, status FROM workspace_human_work_assignments")) {
+        return { rows: [{ workspace_id: workspaceId, work_id: workId, room_id: roomId, status: "running" }] };
+      }
+      if (text.includes("FROM workspace_records")) {
+        const recordType = values?.[1];
+        const id = values?.[2];
+        if (recordType === "artifact" && id === "artifact_result") {
+          return { rows: [{ record_type: "artifact", room_id: roomId, id, payload: {
+            title: "Result artifact",
+            file_ref: { kind: "artifact_revision", id: "artifact_revision_result", uri: "artifacts/artifact_result/revisions/1.md", version: "1" }
+          } }] };
+        }
+        if (recordType === "artifact_revision" && id === "artifact_revision_result") {
+          return { rows: [{ record_type: "artifact_revision", room_id: roomId, id, payload: {
+            artifact_id: "artifact_result",
+            file_ref: { kind: "artifact_revision", id, uri: "artifacts/artifact_result/revisions/1.md", version: "1" }
+          } }] };
+        }
+        if (recordType === "generated_surface" && id === "surface_result") {
+          return { rows: [{ record_type: "generated_surface", room_id: roomId, id, payload: { title: "Result surface" } }] };
+        }
+        if (recordType === "generated_surface_revision" && id === "surface_revision_result") {
+          return { rows: [{ record_type: "generated_surface_revision", room_id: roomId, id, payload: {
+            surface_id: "surface_result",
+            revision: 1,
+            html_ref: { kind: "generated_surface_html", id, uri: "surfaces/surface_result/revisions/1.html" }
+          } }] };
+        }
+      }
+      if (text.includes("SELECT samurai_settle_human_work_assignment")) {
+        persisted = JSON.parse(String(values?.[3])) as Record<string, unknown>;
+        throw new Error("human_work_run_evidence_missing");
+      }
+      return { rows: [] };
+    });
+
+    await expect(store.settleRoomWorkAssignment(
+      { workspaceId, accountId: "account_store_result_refs", operationId },
+      {
+        workId,
+        assignmentId,
+        reservationId,
+        leaseOwner: "worker_store_result_refs",
+        generation: 0,
+        status: "completed",
+        result: {
+          resource_refs: [
+            { kind: "artifact", id: "artifact_result", uri: "artifacts/artifact_result/revisions/1.md", version: "1", label: "Result artifact" },
+            { kind: "artifact_revision", id: "artifact_revision_result", uri: "artifacts/artifact_result/revisions/1.md", version: "1" },
+            { kind: "generated_surface", id: "surface_result", uri: "surfaces/surface_result", label: "Result surface" },
+            { kind: "generated_surface_revision", id: "surface_revision_result", uri: "surfaces/surface_result/revisions/1.html", label: "Result surface r1" }
+          ]
+        }
+      }
+    )).rejects.toMatchObject({ code: "room_work_run_evidence_missing", status: 409 });
+
+    expect(persisted).toMatchObject({
+      resource_refs: [
+        { kind: "artifact", id: "artifact_result" },
+        { kind: "artifact_revision", id: "artifact_revision_result", parent_id: "artifact_result" },
+        { kind: "generated_surface", id: "surface_result" },
+        { kind: "generated_surface_revision", id: "surface_revision_result", parent_id: "surface_result" }
+      ]
+    });
+  });
+
   it("maps reassignment safety errors to the public Room-work conflict codes", async () => {
     const mappings = [
       ["human_work_reassign_outcome_unknown", "room_work_reassign_outcome_unknown"],

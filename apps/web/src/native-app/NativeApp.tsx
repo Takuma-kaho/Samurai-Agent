@@ -7,7 +7,7 @@ import RoomWorkSurface, { roomWorkCanReceiveReply, roomWorkControlAllowed } from
 import { NativeInteractionRequests } from "./NativeInteractionRequests";
 import NativeKnowledgeTools from "./NativeKnowledgeTools";
 import NativeRoomAdministration from "./NativeRoomAdministration";
-import NativeArtifactWorkspace from "./NativeArtifactWorkspace";
+import NativeArtifactWorkspace, { nativeArtifactWorkspaceInitialResourceFromUnknown } from "./NativeArtifactWorkspace";
 import NativeCollectionPanel from "./NativeCollectionPanel";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 import OrganizationManagement from "../components/OrganizationManagement";
@@ -16,7 +16,7 @@ import ConnectionRequired from "../components/ConnectionRequired";
 import WorkspaceConnectionSettings from "../components/WorkspaceConnectionSettings";
 import { createIdempotencyKey } from "../lib/api";
 import { nativeRoomAgentIsAvailable, nativeRoomCreateErrorIsExplicitServerFailure, useNativeApp } from "./use-native-app";
-import type { NativeAgent, NativeAgentBackend, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspaceTarget } from "./types";
+import type { NativeAgent, NativeAgentBackend, NativeArtifactWorkspaceInitialResource, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspaceTarget } from "./types";
 
 export interface NativeCreateDialogValue {
   name: string;
@@ -39,6 +39,25 @@ export function nativeRoomToolTarget(
 ): NativeRoomToolTarget | undefined {
   if (!target || !room || room.workspaceId !== target.workspaceId) return undefined;
   return { ...target, roomId: room.id };
+}
+
+/** Adds the currently selected target to a result ref and rejects a stale Room/Workspace. */
+export function nativeRoomResultResourceTarget(
+  target: NativeWorkspaceTarget | undefined,
+  room: Pick<NativeRoom, "id" | "workspaceId"> | undefined,
+  resource: NativeArtifactWorkspaceInitialResource
+): NativeArtifactWorkspaceInitialResource | undefined {
+  const roomTarget = nativeRoomToolTarget(target, room);
+  if (!roomTarget) return undefined;
+  if ((resource.roomId && resource.roomId !== roomTarget.roomId)
+    || (resource.workspaceId && resource.workspaceId !== roomTarget.workspaceId)
+    || (resource.connectionId && resource.connectionId !== roomTarget.connectionId)) return undefined;
+  return nativeArtifactWorkspaceInitialResourceFromUnknown({
+    ...resource,
+    connectionId: roomTarget.connectionId,
+    workspaceId: roomTarget.workspaceId,
+    roomId: roomTarget.roomId
+  }, roomTarget);
 }
 
 export function NativeRoomToolLinks({ target, onOpen }: {
@@ -645,6 +664,7 @@ export function NativeApp() {
   const [connectionSettingsOpen, setConnectionSettingsOpen] = useState(false);
   const [agentDirectoryOpen, setAgentDirectoryOpen] = useState(false);
   const [roomToolOpen, setRoomToolOpen] = useState<NativeRoomTool>();
+  const [artifactWorkspaceInitialResource, setArtifactWorkspaceInitialResource] = useState<NativeArtifactWorkspaceInitialResource>();
   const [workResourceDrafts, setWorkResourceDrafts] = useState<Record<string, NativeRoomWorkResourceRefInput[]>>({});
 
   // A Room-scoped panel must never quietly carry its target into a newly
@@ -652,6 +672,7 @@ export function NativeApp() {
   // does not discard an in-progress instruction or comment.
   useEffect(() => {
     setRoomToolOpen(undefined);
+    setArtifactWorkspaceInitialResource(undefined);
   }, [model.selectedRoomId, model.selectedWorkspaceTargetKey]);
 
   const startCreate = (kind: "organization" | "workspace" | "room") => {
@@ -765,6 +786,16 @@ export function NativeApp() {
       ? undefined
       : "このDesktopは移転の事前確認・実行bridgeに対応していません。移転元を変更せず保持してください。";
   const roomToolTarget = nativeRoomToolTarget(model.selectedWorkspaceTarget, model.selectedRoom);
+  const openRoomTool = (tool: NativeRoomTool): void => {
+    setArtifactWorkspaceInitialResource(undefined);
+    setRoomToolOpen(tool);
+  };
+  const openResultResource = (resource: NativeArtifactWorkspaceInitialResource): void => {
+    const scoped = nativeRoomResultResourceTarget(model.selectedWorkspaceTarget, model.selectedRoom, resource);
+    if (!scoped) return;
+    setArtifactWorkspaceInitialResource(scoped);
+    setRoomToolOpen("artifacts");
+  };
   const resourceDraftReplyWork = model.replyWorkId
     ? model.works.find((work) => work.id === model.replyWorkId)
     : undefined;
@@ -907,10 +938,11 @@ export function NativeApp() {
       : roomToolOpen === "artifacts" && roomToolTarget
         ? <NativeArtifactWorkspace
           target={roomToolTarget}
+          initialResource={artifactWorkspaceInitialResource}
           canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
           canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
           bridge={model.bridge}
-          onClose={() => setRoomToolOpen(undefined)}
+          onClose={() => { setArtifactWorkspaceInitialResource(undefined); setRoomToolOpen(undefined); }}
           onRequestAgentRevision={(target) => {
             const sourceWork = target.sourceWorkId ? model.works.find((work) => work.id === target.sourceWorkId) : undefined;
             const replyWorkId = sourceWork && roomWorkCanReceiveReply(sourceWork) && roomWorkControlAllowed(model.selectedRoom, sourceWork, model.connection?.accountId)
@@ -978,6 +1010,7 @@ export function NativeApp() {
                 onSetDefaultAgent={model.setRoomDefaultAgent}
                 onOpenAgentDm={model.openAgentDm}
                 onOpenAgentSettings={() => setAgentDirectoryOpen(true)}
+                onOpenResultResource={openResultResource}
                 onReconnect={model.reconnect}
               />
               : <ChatSurface
@@ -1003,7 +1036,7 @@ export function NativeApp() {
         <div className="native-brand"><span className="native-brand-mark" aria-hidden="true">S</span><div><strong>Samurai</strong><small>WORKSPACE</small></div></div>
         <WorkspaceNavigator workspaces={model.workspaces} selectedWorkspaceId={model.selectedWorkspaceId} selectedWorkspaceTargetKey={model.selectedWorkspaceTargetKey} organizationRole={model.selectedOrganization?.role} canCreate={Boolean(model.connection)} loading={model.workspaceLoading} disabled={!model.connection} error={model.workspaceError} directoryErrors={model.workspaceDirectoryErrors} onSelect={model.selectWorkspace} onCreate={() => startCreate("workspace")} onManage={openWorkspaceManagement} />
         <RoomNavigator rooms={model.rooms} selectedRoomId={model.selectedRoomId} loading={model.roomLoading} disabled={!model.connection || !model.selectedWorkspace} archived={model.selectedWorkspace?.state !== "active"} error={model.roomError} onSelect={model.openRoom} onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room") : undefined} />
-        <NativeRoomToolLinks target={roomToolTarget} onOpen={setRoomToolOpen} />
+        <NativeRoomToolLinks target={roomToolTarget} onOpen={openRoomTool} />
         {model.selectedWorkspace ? <button type="button" className="native-text-button" onClick={() => setAgentDirectoryOpen(true)} disabled={model.agentLoading}>Agent一覧・設定</button> : null}
         <OrganizationSwitcher organizations={model.organizations} selectedOrganizationId={model.selectedOrganizationId} loading={model.organizationLoading} disabled={!model.connection} error={model.organizationError} onSelect={model.selectOrganization} onCreate={() => startCreate("organization")} onManage={openManagement} />
         <footer className="native-sidebar-footer"><span className={`native-connection-pip is-${model.transportState}`} aria-hidden="true" /><span>{model.connection ? model.connection.label : "未接続"}</span>{model.connection ? <button type="button" className="native-text-button" onClick={() => void model.reconnect()}>再確認</button> : null}{!model.browserMode ? <button type="button" className="native-text-button" onClick={() => setConnectionSettingsOpen(true)}>接続設定</button> : null}</footer>

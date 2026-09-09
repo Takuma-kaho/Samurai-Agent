@@ -63,7 +63,37 @@ type GeneratedSurfaceBundle = {
 
 /** Runtime tool ingress may add a persisted Run identity. It is never read
  * from HTTP JSON and becomes immutable provenance on the saved revision. */
-type GeneratedSurfaceMutationContext = WorkspaceRequestContext & { runtimeRunId?: string };
+type GeneratedSurfaceMutationContext = WorkspaceRequestContext & { runtimeRunId?: string; runtimeWorkId?: string };
+
+/** The Room Work source is derived from the admitted Runtime binding, never
+ * from provider-generated Surface input. */
+export function generatedSurfaceRoomWorkSourceRef(workId: string): ResourceRef {
+  return ResourceRefSchema.parse({
+    kind: "room_work",
+    id: workId,
+    uri: `samurai://room_work/${workId}`,
+    label: workId
+  });
+}
+
+export function applyRuntimeRoomWorkSourceRefs<T extends {
+  definition: GeneratedSurfaceDefinition;
+  revision: GeneratedSurfaceRevisionRecord;
+}>(value: T, workId?: string): T {
+  if (!workId) return value;
+  const sourceRef = generatedSurfaceRoomWorkSourceRef(workId);
+  return {
+    ...value,
+    definition: {
+      ...value.definition,
+      source_refs: [...value.definition.source_refs.filter((ref) => ref.kind !== "room_work"), sourceRef]
+    },
+    revision: {
+      ...value.revision,
+      source_resource_refs: [...value.revision.source_resource_refs.filter((ref) => ref.kind !== "room_work"), sourceRef]
+    }
+  } as T;
+}
 
 export interface GeneratedSurfaceTargetCommandResult {
   result?: JsonValue;
@@ -417,11 +447,11 @@ export class PostgresGeneratedSurface {
       createGeneratedSurfaceRequestId: () => `surface_request_${stableHash(`${context.workspaceId}|${context.operationId}`)}`,
       generatedSurfaceNow: nowIso,
       generatedSurfaceFingerprint: stableHash,
-      buildGeneratedSurfaceRevision: (input) => buildGeneratedSurfaceRevision({
+      buildGeneratedSurfaceRevision: (input) => applyRuntimeRoomWorkSourceRefs(buildGeneratedSurfaceRevision({
         ...input,
         surfaceId,
         revisionId: deterministicRevisionId(context, surfaceId)
-      }),
+      }), context.runtimeWorkId),
       saveGeneratedSurfaceRevision: (input) => this.saveRevision(context, roomId, input),
       runGeneratedSurfaceMutation: (input) => this.runMutation(context, roomId, input, inputHash)
     };
@@ -433,10 +463,10 @@ export class PostgresGeneratedSurface {
       createGeneratedSurfaceRequestId: () => `surface_request_${stableHash(`${context.workspaceId}|${context.operationId}`)}`,
       generatedSurfaceNow: nowIso,
       generatedSurfaceFingerprint: stableHash,
-      buildGeneratedSurfaceRevision: (input) => buildGeneratedSurfaceRevision({
+      buildGeneratedSurfaceRevision: (input) => applyRuntimeRoomWorkSourceRefs(buildGeneratedSurfaceRevision({
         ...input,
         revisionId: deterministicRevisionId(context, surfaceId)
-      }),
+      }), context.runtimeWorkId),
       saveGeneratedSurfaceRevision: (input) => this.saveRevision(context, roomId, input),
       generatedSurfaceReviseError: (message) => new WorkspaceServerError(message, message === "generated_surface_not_found" ? 404 : 409),
       runGeneratedSurfaceMutation: (input) => this.runMutation(context, roomId, input, inputHash)
@@ -569,7 +599,7 @@ export class PostgresGeneratedSurface {
     return { resource, operation: completed, ...(execution.rollbackPoint ? { rollbackPoint: execution.rollbackPoint } : {}), activity: [], ...(extra as unknown as TExtra) };
   }
 
-  private async saveRevision(context: WorkspaceRequestContext, roomId: string, input: {
+  private async saveRevision(context: GeneratedSurfaceMutationContext, roomId: string, input: {
     definition: GeneratedSurfaceDefinition;
     revision: GeneratedSurfaceRevisionRecord;
     html: string;
@@ -577,8 +607,9 @@ export class PostgresGeneratedSurface {
     script?: string;
     assets?: GeneratedSurfaceBundleInput["assets"];
   }): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord }> {
-    const definition = normalizedGeneratedSurfaceDefinition(context.workspaceId, input.definition);
-    const revision = GeneratedSurfaceRevisionRecordSchema.parse(input.revision);
+    const withProvenance = applyRuntimeRoomWorkSourceRefs({ definition: input.definition, revision: input.revision }, context.runtimeWorkId);
+    const definition = normalizedGeneratedSurfaceDefinition(context.workspaceId, withProvenance.definition);
+    const revision = GeneratedSurfaceRevisionRecordSchema.parse(withProvenance.revision);
     const existingRevisionRecord = await this.tryGetRecord(context, roomId, revisionRecordType, revision.id);
     if (existingRevisionRecord) {
       const existingRevision = revisionFromRecord(existingRevisionRecord);

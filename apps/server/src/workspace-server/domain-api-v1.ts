@@ -29,6 +29,7 @@ import {
   PublicRoomRecordSchema,
   PublicRoomWorkResourceRefInputSchema,
   PublicRoomWorkResourceRefSchema,
+  PublicRoomWorkResultResourceRefSchema,
   RunControlActionSchema,
   RunControlInputSchema,
   eventPayloadSchemaFor,
@@ -1507,9 +1508,48 @@ function roomWorkAssigneeRecord(value: unknown): Record<string, unknown> {
     agent_configuration_version: numberValue(body, "agent_configuration_version", "agentConfigurationVersion", "agent_version", "agentVersion"),
     attempt: numberValue(body, "attempt"),
     version: numberValue(body, "version") ?? 1,
+    result: publicRoomWorkAssignmentResult(body),
     created_at: valueString(body, "created_at", "createdAt"),
     updated_at: valueString(body, "updated_at", "updatedAt")
   });
+}
+
+/** Expose only stable completion evidence from the internal Assignment JSON. */
+function publicRoomWorkAssignmentResult(body: Record<string, unknown>): Record<string, unknown> | undefined {
+  const raw = body.result;
+  if (raw === undefined || raw === null) return undefined;
+  const result = recordValue(raw);
+  const summary = typeof result.summary === "string"
+    ? result.summary
+    : typeof result.output_summary === "string" ? result.output_summary : undefined;
+  const rawRefs = result.resource_refs ?? result.resourceRefs;
+  const refs = rawRefs === undefined || rawRefs === null ? undefined : publicRoomWorkResultResourceRefs(rawRefs);
+  const projected = compactRecord({
+    ...(summary === undefined ? {} : { summary }),
+    ...(refs && refs.length > 0 ? { resource_refs: refs } : {})
+  });
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+/** Result refs are a different public contract from Completion input refs. */
+function publicRoomWorkResultResourceRefs(value: unknown): ResourceRef[] {
+  if (!Array.isArray(value)) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+  const projected = value.map((entryValue) => {
+    const entry = recordValue(entryValue);
+    return compactRecord({
+      kind: valueString(entry, "kind"),
+      id: valueString(entry, "id", "resource_id", "resourceId"),
+      uri: valueString(entry, "uri"),
+      parent_id: optionalValue(entry, "parent_id", "parentId"),
+      version: typeof entry.version === "number" && Number.isSafeInteger(entry.version)
+        ? String(entry.version)
+        : optionalValue(entry, "version"),
+      label: optionalValue(entry, "label")
+    });
+  });
+  const parsed = PublicRoomWorkResultResourceRefSchema.array().max(32).safeParse(projected);
+  if (!parsed.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+  return parsed.data;
 }
 
 function roomWorkInstructionRecord(value: unknown): Record<string, unknown> {

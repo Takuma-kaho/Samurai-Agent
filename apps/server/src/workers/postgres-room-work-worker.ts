@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { WorkspaceFileResourceRefSchema, nowIso, type ResourceRef, type SessionRecord } from "@samurai-agent/core-schemas";
+import { ResourceRefSchema, RoomWorkResultResourceRefSchema, WorkspaceFileResourceRefSchema, nowIso, type ResourceRef, type SessionRecord } from "@samurai-agent/core-schemas";
 import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 import type { RunChatTurnResult } from "@samurai-agent/runtime";
 import {
@@ -199,6 +199,9 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           signal: input.signal
         }) as RunChatTurnResult;
         const settledStatus = terminalStatus(result.backendRun.status);
+        const completionResourceRefs = settledStatus === "completed"
+          ? roomWorkCompletionResourceRefs(result, result.backendRun.id, reservation.workId, reservation.roomId)
+          : [];
         settlementAttempted = true;
         await this.settle(runContext, claimedReservation, {
           status: settledStatus,
@@ -207,6 +210,7 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           result: {
             run_id: result.backendRun.id,
             status: result.backendRun.status,
+            ...(completionResourceRefs.length > 0 ? { resource_refs: completionResourceRefs } : {}),
             ...(result.backendRun.output_summary ? { output_summary: result.backendRun.output_summary } : {})
           },
           now: nowIso()
@@ -450,6 +454,76 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
       now: result.now
     });
   }
+}
+
+const roomWorkCompletionResourceKinds = new Set([
+  "artifact",
+  "artifact_revision",
+  "generated_surface",
+  "generated_surface_revision"
+]);
+
+/**
+ * Completion evidence comes only from Runtime's server-persisted projections:
+ * event refs, Workspace changes, operation result refs, and server Artifact
+ * records. Provider messages/tool output are intentionally not inspected.
+ */
+export function roomWorkCompletionResourceRefs(
+  result: Pick<RunChatTurnResult, "backendEvents" | "workspaceChanges" | "operations" | "artifacts">,
+  runId: string,
+  workId: string,
+  roomId: string
+): ResourceRef[] {
+  // A valid Runtime completion need not have produced an Artifact or Surface.
+  // Older/runtime-minimal adapters therefore omit these optional projections.
+  const backendEvents = result.backendEvents ?? [];
+  const workspaceChanges = result.workspaceChanges ?? [];
+  const operations = result.operations ?? [];
+  const artifacts = result.artifacts ?? [];
+  const candidates: unknown[] = [];
+  for (const event of backendEvents) {
+    if (event.run_id === runId) candidates.push(...(event.resource_refs ?? []));
+  }
+  for (const change of workspaceChanges) {
+    if (change.run_id === runId && (!change.room_id || change.room_id === roomId)) candidates.push(change.resource_ref);
+  }
+  for (const operation of operations) {
+    if ((!operation.run_id || operation.run_id === runId) && (!operation.room_id || operation.room_id === roomId) && operation.result_ref) {
+      candidates.push(operation.result_ref);
+    }
+  }
+  const changedResourceIds = new Set(workspaceChanges
+    .filter((change) => change.run_id === runId && (!change.room_id || change.room_id === roomId))
+    .map((change) => change.resource_ref.id));
+  for (const artifact of artifacts) {
+    const metadata = artifact.metadata;
+    const sourceRunId = typeof metadata.source_run_id === "string" ? metadata.source_run_id : undefined;
+    const sourceWorkId = typeof metadata.source_work_id === "string" ? metadata.source_work_id : undefined;
+    if (sourceRunId !== runId && sourceWorkId !== workId && !changedResourceIds.has(artifact.id) && !changedResourceIds.has(artifact.file_ref.id)) continue;
+    candidates.push({
+      kind: "artifact",
+      id: artifact.id,
+      uri: artifact.file_ref.uri,
+      ...(artifact.file_ref.version ? { version: artifact.file_ref.version } : {}),
+      label: artifact.title
+    });
+    candidates.push(artifact.file_ref);
+  }
+
+  const refs: ResourceRef[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const generic = ResourceRefSchema.safeParse(candidate);
+    if (!generic.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    if (!roomWorkCompletionResourceKinds.has(generic.data.kind)) continue;
+    const parsed = RoomWorkResultResourceRefSchema.safeParse(generic.data);
+    if (!parsed.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    const key = `${parsed.data.kind}|${parsed.data.id}|${parsed.data.uri}|${parsed.data.version ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push(parsed.data);
+  }
+  return refs;
 }
 
 function roomWorkDomainContext(

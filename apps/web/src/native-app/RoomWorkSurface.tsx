@@ -15,7 +15,8 @@ import type {
   NativeRoomWorkInstruction,
   NativeRoomWorkResourceRefInput,
   NativeRoomWorkInstructionStatus,
-  NativeRoomWorkStatus
+  NativeRoomWorkStatus,
+  NativeArtifactWorkspaceInitialResource
 } from "./types";
 
 export interface RoomWorkSurfaceProps {
@@ -70,6 +71,7 @@ export interface RoomWorkSurfaceProps {
   onSetDefaultAgent?: (agentId: string) => void | Promise<void>;
   onOpenAgentDm?: (agentId: string) => void | Promise<void>;
   onOpenAgentSettings?: () => void;
+  onOpenResultResource?: (resource: NativeArtifactWorkspaceInitialResource) => void;
   onReconnect: () => void | Promise<void>;
 }
 
@@ -155,6 +157,52 @@ export function roomWorkControlStatusLabel(status: NativeRoomWorkControl["status
 /** Keep the operation ID when the mutation may be committed but the projection refresh failed. */
 export function roomWorkMutationNeedsRetry(result: NativeRoomWorkMutationResult | void): boolean {
   return result?.refreshed === false;
+}
+
+export interface NativeRoomWorkResultCard {
+  resource: NativeArtifactWorkspaceInitialResource;
+  title: string;
+  typeLabel: "Artifact" | "Generated Surface";
+  stateLabel: "作成済み" | "更新済み" | "結果を記録";
+}
+
+/** Builds direct-open entries from validated Assignment result refs only. */
+export function nativeRoomWorkResultCards(work: NativeRoomWork, room?: Pick<NativeRoom, "id" | "workspaceId">): NativeRoomWorkResultCard[] {
+  const cards: NativeRoomWorkResultCard[] = [];
+  const seen = new Set<string>();
+  for (const assignee of work.assignees) {
+    const result = assignee.result;
+    if (!result?.resourceRefs?.length) continue;
+    for (const ref of result.resourceRefs) {
+      if (ref.kind !== "artifact" && ref.kind !== "generated_surface") continue;
+      if ((ref.roomId && ref.roomId !== work.roomId) || (room && ref.workspaceId && ref.workspaceId !== room.workspaceId)) continue;
+      const key = `${ref.kind}\n${ref.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const typeLabel = ref.kind === "artifact" ? "Artifact" : "Generated Surface";
+      const revisionRefs = result.resourceRefs.filter((candidate) => candidate.parentId === ref.id);
+      // A single, Server-linked revision can be opened exactly. If one work
+      // changed the same resource multiple times, open the current durable
+      // version instead of guessing which historical revision the person wants.
+      const revisionId = revisionRefs.length === 1 ? revisionRefs[0]?.id : undefined;
+      cards.push({
+        resource: {
+          kind: ref.kind,
+          id: ref.id,
+          uri: ref.uri,
+          ...(revisionId ? { revisionId } : {}),
+          ...(ref.label ? { label: ref.label } : {}),
+          ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+          ...(ref.workspaceId ? { workspaceId: ref.workspaceId } : {}),
+          roomId: ref.roomId ?? work.roomId
+        },
+        title: ref.label?.trim() || ref.id,
+        typeLabel,
+        stateLabel: result.state === "created" ? "作成済み" : result.state === "updated" ? "更新済み" : "結果を記録"
+      });
+    }
+  }
+  return cards;
 }
 
 function roomWorkControlLabel(control: NativeRoomWorkControl): string {
@@ -469,6 +517,15 @@ const roomWorkStyles = [
   ".native-work-resource-item { align-items: center; background: rgba(125,177,221,.08); border: 1px solid rgba(125,177,221,.32); border-radius: 7px; color: var(--native-copy); display: inline-flex; font-size: 10px; gap: 6px; max-width: 100%; padding: 6px 8px; }",
   ".native-work-resource-item > span:first-child { color: #a8cdec; font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }",
   ".native-work-resource-version { color: var(--native-dim); font-size: 9px; }",
+  ".native-work-result-cards { display: grid; gap: 9px; margin-top: 10px; }",
+  ".native-work-result-card { align-items: center; background: linear-gradient(135deg, rgba(123,190,147,.09), rgba(255,255,255,.028)); border: 1px solid rgba(123,190,147,.34); border-radius: 10px; color: inherit; cursor: pointer; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; padding: 12px 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
+  ".native-work-result-card:hover { background: linear-gradient(135deg, rgba(123,190,147,.16), rgba(255,255,255,.05)); border-color: rgba(123,190,147,.58); transform: translateY(-1px); }",
+  ".native-work-result-card:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-result-card-main { display: grid; gap: 5px; min-width: 0; }",
+  ".native-work-result-card-title { color: var(--native-copy); font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-result-card-meta { align-items: center; color: var(--native-muted); display: flex; flex-wrap: wrap; font-size: 9px; gap: 7px; }",
+  ".native-work-result-card-state { border: 1px solid rgba(123,190,147,.46); border-radius: 999px; color: #9bd3ad; font-size: 9px; padding: 5px 7px; white-space: nowrap; }",
+  ".native-work-result-card-open { color: var(--native-accent); font-size: 10px; white-space: nowrap; }",
   ".native-work-resource-remove { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 12px; line-height: 1; padding: 0 0 0 2px; }",
   ".native-work-resource-remove:hover { color: var(--native-copy); }",
   ".native-work-attachment.is-ready { border-color: rgba(123,190,147,.42); }",
@@ -533,6 +590,7 @@ export function RoomWorkSurface({
   onSetDefaultAgent,
   onOpenAgentDm,
   onOpenAgentSettings,
+  onOpenResultResource,
   onReconnect
 }: RoomWorkSurfaceProps) {
   const [busyAction, setBusyAction] = useState<string>();
@@ -639,6 +697,7 @@ export function RoomWorkSurface({
     || !delegateInstruction.trim()
     || delegateAgentIds.length === 0
     || !delegateDependencyIds.every((dependencyId) => delegateDependencyAssignees.some((assignee) => assignee.id === dependencyId));
+  const resultCards = selectedWork ? nativeRoomWorkResultCards(selectedWork, room) : [];
 
   if (attachmentContextRef.current !== attachmentContextKey) {
     attachmentContextRef.current = attachmentContextKey;
@@ -1338,10 +1397,25 @@ export function RoomWorkSurface({
               {!workDetailLoading && !(selectedWork.instructions?.length) ? <p className="native-work-empty">指示履歴はServerからまだ返されていません。</p> : null}
               {selectedWork.instructions?.length ? <div className="native-work-timeline">{selectedWork.instructions.map(renderInstruction)}</div> : null}
 
-              {selectedWork.resultSummary ? (
+              {selectedWork.resultSummary || resultCards.length ? (
                 <>
                   <div className="native-work-subheading"><h3>結果</h3><span>Serverの記録</span></div>
-                  <p className="native-work-instruction-body">{selectedWork.resultSummary}</p>
+                  {selectedWork.resultSummary ? <p className="native-work-instruction-body">{selectedWork.resultSummary}</p> : null}
+                  {resultCards.length ? <div className="native-work-result-cards" aria-label="仕事の結果">
+                    {resultCards.map((card) => <button
+                      key={`${card.resource.kind}:${card.resource.id}`}
+                      type="button"
+                      className="native-work-result-card"
+                      onClick={() => onOpenResultResource?.(card.resource)}
+                      disabled={!onOpenResultResource}
+                    >
+                      <span className="native-work-result-card-main">
+                        <strong className="native-work-result-card-title">{card.title}</strong>
+                        <span className="native-work-result-card-meta"><span>{card.typeLabel}</span><span>同じRoomで開く</span></span>
+                      </span>
+                      <span className="native-work-result-card-state">{card.stateLabel}</span>
+                    </button>)}
+                  </div> : null}
                 </>
               ) : null}
 

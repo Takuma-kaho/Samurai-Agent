@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { GeneratedSurfaceBundleDetail, GeneratedSurfaceDetail } from "../lib/api";
-import { GeneratedSurfaceFrame, generatedSurfaceActionFromMessage, generatedSurfaceSrcdoc } from "./GeneratedSurfaceFrame";
+import { GeneratedSurfaceFrame, generatedSurfaceActionFromMessage, generatedSurfaceConfirmationRequest, generatedSurfaceSrcdoc, shouldConsumeGeneratedSurfaceConfirmationRequest } from "./GeneratedSurfaceFrame";
 
 const createdAt = "2026-09-08T00:00:00.000Z";
 
@@ -71,6 +71,8 @@ describe("GeneratedSurfaceFrame", () => {
       payload: { nested: { enabled: true } }
     }, { surfaceId: detail.surface.id, revisionId: "surface_revision_1", actions: detail.surface.actions });
 
+    if (!accepted) throw new Error("expected confirmation action");
+
     expect(accepted).toEqual({
       surfaceId: "surface_report",
       revisionId: "surface_revision_1",
@@ -96,6 +98,43 @@ describe("GeneratedSurfaceFrame", () => {
       action_id: "refresh",
       payload: { oversized: "x".repeat(32 * 1024) }
     }, { surfaceId: detail.surface.id, revisionId: "surface_revision_1", actions: detail.surface.actions })).toBeUndefined();
+  });
+
+  it("retains an input payload for a confirmation action until the parent starts approval", () => {
+    const accepted = generatedSurfaceActionFromMessage({
+      type: "samurai.generated_surface.action",
+      surface_id: "surface_report",
+      revision_id: "surface_revision_1",
+      action_id: "publish",
+      payload: { audience: "customers", notify: true }
+    }, { surfaceId: detail.surface.id, revisionId: "surface_revision_1", actions: detail.surface.actions });
+
+    if (!accepted) throw new Error("expected confirmation action");
+
+    expect(accepted).toEqual({
+      surfaceId: "surface_report",
+      revisionId: "surface_revision_1",
+      actionId: "publish",
+      payload: { audience: "customers", notify: true }
+    });
+    expect(generatedSurfaceConfirmationRequest(accepted, {
+      surfaceId: "surface_report",
+      revisionId: "surface_revision_1",
+      actionId: "publish"
+    })).toEqual(accepted);
+    expect(generatedSurfaceConfirmationRequest(accepted, {
+      surfaceId: "surface_report",
+      revisionId: "surface_revision_2",
+      actionId: "publish"
+    })).toEqual({
+      surfaceId: "surface_report",
+      revisionId: "surface_revision_2",
+      actionId: "publish",
+      payload: {}
+    });
+    expect(shouldConsumeGeneratedSurfaceConfirmationRequest(accepted, accepted)).toBe(true);
+    const newerRequest = { ...accepted };
+    expect(shouldConsumeGeneratedSurfaceConfirmationRequest(newerRequest, accepted)).toBe(false);
   });
 
   it("renders the bundle only in an iframe without same-origin access", () => {

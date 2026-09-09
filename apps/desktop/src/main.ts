@@ -1653,7 +1653,15 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:artifact:surface", async (_event, input: unknown) => {
     const request = workspaceArtifactSurfaceOperationRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceV1ArtifactsPath()}/surface/operations`, workspaceScoped: true, operationId: request.operationId, idempotencyKey: request.operationId, body: request.body });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    return snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "POST",
+      path: `${workspaceV1ArtifactsPath(workspaceSnapshot.workspaceId)}/surface/operations`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      body: request.body
+    });
   });
   ipcMain.handle("samurai:workspace-server:artifact:revise", async (_event, input: unknown) => {
     const request = workspaceArtifactRevisionIpcInput(input, { requireContent: true, requireOperationId: true });
@@ -1703,15 +1711,33 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:get", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceRoomRequest(input);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    return snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "GET",
+      path: `${workspaceV1GeneratedSurfacesPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.surfaceId)}?room_id=${encodeURIComponent(request.roomId)}`,
+      workspaceScoped: true
+    });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:bundle", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceBundleRequest(input);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/revisions/${encodeURIComponent(request.revisionId)}/bundle?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    return snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "GET",
+      path: `${workspaceV1GeneratedSurfacesPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.surfaceId)}/revisions/${encodeURIComponent(request.revisionId)}/bundle?room_id=${encodeURIComponent(request.roomId)}`,
+      workspaceScoped: true
+    });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:action", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceActionRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/actions/${encodeURIComponent(request.actionId)}/run`, workspaceScoped: true, operationId: request.operationId, idempotencyKey: request.operationId, body: request.body });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    return snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "POST",
+      path: `${workspaceV1GeneratedSurfacesPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.surfaceId)}/actions/${encodeURIComponent(request.actionId)}/run`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      body: request.body
+    });
   });
   ipcMain.handle("samurai:workspace-server:interaction-requests:list", async (event, input: unknown) => {
     assertWorkspaceInteractionIpcSender(event);
@@ -1760,13 +1786,26 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:state", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceStateRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/state`, workspaceScoped: true, operationId: request.operationId, idempotencyKey: request.operationId, body: request.body });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    return snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "POST",
+      path: `${workspaceV1GeneratedSurfacesPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.surfaceId)}/state`,
+      workspaceScoped: true,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      body: request.body
+    });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:export", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceExportRequest(input);
     const query = new URLSearchParams({ room_id: request.roomId, format: request.format });
     if (request.revisionId) query.set("revision_id", request.revisionId);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/export?${query.toString()}`, workspaceScoped: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    return snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "GET",
+      path: `${workspaceV1GeneratedSurfacesPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.surfaceId)}/export?${query.toString()}`,
+      workspaceScoped: true
+    });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:create", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceMutationIpcInput(input);
@@ -5286,7 +5325,11 @@ function activeWorkspaceArtifactsPath(): string {
 }
 
 function activeWorkspaceV1ArtifactsPath(): string {
-  return `/api/v1/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/artifacts`;
+  return workspaceV1ArtifactsPath(requireActiveWorkspaceId());
+}
+
+function workspaceV1ArtifactsPath(workspaceId: string): string {
+  return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/artifacts`;
 }
 
 function activeWorkspaceGeneratedSurfacesPath(): string {
@@ -5294,7 +5337,11 @@ function activeWorkspaceGeneratedSurfacesPath(): string {
 }
 
 function activeWorkspaceV1GeneratedSurfacesPath(): string {
-  return `/api/v1/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/generated-surfaces`;
+  return workspaceV1GeneratedSurfacesPath(requireActiveWorkspaceId());
+}
+
+function workspaceV1GeneratedSurfacesPath(workspaceId: string): string {
+  return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces`;
 }
 
 function workspaceInteractionRequestsPath(workspaceId: string): string {

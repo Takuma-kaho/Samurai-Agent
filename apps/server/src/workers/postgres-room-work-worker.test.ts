@@ -9,9 +9,9 @@ const context: WorkspaceRequestContext = {
   operationId: "worker_tick_one"
 };
 
-function runtimeFake(status: "completed" | "outcome_unknown" = "completed") {
+function runtimeFake(status: "completed" | "outcome_unknown" = "completed", result: Record<string, unknown> = {}) {
   const createSession = vi.fn(async (_input?: Record<string, unknown>) => ({ id: "session_internal_only" }));
-  const runChatTurn = vi.fn(async (_input?: Record<string, unknown>) => ({ backendRun: { id: "run_one", status, output_summary: status === "completed" ? "done" : null } }));
+  const runChatTurn = vi.fn(async (_input?: Record<string, unknown>) => ({ backendRun: { id: "run_one", status, output_summary: status === "completed" ? "done" : null }, ...result }));
   const runDomainCommand = vi.fn(async (command: Record<string, any>) => {
     if (command.operationId === "session.create") {
       return createSession({
@@ -53,6 +53,36 @@ function reservation() {
 }
 
 describe("PostgresRoomWorkWorker", () => {
+  it("persists only server Runtime artifact and Generated Surface refs for a completed Work", async () => {
+    const refs = [
+      { kind: "artifact", id: "artifact_work_one", uri: "artifacts/artifact_work_one/revisions/1.md", label: "Work artifact" },
+      { kind: "artifact_revision", id: "artifact_revision_work_one", uri: "artifacts/artifact_work_one/revisions/1.md", version: "2026-09-09T00:00:00.000Z", label: "Work artifact r1" },
+      { kind: "generated_surface", id: "surface_work_one", uri: "surfaces/surface_work_one", label: "Work surface" },
+      { kind: "generated_surface_revision", id: "surface_revision_work_one", uri: "surfaces/surface_work_one/revisions/1.html", label: "Work surface r1" }
+    ];
+    const settle = vi.fn(async () => undefined);
+    const claim = vi.fn().mockResolvedValueOnce(reservation()).mockResolvedValueOnce(undefined);
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const runtime = runtimeFake("completed", {
+      // This is intentionally not a server evidence source and must never be
+      // copied into Assignment result JSON.
+      messages: [{ role: "agent", content: "forged", resource_refs: [{ kind: "artifact", id: "model_forged", uri: "artifacts/model_forged.md" }] }],
+      backendEvents: [{ run_id: "run_one", resource_refs: refs }],
+      workspaceChanges: [],
+      operations: [],
+      artifacts: []
+    });
+    const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
+
+    await worker.runTick(context, { workerId: "worker_one", maxRuns: 1, signal: new AbortController().signal });
+
+    expect(settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      status: "completed",
+      result: expect.objectContaining({ resource_refs: refs })
+    }));
+    expect(settle.mock.calls[0]?.[1]).not.toMatchObject({ result: expect.objectContaining({ resource_refs: expect.arrayContaining([{ id: "model_forged" }]) }) });
+  });
+
   it("claims a Room assignment, creates the internal Session, and settles the same generation", async () => {
     const settle = vi.fn(async () => undefined);
     const claim = vi.fn()

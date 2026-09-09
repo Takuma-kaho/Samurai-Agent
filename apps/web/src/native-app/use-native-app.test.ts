@@ -13,7 +13,9 @@ import {
   appendNativeWorkDraft,
   nativeRoomWorkListRequestIsCurrent,
   nativeRoomWorkErrorIsExplicitServerFailure,
+  nativeRoomWorkAssignmentResultFromUnknown,
   nativeRoomWorkFromUnknown,
+  nativeRoomWorkResultResourceRefFromUnknown,
   nativeWorkspaceContentRefreshRequestIsCurrent,
   nativeWorkspaceRealtimeEventAction,
   shouldDiscardWorkspaceTargetAfterReauthorizationFailure,
@@ -598,6 +600,79 @@ describe("Room work bridge adapter", () => {
     expect(projected.resourceRefs).toEqual([{ kind: "knowledge", id: "knowledge_policy", uri: "knowledge/policy.md", version: "4", label: "公開方針" }]);
     expect(projected.instructions?.[0]?.attachments).toEqual([]);
     expect(projected.instructions?.[0]?.resourceRefs).toEqual([{ kind: "skill", id: "skill_review", uri: "skills/review.md", version: "2", label: "レビュー" }]);
+  });
+});
+
+describe("Room Work result resource refs", () => {
+  it("normalizes Artifact and Generated Surface refs with their revision and update state", () => {
+    const result = nativeRoomWorkAssignmentResultFromUnknown({
+      resource_refs: [
+        {
+          kind: "artifact",
+          id: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z",
+          label: "調査レポート"
+        },
+        {
+          kind: "artifact_revision",
+          id: "artifact_revision_2",
+          parent_id: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z"
+        }
+      ],
+      summary: "Artifact 調査レポートの版を保存しました。",
+      output: { revision_id: "artifact_revision_2" }
+    });
+
+    expect(result).toMatchObject({
+      state: "updated",
+      summary: "Artifact 調査レポートの版を保存しました。",
+      resourceRefs: [
+        {
+          kind: "artifact",
+          id: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z",
+          label: "調査レポート"
+        },
+        {
+          kind: "artifact_revision",
+          id: "artifact_revision_2",
+          parentId: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z"
+        }
+      ]
+    });
+  });
+
+  it("rejects an external result URI and ignores a non-openable result kind", () => {
+    expect(() => nativeRoomWorkResultResourceRefFromUnknown({ kind: "artifact", id: "artifact_report", uri: "https://example.com/report" }))
+      .toThrow("room_work_result_resource_ref_invalid");
+    expect(nativeRoomWorkResultResourceRefFromUnknown({ kind: "room_work_assignee", id: "assignment_child", uri: "samurai://room-work-assignees/assignment_child" }))
+      .toBeUndefined();
+  });
+
+  it("keeps a legacy work result summary without inventing result cards", () => {
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_legacy_result",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "旧結果",
+      objective: "旧形式の結果",
+      status: "completed",
+      instruction_version: 1,
+      generation: 0,
+      version: 1,
+      assignees: [],
+      result_summary: "旧形式の結果概要"
+    });
+
+    expect(projected.resultSummary).toBe("旧形式の結果概要");
+    expect(projected.assignees).toEqual([]);
   });
 });
 
