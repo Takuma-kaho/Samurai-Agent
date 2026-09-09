@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ResourceRef } from "@samurai-agent/core-schemas";
 import { canonicalJson, isTrustedWorkspaceCaller, isTrustedWorkspaceCallerForAccount } from "./auth";
 import { assertOpaqueId } from "./config";
 import { WorkspaceServerError } from "./errors";
@@ -201,6 +202,21 @@ export interface ApplyWorkspaceCompletionAttestationInput {
 export interface WorkspaceCompletionReadResource {
   resource: WorkspaceCompletionResource;
   version: WorkspaceCompletionResourceVersion;
+}
+
+/**
+ * Server-side input for attaching a Completion resource to Room Work.  The
+ * optional uri/label fields may be carried by an existing client reference,
+ * but are deliberately ignored; only the DB-backed version metadata is
+ * allowed to become a ResourceRef.
+ */
+export interface WorkspaceCompletionResourceRefInput {
+  targetRoomId: string;
+  resourceId: string;
+  kind: ResourceRef["kind"];
+  version: ResourceRef["version"] | number;
+  uri?: string;
+  label?: string;
 }
 
 /** The file editor is intentionally an opt-in Self-host workflow.  The
@@ -729,6 +745,67 @@ export class WorkspaceCompletionService {
   async getResource(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, resourceId: string): Promise<WorkspaceCompletionReadResource> {
     assertCompletionId(resourceId, "workspace_completion_resource_id_invalid");
     return this.store.database.withContext(context, async (sql) => this.selectReadableResource(sql, context.workspaceId, resourceId, true));
+  }
+
+  /**
+   * Resolve one immutable Completion version into a server-owned ResourceRef
+   * for an explicitly selected Room.  This is intentionally narrower than
+   * listResources: Room Work must not turn a broad authorized listing into a
+   * client-selected attachment, and client uri/label values are never used.
+   */
+  async getResourceRefForRoom(
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+    input: WorkspaceCompletionResourceRefInput
+  ): Promise<ResourceRef> {
+    if (input.kind !== "knowledge" && input.kind !== "skill") {
+      throw new WorkspaceServerError("workspace_completion_resource_ref_kind_invalid", 400);
+    }
+    assertOpaqueId(input.targetRoomId, "room_id_invalid");
+    assertCompletionId(input.resourceId, "workspace_completion_resource_id_invalid");
+    const requestedVersion = completionResourceRefVersion(input.version);
+    return this.store.database.withContext(context, async (sql) => {
+      const permission = await sql.query<{ allowed: boolean }>(
+        "SELECT samurai_can_room($1, $2, 'read') AS allowed",
+        [context.workspaceId, input.targetRoomId]
+      );
+      if (permission.rows[0]?.allowed !== true) {
+        throw new WorkspaceServerError("room_read_permission_denied", 403);
+      }
+
+      const selected = await sql.query<ResourceRow>(
+        `SELECT resource.*
+         FROM workspace_completion_resources resource
+         WHERE resource.workspace_id = $1
+           AND resource.id = $2
+           AND resource.resource_kind = $3
+           AND resource.lifecycle_state <> 'archived'
+           AND (resource.scope_kind = 'workspace' OR resource.room_id = $4)`,
+        [context.workspaceId, input.resourceId, input.kind, input.targetRoomId]
+      );
+      if (!selected.rows[0]) throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
+      const resource = resourceFromRow(selected.rows[0]);
+      if (resource.workspaceId !== context.workspaceId
+        || resource.kind !== input.kind
+        || resource.lifecycleState === "archived"
+        || (resource.scope.kind === "room" && resource.scope.roomId !== input.targetRoomId)) {
+        throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
+      }
+
+      const version = await this.selectVersion(sql, context.workspaceId, resource.id, requestedVersion, true);
+      if (version.workspaceId !== context.workspaceId
+        || version.resourceId !== resource.id
+        || version.version !== requestedVersion
+        || version.lifecycleState === "archived") {
+        throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
+      }
+      return {
+        kind: resource.kind,
+        id: resource.id,
+        uri: version.filePath,
+        version: String(version.version),
+        label: resource.title
+      };
+    });
   }
 
   async getPolicy(
@@ -4753,6 +4830,16 @@ function containsSecretDeep(value: unknown): boolean {
 
 function assertExpectedVersion(value: number, allowZero = false): void {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) throw new WorkspaceServerError("workspace_completion_resource_version_invalid", 400);
+}
+
+function completionResourceRefVersion(value: string | number | undefined): number {
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^[1-9][0-9]*$/.test(value)
+      ? Number(value)
+      : Number.NaN;
+  assertExpectedVersion(parsed);
+  return parsed;
 }
 
 function assertCompletionId(value: string, code: string): void {

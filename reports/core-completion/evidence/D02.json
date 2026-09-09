@@ -3,11 +3,11 @@
   "test_id": "D02",
   "command": "pnpm core:test:generated-surface",
   "status": "passed",
-  "commit_sha": "a1c07f646a9486c0c1bed5672371531ab75bfac1",
+  "commit_sha": "d2e65a7e7df2adfaf3a25e896440cd3f8400a6ca",
   "worktree_clean": false,
-  "source_sha256": "3cc684b05e5ac8c2fff6c617cfd2664b9653954e3b8108dce2f770b78607eeb0",
+  "source_sha256": "cde43e05029394546b91e205d69bb2acc9bb6222d71ac1e6f1c45111668e5ba7",
   "source_graph_sha256": "8f971e3f2a9c315e360c47d445dd9fda13195b990e9770a52232e02b2908fef6",
-  "contract_versions_sha256": "19b8d5e9f2798b7dd2a06b7ecc3a665319ea725d994cf302188907b723e7121c",
+  "contract_versions_sha256": "d9c967c821aa68c3dc592dc59e5622ad6d72f17d7c2964e49c2ebeb59d6592af",
   "source_files": [
     "packages/action-catalog/src/index.ts",
     "packages/core-schemas/src/index.ts",
@@ -18,8 +18,8 @@
     "scripts/verify-generated-surface-validation.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-24T04:03:17.858Z",
-  "completed_at": "2026-08-24T04:03:19.381Z",
+  "started_at": "2026-09-09T03:16:09.633Z",
+  "completed_at": "2026-09-09T03:16:10.763Z",
   "assertions": [
     {
       "name": "Valid HTML/CSS/script/action bundle",

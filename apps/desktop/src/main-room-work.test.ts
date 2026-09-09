@@ -107,7 +107,9 @@ describe("Desktop Room work and Agent bridge", () => {
 
   it("preserves Core-sized ResourceRef paths in the Desktop response sanitizer", () => {
     const start = mainSource.indexOf("function sanitizeRoomWorkResources");
-    const end = mainSource.indexOf("function sanitizeAgentDmPayload", start);
+    // Extract precisely this function. Adjacent Room Work helpers are allowed
+    // to evolve independently and may contain TypeScript-only syntax.
+    const end = mainSource.indexOf("\nfunction ", start + 1);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const sanitizerSource = mainSource.slice(start, end);

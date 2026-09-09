@@ -22,6 +22,12 @@ export * from "./execution/run-control";
 export * from "./execution/run-recovery";
 export * from "./execution/turn-executor";
 export { buildGeneratedSurfaceRevision, safeGeneratedSurfaceAssetPath, type GeneratedSurfaceBundleInput } from "./presentation/generated-surface";
+export {
+  canonicalGeneratedSurfaceProviderCommandId,
+  normalizeGeneratedSurfaceProviderAction,
+  normalizeGeneratedSurfaceProviderAllowedCommands,
+  normalizeGeneratedSurfaceProviderToolArguments
+} from "./generated-surface-provider-normalization";
 export { BackendEventBridge, normalizeBackendOutputEvent, projectBackendEventForUi } from "./backend/event-bridge";
 export * from "./composition/create-agent-host";
 export * from "./composition/runtime-host";

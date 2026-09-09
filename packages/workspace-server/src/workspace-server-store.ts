@@ -77,6 +77,7 @@ const roleSet = new Set<WorkspaceMembershipRole>(["owner", "admin", "member", "g
 const workspaceHumanWorkStatusSet = new Set<WorkspaceHumanWorkStatus>(["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"]);
 const recordTypePattern = /^[a-z][a-z0-9_]{0,63}$/;
 const maxSearchTextLength = 500_000;
+type RoomWorkResourceRef = RoomWorkResourceRefInput & { kind: "knowledge" | "skill"; version: string };
 
 export interface WorkspaceServerStoreOptions {
   database: PostgresWorkspaceDatabase;
@@ -311,10 +312,26 @@ export interface OpenAgentDmInput {
   agentId: string;
 }
 
+/**
+ * A Room Work ResourceRef is intentionally narrower than the public generic
+ * ResourceRef.  URI and label are checked against the server-owned
+ * Completion row before persistence; callers cannot use them to select an
+ * arbitrary file or cross-Room resource.
+ */
+export interface RoomWorkResourceRefInput {
+  kind: "knowledge" | "skill";
+  id: string;
+  uri: string;
+  version?: string;
+  label?: string;
+}
+
 export interface CreateRoomWorkInput {
   roomId: string;
   instruction?: string;
   attachments?: WorkspaceFileResourceRef[];
+  /** Server-owned Knowledge/Skill references resolved again inside the Store transaction. */
+  resourceRefs?: RoomWorkResourceRefInput[];
   /** Optional explicit Agent. Omitted means the persisted Room default. */
   agentId?: string;
   title?: string;
@@ -353,6 +370,8 @@ export interface ReplyToRoomWorkInput {
   assigneeId?: string;
   instruction?: string;
   attachments?: WorkspaceFileResourceRef[];
+  /** Server-owned Knowledge/Skill references resolved again inside the Store transaction. */
+  resourceRefs?: RoomWorkResourceRefInput[];
   expectedVersion?: number;
   expectedGeneration?: number;
 }
@@ -1793,7 +1812,9 @@ export class WorkspaceServerStore {
   async createRoomWork(context: WorkspaceRequestContext, input: CreateRoomWorkInput): Promise<WorkspaceHumanWorkCreateResult> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
-    const instruction = input.instruction?.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
+    const resourceRefs = normalizeRoomWorkResourceRefs(input.resourceRefs);
+    const instruction = input.instruction?.trim()
+      || (resourceRefs.length > 0 ? "Review the referenced resources." : attachments.length > 0 ? "Review the attached resources." : "");
     if (!instruction) throw new WorkspaceServerError("room_work_instruction_required", 400);
     if (input.title !== undefined && (!input.title.trim() || input.title.trim().length > 200)) {
       throw new WorkspaceServerError("room_work_title_invalid", 400);
@@ -1818,6 +1839,7 @@ export class WorkspaceServerStore {
       roomId: input.roomId,
       instruction: input.instruction ?? null,
       attachments,
+      ...(input.resourceRefs === undefined ? {} : { resourceRefs }),
       agentId: input.agentId ?? null,
       title: input.title ?? null,
       objective: input.objective ?? null,
@@ -1826,6 +1848,7 @@ export class WorkspaceServerStore {
     };
     const result = await this.runIdempotentResult(context, { action: "room.work.create", input: requestInput }, async (sql) => {
       await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      const canonicalResourceRefs = await resolveRoomWorkResourceRefs(sql, context, input.roomId, resourceRefs);
       const persistedRoom = await this.lockRoomDefaultAgent(sql, context.workspaceId, input.roomId);
       const agent = (await sql.query<{ version: number | string; status: WorkspaceAgent["status"]; enabled: boolean }>(
         `SELECT version, status, enabled FROM workspace_agents
@@ -1842,7 +1865,7 @@ export class WorkspaceServerStore {
       }
       try {
         await sql.query(
-          "SELECT samurai_create_human_work($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::JSONB, $13, $14::JSONB, $15, $16)",
+          "SELECT samurai_create_human_work($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::JSONB, $13, $14::JSONB, $15::JSONB, $16, $17)",
           [
             context.workspaceId,
             workId,
@@ -1858,6 +1881,7 @@ export class WorkspaceServerStore {
             canonicalJson(completionCriteria),
             instruction,
             canonicalJson(attachments),
+            canonicalJson(canonicalResourceRefs),
             scheduledAt.toISOString(),
             context.operationId
           ]
@@ -2095,7 +2119,7 @@ export class WorkspaceServerStore {
       const rows = await sql.query<HumanWorkRow>(
         `SELECT workspace_id, id, room_id, requester_account_id, default_agent_id,
                 default_agent_version, title, objective, completion_criteria, status,
-                stop_state, instruction_version, control_generation, operation_id,
+                resource_refs, stop_state, instruction_version, control_generation, operation_id,
                 created_at, updated_at
          FROM workspace_human_works
          WHERE workspace_id = $1 AND room_id = $2
@@ -2130,7 +2154,9 @@ export class WorkspaceServerStore {
     assertOpaqueId(input.workId, "room_work_id_invalid");
     if (input.assigneeId) assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
     const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
-    const body = input.instruction?.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
+    const resourceRefs = normalizeRoomWorkResourceRefs(input.resourceRefs);
+    const body = input.instruction?.trim()
+      || (resourceRefs.length > 0 ? "Review the referenced resources." : attachments.length > 0 ? "Review the attached resources." : "");
     if (!body) throw new WorkspaceServerError("room_work_instruction_required", 400);
     const instructionId = operationScopedId("room_work_instruction", `${context.workspaceId}:${input.workId}`, context.operationId);
     const requestInput = {
@@ -2139,26 +2165,28 @@ export class WorkspaceServerStore {
       assigneeId: input.assigneeId ?? null,
       instruction: input.instruction ?? null,
       attachments,
+      ...(input.resourceRefs === undefined ? {} : { resourceRefs }),
       expectedVersion: input.expectedVersion ?? null,
       expectedGeneration: input.expectedGeneration ?? null
     };
     const result = await this.runIdempotentResult(context, { action: "room.work.reply", input: requestInput }, async (sql) => {
       const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
       await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
+      const canonicalResourceRefs = await resolveRoomWorkResourceRefs(sql, context, input.roomId, resourceRefs);
       const expectedVersion = input.expectedVersion ?? work.instructionVersion;
       const expectedGeneration = input.expectedGeneration ?? work.controlGeneration;
       assertExpectedVersion(expectedVersion, "room_work_instruction_version_invalid", 1);
       assertExpectedVersion(expectedGeneration, "room_work_generation_invalid", 0);
       try {
         await sql.query(
-          "SELECT samurai_append_human_work_instruction($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11, $12)",
-          [context.workspaceId, instructionId, input.workId, input.assigneeId ?? null, body, expectedVersion, "reply", null, null, canonicalJson(attachments), expectedGeneration, context.operationId]
+          "SELECT samurai_append_human_work_instruction($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11::JSONB, $12, $13)",
+          [context.workspaceId, instructionId, input.workId, input.assigneeId ?? null, body, expectedVersion, "reply", null, null, canonicalJson(attachments), canonicalJson(canonicalResourceRefs), expectedGeneration, context.operationId]
         );
       } catch (error) {
         throw mapRoomWorkPostgresError(error, "room_work_reply_failed");
       }
       const row = (await sql.query<HumanWorkInstructionRow>(
-        `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs,
+        `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs, resource_refs,
                 source_kind, source_comment_id, source_comment_version, state, created_by, created_at
          FROM workspace_human_work_instructions WHERE workspace_id = $1 AND id = $2`,
         [context.workspaceId, instructionId]
@@ -2908,6 +2936,8 @@ export class WorkspaceServerStore {
                 CASE WHEN parent_session.id IS NOT NULL THEN parent_run.metadata -> 'runtime_binding' ELSE NULL::JSONB END AS parent_runtime_binding,
                 parent_session.id AS session_id,
                 instruction.body AS instruction,
+                work.resource_refs AS work_resource_refs,
+                instruction.resource_refs AS resource_refs,
                 samurai_project_human_work_attachment_refs(
                   reservation.workspace_id, reservation.room_id, instruction.attachment_refs
                 ) AS attachments,
@@ -3004,6 +3034,45 @@ export class WorkspaceServerStore {
       }
       const attachments = normalizeRoomWorkAttachmentRefs(claimed.attachments);
       await assertRoomWorkAttachmentRefs(sql, context, claimed.room_id, attachments);
+      let resourceRefs: RoomWorkResourceRef[];
+      try {
+        resourceRefs = await resolveRoomWorkResourceRefs(
+          sql,
+          context,
+          claimed.room_id,
+          normalizeRoomWorkResourceRefs(claimed.resource_refs)
+        );
+        if (claimed.work_resource_refs !== undefined && claimed.work_resource_refs !== null) {
+          await resolveRoomWorkResourceRefs(
+            sql,
+            context,
+            claimed.room_id,
+            normalizeRoomWorkResourceRefs(claimed.work_resource_refs)
+          );
+        }
+      } catch (error) {
+        const reason = error instanceof WorkspaceServerError
+          && (error.code === "room_work_resource_reference_scope_invalid"
+            || error.code === "room_work_resource_reference_not_found")
+          ? error.code
+          : "room_work_resource_reference_invalid";
+        const preflight = await sql.query<{ failed: boolean }>(
+          "SELECT samurai_fail_human_work_launch_preflight($1, $2, $3, $4, $5, $6, $7) AS failed",
+          [
+            context.workspaceId,
+            claimed.work_id,
+            claimed.assignment_id,
+            claimed.reservation_id,
+            input.workerId,
+            Number(claimed.generation),
+            reason
+          ]
+        );
+        if (preflight.rows[0]?.failed !== true) {
+          throw new WorkspaceServerError("room_work_launch_preflight_failed", 409);
+        }
+        return undefined;
+      }
       // The reservation is the claimed execution token.  Returning the Work
       // generation here would let a stale reservation masquerade as a fresh
       // launch after an individual stop/reassign advanced the Work.
@@ -3037,6 +3106,7 @@ export class WorkspaceServerStore {
         } : {}),
         instruction: claimed.instruction,
         attachments,
+        resourceRefs,
         generation,
         reservationGeneration: generation,
         reservation_generation: generation,
@@ -4788,18 +4858,6 @@ export class WorkspaceServerStore {
     return value;
   }
 
-  private async getOrganizationMember(context: OrganizationRequestContext, organizationId: string, accountId: string): Promise<OrganizationMembership> {
-    assertOpaqueId(accountId, "account_id_invalid");
-    return this.database.withContext({ accountId: context.accountId }, async (sql) => {
-      const row = (await sql.query<OrganizationMembershipRow>(
-        `SELECT organization_id, account_id, role, state, version, joined_at, removed_at, created_by, updated_by
-           FROM organization_members WHERE organization_id = $1 AND account_id = $2`, [organizationId, accountId]
-      )).rows[0];
-      if (!row) throw new WorkspaceServerError("organization_member_not_found", 404);
-      return organizationMembershipFromRow(row);
-    });
-  }
-
   private async setOrganizationMember(
     context: OrganizationRequestContext,
     input: { organizationId?: string; organization_id?: string; accountId?: string; target_account_id?: string; role?: OrganizationRole; expectedVersion?: number; expected_version?: number },
@@ -4947,7 +5005,7 @@ export class WorkspaceServerStore {
     const row = knownRow ?? (await sql.query<HumanWorkRow>(
       `SELECT workspace_id, id, room_id, requester_account_id, default_agent_id,
               default_agent_version, title, objective, completion_criteria, status,
-              stop_state, instruction_version, control_generation, operation_id,
+              resource_refs, stop_state, instruction_version, control_generation, operation_id,
               created_at, updated_at
        FROM workspace_human_works WHERE workspace_id = $1 AND id = $2`,
       [workspaceId, workId]
@@ -4961,7 +5019,7 @@ export class WorkspaceServerStore {
        WHERE workspace_id = $1 AND work_id = $2 ORDER BY created_at, id`,
       [workspaceId, workId]
     );
-    const work: WorkspaceHumanWork = {
+    const work = {
       workspaceId: row.workspace_id,
       id: row.id,
       roomId: row.room_id,
@@ -4971,6 +5029,7 @@ export class WorkspaceServerStore {
       title: row.title,
       objective: row.objective,
       completionCriteria: jsonArray(row.completion_criteria),
+      resourceRefs: normalizeRoomWorkResourceRefsForRead(row.resource_refs),
       status: row.status,
       stopState: row.stop_state,
       instructionVersion: Number(row.instruction_version),
@@ -4979,7 +5038,7 @@ export class WorkspaceServerStore {
       assignments: assignmentRows.rows.map((assignment) => humanWorkAssignmentFromRow(assignment, Number(row.control_generation))),
       createdAt: iso(row.created_at),
       updatedAt: iso(row.updated_at)
-    };
+    } as WorkspaceHumanWork & { resourceRefs: RoomWorkResourceRef[] };
     if (!includeDetails) return work;
     // Keep all detail reads on the same transaction-bound PostgreSQL client
     // strictly sequential. `pg` does not support overlapping queries on one
@@ -4988,6 +5047,7 @@ export class WorkspaceServerStore {
     const instructionRows = await sql.query<HumanWorkInstructionRow>(
       `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body,
               samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+              resource_refs,
               source_kind, source_comment_id, source_comment_version,
               state, created_by, created_at
        FROM workspace_human_work_instructions WHERE workspace_id = $1 AND work_id = $2 ORDER BY version`,
@@ -5304,6 +5364,7 @@ interface HumanWorkRow {
   title: string;
   objective: string;
   completion_criteria: unknown;
+  resource_refs?: unknown;
   status: WorkspaceHumanWorkStatus;
   stop_state: WorkspaceHumanWorkStopState;
   instruction_version: number | string;
@@ -5345,6 +5406,7 @@ interface HumanWorkInstructionRow {
   version: number | string;
   body: string;
   attachment_refs: unknown;
+  resource_refs?: unknown;
   source_kind: WorkspaceHumanWorkInstructionSource;
   source_comment_id: string | null;
   source_comment_version: number | string | null;
@@ -5450,6 +5512,8 @@ interface HumanWorkExecutionRow {
   parent_runtime_binding: unknown;
   session_id: string | null;
   instruction: string | null;
+  resource_refs?: unknown;
+  work_resource_refs?: unknown;
   attachments: unknown;
   attachments_have_unresolved: boolean;
 }
@@ -5763,20 +5827,6 @@ function organizationWorkspaceFromRow(row: OrganizationWorkspaceRow): Organizati
   };
 }
 
-function organizationWorkspaceFromSummary(row: WorkspaceSummary, organizationId: string): OrganizationWorkspaceSummary {
-  return {
-    organizationId,
-    workspaceId: row.id,
-    name: row.name,
-    state: row.state,
-    hasAccess: true,
-    workspaceRole: row.role,
-    version: row.version,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt
-  };
-}
-
 function mapOrganizationPostgresError(error: unknown, _fallback: string): unknown {
   const message = postgresMessage(error);
   const known: Array<[string, string, number]> = [
@@ -5928,13 +5978,14 @@ function humanWorkInstructionFromRow(row: HumanWorkInstructionRow): WorkspaceHum
     version: Number(row.version),
     body: row.body,
     attachments: normalizeRoomWorkAttachmentRefsForRead(row.attachment_refs),
+    resourceRefs: normalizeRoomWorkResourceRefsForRead(row.resource_refs),
     sourceKind: row.source_kind,
     ...(row.source_comment_id ? { sourceCommentId: row.source_comment_id } : {}),
     ...(row.source_comment_version === null || row.source_comment_version === undefined ? {} : { sourceCommentVersion: Number(row.source_comment_version) }),
     state: row.state,
     createdBy: row.created_by,
     createdAt: iso(row.created_at)
-  };
+  } as WorkspaceHumanWorkInstruction;
 }
 
 function humanWorkCommentFromRow(row: HumanWorkCommentRow, reactionCount: number, appliedInstructionIds: string[]): WorkspaceHumanWorkComment {
@@ -6453,21 +6504,129 @@ async function assertRoomWorkAttachmentRefs(
   }
 }
 
-function normalizeResourceRefs(value: unknown): ResourceRef[] {
-  return jsonArray(value).flatMap((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
-    const candidate = entry as Record<string, unknown>;
-    if (typeof candidate.kind !== "string" || !candidate.kind.trim()
-      || typeof candidate.id !== "string" || !candidate.id.trim()
-      || typeof candidate.uri !== "string" || !candidate.uri.trim()) return [];
-    return [{
-      kind: candidate.kind,
-      id: candidate.id,
-      uri: candidate.uri,
-      ...(typeof candidate.version === "string" ? { version: candidate.version } : {}),
-      ...(typeof candidate.label === "string" ? { label: candidate.label } : {})
-    }];
+interface RoomWorkResourceRow {
+  workspace_id: string;
+  id: string;
+  scope_kind: "workspace" | "room" | string;
+  room_id: string | null;
+  resource_kind: "knowledge" | "skill" | string;
+  title: string;
+  lifecycle_state: string;
+  version: number | string;
+  file_path: string;
+  version_lifecycle_state: string;
+}
+
+/**
+ * Parse Room Work refs fail-closed.  The generic ResourceRef parser is used
+ * elsewhere for public events and intentionally accepts more kinds; Room
+ * Work accepts only server-owned Knowledge/Skill refs and only the documented
+ * five keys.
+ */
+function normalizeRoomWorkResourceRefs(value: unknown): RoomWorkResourceRefInput[] {
+  const candidate = value === undefined || value === null
+    ? []
+    : typeof value === "string"
+      ? (() => {
+          try { return JSON.parse(value) as unknown; } catch { return value; }
+        })()
+      : value;
+  const parsed = ResourceRefSchema.array().max(32).safeParse(candidate);
+  if (!parsed.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 400);
+  return parsed.data.map((entry) => {
+    if ((entry.kind !== "knowledge" && entry.kind !== "skill")
+      || !isRoomWorkResourceText(entry.id, 512)
+      || !/^[a-z][a-z0-9_:-]{0,127}$/.test(entry.id)
+      || !isRoomWorkResourceText(entry.uri, 4_096)
+      || (entry.version !== undefined && !/^[1-9][0-9]*$/.test(entry.version))
+      || (entry.label !== undefined && !isRoomWorkResourceText(entry.label, 4_096))) {
+      throw new WorkspaceServerError("room_work_resource_reference_invalid", 400);
+    }
+    return {
+      kind: entry.kind,
+      id: entry.id,
+      uri: entry.uri,
+      ...(entry.version === undefined ? {} : { version: entry.version }),
+      ...(entry.label === undefined ? {} : { label: entry.label })
+    };
   });
+}
+
+function normalizeRoomWorkResourceRefsForRead(value: unknown): RoomWorkResourceRef[] {
+  const refs = normalizeRoomWorkResourceRefs(value);
+  return refs.map((ref) => {
+    if (!ref.version) {
+      throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    }
+    return ref as RoomWorkResourceRef;
+  });
+}
+
+function isRoomWorkResourceText(value: unknown, maxLength: number): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= maxLength
+    && !value.includes("\u0000");
+}
+
+/**
+ * Resolve refs against the current Workspace/Room and return canonical URI,
+ * version, and label values from PostgreSQL.  The caller-provided URI/label
+ * can therefore never become the runtime resource selector.
+ */
+async function resolveRoomWorkResourceRefs(
+  sql: WorkspaceSql,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  roomId: string,
+  refs: readonly RoomWorkResourceRefInput[]
+): Promise<RoomWorkResourceRef[]> {
+  const parsedRefs = normalizeRoomWorkResourceRefs(refs);
+  if (parsedRefs.length === 0) return [];
+  const permission = await sql.query<{ allowed: boolean }>(
+    "SELECT samurai_can_room($1, $2, 'read') AS allowed",
+    [context.workspaceId, roomId]
+  );
+  if (permission.rows[0]?.allowed !== true) {
+    throw new WorkspaceServerError("room_read_permission_denied", 403);
+  }
+  const resolved: RoomWorkResourceRef[] = [];
+  for (const ref of parsedRefs) {
+    const row = (await sql.query<RoomWorkResourceRow>(
+      `SELECT resource.workspace_id, resource.id, resource.scope_kind, resource.room_id,
+              resource.resource_kind, resource.title, resource.lifecycle_state,
+              resource_version.version, resource_version.file_path,
+              resource_version.lifecycle_state AS version_lifecycle_state
+       FROM workspace_completion_resources AS resource
+       JOIN workspace_completion_resource_versions AS resource_version
+         ON resource_version.workspace_id = resource.workspace_id
+        AND resource_version.resource_id = resource.id
+        AND resource_version.version = COALESCE($4::BIGINT, COALESCE(resource.current_confirmed_version, resource.current_provisional_version))
+       WHERE resource.workspace_id = $1
+         AND resource.id = $2
+         AND resource.resource_kind = $3
+         AND resource.lifecycle_state <> 'archived'
+         AND resource_version.lifecycle_state <> 'archived'`,
+      [context.workspaceId, ref.id, ref.kind, ref.version ?? null]
+    )).rows[0];
+    if (!row) throw new WorkspaceServerError("room_work_resource_reference_not_found", 404);
+    if (row.scope_kind !== "workspace"
+      && (row.scope_kind !== "room" || row.room_id !== roomId)) {
+      throw new WorkspaceServerError("room_work_resource_reference_scope_invalid", 409);
+    }
+    const version = String(row.version);
+    if ((ref.version !== undefined && ref.version !== version)
+      || ref.uri !== row.file_path
+      || (ref.label !== undefined && ref.label !== row.title)) {
+      throw new WorkspaceServerError("room_work_resource_reference_invalid", 400);
+    }
+    if (row.resource_kind !== ref.kind || row.workspace_id !== context.workspaceId
+      || !isRoomWorkResourceText(row.file_path, 4_096)
+      || !isRoomWorkResourceText(row.title, 4_096)) {
+      throw new WorkspaceServerError("room_work_resource_reference_invalid", 400);
+    }
+    resolved.push({ kind: ref.kind, id: row.id, uri: row.file_path, version, label: row.title });
+  }
+  return resolved;
 }
 
 function parseDateInput(value: string | undefined, code: string): Date | undefined {
@@ -6620,6 +6779,10 @@ function mapRoomWorkPostgresError(error: unknown, fallback: string): WorkspaceSe
     ["human_work_attachment_hash_mismatch", "room_work_attachment_hash_mismatch", 409],
     ["human_work_attachment_version_conflict", "room_work_attachment_version_conflict", 409],
     ["room_work_attachment_reference_unavailable", "room_work_attachment_reference_unavailable", 409],
+    ["human_work_resource_reference_invalid", "room_work_resource_reference_invalid", 400],
+    ["room_work_resource_reference_invalid", "room_work_resource_reference_invalid", 400],
+    ["room_work_resource_reference_scope_invalid", "room_work_resource_reference_scope_invalid", 409],
+    ["room_work_resource_reference_not_found", "room_work_resource_reference_not_found", 404],
     ["human_work_reassign_parent_continuation_forbidden", "room_work_reassign_parent_continuation_forbidden", 409],
     ["human_work_reaction_version_conflict", "room_work_reaction_version_conflict", 409],
     ["human_work_control_generation_conflict", "room_work_control_generation_conflict", 409],

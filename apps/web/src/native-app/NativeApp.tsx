@@ -3,14 +3,20 @@ import OrganizationSwitcher from "../components/OrganizationSwitcher";
 import WorkspaceNavigator from "../components/WorkspaceNavigator";
 import RoomNavigator from "../components/RoomNavigator";
 import ChatSurface from "../components/ChatSurface";
-import RoomWorkSurface from "./RoomWorkSurface";
+import RoomWorkSurface, { roomWorkCanReceiveReply, roomWorkControlAllowed } from "./RoomWorkSurface";
+import { NativeInteractionRequests } from "./NativeInteractionRequests";
+import NativeKnowledgeTools from "./NativeKnowledgeTools";
+import NativeRoomAdministration from "./NativeRoomAdministration";
+import NativeArtifactWorkspace from "./NativeArtifactWorkspace";
+import NativeCollectionPanel from "./NativeCollectionPanel";
+import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 import OrganizationManagement from "../components/OrganizationManagement";
 import EvidenceInspector from "../components/EvidenceInspector";
 import ConnectionRequired from "../components/ConnectionRequired";
 import WorkspaceConnectionSettings from "../components/WorkspaceConnectionSettings";
 import { createIdempotencyKey } from "../lib/api";
 import { nativeRoomAgentIsAvailable, nativeRoomCreateErrorIsExplicitServerFailure, useNativeApp } from "./use-native-app";
-import type { NativeAgent, NativeAgentBackend, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeWorkspaceTarget } from "./types";
+import type { NativeAgent, NativeAgentBackend, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspaceTarget } from "./types";
 
 export interface NativeCreateDialogValue {
   name: string;
@@ -21,6 +27,88 @@ export interface NativeCreateDialogValue {
   defaultAgentVersion?: number;
   newAgent?: NativeRoomNewAgentInput;
   agentPermission?: NativeRoomAgentPermission;
+}
+
+export type NativeRoomTool = "knowledge" | "administration" | "artifacts" | "collections" | "interactions";
+export type NativeRoomToolTarget = NativeWorkspaceTarget & { roomId: string };
+
+/** A Room tool is visible only when its Room belongs to the selected Workspace target. */
+export function nativeRoomToolTarget(
+  target: NativeWorkspaceTarget | undefined,
+  room: Pick<NativeRoom, "id" | "workspaceId"> | undefined
+): NativeRoomToolTarget | undefined {
+  if (!target || !room || room.workspaceId !== target.workspaceId) return undefined;
+  return { ...target, roomId: room.id };
+}
+
+export function NativeRoomToolLinks({ target, onOpen }: {
+  target?: NativeRoomToolTarget;
+  onOpen: (tool: NativeRoomTool) => void;
+}) {
+  if (!target) return null;
+  return <div className="native-room-tool-links" aria-label="現在のRoomの補助操作">
+    <button type="button" className="native-text-button" onClick={() => onOpen("knowledge")}>知識・検索・設定</button>
+    <button type="button" className="native-text-button" onClick={() => onOpen("administration")}>Room管理</button>
+    <button type="button" className="native-text-button" onClick={() => onOpen("artifacts")}>成果物・操作画面</button>
+    <button type="button" className="native-text-button" onClick={() => onOpen("collections")}>Collection</button>
+    <button type="button" className="native-text-button" onClick={() => onOpen("interactions")}>確認待ち</button>
+  </div>;
+}
+
+/**
+ * Keeps an Artifact revision request on the existing Room Work path. The
+ * renderer supplies only the selected Artifact/revision/location; the person
+ * still reviews and sends the resulting Work instruction themselves.
+ */
+export function artifactRevisionRequestDraft(target: ArtifactRevisionTarget): string {
+  const location = target.location
+    ? target.location.kind === "text"
+      ? `選択箇所（${target.location.start}-${target.location.end}）: ${target.location.text}`
+      : `表のセル: 行 ${target.location.rowId} / 列 ${target.location.columnId} / 現在値 ${String(target.location.value)}`
+    : "指定箇所: 成果物全体";
+  return [
+    "[成果物の修正依頼]",
+    `成果物: ${target.artifact.title || target.artifact.id} (${target.artifact.id})`,
+    `対象版: ${target.revisionId ?? "最新版"}`,
+    ...(target.sourceWorkId ? [`元の仕事: ${target.sourceWorkId}`] : []),
+    location,
+    "依頼内容:",
+    target.request.trim()
+  ].join("\n");
+}
+
+/** A Room Work draft belongs to one selected Server, Workspace, Room, and Work. */
+export function nativeRoomWorkResourceDraftKey(
+  target: NativeWorkspaceTarget | undefined,
+  roomId: string | undefined,
+  workId: string | undefined
+): string | undefined {
+  if (!target || !roomId) return undefined;
+  return `${target.connectionId}\n${target.workspaceId}\n${roomId}\n${workId ?? "new"}`;
+}
+
+/** Keep one immutable Knowledge/Skill version per draft without trusting its label. */
+export function appendNativeRoomWorkResourceRef(
+  current: readonly NativeRoomWorkResourceRefInput[],
+  next: NativeRoomWorkResourceRefInput
+): NativeRoomWorkResourceRefInput[] {
+  if ((next.kind !== "knowledge" && next.kind !== "skill")
+    || !/^[a-z][a-z0-9_:-]{0,127}$/.test(next.id)
+    || !Number.isSafeInteger(next.version)
+    || next.version < 1) {
+    return [...current];
+  }
+  const key = `${next.kind}\n${next.id}\n${next.version}`;
+  if (current.some((ref) => `${ref.kind}\n${ref.id}\n${ref.version}` === key)) return [...current];
+  return [
+    ...current,
+    {
+      kind: next.kind,
+      id: next.id,
+      version: next.version,
+      ...(next.label?.trim() ? { label: next.label.trim().slice(0, 4_096) } : {})
+    }
+  ];
 }
 
 export function CreateDialog({
@@ -556,6 +644,15 @@ export function NativeApp() {
   const [managementScope, setManagementScope] = useState<"organization" | "workspace">("organization");
   const [connectionSettingsOpen, setConnectionSettingsOpen] = useState(false);
   const [agentDirectoryOpen, setAgentDirectoryOpen] = useState(false);
+  const [roomToolOpen, setRoomToolOpen] = useState<NativeRoomTool>();
+  const [workResourceDrafts, setWorkResourceDrafts] = useState<Record<string, NativeRoomWorkResourceRefInput[]>>({});
+
+  // A Room-scoped panel must never quietly carry its target into a newly
+  // selected Room. Drafts live in the Room Work model, so closing this panel
+  // does not discard an in-progress instruction or comment.
+  useEffect(() => {
+    setRoomToolOpen(undefined);
+  }, [model.selectedRoomId, model.selectedWorkspaceTargetKey]);
 
   const startCreate = (kind: "organization" | "workspace" | "room") => {
     setCreateError(null);
@@ -667,6 +764,53 @@ export function NativeApp() {
     : model.workspaceTransferSupported
       ? undefined
       : "このDesktopは移転の事前確認・実行bridgeに対応していません。移転元を変更せず保持してください。";
+  const roomToolTarget = nativeRoomToolTarget(model.selectedWorkspaceTarget, model.selectedRoom);
+  const resourceDraftReplyWork = model.replyWorkId
+    ? model.works.find((work) => work.id === model.replyWorkId)
+    : undefined;
+  const resourceDraftWorkId = resourceDraftReplyWork
+    && roomWorkCanReceiveReply(resourceDraftReplyWork)
+    && roomWorkControlAllowed(model.selectedRoom, resourceDraftReplyWork, model.connection?.accountId)
+    ? resourceDraftReplyWork.id
+    : undefined;
+  const workResourceDraftKey = nativeRoomWorkResourceDraftKey(model.selectedWorkspaceTarget, model.selectedRoom?.id, resourceDraftWorkId);
+  const workResourceRefs = workResourceDraftKey ? workResourceDrafts[workResourceDraftKey] ?? [] : [];
+  const addWorkResourceRef = (resource: {
+    resourceId: string;
+    kind: "knowledge" | "skill";
+    title: string;
+    version: number;
+    scopeKind: "workspace" | "room";
+    roomId?: string;
+  }): void => {
+    if (!workResourceDraftKey || !model.selectedRoom || !model.selectedWorkspaceTarget) return;
+    if (resource.scopeKind === "room" && resource.roomId !== model.selectedRoom.id) return;
+    setWorkResourceDrafts((current) => ({
+      ...current,
+      [workResourceDraftKey]: appendNativeRoomWorkResourceRef(current[workResourceDraftKey] ?? [], {
+        kind: resource.kind,
+        id: resource.resourceId,
+        version: resource.version,
+        label: resource.title
+      })
+    }));
+    setRoomToolOpen(undefined);
+  };
+  const removeWorkResourceRef = (resource: NativeRoomWorkResourceRefInput): void => {
+    if (!workResourceDraftKey) return;
+    const key = `${resource.kind}\n${resource.id}\n${resource.version}`;
+    setWorkResourceDrafts((current) => {
+      const nextRefs = (current[workResourceDraftKey] ?? []).filter((candidate) => `${candidate.kind}\n${candidate.id}\n${candidate.version}` !== key);
+      return { ...current, [workResourceDraftKey]: nextRefs };
+    });
+  };
+  const clearWorkResourceRefs = (): void => {
+    if (!workResourceDraftKey) return;
+    setWorkResourceDrafts((current) => {
+      if (!current[workResourceDraftKey]?.length) return current;
+      return { ...current, [workResourceDraftKey]: [] };
+    });
+  };
 
   const main = !model.connection
     ? model.connectionLoading
@@ -732,6 +876,58 @@ export function NativeApp() {
           onSetDefaultAgent={model.setRoomDefaultAgent}
           onOpenAgentDm={model.openAgentDm}
         />
+      : roomToolOpen === "knowledge" && roomToolTarget
+        ? <NativeKnowledgeTools
+          target={roomToolTarget}
+          workspaceName={model.selectedWorkspace?.name}
+          roomName={model.selectedRoom?.name}
+          onClose={() => setRoomToolOpen(undefined)}
+          onUseResource={addWorkResourceRef}
+          bridge={model.bridge}
+        />
+      : roomToolOpen === "interactions" && roomToolTarget
+        ? <NativeInteractionRequests
+          roomId={roomToolTarget.roomId}
+          target={roomToolTarget}
+          bridge={model.bridge}
+          onClose={() => setRoomToolOpen(undefined)}
+        />
+      : roomToolOpen === "administration" && model.selectedWorkspace && model.selectedRoom && model.selectedWorkspaceTarget
+        ? <NativeRoomAdministration
+          rooms={model.rooms}
+          target={model.selectedWorkspaceTarget}
+          workspaceVersion={model.selectedWorkspace.version}
+          currentRoom={model.selectedRoom}
+          workspaceRole={model.selectedWorkspace.role}
+          bridge={model.bridge}
+          onSelectRoom={model.openRoom}
+          onRefresh={model.refreshWorkspaceContent}
+          onClose={() => setRoomToolOpen(undefined)}
+        />
+      : roomToolOpen === "artifacts" && roomToolTarget
+        ? <NativeArtifactWorkspace
+          target={roomToolTarget}
+          canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
+          canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
+          bridge={model.bridge}
+          onClose={() => setRoomToolOpen(undefined)}
+          onRequestAgentRevision={(target) => {
+            const sourceWork = target.sourceWorkId ? model.works.find((work) => work.id === target.sourceWorkId) : undefined;
+            const replyWorkId = sourceWork && roomWorkCanReceiveReply(sourceWork) && roomWorkControlAllowed(model.selectedRoom, sourceWork, model.connection?.accountId)
+              ? sourceWork.id
+              : undefined;
+            model.appendWorkDraft(artifactRevisionRequestDraft(target), replyWorkId);
+            setRoomToolOpen(undefined);
+          }}
+        />
+      : roomToolOpen === "collections" && roomToolTarget
+        ? <NativeCollectionPanel
+          target={roomToolTarget}
+          bridge={model.bridge}
+          canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
+          canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
+          onClose={() => setRoomToolOpen(undefined)}
+        />
       : model.workspaceLoading && !model.selectedWorkspace
         ? <section className="native-main-empty" role="status"><span className="native-loading-orbit" aria-hidden="true" /><h1>Workspaceを確認しています</h1><p>接続済みServerのWorkspaceを確認しています…</p></section>
         : !model.selectedWorkspace
@@ -769,6 +965,9 @@ export function NativeApp() {
                 readOnly={model.selectedWorkspace?.state === "read_only"}
                 connectionState={model.transportState}
                 onSend={model.sendRoomWork}
+                workResourceRefs={workResourceRefs}
+                onRemoveWorkResourceRef={removeWorkResourceRef}
+                onClearWorkResourceRefs={clearWorkResourceRefs}
                 onCreateComment={model.createRoomWorkComment}
                 onApplyComment={model.applyRoomWorkComment}
                 onReactComment={model.likeRoomWorkComment}
@@ -804,6 +1003,7 @@ export function NativeApp() {
         <div className="native-brand"><span className="native-brand-mark" aria-hidden="true">S</span><div><strong>Samurai</strong><small>WORKSPACE</small></div></div>
         <WorkspaceNavigator workspaces={model.workspaces} selectedWorkspaceId={model.selectedWorkspaceId} selectedWorkspaceTargetKey={model.selectedWorkspaceTargetKey} organizationRole={model.selectedOrganization?.role} canCreate={Boolean(model.connection)} loading={model.workspaceLoading} disabled={!model.connection} error={model.workspaceError} directoryErrors={model.workspaceDirectoryErrors} onSelect={model.selectWorkspace} onCreate={() => startCreate("workspace")} onManage={openWorkspaceManagement} />
         <RoomNavigator rooms={model.rooms} selectedRoomId={model.selectedRoomId} loading={model.roomLoading} disabled={!model.connection || !model.selectedWorkspace} archived={model.selectedWorkspace?.state !== "active"} error={model.roomError} onSelect={model.openRoom} onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room") : undefined} />
+        <NativeRoomToolLinks target={roomToolTarget} onOpen={setRoomToolOpen} />
         {model.selectedWorkspace ? <button type="button" className="native-text-button" onClick={() => setAgentDirectoryOpen(true)} disabled={model.agentLoading}>Agent一覧・設定</button> : null}
         <OrganizationSwitcher organizations={model.organizations} selectedOrganizationId={model.selectedOrganizationId} loading={model.organizationLoading} disabled={!model.connection} error={model.organizationError} onSelect={model.selectOrganization} onCreate={() => startCreate("organization")} onManage={openManagement} />
         <footer className="native-sidebar-footer"><span className={`native-connection-pip is-${model.transportState}`} aria-hidden="true" /><span>{model.connection ? model.connection.label : "未接続"}</span>{model.connection ? <button type="button" className="native-text-button" onClick={() => void model.reconnect()}>再確認</button> : null}{!model.browserMode ? <button type="button" className="native-text-button" onClick={() => setConnectionSettingsOpen(true)}>接続設定</button> : null}</footer>

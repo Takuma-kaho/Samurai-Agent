@@ -14,6 +14,9 @@ import {
   PublicRoomDomainApiRequestSchema,
   PublicRoomWorkCommentCreateInputSchema,
   PublicRoomWorkCreateInputSchema,
+  PublicRoomWorkReplyInputSchema,
+  PublicRoomWorkResourceRefInputSchema,
+  PublicRoomWorkResourceRefSchema,
   PublicEventEnvelopeSchema,
   PublicWorkspaceDirectorySchema,
   PublicWorkspaceTransferManifestSchema,
@@ -27,6 +30,7 @@ import {
   parsePublicEventPayload,
   publicDomainOperationIds,
   publicOperationOutputSchemaFor,
+  publicOperationInputSchemaFor,
   runControlRequestSchemaFor
 } from "./index";
 
@@ -63,8 +67,23 @@ describe("public Domain API contract", () => {
       context: { room_id: "room_1" },
       input: { instruction: "Use the Room work contract." }
     }).success).toBe(true);
+    const resourceSelector = { kind: "knowledge", id: "resource_1", version: 2 } as const;
+    expect(PublicRoomWorkCreateInputSchema.safeParse({ resource_refs: [resourceSelector] }).success).toBe(true);
+    expect(PublicRoomWorkReplyInputSchema.safeParse({ work_id: "work_1", resource_refs: [resourceSelector] }).success).toBe(true);
+    expect(publicOperationInputSchemaFor("room.work.create", z.any()).safeParse({ resource_refs: [resourceSelector] }).success).toBe(true);
+    expect(PublicRoomWorkResourceRefInputSchema.safeParse({ ...resourceSelector, uri: "client://must-be-rejected" }).success).toBe(false);
+    expect(PublicRoomWorkResourceRefInputSchema.safeParse({ kind: "policy", id: "resource_1", version: 2 }).success).toBe(false);
+    expect(PublicRoomWorkResourceRefInputSchema.safeParse({ kind: "knowledge", id: "resource_1" }).success).toBe(false);
+    expect(PublicRoomWorkResourceRefSchema.safeParse({
+      kind: "skill",
+      id: "resource_2",
+      uri: "skills/resource_2/SKILL.md",
+      version: "3",
+      label: "A Skill"
+    }).success).toBe(true);
     expect(PublicRoomWorkCreateInputSchema.safeParse({ instruction: "Use the Room work contract.", session_id: "session_1" }).success).toBe(false);
     expect(PublicRoomWorkCommentCreateInputSchema.safeParse({ work_id: "work_1", body: "A comment", actor_id: "spoofed" }).success).toBe(false);
+    expect(PublicRoomWorkCommentCreateInputSchema.safeParse({ work_id: "work_1", resource_refs: [resourceSelector] }).success).toBe(false);
 
     expect(PublicRoomCreateInputSchema.safeParse({
       name: "Product",
@@ -254,6 +273,48 @@ describe("public Domain API contract", () => {
     }).success).toBe(false);
   });
 
+  it("publishes Artifact revision and Generated Surface public contracts", () => {
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
+      "artifact.list",
+      "artifact.view",
+      "artifact.create",
+      "artifact.revise",
+      "artifact.restore_revision",
+      "generated_surface.create",
+      "generated_surface.revise",
+      "generated_surface.action.run",
+      "generated_surface.state",
+      "generated_surface.export"
+    ]));
+    expect(eventCatalog.map((entry) => entry.event_type)).toEqual(expect.arrayContaining([
+      "workspace.artifact.changed",
+      "workspace.generated_surface.changed",
+      "workspace.interaction_request.changed"
+    ]));
+    expect(eventPayloadSchemaFor("workspace.artifact.changed").safeParse({
+      artifact_id: "artifact_1",
+      action: "revised",
+      revision_id: "revision_2"
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.generated_surface.changed").safeParse({
+      surface_id: "surface_1",
+      action: "state_changed"
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.interaction_request.changed").safeParse({
+      request_id: "request_1",
+      kind: "approval",
+      status: "pending",
+      action: "created"
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.interaction_request.changed").safeParse({
+      request_id: "request_1",
+      kind: "backend_input",
+      status: "accepted",
+      action: "responded",
+      values: { answer: "must not be public" }
+    }).success).toBe(false);
+  });
+
   it("publishes Organization events and keeps sensitive fields outside payloads", () => {
     const eventTypes = [
       "organization.created",
@@ -375,6 +436,36 @@ describe("public Domain API contract", () => {
       { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/attach", body: { expected_workspace_version: 3, confirm_guest_memberships: true }, operationId: "attach_1", idempotencyKey: "attach_1" },
       { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/detach", body: {}, operationId: "detach_1", idempotencyKey: "detach_1" },
       { method: "POST", path: "/api/v1/workspaces/workspace_1/domain/queries/agent.backend.list", body: { context: {}, input: {} } }
+    ]);
+  });
+
+  it("uses fixed Room-scoped Artifact and Generated Surface v1 routes", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    });
+
+    await client.listArtifactRevisions("workspace_1", "room_1", "artifact_1");
+    await client.getArtifactRevision("workspace_1", "room_1", "artifact_1", "revision_1");
+    await client.listGeneratedSurfaces("workspace_1", "room_1");
+    await client.getGeneratedSurface("workspace_1", "room_1", "surface_1");
+    await client.getGeneratedSurfaceBundle("workspace_1", "room_1", "surface_1", "surface_revision_1");
+    await client.runGeneratedSurfaceAction("workspace_1", "room_1", "surface_1", "refresh", {}, { operationId: "surface_action_1" });
+    await client.runGeneratedSurfaceState("workspace_1", "room_1", "surface_1", { action: "pin" }, { operationId: "surface_state_1" });
+    await client.exportGeneratedSurface("workspace_1", "room_1", "surface_1", { format: "html" });
+    await client.runArtifactSurfaceOperation("workspace_1", "room_1", { id: "surface_op_1", kind: "artifact.request", action: "create" }, { operationId: "artifact_surface_1" });
+
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /api/v1/workspaces/workspace_1/artifacts/artifact_1/revisions?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/artifacts/artifact_1/revisions/revision_1?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/revisions/surface_revision_1/bundle?room_id=room_1",
+      "POST /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/actions/refresh/run",
+      "POST /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/state",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/export?room_id=room_1&format=html",
+      "POST /api/v1/workspaces/workspace_1/artifacts/surface/operations"
     ]);
   });
 

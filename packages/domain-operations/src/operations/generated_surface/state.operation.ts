@@ -62,9 +62,6 @@ const generatedSurfaceState = defineCommand<GeneratedSurfaceStatePorts>()({
   createHandler(ports) {
     return {
       execute: async function handleGeneratedSurfaceState(context: TrustedDomainContext, input: GeneratedSurfaceStateInput): Promise<DomainResult<z.infer<typeof Output>>> {
-        if (!context.sessionId) {
-          throw ports.generatedSurfaceStateError("conflict", "generated_surface_display_state_compatibility_required");
-        }
         const state = input.action === "pin" ? "pinned" : input.action === "unpin" ? "ephemeral" : "archived";
         const surface = await ports.updateGeneratedSurfaceState(input.surface_id, state);
         if (!surface) throw ports.generatedSurfaceStateError("not_found", "generated_surface_not_found");

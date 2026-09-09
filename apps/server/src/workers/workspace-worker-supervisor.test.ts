@@ -19,6 +19,13 @@ function makeExecutionJobWorker() {
   };
 }
 
+function makeInteractionRequestMaintenanceWorker() {
+  return {
+    runTick: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined)
+  };
+}
+
 function makeRoomWorkWorker() {
   return {
     runTick: vi.fn(async () => undefined),
@@ -126,6 +133,46 @@ describe("WorkspaceWorkerSupervisor", () => {
     expect(order).toEqual(["execution", "maintenance"]);
 
     await supervisor.stop();
+    vi.useRealTimers();
+  });
+
+  it("reconciles durable interaction requests before normal Room work can start", async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner();
+    const maintenance = makeMaintenance();
+    const interactionRequestMaintenanceWorker = makeInteractionRequestMaintenanceWorker();
+    const roomWorkWorker = makeRoomWorkWorker();
+    const order: string[] = [];
+    vi.mocked(interactionRequestMaintenanceWorker.runTick).mockImplementation(async () => {
+      order.push("interaction_requests");
+    });
+    vi.mocked(roomWorkWorker.runTick).mockImplementation(async () => {
+      order.push("room_work");
+    });
+    vi.mocked(maintenance.runTick).mockImplementation(async () => {
+      order.push("maintenance");
+    });
+    const supervisor = new WorkspaceWorkerSupervisor({
+      learningRunner: runner,
+      maintenance,
+      interactionRequestMaintenanceWorker,
+      roomWorkWorker,
+      resolveContext: async () => ({ state: "enabled", context }),
+      intervalMs: 10_000
+    });
+
+    await supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(interactionRequestMaintenanceWorker.runTick).toHaveBeenCalledWith(expect.objectContaining(context), {
+      workerId: expect.stringMatching(/^workspace_worker_/),
+      maxRuns: 100,
+      signal: expect.any(AbortSignal)
+    });
+    expect(order).toEqual(["interaction_requests", "room_work", "maintenance"]);
+
+    await supervisor.stop();
+    expect(interactionRequestMaintenanceWorker.close).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
 

@@ -10,7 +10,13 @@ import {
   sanitizeWorkspaceBundleExportInput,
   sanitizeWorkspaceBundleRestoreInput,
   sanitizeWorkspaceChatSessionInput,
-  sanitizeWorkspaceCreateInput
+  sanitizeWorkspaceCreateInput,
+  sanitizeWorkspaceArtifactRevisionInput,
+  sanitizeWorkspaceGeneratedSurfaceMutationInput,
+  sanitizeWorkspaceInteractionRequestCancelInput,
+  sanitizeWorkspaceInteractionRequestListInput,
+  sanitizeWorkspaceInteractionRequestRespondInput,
+  sanitizeWorkspaceRoomWorkResourceRefs
 } from "./preload-sanitizers.js";
 import { workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests.js";
 
@@ -148,12 +154,23 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   listWorkspaceArtifacts: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifacts:list", sanitizeWorkspaceArtifactOperation(input)),
   getWorkspaceArtifact: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:get", sanitizeWorkspaceArtifactOperation(input)),
   createWorkspaceArtifact: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:create", sanitizeWorkspaceArtifactOperation(input)),
+  listWorkspaceArtifactRevisions: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:revisions:list", sanitizeWorkspaceArtifactOperation(input)),
+  getWorkspaceArtifactRevision: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:revision:get", sanitizeWorkspaceArtifactOperation(input)),
+  reviseWorkspaceArtifact: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:revise", sanitizeWorkspaceArtifactRevisionInput(input)),
+  restoreWorkspaceArtifactRevision: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:restore", sanitizeWorkspaceArtifactRevisionInput(input)),
   runWorkspaceArtifactSurfaceOperation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:surface", sanitizeWorkspaceArtifactOperation(input)),
+  listWorkspaceGeneratedSurfaces: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:list", sanitizeWorkspaceArtifactOperation(input)),
   getWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:get", workspaceGeneratedSurfaceRoomRequest(input)),
+  queryWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:get", workspaceGeneratedSurfaceRoomRequest(input)),
   getWorkspaceGeneratedSurfaceBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:bundle", workspaceGeneratedSurfaceBundleRequest(input)),
+  createWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:create", sanitizeWorkspaceGeneratedSurfaceMutationInput(input)),
+  reviseWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:revise", sanitizeWorkspaceGeneratedSurfaceMutationInput(input)),
   runWorkspaceGeneratedSurfaceAction: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:action", workspaceGeneratedSurfaceActionRequest(input)),
   runWorkspaceGeneratedSurfaceState: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:state", workspaceGeneratedSurfaceStateRequest(input)),
   exportWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:export", workspaceGeneratedSurfaceExportRequest(input)),
+  listWorkspaceInteractionRequests: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:list", sanitizeWorkspaceInteractionRequestListInput(input)),
+  respondWorkspaceInteractionRequest: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:respond", sanitizeWorkspaceInteractionRequestRespondInput(input)),
+  cancelWorkspaceInteractionRequest: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:cancel", sanitizeWorkspaceInteractionRequestCancelInput(input)),
   listWorkspaceRoomMembers: (roomId: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-members:list", typeof roomId === "string" ? roomId.slice(0, 128) : ""),
   listWorkspaceRoomWorks: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-work:list", sanitizeWorkspaceRoomWorkListInput(input)),
   getWorkspaceRoomWork: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-work:view", sanitizeWorkspaceRoomWorkViewInput(input)),
@@ -548,6 +565,7 @@ function sanitizeWorkspaceRoomWorkCreateInput(input: unknown): Record<string, un
   copyRoomWorkString(value, output, "instruction", 1_000_000);
   copyRoomWorkString(value, output, "operationId", 256);
   copyRoomWorkAttachments(value, output);
+  if (value.resourceRefs !== undefined) output.resourceRefs = sanitizeWorkspaceRoomWorkResourceRefs(value.resourceRefs);
   return output;
 }
 
@@ -560,6 +578,7 @@ function sanitizeWorkspaceRoomWorkReplyInput(input: unknown): Record<string, unk
   copyRoomWorkString(value, output, "reason", 2_000);
   copyRoomWorkAttachments(value, output);
   copyRoomWorkVersions(value, output);
+  if (value.resourceRefs !== undefined) output.resourceRefs = sanitizeWorkspaceRoomWorkResourceRefs(value.resourceRefs);
   return output;
 }
 
@@ -847,13 +866,14 @@ function sanitizeWorkspaceArtifactOperation(input: unknown): Record<string, unkn
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
-  for (const key of ["roomId", "artifactId", "operationId", "kind", "locale"]) {
+  for (const key of ["roomId", "artifactId", "revisionId", "baseRevisionId", "operationId", "kind", "locale", "mimeType", "encoding"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }
-  for (const key of ["title", "content"]) {
-    if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "content" ? 20_000_000 : 20_000);
-    else if (key === "content" && value[key] && typeof value[key] === "object") output[key] = value[key];
-  }
+  if (typeof value.title === "string") output.title = value.title.slice(0, 20_000);
+  if (typeof value.content === "string") output.content = value.content.slice(0, 50_000_000);
+  else if (value.content instanceof Uint8Array) output.content = Array.from(value.content.slice(0, 50_000_000));
+  else if (Array.isArray(value.content) && value.content.length <= 50_000_000 && value.content.every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255)) output.content = value.content;
+  else if (value.content && typeof value.content === "object") output.content = value.content;
   if (Array.isArray(value.sourceLocales)) output.sourceLocales = value.sourceLocales.filter((item): item is string => typeof item === "string").slice(0, 20);
   if (value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata)) output.metadata = value.metadata;
   if (value.operation && typeof value.operation === "object" && !Array.isArray(value.operation)) output.operation = value.operation;

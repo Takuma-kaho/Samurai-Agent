@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
 import path from "node:path";
 import { Server as SocketServer } from "socket.io";
-import { ClientEventRecordSchema, ResourceRefSchema, WorkspaceFileResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { ClientEventRecordSchema, ResourceRefSchema, WorkspaceFileResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type JsonValue, type ResourceRef, type SupportedLocale } from "@samurai-agent/core-schemas";
 import { builtinSurfaceRendererRegistryEntries } from "@samurai-agent/ui-protocol";
 import { domainCommandInputSources, listActionCatalogEntries, listDomainCommandEntries, listDomainQueryEntries, pluginManifests, type DomainCommandInputSource } from "@samurai-agent/action-catalog";
 import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
@@ -13,6 +13,7 @@ import {
   createDefaultAgentBackendRegistry,
   createProviderRegistryFromEnv,
   generatedSurfaceCsp,
+  normalizeGeneratedSurfaceProviderToolArguments,
   safeGeneratedSurfaceAssetPath
 } from "@samurai-agent/runtime";
 import type { RunChatTurnResult } from "@samurai-agent/runtime";
@@ -23,6 +24,7 @@ import {
   WorkspaceFileStore,
   WorkspaceServerStore,
   WorkspaceLearningRunner,
+  WorkspaceInteractionRequestService,
   createInternalWorkspaceMaintenanceCaller,
   assertOpaqueId,
   assertSafeRelativePath,
@@ -58,6 +60,8 @@ import {
   executeOrganizationCommandOperation,
   executeOrganizationQueryOperation,
   mountDomainApiV1,
+  emitAuthorizedV1Event,
+  emitInteractionRequestChange,
   publicAgentBackendRecord,
   publicOperationResult,
   publicWorkspaceDirectory,
@@ -71,6 +75,7 @@ import { PostgresRoomWorkWorker } from "../workers/postgres-room-work-worker";
 import { createWorkspaceCompletionBackendReviewPort } from "../workers/workspace-completion-review-port";
 import { createWorkspaceLearningBackendReviewPort } from "../workers/workspace-learning-review-port";
 import { PostgresRuntimeExecutionWorker } from "../workers/postgres-runtime-execution-worker";
+import { WorkspaceInteractionRequestMaintenanceWorker } from "../workers/workspace-interaction-request-maintenance-worker";
 import { PostgresRuntimeCommandService, type PostgresRuntimeChatCompletionEvent, type PostgresRuntimeToolExecutionPort } from "../adapters/runtime/postgres-runtime-chat";
 import { runPostgresChatTurnThroughDomainOperation } from "../adapters/runtime/postgres-chat-domain-operation";
 import { createPostgresChatSessionThroughDomainOperation } from "../adapters/runtime/postgres-session-domain-operation";
@@ -237,6 +242,7 @@ export async function createWorkspaceServerHttp(
   const knowledgeSkill = new PostgresKnowledgeSkill(completion, commands);
   const runtimeSettings = new PostgresRuntimeSettings(core.database, store);
   const artifacts = new PostgresArtifact(commands, files, (context, input) => commands.ingestCompletionActivity(context, input));
+  const interactionRequests = new WorkspaceInteractionRequestService(store);
   const generatedSurfaces = new PostgresGeneratedSurface(
     commands,
     files,
@@ -382,13 +388,30 @@ export async function createWorkspaceServerHttp(
       store,
       knowledgeMemory,
       (event) => recordPostgresChatCompletionActivity(commands, { ...context, operationId }, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context)
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context)
     )
   });
   const workerSupervisor = new WorkspaceWorkerSupervisor({
     learningRunner,
     maintenance,
     executionJobWorker: new PostgresRuntimeExecutionWorker(core.database, 60_000, completion),
+    interactionRequestMaintenanceWorker: new WorkspaceInteractionRequestMaintenanceWorker({
+      store,
+      interactionRequests,
+      onReconciled: async (context, result) => {
+        const eventContext = { ...context, operationId: result.eventOperationId };
+        await emitInteractionRequestChange(
+          { io, store, commands, realtimeGate },
+          eventContext,
+          result.request,
+          result.action,
+          {
+            actor: { kind: "system", id: "workspace-server" },
+            correlationId: result.eventOperationId
+          }
+        );
+      }
+    }),
     roomWorkWorker,
     roomWorkStopWorker: roomWorkWorker,
     gatewayMaintenance: new PostgresGatewayMaintenanceWorker(core.database),
@@ -480,6 +503,8 @@ export async function createWorkspaceServerHttp(
     store,
     commands,
     artifacts,
+    generatedSurfaces,
+    interactionRequests,
     realtimeGate,
     authenticateWorkspace,
     authenticateAccount: authenticate,
@@ -500,7 +525,7 @@ export async function createWorkspaceServerHttp(
         store,
         knowledgeMemory,
         (event) => recordPostgresChatCompletionActivity(commands, context, event),
-        createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context)
+        createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context)
       );
     }
   });
@@ -958,7 +983,7 @@ export async function createWorkspaceServerHttp(
     const roomId = stringField(body, "room_id");
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
     const session = await createPostgresChatSessionThroughDomainOperation(runtimeCommands, {
       workspaceId: context.workspaceId,
       accountId: context.accountId,
@@ -1068,7 +1093,7 @@ export async function createWorkspaceServerHttp(
     };
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, completionContext, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
     const metadata = body.metadata === undefined ? undefined : jsonObjectField(body, "metadata");
     const result = await runPostgresChatTurnThroughDomainOperation(runtimeCommands, {
       workspaceId: context.workspaceId,
@@ -1126,7 +1151,7 @@ export async function createWorkspaceServerHttp(
     const input = body.input === undefined ? {} : jsonObjectField(body, "input");
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
     res.json(await runtimeCommands.resumeBackendRun(pathParam(req, "runId"), input));
   }));
 
@@ -1134,7 +1159,7 @@ export async function createWorkspaceServerHttp(
     const context = operationContext(req);
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
     res.json(await runtimeCommands.syncBackendRun(pathParam(req, "runId")));
   }));
 
@@ -1142,7 +1167,7 @@ export async function createWorkspaceServerHttp(
     const context = operationContext(req);
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
     res.json(await runtimeCommands.recoverBackendRun(pathParam(req, "runId")));
   }));
 
@@ -1151,7 +1176,7 @@ export async function createWorkspaceServerHttp(
     const body = objectBody(req.body);
     const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
       async (event) => recordPostgresChatCompletionActivity(commands, context, event),
-      createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+      createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
     const result = await runtimeCommands.retryBackendRun(pathParam(req, "runId"), {
       idempotencyKey: context.operationId,
       ...(body.confirm_unknown === true ? { confirmUnknown: true } : {})
@@ -1239,7 +1264,7 @@ export async function createWorkspaceServerHttp(
       const context = operationContext(req);
       const runtimeCommands = postgresRuntimeCommands(core.database, config, backendRegistry, context, io, store, knowledgeMemory,
         (event) => recordPostgresChatCompletionActivity(commands, context, event),
-        createPostgresRuntimeToolExecutionPort(commands, artifacts, store, context));
+        createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context));
       const runId = pathParam(req, "runId");
       if (action === "cancel") {
         res.json(await runtimeCommands.cancelBackendRun(runId));
@@ -1767,8 +1792,13 @@ export async function createWorkspaceServerHttp(
   app.get("/api/workspaces/:workspaceId/artifacts/:artifactId/content", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("artifact_room_id_required", 400);
-    const detail = await artifacts.get(workspaceContext(req), roomId, pathParam(req, "artifactId"));
-    res.type(detail.artifact.metadata.content_type === "application/json" ? "application/json" : "text/plain").send(detail.content);
+    const revisionId = queryString(req, "revision_id");
+    const content = await artifacts.readContent(workspaceContext(req), roomId, pathParam(req, "artifactId"), revisionId);
+    res.set("Content-Type", content.mimeType);
+    res.set("Content-Length", String(content.bytes.byteLength));
+    res.set("X-Content-Encoding", content.encoding);
+    res.set("X-Content-Type-Options", "nosniff");
+    res.send(content.bytes);
   }));
   app.get("/api/workspaces/:workspaceId/artifacts/:artifactId", authenticateWorkspace, asyncRoute(async (req, res) => {
     const roomId = queryString(req, "room_id");
@@ -1863,19 +1893,38 @@ export async function createWorkspaceServerHttp(
 
   app.post("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/actions/:actionId/run", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
+    assertOnlyFields(body, ["room_id", "revision_id", "interaction_id", "message_id", "action_payload"], "generated_surface_action_body_invalid");
     const roomId = stringField(body, "room_id");
     const context = operationContext(req);
     const actionPayload = body.action_payload === undefined ? {} : jsonObjectField(body, "action_payload");
-    const result = await generatedSurfaces.runAction(context, {
+    const input = {
       room_id: roomId,
       surface_id: pathParam(req, "surfaceId"),
       action_id: pathParam(req, "actionId"),
       ...(optionalStringField(body, "revision_id") ? { revision_id: optionalStringField(body, "revision_id") } : {}),
       ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
       ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {}),
-      confirmed: body.confirmed === true,
       action_payload: actionPayload
-    });
+    };
+    const prepared = await generatedSurfaces.prepareAction(context, input);
+    if (prepared.action.requires_confirmation) {
+      const created = await interactionRequests.create(context, {
+        roomId: prepared.target.room_id,
+        kind: "approval",
+        surfaceId: prepared.target.surface_id,
+        revisionId: prepared.target.revision_id,
+        actionTarget: prepared.target as unknown as Record<string, JsonValue>,
+        title: `${prepared.surface.title}: ${prepared.action.label}`,
+        summary: "このSurface操作は、現在の対象版とRoom権限を再確認してから実行されます。",
+        options: [
+          { id: "approve", label: "実行を許可", decision: "approve" },
+          { id: "deny", label: "実行しない", decision: "deny" }
+        ]
+      });
+      res.status(created.replayed ? 200 : 202).json({ status: "approval_required", request: created.request, replayed: created.replayed });
+      return;
+    }
+    const result = await generatedSurfaces.runAction(context, input);
     res.status(201).json(result);
   }));
 
@@ -3817,16 +3866,52 @@ function organizationRequestContext(
   };
 }
 
+const runtimeProviderToolContracts = [
+  {
+    operation: "artifact.create",
+    providerToolName: "create_artifact",
+    acceptedProviderToolNames: ["create_artifact", "samurai.artifact.create", "mcp__samurai__artifact_create"]
+  },
+  {
+    operation: "artifact.revise",
+    providerToolName: "revise_artifact",
+    acceptedProviderToolNames: ["revise_artifact", "artifact.revise", "samurai.artifact.revise", "mcp__samurai__artifact_revise"]
+  },
+  {
+    operation: "generated_surface.create",
+    providerToolName: "create_generated_surface",
+    acceptedProviderToolNames: ["create_generated_surface", "generated_surface.create", "samurai.generated_surface.create", "mcp__samurai__generated_surface_create"]
+  },
+  {
+    operation: "generated_surface.revise",
+    providerToolName: "generated_surface.revise",
+    acceptedProviderToolNames: ["generated_surface.revise", "samurai.generated_surface.revise", "mcp__samurai__generated_surface_revise"]
+  }
+] as const;
+
+/**
+ * Return only tool names that are both advertised by the Domain catalog and
+ * implemented by the Runtime ingress below.  Keeping this one list prevents a
+ * model from being shown a contract that the Server cannot execute.
+ */
 export function runtimeChatAvailableProviderTools(options: { roomWorkBinding?: boolean } = {}): string[] {
   const entries = listDomainCommandEntries("provider_tool_call");
   const providerToolNames = [
-    { operation: "artifact.create", providerToolName: "create_artifact" },
+    ...runtimeProviderToolContracts,
     ...(options.roomWorkBinding ? [{ operation: "room.work.assignee.delegate", providerToolName: "subagent_delegate" }] : [])
   ];
   return providerToolNames.flatMap(({ operation, providerToolName }) => {
     const entry = entries.find((candidate) => candidate.id === operation && candidate.availability === "active");
     return entry?.provider_tool_names?.includes(providerToolName) ? [providerToolName] : [];
   });
+}
+
+function backendInputRequestSummary(event: BackendEventRecord): string {
+  const prompt = typeof event.payload.prompt === "string"
+    ? event.payload.prompt
+    : typeof event.payload.message === "string" ? event.payload.message : undefined;
+  const normalized = prompt?.trim().replace(/\s+/g, " ");
+  return normalized ? normalized.slice(0, 4_000) : "The Agent is waiting for a response through its current Run.";
 }
 
 function postgresRuntimeCommands(
@@ -3841,6 +3926,7 @@ function postgresRuntimeCommands(
   toolExecution?: PostgresRuntimeToolExecutionPort
 ): PostgresRuntimeCommandService {
   const clientEvents = new PostgresRuntimeClientEvents(database, store);
+  const interactionRequests = new WorkspaceInteractionRequestService(store);
   let runtimeCommands: PostgresRuntimeCommandService;
   runtimeCommands = new PostgresRuntimeCommandService({
     database,
@@ -3864,6 +3950,59 @@ function postgresRuntimeCommands(
         roomId,
         kind: "runtime.event.created"
       });
+      if (event.event_type === "backend_waiting_for_native_input") {
+        const operationId = `interaction_request_${createHash("sha256").update(`${context.workspaceId}|${event.id}`).digest("hex").slice(0, 48)}`;
+        const created = await interactionRequests.create({
+          workspaceId: context.workspaceId,
+          accountId: context.accountId,
+          operationId
+        }, {
+          roomId,
+          kind: "backend_input",
+          runId: event.run_id,
+          actionTarget: { kind: "backend_input", room_id: roomId, run_id: event.run_id },
+          title: "Agent input required",
+          summary: backendInputRequestSummary(event),
+          options: [
+            { id: "submit", label: "入力を送信", decision: "submit_input" },
+            { id: "deny", label: "送信しない", decision: "deny" }
+          ],
+          inputSchema: {
+            type: "object",
+            properties: {
+              response: { type: "string", minLength: 1, maxLength: 100_000 }
+            },
+            required: ["response"],
+            additionalProperties: false
+          }
+        });
+        if (!created.replayed) {
+          const eventContext = {
+            workspaceId: context.workspaceId,
+            accountId: context.accountId,
+            operationId: `interaction_event_${createHash("sha256").update(`${context.workspaceId}|${created.request.id}|${event.id}`).digest("hex").slice(0, 48)}`
+          };
+          const publicEvent = await store.appendPublicEvent(eventContext, {
+            eventType: "workspace.interaction_request.changed",
+            roomId,
+            actor: { kind: "system", id: "workspace-server" },
+            resources: [
+              { kind: "interaction_request", id: created.request.id, uri: `samurai://interaction-requests/${created.request.id}`, label: created.request.title },
+              { kind: "backend_run", id: event.run_id, uri: `samurai://backend-runs/${event.run_id}`, label: event.run_id }
+            ],
+            authorizationAction: "execute",
+            operationId: eventContext.operationId,
+            correlationId: event.id,
+            payload: {
+              request_id: created.request.id,
+              kind: created.request.kind,
+              status: created.request.status,
+              action: "created"
+            }
+          });
+          if (!publicEvent.replayed) await emitAuthorizedV1Event(io, store, publicEvent.event);
+        }
+      }
       if (event.event_type !== "run_completed" && event.event_type !== "run_failed" && event.event_type !== "backend_waiting_for_native_input") return;
       const run = await runtimeCommands.getBackendRun(event.run_id);
       if (!run) return;
@@ -3876,51 +4015,96 @@ function postgresRuntimeCommands(
   return runtimeCommands;
 }
 
-function createPostgresRuntimeToolExecutionPort(
+export function createPostgresRuntimeToolExecutionPort(
   commands: WorkspaceServerCommandService,
   artifacts: PostgresArtifact,
+  generatedSurfaces: PostgresGeneratedSurface,
   store: WorkspaceServerStore,
   context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">
 ): PostgresRuntimeToolExecutionPort {
   return {
     execute: async (input) => {
-      const providerToolName = input.event.provider_tool_name;
-      const actionId = input.event.action_id;
-      if (providerToolName !== "create_artifact" && actionId !== "artifact.create") {
-        throw new WorkspaceServerError("runtime_tool_unsupported", 409);
-      }
+      const operation = runtimeProviderToolOperation(input.event.provider_tool_name, input.event.action_id);
       const roomId = input.run.room_id;
       if (!roomId) throw new WorkspaceServerError("runtime_tool_room_missing", 409);
       await commands.assertRoomExecutable(context, roomId);
-      let payload: ReturnType<typeof parseDomainOperationInput<"artifact.create">>;
-      try {
-        payload = parseDomainOperationInput("artifact.create", input.event.arguments);
-      } catch {
-        throw new WorkspaceServerError("runtime_artifact_tool_input_invalid", 400);
-      }
-      const created = await artifacts.create({
-        ...context,
-        operationId: input.operation.id
-      }, {
-        roomId,
-        title: payload.title,
-        content: payload.content,
-        ...(payload.kind ? { kind: payload.kind } : {}),
-        ...(payload.input_locale ? { sourceLocales: [payload.input_locale] } : {}),
-        ...(payload.output_locale ? { locale: payload.output_locale } : {}),
-        ...(payload.metadata ? { metadata: payload.metadata } : {})
-      });
-      return {
-        resourceRefs: [created.artifact.file_ref],
-        summary: `Artifact ${created.artifact.title} を保存しました。`,
-        output: {
-          artifact_id: created.artifact.id,
-          title: created.artifact.title,
-          kind: created.artifact.kind,
-          resource_ref: created.artifact.file_ref,
-          replayed: created.replayed
+      const runtimeContext = { ...context, operationId: input.operation.id };
+      const source = runtimeArtifactSourceMetadata(input.run, context.workspaceId, roomId);
+
+      switch (operation) {
+        case "artifact.create": {
+          const payload = parseRuntimeToolInput("artifact.create", input.event.arguments);
+          const created = await artifacts.create(runtimeContext, {
+            roomId,
+            title: payload.title,
+            content: payload.content,
+            ...(payload.kind ? { kind: payload.kind } : {}),
+            ...(payload.input_locale ? { sourceLocales: [payload.input_locale] } : {}),
+            ...(payload.output_locale ? { locale: payload.output_locale } : {}),
+            ...(payload.mime_type ? { mimeType: payload.mime_type } : {}),
+            ...(payload.encoding ? { encoding: payload.encoding } : {}),
+            metadata: runtimeArtifactMetadata(payload.metadata, source)
+          });
+          const artifactRef = runtimeArtifactResourceRef(created.artifact);
+          return {
+            resourceRefs: [artifactRef, created.artifact.file_ref],
+            summary: `Artifact ${created.artifact.title} を保存しました。`,
+            output: {
+              artifact_id: created.artifact.id,
+              title: created.artifact.title,
+              kind: created.artifact.kind,
+              resource_ref: artifactRef,
+              replayed: created.replayed
+            } as JsonValue
+          };
         }
-      };
+        case "artifact.revise": {
+          const payload = parseRuntimeToolInput("artifact.revise", input.event.arguments);
+          const revised = await artifacts.revise(runtimeContext, {
+            roomId,
+            artifactId: payload.artifact_id,
+            content: Array.isArray(payload.content) ? Uint8Array.from(payload.content) : payload.content,
+            ...(payload.base_revision_id ? { baseRevisionId: payload.base_revision_id } : {}),
+            ...(payload.expected_revision ? { expectedRevision: payload.expected_revision } : {}),
+            editorSource: "provider",
+            ...(payload.change_summary ? { changeSummary: payload.change_summary } : {}),
+            ...(payload.extension ? { extension: payload.extension } : {}),
+            ...(payload.mime_type ? { mimeType: payload.mime_type } : {}),
+            ...(payload.encoding ? { encoding: payload.encoding } : {}),
+            provenance: runtimeArtifactMetadata(payload.provenance, source)
+          });
+          const artifactRef = runtimeArtifactResourceRef(revised.artifact);
+          return {
+            resourceRefs: [artifactRef, revised.revision.file_ref],
+            summary: `Artifact ${revised.artifact.title} の版を保存しました。`,
+            output: {
+              artifact_id: revised.artifact.id,
+              revision_id: revised.revision.id,
+              revision: revised.revision.revision,
+              resource_ref: revised.revision.file_ref,
+              replayed: revised.replayed
+            } as JsonValue
+          };
+        }
+        case "generated_surface.create": {
+          const payload = parseRuntimeToolInput("generated_surface.create", normalizeGeneratedSurfaceProviderToolArguments(input.event.arguments));
+          const created = await generatedSurfaces.create(
+            { ...runtimeContext, runtimeRunId: input.run.id },
+            roomId,
+            payload as GeneratedSurfaceCreateInput
+          );
+          return generatedSurfaceToolResult(created.definition, created.revision, created.replayed, "作成");
+        }
+        case "generated_surface.revise": {
+          const payload = parseRuntimeToolInput("generated_surface.revise", normalizeGeneratedSurfaceProviderToolArguments(input.event.arguments));
+          const revised = await generatedSurfaces.revise(
+            { ...runtimeContext, runtimeRunId: input.run.id },
+            roomId,
+            payload as GeneratedSurfaceReviseInput
+          );
+          return generatedSurfaceToolResult(revised.definition, revised.revision, revised.replayed, "更新");
+        }
+      }
     },
     delegate: async (input) => {
       const binding = input.trustedRoomWorkBinding;
@@ -3986,6 +4170,135 @@ function createPostgresRuntimeToolExecutionPort(
       };
     }
   };
+}
+
+type RuntimeProviderToolOperation = (typeof runtimeProviderToolContracts)[number]["operation"];
+
+/**
+ * The Runtime event may identify a tool by the provider capability, the
+ * Domain operation, or both. When both are present they must agree: accepting
+ * a mixed pair would let a provider label one capability while executing a
+ * different persisted command.
+ */
+function runtimeProviderToolOperation(
+  providerToolName: string | undefined,
+  actionId: string | undefined
+): RuntimeProviderToolOperation {
+  const providerMatch = providerToolName === undefined
+    ? undefined
+    : runtimeProviderToolContracts.find((entry) => entry.acceptedProviderToolNames.some((candidate) => candidate === providerToolName));
+  const actionMatch = actionId === undefined
+    ? undefined
+    : runtimeProviderToolContracts.find((entry) => entry.operation === actionId);
+  if ((providerToolName !== undefined && !providerMatch) || (actionId !== undefined && !actionMatch)) {
+    throw new WorkspaceServerError("runtime_tool_unsupported", 409);
+  }
+  if (!providerMatch && !actionMatch) throw new WorkspaceServerError("runtime_tool_unsupported", 409);
+  if (providerMatch && actionMatch && providerMatch.operation !== actionMatch.operation) {
+    throw new WorkspaceServerError("runtime_tool_identity_mismatch", 409);
+  }
+  return (providerMatch ?? actionMatch)!.operation;
+}
+
+function parseRuntimeToolInput<T extends RuntimeProviderToolOperation>(
+  operation: T,
+  input: Record<string, JsonValue>
+): ReturnType<typeof parseDomainOperationInput<T>> {
+  try {
+    return parseDomainOperationInput(operation, input) as ReturnType<typeof parseDomainOperationInput<T>>;
+  } catch {
+    throw new WorkspaceServerError("runtime_tool_input_invalid", 400, { operation });
+  }
+}
+
+function generatedSurfaceToolResult(
+  definition: GeneratedSurfaceDefinition,
+  revision: GeneratedSurfaceRevisionRecord,
+  replayed: boolean,
+  verb: "作成" | "更新"
+): { resourceRefs: ResourceRef[]; summary: string; output: JsonValue } {
+  const surfaceRef = ResourceRefSchema.parse({
+    kind: "generated_surface",
+    id: definition.id,
+    uri: `surfaces/${definition.id}`,
+    label: definition.title
+  });
+  const revisionRef = ResourceRefSchema.parse({
+    kind: "generated_surface_revision",
+    id: revision.id,
+    uri: revision.html_ref.uri,
+    label: `${definition.title} r${revision.revision}`
+  });
+  return {
+    resourceRefs: [surfaceRef, revisionRef],
+    summary: `Generated Surface ${definition.title} を${verb}しました。`,
+    output: {
+      surface_id: definition.id,
+      revision_id: revision.id,
+      revision: revision.revision,
+      resource_refs: [surfaceRef, revisionRef],
+      replayed
+    }
+  };
+}
+
+/**
+ * An Artifact's current file points to an immutable revision in PostgreSQL.
+ * Runtime history also needs a stable logical Artifact reference, rather than
+ * mislabeling that revision file as the Artifact itself.
+ */
+function runtimeArtifactResourceRef(artifact: Pick<ArtifactRecord, "id" | "title" | "file_ref">): ResourceRef {
+  return ResourceRefSchema.parse({
+    kind: "artifact",
+    id: artifact.id,
+    uri: artifact.file_ref.uri,
+    ...(artifact.file_ref.version ? { version: artifact.file_ref.version } : {}),
+    label: artifact.title
+  });
+}
+
+/**
+ * Runtime-created Artifacts may carry a server-owned Work association, but
+ * provider arguments are never an authority source. The binding is read from
+ * the persisted RuntimeRun metadata written by the Server admission path.
+ */
+export function runtimeArtifactSourceMetadata(
+  run: Pick<BackendRunRecord, "id" | "room_id" | "metadata">,
+  workspaceId: string,
+  roomId: string
+): Record<string, JsonValue> | undefined {
+  const rawBinding = run.metadata.runtime_binding;
+  if (rawBinding === undefined) return undefined;
+  if (!isJsonObject(rawBinding)) throw new WorkspaceServerError("runtime_artifact_binding_invalid", 409);
+  const binding = rawBinding as Record<string, JsonValue>;
+  const workBindingKeys = ["work_id", "assignee_id", "parent_assignee_id", "reservation_id", "lease_owner"] as const;
+  // All Runtime Runs retain a server-owned execution binding for provenance.
+  // Only the Work-specific fields turn that general binding into a Human Work
+  // association. A normal Room chat may therefore create an Artifact without
+  // fabricated Work metadata, while malformed Work-shaped bindings still fail
+  // closed below.
+  if (!workBindingKeys.some((key) => key in binding)) return undefined;
+  const boundWorkspaceId = typeof binding.workspace_id === "string" ? binding.workspace_id : undefined;
+  const boundRoomId = typeof binding.room_id === "string" ? binding.room_id : undefined;
+  const workId = typeof binding.work_id === "string" && binding.work_id.trim() ? binding.work_id : undefined;
+  const assigneeId = typeof binding.assignee_id === "string" && binding.assignee_id.trim() ? binding.assignee_id : undefined;
+  if (!run.room_id || run.room_id !== roomId || boundWorkspaceId !== workspaceId || boundRoomId !== roomId || !workId || !assigneeId) {
+    throw new WorkspaceServerError("runtime_artifact_binding_mismatch", 409);
+  }
+  return {
+    source_work_id: workId,
+    source_assignee_id: assigneeId,
+    source_run_id: run.id
+  };
+}
+
+export function runtimeArtifactMetadata(
+  metadata: Record<string, JsonValue> | undefined,
+  source: Record<string, JsonValue> | undefined
+): Record<string, JsonValue> {
+  const protectedKeys = new Set(["source_work_id", "source_assignee_id", "source_run_id"]);
+  const safeMetadata = Object.fromEntries(Object.entries(metadata ?? {}).filter(([key]) => !protectedKeys.has(key))) as Record<string, JsonValue>;
+  return { ...safeMetadata, ...(source ?? {}) };
 }
 
 /** Converts a settled PG Runtime run into the product's formal Completion
@@ -4273,6 +4586,12 @@ function objectBody(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** Keep action confirmation server-owned across the legacy compatibility API. */
+function assertOnlyFields(value: Record<string, unknown>, allowed: readonly string[], code: string): void {
+  const allowedFields = new Set(allowed);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) throw new WorkspaceServerError(code, 400);
+}
+
 function objectField(body: Record<string, unknown>, key: string): Record<string, unknown> {
   const value = body[key];
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new WorkspaceServerError(`${key}_required`, 400);
@@ -4286,12 +4605,12 @@ function jsonObjectField(body: Record<string, unknown>, key: string): Record<str
   return value as Record<string, JsonValue>;
 }
 
-function isJsonObject(value: unknown): boolean {
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   return Object.values(value as Record<string, unknown>).every(isJsonValue);
 }
 
-function isJsonValue(value: unknown): boolean {
+function isJsonValue(value: unknown): value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (Array.isArray(value)) return value.every(isJsonValue);
@@ -5015,7 +5334,12 @@ function createPostgresGeneratedSurfaceTargetCommand(dependencies: {
         throw new WorkspaceServerError("generated_surface_target_command_not_connected", 503, { command_id: input.commandId });
     }
 
-    const resultValue = result as JsonValue;
+    // Domain records intentionally use optional TypeScript properties.  Before
+    // a target result becomes durable Activity payload, normalize it through
+    // the same JSON boundary used by the HTTP response.  Otherwise an absent
+    // optional field (`undefined`) makes the strict canonical JSON ledger fail
+    // after the Artifact side effect has already succeeded.
+    const resultValue = normalizeGeneratedSurfaceTargetResult(result);
     await dependencies.commands.ingestCompletionActivity(context, {
       id: `completion_activity_${createHash("sha256").update(`${context.workspaceId}|generated_surface_target|${input.operationId}`).digest("hex").slice(0, 48)}`,
       roomId: input.roomId,
@@ -5032,6 +5356,31 @@ function createPostgresGeneratedSurfaceTargetCommand(dependencies: {
     });
     return { result: resultValue, resourceRefs: changedResources };
   };
+}
+
+/**
+ * Converts a target command result into the durable JSON value shared by the
+ * Surface interaction response and Completion Activity.  This is deliberately
+ * a serialization boundary: optional in-memory fields are omitted, while a
+ * non-serializable result remains a server error instead of being persisted in
+ * a lossy or ambiguous representation.
+ */
+export function normalizeGeneratedSurfaceTargetResult(value: unknown): JsonValue {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new WorkspaceServerError("generated_surface_target_result_invalid", 500);
+  }
+  if (serialized === undefined) throw new WorkspaceServerError("generated_surface_target_result_invalid", 500);
+  try {
+    const normalized = JSON.parse(serialized) as unknown;
+    if (!isJsonValue(normalized)) throw new WorkspaceServerError("generated_surface_target_result_invalid", 500);
+    return normalized;
+  } catch (error) {
+    if (error instanceof WorkspaceServerError) throw error;
+    throw new WorkspaceServerError("generated_surface_target_result_invalid", 500);
+  }
 }
 
 function generatedSurfaceRequiredString(payload: Record<string, JsonValue>, key: string): string {

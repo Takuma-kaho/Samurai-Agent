@@ -138,6 +138,30 @@ describe("RoomWorkSurface", () => {
     expect(html).not.toMatch(/session/i);
   });
 
+  it("shows Knowledge/Skill selections separately from uploaded file attachments", () => {
+    const resourceWork: NativeRoomWork = {
+      ...work,
+      instructions: [{
+        ...work.instructions![0]!,
+        instruction: "",
+        resourceRefs: [{ kind: "knowledge", id: "knowledge_policy", uri: "knowledge/policy.md", version: "3", label: "公開方針" }]
+      }]
+    };
+    const html = renderSurface({
+      works: [resourceWork],
+      selectedWork: resourceWork,
+      workResourceRefs: [{ kind: "skill", id: "skill_review", version: 2, label: "レビュー手順" }],
+      onRemoveWorkResourceRef: vi.fn(),
+      onClearWorkResourceRefs: vi.fn()
+    });
+
+    expect(html).toContain("利用したKnowledgeとSkill");
+    expect(html).toContain("公開方針");
+    expect(html).toContain("仕事で使うKnowledgeとSkill");
+    expect(html).toContain("レビュー手順");
+    expect(html).toContain("ファイルを添付");
+  });
+
   it("does not enable a new request when the default Agent is missing or cannot execute", () => {
     const missingDefault = renderSurface({ room: { ...room, defaultAgentId: undefined } });
     const disabledDefault = renderSurface({

@@ -10,6 +10,7 @@ import {
   nativeRoomCreateResponseIsCurrent,
   nativeRoomsAfterRoomCreate,
   nativeDraftRequestIsCurrent,
+  appendNativeWorkDraft,
   nativeRoomWorkListRequestIsCurrent,
   nativeRoomWorkErrorIsExplicitServerFailure,
   nativeRoomWorkFromUnknown,
@@ -365,6 +366,43 @@ describe("Room work bridge adapter", () => {
     }));
   });
 
+  it("sends only a stable Knowledge/Skill id and version through the Room Work operation", async () => {
+    const calls: Array<{ operation: string; roomId: string; payload: Record<string, unknown>; operationId: string }> = [];
+    const client = createNativeRoomWorkClient({
+      runWorkspaceRoomWorkOperation: vi.fn(async (input: typeof calls[number]) => {
+        calls.push(input);
+        if (input.operation === "room.work.list") return { works: [] };
+        return {
+          id: "work_resource",
+          room_id: input.roomId,
+          requester_id: "account_owner",
+          default_agent_id: "agent_research",
+          title: "方針を確認",
+          objective: "",
+          status: "queued",
+          instruction_version: 1,
+          generation: 0,
+          version: 1,
+          assignees: []
+        };
+      })
+    });
+
+    await client?.create({
+      roomId: "room_public",
+      resourceRefs: [{ kind: "knowledge", id: "knowledge_policy", version: 4, label: "公開方針" }],
+      operationId: "op_resource"
+    });
+
+    expect(calls[0]).toMatchObject({
+      operation: "room.work.create",
+      roomId: "room_public",
+      payload: { resource_refs: [{ kind: "knowledge", id: "knowledge_policy", version: 4 }] },
+      operationId: "op_resource"
+    });
+    expect(calls[0]?.payload.resource_refs).not.toEqual(expect.arrayContaining([expect.objectContaining({ label: expect.anything() })]));
+  });
+
   it("carries an explicitly selected assignee through the reply adapter", async () => {
     const reply = vi.fn(async (input: { workId: string; assigneeId?: string; instruction?: string }) => ({
       id: "instruction_reply",
@@ -528,9 +566,48 @@ describe("Room work bridge adapter", () => {
 
     expect(projected.instructions?.[0]).toMatchObject({ id: "instruction_pending", status: "pending" });
   });
+
+  it("keeps canonical Knowledge/Skill refs separate from file attachments in a public instruction", () => {
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_resource",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "方針を確認",
+      objective: "",
+      status: "queued",
+      instruction_version: 1,
+      generation: 0,
+      version: 1,
+      assignees: [],
+      resource_refs: [{ kind: "knowledge", id: "knowledge_policy", uri: "knowledge/policy.md", version: "4", label: "公開方針" }],
+      instructions: [{
+        id: "instruction_resource",
+        work_id: "work_resource",
+        kind: "initial",
+        instruction: "",
+        attachments: [],
+        resource_refs: [{ kind: "skill", id: "skill_review", uri: "skills/review.md", version: "2", label: "レビュー" }],
+        status: "accepted",
+        version: 1,
+        generation: 0,
+        created_by: "account_owner"
+      }]
+    });
+
+    expect(projected.resourceRefs).toEqual([{ kind: "knowledge", id: "knowledge_policy", uri: "knowledge/policy.md", version: "4", label: "公開方針" }]);
+    expect(projected.instructions?.[0]?.attachments).toEqual([]);
+    expect(projected.instructions?.[0]?.resourceRefs).toEqual([{ kind: "skill", id: "skill_review", uri: "skills/review.md", version: "2", label: "レビュー" }]);
+  });
 });
 
 describe("Room work draft request stamp", () => {
+  it("adds an Artifact request without overwriting the draft already prepared for that Work", () => {
+    expect(appendNativeWorkDraft("先に書いた追加指示", "[成果物の修正依頼]\n対象版: revision_2"))
+      .toBe("先に書いた追加指示\n\n[成果物の修正依頼]\n対象版: revision_2");
+    expect(appendNativeWorkDraft("", "  修正依頼  ")).toBe("修正依頼");
+  });
+
   it("rejects a late completion from an older Room or draft key", () => {
     expect(nativeDraftRequestIsCurrent(
       { key: "workspace\nroom_a\nnew", roomOpenId: 1 },

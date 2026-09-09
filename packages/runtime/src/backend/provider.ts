@@ -472,7 +472,7 @@ async function postJson(profile: ProviderProfile, url: string, headers: Record<s
         reason: profile.classifyError(response.status, message),
         retryable: response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500,
         message: safeDiagnosticMessage(message, headerSecrets(headers))
-      });
+      }, "provider_terminal_response");
     }
 
     try {
@@ -681,7 +681,7 @@ async function* postSse(profile: ProviderProfile, url: string, headers: Record<s
         reason: profile.classifyError(response.status, message),
         retryable: response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500,
         message: safeDiagnosticMessage(message, headerSecrets(headers))
-      });
+      }, "provider_terminal_response");
     }
     if (!response.body) {
       throw new ProviderRequestError("provider_failed", "Provider stream response was empty.", {

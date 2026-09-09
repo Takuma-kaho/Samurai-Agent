@@ -159,6 +159,88 @@ describe("Workspace completion Activity projection identity", () => {
   });
 });
 
+describe("Workspace completion ResourceRef authorization", () => {
+  const context = { workspaceId: "workspace_a", accountId: "account_a" };
+
+  it("resolves a workspace resource with DB-owned uri, version, and label", async () => {
+    const store = createResourceRefStore();
+    const service = new WorkspaceCompletionService(store as never);
+
+    await expect(service.getResourceRefForRoom(context, {
+      targetRoomId: "room_target",
+      resourceId: "knowledge_workspace",
+      kind: "knowledge",
+      version: "2",
+      uri: "client://forced-uri",
+      label: "client-forced-label"
+    })).resolves.toEqual({
+      kind: "knowledge",
+      id: "knowledge_workspace",
+      uri: ".versions/knowledge_workspace/2.md",
+      version: "2",
+      label: "DB title"
+    });
+
+    const resourceQuery = store.queries.find((query) => query.text.includes("FROM workspace_completion_resources"));
+    expect(resourceQuery?.text).toContain("resource.id = $2");
+    expect(resourceQuery?.text).toContain("resource.scope_kind = 'workspace' OR resource.room_id = $4");
+  });
+
+  it("rejects a Room-scoped resource from another Room", async () => {
+    const store = createResourceRefStore({
+      resource: { ...defaultCompletionResourceRow(), scope_kind: "room", room_id: "room_other" }
+    });
+    const service = new WorkspaceCompletionService(store as never);
+
+    await expect(service.getResourceRefForRoom(context, resourceRefInput())).rejects.toMatchObject({
+      code: "workspace_completion_resource_not_found",
+      status: 404
+    });
+  });
+
+  it("rejects archived resources, policy kinds, and mismatched versions", async () => {
+    const archivedStore = createResourceRefStore({
+      resource: { ...defaultCompletionResourceRow(), lifecycle_state: "archived" }
+    });
+    const archivedService = new WorkspaceCompletionService(archivedStore as never);
+    await expect(archivedService.getResourceRefForRoom(context, resourceRefInput())).rejects.toMatchObject({
+      code: "workspace_completion_resource_not_found",
+      status: 404
+    });
+
+    const invalidKindStore = createResourceRefStore();
+    const invalidKindService = new WorkspaceCompletionService(invalidKindStore as never);
+    await expect(invalidKindService.getResourceRefForRoom(context, { ...resourceRefInput(), kind: "policy" })).rejects.toMatchObject({
+      code: "workspace_completion_resource_ref_kind_invalid",
+      status: 400
+    });
+    expect(invalidKindStore.queries).toHaveLength(0);
+
+    const mismatchedVersionStore = createResourceRefStore();
+    const mismatchedVersionService = new WorkspaceCompletionService(mismatchedVersionStore as never);
+    await expect(mismatchedVersionService.getResourceRefForRoom(context, { ...resourceRefInput(), version: "3" })).rejects.toMatchObject({
+      code: "workspace_completion_resource_version_not_found",
+      status: 404
+    });
+  });
+
+  it("rechecks target Room read permission and batch readiness", async () => {
+    const deniedStore = createResourceRefStore({ roomRead: false });
+    const deniedService = new WorkspaceCompletionService(deniedStore as never);
+    await expect(deniedService.getResourceRefForRoom(context, resourceRefInput())).rejects.toMatchObject({
+      code: "room_read_permission_denied",
+      status: 403
+    });
+
+    const pendingBatchStore = createResourceRefStore({ batchStatus: "db_committed" });
+    const pendingBatchService = new WorkspaceCompletionService(pendingBatchStore as never);
+    await expect(pendingBatchService.getResourceRefForRoom(context, resourceRefInput())).rejects.toMatchObject({
+      code: "workspace_completion_file_recovery_required",
+      status: 503
+    });
+  });
+});
+
 function completionContext(operationId: string) {
   return {
     workspaceId: "workspace_a",
@@ -280,5 +362,106 @@ function createCompletionStore(state: ReturnType<typeof createCompletionSqlState
       replayed: false
     }),
     insertAudit: async () => undefined
+  };
+}
+
+function resourceRefInput() {
+  return {
+    targetRoomId: "room_target",
+    resourceId: "knowledge_workspace",
+    kind: "knowledge" as const,
+    version: "2",
+    uri: "client://forced-uri",
+    label: "client-forced-label"
+  };
+}
+
+function defaultCompletionResourceRow() {
+  return {
+    workspace_id: "workspace_a",
+    id: "knowledge_workspace",
+    scope_kind: "workspace" as const,
+    room_id: null,
+    resource_kind: "knowledge" as const,
+    knowledge_kind: "fact" as const,
+    title: "DB title",
+    evidence_state: "confirmed" as const,
+    lifecycle_state: "active" as const,
+    ai_protection: "editable" as const,
+    creation_source: "human" as const,
+    ai_managed: false,
+    version: 2,
+    current_confirmed_version: 2,
+    current_provisional_version: null,
+    candidate_version: null,
+    archived_at: null,
+    created_by: "account_a",
+    updated_by: "account_a",
+    created_at: "2026-09-04T00:00:00.000Z",
+    updated_at: "2026-09-04T00:00:00.000Z"
+  };
+}
+
+function defaultCompletionVersionRow() {
+  return {
+    workspace_id: "workspace_a",
+    id: "completion_version_knowledge_workspace_2",
+    resource_id: "knowledge_workspace",
+    version: 2,
+    parent_version: 1,
+    file_path: ".versions/knowledge_workspace/2.md",
+    content_hash: "a".repeat(64),
+    content_size: 12,
+    evidence_state: "confirmed" as const,
+    lifecycle_state: "active" as const,
+    ai_protection: "editable" as const,
+    creation_source: "human" as const,
+    metadata: {},
+    reason: "created for test",
+    actor_account_id: "account_a",
+    created_at: "2026-09-04T00:00:00.000Z",
+    file_batch_id: "batch_a"
+  };
+}
+
+function createResourceRefStore(input: {
+  resource?: ReturnType<typeof defaultCompletionResourceRow> & Record<string, unknown>;
+  version?: ReturnType<typeof defaultCompletionVersionRow> & Record<string, unknown>;
+  roomRead?: boolean;
+  batchStatus?: string;
+} = {}) {
+  const resource = input.resource ?? defaultCompletionResourceRow();
+  const version = input.version ?? defaultCompletionVersionRow();
+  const queries: Array<{ text: string; values: readonly unknown[] }> = [];
+  const sql = {
+    query: async (text: string, values: readonly unknown[] = []) => {
+      queries.push({ text, values });
+      if (text.includes("SELECT samurai_can_room")) {
+        return { rows: [{ allowed: input.roomRead !== false }] };
+      }
+      if (text.includes("FROM workspace_completion_resources")) {
+        const visible = resource.workspace_id === values[0]
+          && resource.id === values[1]
+          && resource.resource_kind === values[2]
+          && resource.lifecycle_state !== "archived"
+          && (resource.scope_kind === "workspace" || resource.room_id === values[3]);
+        return { rows: visible ? [resource] : [] };
+      }
+      if (text.includes("FROM workspace_completion_resource_versions")) {
+        const requestedVersion = Number(values[2]);
+        const visible = version.workspace_id === values[0]
+          && version.resource_id === values[1]
+          && Number(version.version) === requestedVersion;
+        return { rows: visible ? [{ ...version, batch_status: input.batchStatus ?? "renamed" }] : [] };
+      }
+      throw new Error(`unexpected query: ${text}`);
+    }
+  };
+  return {
+    storageRoot: "/tmp/samurai-workspace-server-test",
+    database: {
+      withContext: async (_context: unknown, action: (sql: typeof sql) => Promise<unknown>) => action(sql)
+    },
+    queries
   };
 }

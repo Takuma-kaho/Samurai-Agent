@@ -21280,6 +21280,302 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "REVOKE EXECUTE ON FUNCTION samurai_require_human_work_runtime_fence() FROM PUBLIC"
     ]
   },
+  {
+    // v125 stores server-owned Knowledge/Skill refs separately from file
+    // attachments.  The columns are added independently so an existing
+    // database can apply this migration without rebuilding Room Work rows.
+    version: 125,
+    name: "workspace_server_human_work_resource_refs",
+    statements: [
+      "ALTER TABLE workspace_human_works ADD COLUMN IF NOT EXISTS resource_refs JSONB NOT NULL DEFAULT '[]'::JSONB",
+      "ALTER TABLE workspace_human_work_instructions ADD COLUMN IF NOT EXISTS resource_refs JSONB NOT NULL DEFAULT '[]'::JSONB",
+      `DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'workspace_human_works_resource_refs_array_check'
+        ) THEN
+          ALTER TABLE workspace_human_works
+            ADD CONSTRAINT workspace_human_works_resource_refs_array_check
+            CHECK (jsonb_typeof(resource_refs) = 'array');
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'workspace_human_work_instructions_resource_refs_array_check'
+        ) THEN
+          ALTER TABLE workspace_human_work_instructions
+            ADD CONSTRAINT workspace_human_work_instructions_resource_refs_array_check
+            CHECK (jsonb_typeof(resource_refs) = 'array');
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_create_human_work(
+        target_workspace_id TEXT,
+        target_work_id TEXT,
+        target_assignment_id TEXT,
+        target_instruction_id TEXT,
+        target_launch_reservation_id TEXT,
+        target_room_id TEXT,
+        target_requester_account_id TEXT,
+        target_default_agent_id TEXT,
+        target_default_agent_version BIGINT,
+        target_title TEXT,
+        target_objective TEXT,
+        target_completion_criteria JSONB,
+        target_instruction_body TEXT,
+        target_attachment_refs JSONB,
+        target_resource_refs JSONB,
+        target_scheduled_at TIMESTAMPTZ,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE result JSONB;
+      DECLARE normalized_resource_refs JSONB := COALESCE(target_resource_refs, '[]'::JSONB);
+      DECLARE stored_work_resource_refs JSONB;
+      DECLARE stored_instruction_resource_refs JSONB;
+      BEGIN
+        IF jsonb_typeof(normalized_resource_refs) <> 'array'
+          OR jsonb_array_length(CASE WHEN jsonb_typeof(normalized_resource_refs) = 'array' THEN normalized_resource_refs ELSE '[]'::JSONB END) > 32
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(normalized_resource_refs) = 'array' THEN normalized_resource_refs ELSE '[]'::JSONB END
+            ) AS ref(value)
+            WHERE jsonb_typeof(ref.value) <> 'object'
+              OR NOT (ref.value ? 'kind')
+              OR COALESCE(ref.value ->> 'kind', '') NOT IN ('knowledge', 'skill')
+              OR NOT (ref.value ? 'id')
+              OR btrim(COALESCE(ref.value ->> 'id', '')) = ''
+              OR NOT (ref.value ? 'uri')
+              OR btrim(COALESCE(ref.value ->> 'uri', '')) = ''
+              OR ref.value ? 'version' AND (
+                jsonb_typeof(ref.value -> 'version') <> 'string'
+                OR (ref.value ->> 'version') !~ '^[1-9][0-9]*$'
+              )
+              OR ref.value ? 'label' AND (
+                jsonb_typeof(ref.value -> 'label') <> 'string'
+                OR btrim(COALESCE(ref.value ->> 'label', '')) = ''
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_object_keys(
+                  CASE WHEN jsonb_typeof(ref.value) = 'object' THEN ref.value ELSE '{}'::JSONB END
+                ) AS key(name)
+                WHERE key.name NOT IN ('kind', 'id', 'uri', 'version', 'label')
+              )
+          ) THEN
+          RAISE EXCEPTION 'human_work_resource_reference_invalid';
+        END IF;
+        result := samurai_create_human_work(
+          target_workspace_id, target_work_id, target_assignment_id,
+          target_instruction_id, target_launch_reservation_id, target_room_id,
+          target_requester_account_id, target_default_agent_id,
+          target_default_agent_version, target_title, target_objective,
+          target_completion_criteria, target_instruction_body,
+          target_attachment_refs, target_scheduled_at, target_operation_id
+        );
+        SELECT resource_refs INTO stored_work_resource_refs
+        FROM workspace_human_works
+        WHERE workspace_id = target_workspace_id AND id = target_work_id;
+        SELECT resource_refs INTO stored_instruction_resource_refs
+        FROM workspace_human_work_instructions
+        WHERE workspace_id = target_workspace_id AND id = target_instruction_id;
+        IF COALESCE((result ->> 'replayed')::BOOLEAN, FALSE) THEN
+          IF stored_work_resource_refs IS DISTINCT FROM normalized_resource_refs
+            OR stored_instruction_resource_refs IS DISTINCT FROM normalized_resource_refs THEN
+            RAISE EXCEPTION 'human_work_operation_conflict';
+          END IF;
+        ELSE
+          UPDATE workspace_human_works
+          SET resource_refs = normalized_resource_refs, updated_at = NOW()
+          WHERE workspace_id = target_workspace_id AND id = target_work_id;
+          UPDATE workspace_human_work_instructions
+          SET resource_refs = normalized_resource_refs
+          WHERE workspace_id = target_workspace_id AND id = target_instruction_id;
+        END IF;
+        RETURN result;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_append_human_work_instruction(
+        target_workspace_id TEXT,
+        target_instruction_id TEXT,
+        target_work_id TEXT,
+        target_assignment_id TEXT,
+        target_body TEXT,
+        target_expected_instruction_version BIGINT,
+        target_source_kind TEXT,
+        target_source_comment_id TEXT,
+        target_source_comment_version BIGINT,
+        target_attachment_refs JSONB,
+        target_resource_refs JSONB,
+        target_expected_generation BIGINT,
+        target_operation_id TEXT
+      ) RETURNS JSONB
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE result JSONB;
+      DECLARE normalized_resource_refs JSONB := COALESCE(target_resource_refs, '[]'::JSONB);
+      BEGIN
+        IF jsonb_typeof(normalized_resource_refs) <> 'array'
+          OR jsonb_array_length(CASE WHEN jsonb_typeof(normalized_resource_refs) = 'array' THEN normalized_resource_refs ELSE '[]'::JSONB END) > 32
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(normalized_resource_refs) = 'array' THEN normalized_resource_refs ELSE '[]'::JSONB END
+            ) AS ref(value)
+            WHERE jsonb_typeof(ref.value) <> 'object'
+              OR NOT (ref.value ? 'kind')
+              OR COALESCE(ref.value ->> 'kind', '') NOT IN ('knowledge', 'skill')
+              OR NOT (ref.value ? 'id')
+              OR btrim(COALESCE(ref.value ->> 'id', '')) = ''
+              OR NOT (ref.value ? 'uri')
+              OR btrim(COALESCE(ref.value ->> 'uri', '')) = ''
+              OR ref.value ? 'version' AND (
+                jsonb_typeof(ref.value -> 'version') <> 'string'
+                OR (ref.value ->> 'version') !~ '^[1-9][0-9]*$'
+              )
+              OR ref.value ? 'label' AND (
+                jsonb_typeof(ref.value -> 'label') <> 'string'
+                OR btrim(COALESCE(ref.value ->> 'label', '')) = ''
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_object_keys(
+                  CASE WHEN jsonb_typeof(ref.value) = 'object' THEN ref.value ELSE '{}'::JSONB END
+                ) AS key(name)
+                WHERE key.name NOT IN ('kind', 'id', 'uri', 'version', 'label')
+              )
+          ) THEN
+          RAISE EXCEPTION 'human_work_resource_reference_invalid';
+        END IF;
+        result := samurai_append_human_work_instruction(
+          target_workspace_id, target_instruction_id, target_work_id,
+          target_assignment_id, target_body, target_expected_instruction_version,
+          target_source_kind, target_source_comment_id, target_source_comment_version,
+          target_attachment_refs, target_expected_generation, target_operation_id
+        );
+        UPDATE workspace_human_work_instructions
+        SET resource_refs = normalized_resource_refs
+        WHERE workspace_id = target_workspace_id AND id = target_instruction_id;
+        IF NOT FOUND THEN RAISE EXCEPTION 'human_work_instruction_not_found'; END IF;
+        UPDATE workspace_human_works
+        SET resource_refs = normalized_resource_refs, updated_at = NOW()
+        WHERE workspace_id = target_workspace_id AND id = target_work_id;
+        RETURN result;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_create_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, JSONB, TEXT, JSONB, JSONB, TIMESTAMPTZ, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_append_human_work_instruction(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, BIGINT, JSONB, JSONB, BIGINT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // v46 intended to replace the original NULLS NOT DISTINCT constraint
+    // with a partial unique index. PostgreSQL truncated the generated v1
+    // constraint name, so v46's explicit DROP CONSTRAINT did not remove it.
+    // Keep external keys unique when present, while allowing unrelated
+    // Activity operations in the same Room to create distinct Episodes.
+    version: 126,
+    name: "workspace_server_completion_episode_external_key_nullability_repair",
+    statements: [
+      `DO $$
+      DECLARE legacy_constraint_name TEXT;
+      BEGIN
+        FOR legacy_constraint_name IN
+          SELECT constraint_row.conname
+          FROM pg_constraint AS constraint_row
+          WHERE constraint_row.conrelid = 'workspace_completion_episodes'::REGCLASS
+            AND constraint_row.contype = 'u'
+            AND pg_get_constraintdef(constraint_row.oid) LIKE
+              'UNIQUE NULLS NOT DISTINCT (workspace_id, room_id, external_episode_key)%'
+        LOOP
+          EXECUTE format(
+            'ALTER TABLE workspace_completion_episodes DROP CONSTRAINT %I',
+            legacy_constraint_name
+          );
+        END LOOP;
+      END
+      $$`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS workspace_completion_episodes_external_key_unique ON workspace_completion_episodes(workspace_id, room_id, external_episode_key) WHERE external_episode_key IS NOT NULL"
+    ]
+  },
+  {
+    // Every Runtime Run carries a server-owned runtime_binding. Only bindings
+    // with a Work-specific field are Human Work admissions; ordinary chat
+    // runs must not be rejected merely because they retain their Agent and
+    // Room execution provenance.
+    version: 127,
+    name: "workspace_server_human_work_runtime_binding_scope_fix",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_capture_human_work_runtime_run_link()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE binding JSONB;
+      DECLARE work_row workspace_human_works%ROWTYPE;
+      DECLARE assignment_row workspace_human_work_assignments%ROWTYPE;
+      DECLARE binding_generation BIGINT;
+      DECLARE binding_agent_version BIGINT;
+      DECLARE has_human_work_binding BOOLEAN;
+      BEGIN
+        binding := CASE WHEN jsonb_typeof(NEW.metadata -> 'runtime_binding') = 'object'
+          THEN NEW.metadata -> 'runtime_binding' ELSE NULL END;
+        IF binding IS NULL THEN RETURN NEW; END IF;
+        has_human_work_binding :=
+          NULLIF(btrim(COALESCE(binding ->> 'work_id', '')), '') IS NOT NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'assignee_id', '')), '') IS NOT NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'parent_assignee_id', '')), '') IS NOT NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'reservation_id', '')), '') IS NOT NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'lease_owner', '')), '') IS NOT NULL;
+        IF NOT has_human_work_binding THEN RETURN NEW; END IF;
+        IF NULLIF(btrim(COALESCE(binding ->> 'workspace_id', '')), '') IS NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'room_id', '')), '') IS NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'session_id', '')), '') IS NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'work_id', '')), '') IS NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'assignee_id', '')), '') IS NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'agent_id', '')), '') IS NULL
+          OR NULLIF(btrim(COALESCE(binding ->> 'backend_id', '')), '') IS NULL
+          OR (binding ->> 'generation') !~ '^[0-9]+$'
+          OR (binding ->> 'agent_configuration_version') !~ '^[0-9]+$' THEN
+          RAISE EXCEPTION 'human_work_runtime_binding_invalid';
+        END IF;
+        binding_generation := (binding ->> 'generation')::BIGINT;
+        binding_agent_version := (binding ->> 'agent_configuration_version')::BIGINT;
+        IF NEW.workspace_id IS DISTINCT FROM (binding ->> 'workspace_id')
+          OR NEW.room_id IS DISTINCT FROM (binding ->> 'room_id')
+          OR NEW.session_id IS DISTINCT FROM (binding ->> 'session_id')
+          OR NEW.agent_id IS DISTINCT FROM (binding ->> 'agent_id')
+          OR NEW.backend_id IS DISTINCT FROM (binding ->> 'backend_id') THEN
+          RAISE EXCEPTION 'human_work_runtime_binding_invalid';
+        END IF;
+        SELECT * INTO work_row
+        FROM workspace_human_works
+        WHERE workspace_id = NEW.workspace_id AND id = (binding ->> 'work_id')
+        FOR SHARE;
+        IF NOT FOUND OR work_row.room_id IS DISTINCT FROM NEW.room_id
+          OR work_row.stop_state <> 'none'
+          OR work_row.control_generation <> binding_generation THEN
+          RAISE EXCEPTION 'human_work_runtime_binding_invalid';
+        END IF;
+        SELECT * INTO assignment_row
+        FROM workspace_human_work_assignments
+        WHERE workspace_id = NEW.workspace_id
+          AND id = (binding ->> 'assignee_id')
+          AND work_id = work_row.id
+          AND room_id = NEW.room_id
+        FOR UPDATE;
+        IF NOT FOUND OR assignment_row.status <> 'running'
+          OR assignment_row.agent_id IS DISTINCT FROM (binding ->> 'agent_id')
+          OR assignment_row.agent_version <> binding_agent_version
+          OR (assignment_row.current_run_id IS NOT NULL AND assignment_row.current_run_id <> NEW.id) THEN
+          RAISE EXCEPTION 'human_work_runtime_binding_invalid';
+        END IF;
+        UPDATE workspace_human_work_assignments
+        SET current_run_id = NEW.id, updated_at = NOW()
+        WHERE workspace_id = NEW.workspace_id AND id = assignment_row.id;
+        RETURN NEW;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_capture_human_work_runtime_run_link() FROM PUBLIC"
+    ]
+  },
 ];
 
 function workspaceGatewayRlsStatements(): string[] {
@@ -21908,8 +22204,10 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_human_work_assignment_is_superseded(TEXT, TEXT)",
     "samurai_set_human_work_comment_reaction(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, BIGINT, TEXT)",
     "samurai_create_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, JSONB, TEXT, JSONB, TIMESTAMPTZ, TEXT)",
+    "samurai_create_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, JSONB, TEXT, JSONB, JSONB, TIMESTAMPTZ, TEXT)",
     "samurai_add_human_work_comment(TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, BIGINT, TEXT)",
     "samurai_append_human_work_instruction(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, BIGINT, JSONB, BIGINT, TEXT)",
+    "samurai_append_human_work_instruction(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, BIGINT, JSONB, JSONB, BIGINT, TEXT)",
     "samurai_reflect_human_work_comment(TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, JSONB, BIGINT, TEXT)",
     "samurai_control_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, JSONB)",
     "samurai_assert_human_work_runtime_admission(TEXT, TEXT, TEXT, BIGINT)",

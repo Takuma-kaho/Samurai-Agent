@@ -255,6 +255,28 @@ describe("Native App component states", () => {
     expect(markup).toMatch(/button[^>]*disabled/);
   });
 
+  it("keeps deep, read-only Rooms reachable while blocking an explicit view denial", () => {
+    const rooms = Array.from({ length: 9 }, (_, index) => ({
+      id: `room_${index}`,
+      workspaceId: "workspace_1",
+      name: `Room ${index}`,
+      ...(index === 0 ? {} : { parentRoomId: `room_${index - 1}` }),
+      ...(index === 8 ? { canExecute: false } : {})
+    }));
+    const markup = renderToStaticMarkup(createElement(RoomNavigator, {
+      rooms: [...rooms, { id: "room_hidden", workspaceId: "workspace_1", name: "Hidden", canView: false }],
+      onSelect: vi.fn()
+    }));
+
+    expect(markup).toContain("--native-room-depth:8");
+    expect(markup).toContain("読み取り専用");
+    const readOnlyStart = markup.indexOf("Room 8");
+    expect(markup.slice(readOnlyStart - 180, readOnlyStart + 160)).not.toContain("disabled");
+    const deniedStart = markup.indexOf("Hidden");
+    expect(markup.slice(deniedStart - 180, deniedStart + 160)).toContain("disabled");
+    expect(markup).toContain("閲覧不可");
+  });
+
   it("offers reconnect and retry affordances after an Agent failure", () => {
     const markup = renderToStaticMarkup(createElement(ChatSurface, {
       roomName: "Main",

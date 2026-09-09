@@ -140,6 +140,12 @@ export interface NativeRoomWorkInstruction {
   kind: "initial" | "reply" | "comment_apply" | "delegated";
   instruction: string;
   attachments: ResourceRef[];
+  /**
+   * Server-canonical Knowledge/Skill versions used for this instruction.
+   * These are intentionally distinct from file attachments: a resource can
+   * be read by the worker without becoming a user-uploaded file.
+   */
+  resourceRefs?: ResourceRef[];
   version: number;
   generation: number;
   status: NativeRoomWorkInstructionStatus;
@@ -147,6 +153,18 @@ export interface NativeRoomWorkInstruction {
   sourceCommentId?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/**
+ * The renderer may name only a stable Knowledge/Skill version.  The public
+ * API resolves URI and label server-side before a Room Work is persisted.
+ */
+export interface NativeRoomWorkResourceRefInput {
+  kind: "knowledge" | "skill";
+  id: string;
+  version: number;
+  /** Display-only title; it is never sent as an authority field. */
+  label?: string;
 }
 
 export interface NativeRoomWorkComment {
@@ -205,6 +223,8 @@ export interface NativeRoomWork {
   generation: number;
   version: number;
   assignees: NativeRoomWorkAssignee[];
+  /** Latest server-canonical resource set for the Work, if projected. */
+  resourceRefs?: ResourceRef[];
   stopState?: "none" | "requested" | "confirmed" | "unconfirmed";
   instructions?: NativeRoomWorkInstruction[];
   comments?: NativeRoomWorkComment[];
@@ -325,8 +345,8 @@ export interface NativeRoomWorkBridge {
   createWorkspaceRoom?: (input: NativeRoomCreateInput) => Promise<unknown>;
   listWorkspaceRoomWorks?: (input: { roomId: string; status?: NativeRoomWorkStatus; cursor?: string; limit?: number }) => Promise<unknown>;
   getWorkspaceRoomWork?: (input: { roomId: string; workId: string }) => Promise<unknown>;
-  createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId: string }) => Promise<unknown>;
-  replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
+  createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: NativeRoomWorkResourceRefInput[]; agentId?: string; operationId: string }) => Promise<unknown>;
+  replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: NativeRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
   createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string }) => Promise<unknown>;
   applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string; operationId: string }) => Promise<unknown>;
   reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction: "like"; enabled?: boolean; expectedVersion?: number; operationId: string }) => Promise<unknown>;

@@ -1,8 +1,11 @@
 import {
   ActivityFailureSchema,
   ActivityVerificationRecordSchema,
+  ArtifactContentEncodingSchema,
   ArtifactRecordSchema,
   ArtifactRevisionRecordSchema,
+  GeneratedSurfaceDefinitionSchema,
+  GeneratedSurfaceRevisionRecordSchema,
   PublicAgentDmRecordSchema as CorePublicAgentDmRecordSchema,
   PublicRoomWorkAssigneeSchema as CorePublicRoomWorkAssigneeSchema,
   PublicRoomWorkCommentSchema as CorePublicRoomWorkCommentSchema,
@@ -180,6 +183,32 @@ export type PublicRoomKind = z.infer<typeof PublicRoomKindSchema>;
 export const PublicRoomWorkAttachmentSchema = WorkspaceFileResourceRefSchema;
 export type PublicRoomWorkAttachment = z.infer<typeof PublicRoomWorkAttachmentSchema>;
 
+/**
+ * A Completion resource reference that has already been resolved by the
+ * Server.  Room Work never accepts a generic ResourceRef here: a caller may
+ * reference only a Knowledge or Skill, and the URI/label are always rebuilt
+ * from the selected immutable Completion version on the Server.
+ */
+export const PublicRoomWorkResourceRefSchema = z.object({
+  kind: z.enum(["knowledge", "skill"]),
+  id: publicCollaborationId,
+  uri: z.string().trim().min(1).max(4_096),
+  version: z.string().regex(/^[1-9][0-9]*$/),
+  label: z.string().trim().min(1).max(4_096).optional()
+}).strict();
+export type PublicRoomWorkResourceRef = z.infer<typeof PublicRoomWorkResourceRefSchema>;
+
+/** Client-side selector for a server-owned Completion resource. */
+export const PublicRoomWorkResourceRefInputSchema = z.object({
+  kind: z.enum(["knowledge", "skill"]),
+  id: publicCollaborationId,
+  version: z.union([
+    z.number().int().positive(),
+    z.string().regex(/^[1-9][0-9]*$/)
+  ])
+}).strict();
+export type PublicRoomWorkResourceRefInput = z.input<typeof PublicRoomWorkResourceRefInputSchema>;
+
 export const PublicRoomDefaultAgentRecordSchema = z.object({
   room_id: publicCollaborationId,
   agent_id: publicCollaborationId,
@@ -200,7 +229,9 @@ export type PublicRoomWorkStatus = z.infer<typeof PublicRoomWorkStatusSchema>;
 export const PublicRoomWorkAssigneeSchema = CorePublicRoomWorkAssigneeSchema;
 export type PublicRoomWorkAssignee = z.infer<typeof PublicRoomWorkAssigneeSchema>;
 
-export const PublicRoomWorkInstructionSchema = CorePublicRoomWorkInstructionSchema;
+export const PublicRoomWorkInstructionSchema = CorePublicRoomWorkInstructionSchema.extend({
+  resource_refs: z.array(PublicRoomWorkResourceRefSchema).max(32).default([])
+}).strict();
 export type PublicRoomWorkInstruction = z.infer<typeof PublicRoomWorkInstructionSchema>;
 
 export const PublicRoomWorkCommentSchema = CorePublicRoomWorkCommentSchema;
@@ -216,10 +247,15 @@ export type PublicRoomWorkReactionRecord = PublicRoomWorkReaction;
 export const PublicRoomWorkControlSchema = CorePublicRoomWorkControlSchema;
 export type PublicRoomWorkControl = z.infer<typeof PublicRoomWorkControlSchema>;
 
-export const PublicRoomWorkRecordSchema = CorePublicRoomWorkRecordSchema;
+export const PublicRoomWorkRecordSchema = CorePublicRoomWorkRecordSchema.extend({
+  resource_refs: z.array(PublicRoomWorkResourceRefSchema).max(32).default([])
+}).strict();
 export type PublicRoomWorkRecord = z.infer<typeof PublicRoomWorkRecordSchema>;
 
-export const PublicRoomWorkViewSchema = CorePublicRoomWorkViewSchema;
+export const PublicRoomWorkViewSchema = CorePublicRoomWorkViewSchema.extend({
+  resource_refs: z.array(PublicRoomWorkResourceRefSchema).max(32).default([]),
+  instructions: z.array(PublicRoomWorkInstructionSchema).max(1_000)
+}).strict();
 export type PublicRoomWorkView = z.infer<typeof PublicRoomWorkViewSchema>;
 
 /** Agent DM is a private Room projection. The caller's Account is inferred by the Server. */
@@ -236,20 +272,27 @@ const publicRoomWorkInstructionOrAttachment = (bodyField: "instruction" | "body"
   attachments: z.array(PublicRoomWorkAttachmentSchema).max(100).default([])
 }).strict();
 
+const publicRoomWorkInstructionOrAttachmentOrResource = (bodyField: "instruction" | "body") => publicRoomWorkInstructionOrAttachment(bodyField).extend({
+  resource_refs: z.array(PublicRoomWorkResourceRefInputSchema).max(32).default([])
+}).strict();
+
 const requirePublicRoomWorkTextOrAttachment = <T extends z.ZodTypeAny>(schema: T, bodyField: "instruction" | "body") => schema.superRefine((input: Record<string, unknown>, issue) => {
   const text = input[bodyField];
   const attachments = input.attachments;
-  if (!(typeof text === "string" && text.trim()) && !(Array.isArray(attachments) && attachments.length > 0)) {
+  const resourceRefs = input.resource_refs;
+  if (!(typeof text === "string" && text.trim())
+    && !(Array.isArray(attachments) && attachments.length > 0)
+    && !(Array.isArray(resourceRefs) && resourceRefs.length > 0)) {
     issue.addIssue({ code: z.ZodIssueCode.custom, path: [bodyField], message: "room_work_requires_text_or_attachment" });
   }
 });
 
-export const PublicRoomWorkCreateInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachment("instruction").extend({
+export const PublicRoomWorkCreateInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachmentOrResource("instruction").extend({
   agent_id: publicCollaborationId.optional()
 }).strict(), "instruction");
 export type PublicRoomWorkCreateInput = z.input<typeof PublicRoomWorkCreateInputSchema>;
 
-export const PublicRoomWorkReplyInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachment("instruction").extend({
+export const PublicRoomWorkReplyInputSchema = requirePublicRoomWorkTextOrAttachment(publicRoomWorkInstructionOrAttachmentOrResource("instruction").extend({
   work_id: publicCollaborationId,
   assignee_id: publicCollaborationId.optional(),
   expected_version: publicCollaborationVersion.optional(),
@@ -665,6 +708,7 @@ export const publicDomainOperationIds = Object.freeze([
   "room.default_agent.set", "room.work.stop", "room.work.assignee.stop", "room.work.assignee.reassign", "room.work.assignee.delegate", "agent.dm.open",
   "agent.backend.list", "agent.list", "agent.view", "agent.create", "agent.patch", "agent.backend.bind",
   "artifact.list", "artifact.view", "artifact.create", "artifact.revise", "artifact.restore_revision", "artifact.repair",
+  "generated_surface.create", "generated_surface.revise", "generated_surface.action.run", "generated_surface.state", "generated_surface.export",
   "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
   "organization.member.list", "organization.member.invite", "organization.member.accept", "organization.member.role.change", "organization.member.remove", "organization.member.leave",
   "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue", "organization.invitation.extend",
@@ -719,9 +763,35 @@ export const legacyPublicDomainOperationCompatibility = publicLegacyDomainOperat
 const publicArtifactMutationOutputSchema = z.object({
   artifact: ArtifactRecordSchema,
   content: z.string().optional(),
+  content_bytes: z.array(z.number().int().min(0).max(255)).optional(),
+  mime_type: z.string().trim().min(1).max(255).optional(),
+  encoding: ArtifactContentEncodingSchema.optional(),
   revision: ArtifactRevisionRecordSchema.optional(),
   repair: z.object({ repaired: z.boolean() }).strict().optional(),
   replayed: z.boolean()
+}).strict();
+
+const publicArtifactViewOutputSchema = z.object({
+  artifact: ArtifactRecordSchema,
+  content: z.string(),
+  content_bytes: z.array(z.number().int().min(0).max(255)).optional(),
+  mime_type: z.string().trim().min(1).max(255),
+  encoding: ArtifactContentEncodingSchema,
+  revision: ArtifactRevisionRecordSchema.optional()
+}).strict();
+
+const publicGeneratedSurfaceMutationOutputSchema = z.object({
+  definition: GeneratedSurfaceDefinitionSchema.optional(),
+  revision: GeneratedSurfaceRevisionRecordSchema.optional(),
+  replayed: z.boolean().optional()
+}).strict();
+
+const publicGeneratedSurfaceActionOutputSchema = z.object({
+  surface: GeneratedSurfaceDefinitionSchema,
+  action: z.record(jsonValueSchema),
+  command: z.record(jsonValueSchema),
+  interaction: z.record(jsonValueSchema).optional(),
+  target_result: jsonValueSchema.optional()
 }).strict();
 
 /** Output projections are part of the public contract. The PostgreSQL v1
@@ -744,7 +814,18 @@ export function publicOperationOutputSchemaFor(operationId: string, fallback: z.
   if (operationId === "agent.backend.list") return z.array(PublicAgentBackendRecordSchema);
   if (operationId === "agent.list") return z.array(PublicAgentRecordSchema);
   if (["agent.view", "agent.create", "agent.patch", "agent.backend.bind"].includes(operationId)) return PublicAgentRecordSchema;
+  if (operationId === "artifact.view") return publicArtifactViewOutputSchema;
   if (["artifact.create", "artifact.revise", "artifact.restore_revision", "artifact.repair"].includes(operationId)) return publicArtifactMutationOutputSchema;
+  if (["generated_surface.create", "generated_surface.revise"].includes(operationId)) return publicGeneratedSurfaceMutationOutputSchema;
+  if (operationId === "generated_surface.action.run") return publicGeneratedSurfaceActionOutputSchema;
+  if (operationId === "generated_surface.state") return GeneratedSurfaceDefinitionSchema;
+  if (operationId === "generated_surface.export") return z.object({
+    surface: GeneratedSurfaceDefinitionSchema,
+    revision: GeneratedSurfaceRevisionRecordSchema,
+    bundle: z.object({ html: z.string(), css: z.string().optional(), script: z.string().optional() }).strict(),
+    format: z.enum(["html", "zip"]),
+    file_name: z.string().trim().min(1)
+  }).strict();
   if (operationId === "organization.list") return z.array(PublicOrganizationRecordSchema);
   if (["organization.view", "organization.create", "organization.patch", "organization.delete"].includes(operationId)) return PublicOrganizationRecordSchema;
   if (operationId === "organization.member.list") return z.array(PublicOrganizationMembershipRecordSchema);
@@ -771,6 +852,8 @@ export function publicOperationInputSchemaFor(operationId: string, fallback: z.Z
   if (operationId === "room.member.list") return z.object({}).strict();
   if (operationId === "room.agent.permission.set") return PublicRoomAgentPermissionSetInputSchema;
   if (operationId === "room.agent.remove") return PublicRoomAgentRemoveInputSchema;
+  if (operationId === "room.work.create") return PublicRoomWorkCreateInputSchema;
+  if (operationId === "room.work.reply") return PublicRoomWorkReplyInputSchema;
   return fallback;
 }
 
@@ -902,6 +985,13 @@ const eventPayloadSchemas = {
   }).strict(),
   "workspace.agent.changed": z.object({ agent_id: z.string().trim().min(1), action: z.enum(["created", "patched", "backend_bound"]) }).strict(),
   "workspace.artifact.changed": z.object({ artifact_id: z.string().trim().min(1), action: z.enum(["created", "revised", "restored", "repaired"]), revision_id: z.string().trim().min(1).optional() }).strict(),
+  "workspace.generated_surface.changed": z.object({ surface_id: z.string().trim().min(1), action: z.enum(["created", "revised", "action", "state_changed", "exported"]), revision_id: z.string().trim().min(1).optional() }).strict(),
+  "workspace.interaction_request.changed": z.object({
+    request_id: z.string().trim().min(1),
+    kind: z.enum(["approval", "backend_input"]),
+    status: z.enum(["pending", "accepted", "denied", "cancelled", "expired", "executing", "completed", "failed"]),
+    action: z.enum(["created", "responded", "cancelled", "executing", "completed", "failed", "expired"])
+  }).strict(),
   // Organization events carry stable resource IDs and role/state facts only.
   // They deliberately omit raw invitation tokens, private Account fields, and
   // all Room/Message/Knowledge content.
@@ -930,6 +1020,8 @@ const eventResourceKinds: Record<keyof typeof eventPayloadSchemas, string[]> = {
   "workspace.agent_dm.changed": ["room", "agent"],
   "workspace.agent.changed": ["agent"],
   "workspace.artifact.changed": ["artifact", "artifact_revision"],
+  "workspace.generated_surface.changed": ["generated_surface", "generated_surface_revision"],
+  "workspace.interaction_request.changed": ["interaction_request", "room", "backend_run", "generated_surface", "generated_surface_revision"],
   "organization.created": ["organization"],
   "organization.member.invited": ["organization", "organization_invitation"],
   "organization.member.accepted": ["organization", "organization_membership"],
@@ -1247,11 +1339,88 @@ export class DomainApiClient {
     });
   }
 
+  runArtifactSurfaceOperation<T = JsonValue>(workspaceId: string, roomId: string, operation: JsonValue, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/artifacts/surface/operations`,
+      body: { room_id: roomId, operation },
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
   executeQuery<T = JsonValue>(workspaceId: string, queryId: string, request: DomainApiRequest): Promise<DomainApiResponse<T>> {
     return this.transport<DomainApiResponse<T>>({
       method: "POST",
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/domain/queries/${encodeURIComponent(queryId)}`,
       body: request
+    });
+  }
+
+  /** Fixed Room-scoped Artifact revision reads. Body bytes are returned as a
+   * numeric byte array for JSON transports; the Desktop route may also expose
+   * the same revision through its authenticated file endpoint. */
+  listArtifactRevisions<T = JsonValue>(workspaceId: string, roomId: string, artifactId: string): Promise<T> {
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}/revisions?room_id=${encodeURIComponent(roomId)}`
+    });
+  }
+
+  getArtifactRevision<T = JsonValue>(workspaceId: string, roomId: string, artifactId: string, revisionId: string): Promise<T> {
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}/revisions/${encodeURIComponent(revisionId)}?room_id=${encodeURIComponent(roomId)}`
+    });
+  }
+
+  listGeneratedSurfaces<T = JsonValue>(workspaceId: string, roomId: string): Promise<T> {
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces?room_id=${encodeURIComponent(roomId)}`
+    });
+  }
+
+  getGeneratedSurface<T = JsonValue>(workspaceId: string, roomId: string, surfaceId: string): Promise<T> {
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces/${encodeURIComponent(surfaceId)}?room_id=${encodeURIComponent(roomId)}`
+    });
+  }
+
+  getGeneratedSurfaceBundle<T = JsonValue>(workspaceId: string, roomId: string, surfaceId: string, revisionId: string): Promise<T> {
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces/${encodeURIComponent(surfaceId)}/revisions/${encodeURIComponent(revisionId)}/bundle?room_id=${encodeURIComponent(roomId)}`
+    });
+  }
+
+  runGeneratedSurfaceAction<T = JsonValue>(workspaceId: string, roomId: string, surfaceId: string, actionId: string, input: Record<string, JsonValue>, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces/${encodeURIComponent(surfaceId)}/actions/${encodeURIComponent(actionId)}/run`,
+      body: { room_id: roomId, ...input },
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  runGeneratedSurfaceState<T = JsonValue>(workspaceId: string, roomId: string, surfaceId: string, input: Record<string, JsonValue>, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces/${encodeURIComponent(surfaceId)}/state`,
+      body: { room_id: roomId, ...input },
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  exportGeneratedSurface<T = JsonValue>(workspaceId: string, roomId: string, surfaceId: string, input: { revision_id?: string; format: "html" | "zip" }): Promise<T> {
+    const query = new URLSearchParams({ room_id: roomId, format: input.format });
+    if (input.revision_id) query.set("revision_id", input.revision_id);
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/generated-surfaces/${encodeURIComponent(surfaceId)}/export?${query.toString()}`
     });
   }
 

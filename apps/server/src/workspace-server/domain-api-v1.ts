@@ -6,6 +6,7 @@ import {
   ActivityRecordSchema,
   AgentRecordSchema,
   ArtifactRecordSchema,
+  GeneratedSurfaceDefinitionSchema,
   ResourceRefSchema,
   RoomWorkAssignmentStatusSchema as CoreRoomWorkAssignmentStatusSchema,
   RoomRecordSchema,
@@ -26,6 +27,8 @@ import {
   PublicWorkspaceOrganizationAssociationResultSchema,
   publicOperationInputSchemaFor,
   PublicRoomRecordSchema,
+  PublicRoomWorkResourceRefInputSchema,
+  PublicRoomWorkResourceRefSchema,
   RunControlActionSchema,
   RunControlInputSchema,
   eventPayloadSchemaFor,
@@ -42,18 +45,29 @@ import {
 } from "@samurai-agent/domain-api";
 import {
   operationDefinitions,
+  type GeneratedSurfaceActionRunInput,
+  type GeneratedSurfaceCreateInput,
+  type GeneratedSurfaceExportInput,
+  type GeneratedSurfaceReviseInput,
+  type GeneratedSurfaceStateInput,
   type TrustedDomainContext
 } from "@samurai-agent/domain-operations";
+import { generatedSurfaceCsp, safeGeneratedSurfaceAssetPath } from "@samurai-agent/runtime";
+import { parseSurfaceOperation } from "@samurai-agent/ui-protocol";
 import {
+  WorkspaceCompletionService,
+  WorkspaceInteractionRequestService,
   WorkspaceServerError,
   type OrganizationRequestContext,
   type WorkspaceRequestContext,
   type WorkspaceServerCommandService,
   type WorkspacePublicEvent,
   type WorkspacePublicEventPage,
+  type WorkspaceInteractionRequest,
   type WorkspaceServerStore
 } from "@samurai-agent/workspace-server";
 import { PostgresArtifact } from "../adapters/runtime/postgres-artifact";
+import { PostgresGeneratedSurface, type GeneratedSurfaceActionTarget } from "../adapters/runtime/postgres-generated-surface";
 import { createPostgresChatSessionThroughDomainOperation } from "../adapters/runtime/postgres-session-domain-operation";
 import { PostgresRuntimeCommandService } from "../adapters/runtime/postgres-runtime-chat";
 import { WorkspaceRealtimeGate } from "./realtime";
@@ -181,6 +195,8 @@ type V1Dependencies = {
   store: WorkspaceServerStore;
   commands: WorkspaceServerCommandService;
   artifacts: PostgresArtifact;
+  generatedSurfaces: PostgresGeneratedSurface;
+  interactionRequests: WorkspaceInteractionRequestService;
   realtimeGate: WorkspaceRealtimeGate;
   authenticateWorkspace: RequestHandler;
   authenticateAccount: RequestHandler;
@@ -190,10 +206,23 @@ type V1Dependencies = {
   organizationContext: (req: Request, organizationId?: string, options?: { mutation?: boolean }) => OrganizationApiRequestContext;
   requestId: (req: Request) => string;
   runtimeFor: (req: Request) => PostgresRuntimeCommandService;
+  /** Optional injection keeps tests and hosts from constructing a second
+   * Completion facade. The fallback is still Server-owned and uses the same
+   * Store/RLS boundary when the legacy mount has not supplied it yet. */
+  completion?: Pick<WorkspaceCompletionService, "getResourceRefForRoom">;
   backendRegistry: {
     statuses(): readonly AgentBackendStatusProjection[];
   };
 };
+
+type WorkspaceEventEmitterDependencies = Pick<V1Dependencies, "io" | "store" | "commands" | "realtimeGate">;
+
+export type WorkspaceInteractionRequestEventAction = "created" | "responded" | "cancelled" | "executing" | "completed" | "failed" | "expired";
+
+export interface WorkspaceInteractionRequestEventOptions {
+  actor?: { kind: "human" | "system"; id?: string };
+  correlationId?: string;
+}
 
 type AgentBackendStatusProjection = {
   id: string;
@@ -210,10 +239,14 @@ type AgentBackendStatusProjection = {
  * to the shared contract and never accepts actor/authority fields from JSON. */
 export function mountDomainApiV1(dependencies: V1Dependencies): void {
   const {
-    app, io, store, commands, artifacts, realtimeGate,
+    app, io, store, commands, artifacts, generatedSurfaces, interactionRequests, realtimeGate,
     authenticateWorkspace, authenticateAccount, asyncRoute, workspaceContext, operationContext,
     organizationContext, requestId, runtimeFor, backendRegistry
   } = dependencies;
+  const executionDependencies: V1Dependencies = {
+    ...dependencies,
+    completion: dependencies.completion ?? new WorkspaceCompletionService(store)
+  };
 
   app.get("/api/v1/workspaces/:workspaceId/domain/catalog", authenticateWorkspace, asyncRoute(async (_req, res) => {
     const contracts = operationDefinitions
@@ -238,6 +271,187 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     res.json(DomainApiCatalogSchema.parse({ api_version: "1", contracts, events: eventCatalog, run_controls: runControlCatalog }));
   }));
 
+  // Canonical Room-scoped Artifact projection. These routes deliberately
+  // carry the Room selector in the signed request and never fall back to a
+  // Workspace-wide Artifact lookup.
+  app.get("/api/v1/workspaces/:workspaceId/artifacts", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "artifact_room_id_required");
+    res.json({ artifacts: await artifacts.list(workspaceContext(req), roomId) });
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/artifacts/:artifactId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "artifact_room_id_required");
+    res.json(await artifacts.get(workspaceContext(req), roomId, pathParam(req, "artifactId")));
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/artifacts/:artifactId/revisions", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "artifact_room_id_required");
+    res.json({ revisions: await artifacts.listRevisions(workspaceContext(req), roomId, pathParam(req, "artifactId")) });
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/artifacts/:artifactId/revisions/:revisionId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "artifact_room_id_required");
+    res.json(await artifacts.getRevisionDetail(workspaceContext(req), roomId, pathParam(req, "artifactId"), pathParam(req, "revisionId")));
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/artifacts/:artifactId/content", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "artifact_room_id_required");
+    const revisionId = optionalQuery(req, "revision_id");
+    const content = await artifacts.readContent(workspaceContext(req), roomId, pathParam(req, "artifactId"), revisionId);
+    res.set("Content-Type", content.mimeType);
+    res.set("Content-Length", String(content.bytes.byteLength));
+    res.set("X-Content-Encoding", content.encoding);
+    res.set("X-Content-Type-Options", "nosniff");
+    res.send(content.bytes);
+  }));
+  app.post("/api/v1/workspaces/:workspaceId/artifacts/surface/operations", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = recordValue(req.body);
+    const roomId = requireRoomBody(body, "room_id", "artifact_room_id_required");
+    const operation = parseSurfaceOperation(body.operation);
+    const context = operationContext(req);
+    if (!operation || operation.kind !== "artifact.request" || operation.id !== context.operationId) throw new WorkspaceServerError("artifact_surface_operation_invalid", 400);
+    const result = await artifacts.runSurfaceOperation(context, roomId, operation);
+    const created = result.result && typeof result.result === "object" && !Array.isArray(result.result)
+      ? result.result as Record<string, unknown>
+      : undefined;
+    const artifact = created?.artifact && typeof created.artifact === "object" && !Array.isArray(created.artifact)
+      ? created.artifact as Record<string, unknown>
+      : undefined;
+    if (artifact && typeof artifact.id === "string") {
+      await appendAndEmitPublicEvent(dependencies, context, {
+        eventType: "workspace.artifact.changed",
+        roomId,
+        resources: [resourceRef("artifact", artifact.id, typeof artifact.title === "string" ? artifact.title : artifact.id)],
+        authorizationAction: "edit",
+        payload: { artifact_id: artifact.id, action: "created" }
+      });
+    }
+    res.status(201).json(result);
+  }));
+
+  // Generated Surface read/action routes are the versioned counterpart of
+  // the older `/api/workspaces/.../generated-surfaces` compatibility routes.
+  app.get("/api/v1/workspaces/:workspaceId/generated-surfaces", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "generated_surface_room_id_required");
+    const rows = await commands.listRecords(workspaceContext(req), { roomId, recordType: "generated_surface", limit: 500 });
+    const surfaces = rows.map((row) => GeneratedSurfaceDefinitionSchema.parse(row.payload));
+    res.json({ surfaces });
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/generated-surfaces/:surfaceId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "generated_surface_room_id_required");
+    res.json(await generatedSurfaces.detail(workspaceContext(req), roomId, pathParam(req, "surfaceId")));
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/generated-surfaces/:surfaceId/revisions/:revisionId/bundle", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "generated_surface_room_id_required");
+    res.json(await generatedSurfaces.bundle(workspaceContext(req), roomId, pathParam(req, "surfaceId"), pathParam(req, "revisionId")));
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/generated-surfaces/:surfaceId/export", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "generated_surface_room_id_required");
+    const format = optionalQuery(req, "format") === "zip" ? "zip" : "html";
+    const revisionId = optionalQuery(req, "revision_id");
+    const input = { surface_id: pathParam(req, "surfaceId"), ...(revisionId ? { revision_id: revisionId } : {}), format } as const;
+    if (format === "zip") {
+      const zip = await generatedSurfaces.createExportZip(workspaceContext(req), roomId, input);
+      res.json({ file_name: zip.fileName, content_type: "application/zip", content_base64: zip.content.toString("base64") });
+      return;
+    }
+    const exported = await generatedSurfaces.export(workspaceContext(req), roomId, input);
+    const assets = await generatedSurfaces.readAssets(workspaceContext(req), roomId, exported.revision);
+    const content = generatedSurfaceDocument(exported.bundle, exported.surface.actions, generatedSurfaceAssetPayload(assets));
+    res.json({ file_name: exported.file_name, content_type: "text/html", content_base64: Buffer.from(content, "utf8").toString("base64") });
+  }));
+  app.post("/api/v1/workspaces/:workspaceId/generated-surfaces/:surfaceId/actions/:actionId/run", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = recordValue(req.body);
+    assertOnlyFields(body, ["room_id", "revision_id", "interaction_id", "message_id", "action_payload"], "generated_surface_action_body_invalid");
+    const roomId = requireRoomBody(body, "room_id", "generated_surface_room_id_required");
+    const operation = operationContext(req);
+    const submitted = await submitGeneratedSurfaceAction(dependencies, operation, {
+      room_id: roomId,
+      surface_id: pathParam(req, "surfaceId"),
+      action_id: pathParam(req, "actionId"),
+      ...(optionalStringField(body, "revision_id") ? { revision_id: optionalStringField(body, "revision_id") } : {}),
+      ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
+      ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {}),
+      action_payload: body.action_payload === undefined ? {} : objectField(body, "action_payload")
+    });
+    if (submitted.kind === "approval_required") {
+      res.status(submitted.replayed ? 200 : 202).json({ status: "approval_required", request: submitted.request, replayed: submitted.replayed });
+      return;
+    }
+    await appendAndEmitPublicEvent(dependencies, operation, {
+      eventType: "workspace.generated_surface.changed",
+      roomId,
+      resources: [resourceRef("generated_surface", pathParam(req, "surfaceId"), pathParam(req, "surfaceId"))],
+      authorizationAction: "execute",
+      payload: { surface_id: pathParam(req, "surfaceId"), action: "action" }
+    });
+    res.status(201).json(submitted.result);
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/interaction-requests", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "workspace_interaction_room_id_required");
+    const includeResolved = optionalBooleanQuery(req, "include_resolved") ?? false;
+    await store.assertRoomReadable(workspaceContext(req), roomId);
+    res.json({ requests: await interactionRequests.list(workspaceContext(req), { roomId, includeResolved }) });
+  }));
+  app.get("/api/v1/workspaces/:workspaceId/interaction-requests/:requestId", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const roomId = requireRoomQuery(req, "workspace_interaction_room_id_required");
+    await store.assertRoomReadable(workspaceContext(req), roomId);
+    res.json({ request: await interactionRequests.get(workspaceContext(req), { roomId, requestId: pathParam(req, "requestId") }) });
+  }));
+  app.post("/api/v1/workspaces/:workspaceId/interaction-requests/:requestId/respond", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = recordValue(req.body);
+    assertOnlyFields(body, ["room_id", "expected_version", "option_id", "values"], "workspace_interaction_request_response_invalid");
+    const roomId = requireRoomBody(body, "room_id", "workspace_interaction_room_id_required");
+    const operation = operationContext(req);
+    await commands.assertRoomExecutable(operation, roomId);
+    const response = await interactionRequests.respond(operation, {
+      roomId,
+      requestId: pathParam(req, "requestId"),
+      expectedVersion: numberField(body, "expected_version"),
+      optionId: stringField(body, "option_id"),
+      ...(body.values === undefined ? {} : { values: objectField(body, "values") })
+    });
+    if (!response.replayed) await emitInteractionRequestChange(dependencies, operation, response.request, "responded");
+    if (response.request.status !== "accepted") {
+      res.json({ request: response.request, replayed: response.replayed });
+      return;
+    }
+    const request = await executeAcceptedInteractionRequest(dependencies, req, operation, response.request);
+    res.json({ request, replayed: response.replayed });
+  }));
+  app.post("/api/v1/workspaces/:workspaceId/interaction-requests/:requestId/cancel", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = recordValue(req.body);
+    assertOnlyFields(body, ["room_id", "expected_version"], "workspace_interaction_request_cancel_invalid");
+    const roomId = requireRoomBody(body, "room_id", "workspace_interaction_room_id_required");
+    const operation = operationContext(req);
+    await commands.assertRoomExecutable(operation, roomId);
+    const result = await interactionRequests.cancel(operation, {
+      roomId,
+      requestId: pathParam(req, "requestId"),
+      expectedVersion: numberField(body, "expected_version")
+    });
+    if (!result.replayed) await emitInteractionRequestChange(dependencies, operation, result.request, "cancelled");
+    res.json({ request: result.request, replayed: result.replayed });
+  }));
+  app.post("/api/v1/workspaces/:workspaceId/generated-surfaces/:surfaceId/state", authenticateWorkspace, asyncRoute(async (req, res) => {
+    const body = recordValue(req.body);
+    const roomId = requireRoomBody(body, "room_id", "generated_surface_room_id_required");
+    const action = stringField(body, "action");
+    if (action !== "pin" && action !== "unpin" && action !== "archive") throw new WorkspaceServerError("generated_surface_state_action_invalid", 400);
+    const operation = operationContext(req);
+    const surface = await generatedSurfaces.state(operation, {
+      room_id: roomId,
+      surface_id: pathParam(req, "surfaceId"),
+      action,
+      ...(optionalStringField(body, "interaction_id") ? { interaction_id: optionalStringField(body, "interaction_id") } : {}),
+      ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {})
+    });
+    await appendAndEmitPublicEvent(dependencies, operation, {
+      eventType: "workspace.generated_surface.changed",
+      roomId,
+      resources: [resourceRef("generated_surface", surface.id, surface.title)],
+      authorizationAction: "edit",
+      payload: { surface_id: surface.id, revision_id: surface.current_revision_id, action: "state_changed" }
+    });
+    res.json(surface);
+  }));
+
   mountOrganizationDomainRoutes(dependencies);
 
   app.post("/api/v1/workspaces/:workspaceId/domain/operations/:operationId", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -259,7 +473,7 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
       : parsedInput;
     const operation = operationContext(req);
     const context = trustedContext(operation, request.context, operationId);
-    const result = await executeCommand({ operationId, input, requestContext: request.context, context, req, operation, dependencies });
+    const result = await executeCommand({ operationId, input, requestContext: request.context, context, req, operation, dependencies: executionDependencies });
     const response = apiResponse(req, publicOperationResult(operationId, result.value, operation.accountId), result.replayed);
     res.status(result.replayed ? 200 : 201).json(response);
   }));
@@ -613,7 +827,7 @@ async function executeCommand(input: {
   dependencies: V1Dependencies;
 }): Promise<{ value: JsonValue; replayed: boolean }> {
   const { operationId, input: value, requestContext, context, req, operation, dependencies } = input;
-  const { commands, artifacts, store, realtimeGate, runtimeFor } = dependencies;
+  const { commands, artifacts, generatedSurfaces, store, realtimeGate, runtimeFor } = dependencies;
   const { workspaceId, accountId } = operation;
   if (roomWorkCommandIds.has(operationId)) {
     return executeRoomWorkCommand({
@@ -731,13 +945,35 @@ async function executeCommand(input: {
   }
   if (operationId === "artifact.create") {
     const roomId = requireRoom(requestContext);
-    const result = await artifacts.create(operation, { roomId, title: stringField(value, "title"), content: stringField(value, "content"), ...(value.kind === undefined ? {} : { kind: value.kind as never }), ...(value.output_locale === undefined ? {} : { locale: value.output_locale as never }), ...(value.input_locale === undefined ? {} : { sourceLocales: [value.input_locale as never] }), metadata: objectField(value, "metadata") });
+    const result = await artifacts.create(operation, {
+      roomId,
+      title: stringField(value, "title"),
+      content: contentField(value, "content"),
+      ...(value.kind === undefined ? {} : { kind: value.kind as never }),
+      ...(value.output_locale === undefined ? {} : { locale: value.output_locale as never }),
+      ...(value.input_locale === undefined ? {} : { sourceLocales: [value.input_locale as never] }),
+      ...(value.mime_type === undefined ? {} : { mimeType: stringField(value, "mime_type") }),
+      ...(value.encoding === undefined ? {} : { encoding: encodingField(value, "encoding") }),
+      metadata: objectField(value, "metadata")
+    });
     if (!result.replayed) await appendAndEmitPublicEvent(dependencies, operation, { eventType: "workspace.artifact.changed", roomId, resources: [resourceRef("artifact", result.artifact.id, result.artifact.title)], payload: { artifact_id: result.artifact.id, action: "created" } });
     return { value: result as unknown as JsonValue, replayed: result.replayed };
   }
   if (operationId === "artifact.revise") {
     const roomId = requireRoom(requestContext);
-    const result = await artifacts.revise(operation, { roomId, artifactId: stringField(value, "artifact_id"), content: stringField(value, "content"), ...(value.base_revision_id === undefined ? {} : { baseRevisionId: stringField(value, "base_revision_id") }), ...(value.expected_revision === undefined ? {} : { expectedRevision: numberField(value, "expected_revision") }), ...(value.editor_source === undefined ? {} : { editorSource: value.editor_source as never }), ...(value.change_summary === undefined ? {} : { changeSummary: stringField(value, "change_summary") }), ...(value.extension === undefined ? {} : { extension: stringField(value, "extension") }), provenance: objectField(value, "provenance") });
+    const result = await artifacts.revise(operation, {
+      roomId,
+      artifactId: stringField(value, "artifact_id"),
+      content: revisionContentField(value, "content"),
+      ...(value.base_revision_id === undefined ? {} : { baseRevisionId: stringField(value, "base_revision_id") }),
+      ...(value.expected_revision === undefined ? {} : { expectedRevision: numberField(value, "expected_revision") }),
+      ...(value.editor_source === undefined ? {} : { editorSource: value.editor_source as never }),
+      ...(value.change_summary === undefined ? {} : { changeSummary: stringField(value, "change_summary") }),
+      ...(value.extension === undefined ? {} : { extension: stringField(value, "extension") }),
+      ...(value.mime_type === undefined ? {} : { mimeType: stringField(value, "mime_type") }),
+      ...(value.encoding === undefined ? {} : { encoding: encodingField(value, "encoding") }),
+      provenance: objectField(value, "provenance")
+    });
     if (!result.replayed) await appendAndEmitPublicEvent(dependencies, operation, { eventType: "workspace.artifact.changed", roomId, resources: [resourceRef("artifact", result.artifact.id, result.artifact.title)], payload: { artifact_id: result.artifact.id, revision_id: result.revision.id, action: "revised" } });
     return { value: result as unknown as JsonValue, replayed: result.replayed };
   }
@@ -752,6 +988,62 @@ async function executeCommand(input: {
     const result = await artifacts.repair(operation, { roomId, artifactId: stringField(value, "artifact_id") });
     if (!result.replayed && result.repair.repaired) await appendAndEmitPublicEvent(dependencies, operation, { eventType: "workspace.artifact.changed", roomId, resources: [resourceRef("artifact", result.artifact.id, result.artifact.title)], payload: { artifact_id: result.artifact.id, action: "repaired" } });
     return { value: result as unknown as JsonValue, replayed: result.replayed };
+  }
+  if (operationId === "generated_surface.create") {
+    const roomId = requireRoom(requestContext);
+    const result = await generatedSurfaces.create(operation, roomId, value as unknown as GeneratedSurfaceCreateInput);
+    if (!result.replayed) await appendAndEmitPublicEvent(dependencies, operation, {
+      eventType: "workspace.generated_surface.changed",
+      roomId,
+      resources: [resourceRef("generated_surface", result.definition.id, result.definition.title), resourceRef("generated_surface_revision", result.revision.id, result.revision.id)],
+      authorizationAction: "edit",
+      payload: { surface_id: result.definition.id, revision_id: result.revision.id, action: "created" }
+    });
+    return { value: result as unknown as JsonValue, replayed: result.replayed };
+  }
+  if (operationId === "generated_surface.revise") {
+    const roomId = requireRoom(requestContext);
+    const result = await generatedSurfaces.revise(operation, roomId, value as unknown as GeneratedSurfaceReviseInput);
+    if (!result.replayed) await appendAndEmitPublicEvent(dependencies, operation, {
+      eventType: "workspace.generated_surface.changed",
+      roomId,
+      resources: [resourceRef("generated_surface", result.definition.id, result.definition.title), resourceRef("generated_surface_revision", result.revision.id, result.revision.id)],
+      authorizationAction: "edit",
+      payload: { surface_id: result.definition.id, revision_id: result.revision.id, action: "revised" }
+    });
+    return { value: result as unknown as JsonValue, replayed: result.replayed };
+  }
+  if (operationId === "generated_surface.action.run") {
+    const roomId = requireRoom(requestContext);
+    const result = await generatedSurfaces.runAction(operation, {
+      ...(value as unknown as GeneratedSurfaceActionRunInput),
+      room_id: roomId
+    });
+    const surfaceId = stringField(value, "surface_id");
+    await appendAndEmitPublicEvent(dependencies, operation, {
+      eventType: "workspace.generated_surface.changed",
+      roomId,
+      resources: [resourceRef("generated_surface", surfaceId, surfaceId)],
+      authorizationAction: "execute",
+      payload: { surface_id: surfaceId, action: "action" }
+    });
+    const { revisionId: _revisionId, ...publicResult } = result as Record<string, unknown>;
+    return { value: publicResult as JsonValue, replayed: false };
+  }
+  if (operationId === "generated_surface.state") {
+    const roomId = requireRoom(requestContext);
+    const result = await generatedSurfaces.state(operation, {
+      ...(value as unknown as GeneratedSurfaceStateInput),
+      room_id: roomId
+    });
+    await appendAndEmitPublicEvent(dependencies, operation, {
+      eventType: "workspace.generated_surface.changed",
+      roomId,
+      resources: [resourceRef("generated_surface", result.id, result.title)],
+      authorizationAction: "edit",
+      payload: { surface_id: result.id, revision_id: result.current_revision_id, action: "state_changed" }
+    });
+    return { value: result as unknown as JsonValue, replayed: false };
   }
   if (operationId === "workspace.bundle.export") {
     const result = await commands.exportWorkspaceBundle(
@@ -772,6 +1064,51 @@ async function executeCommand(input: {
   throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
 }
 
+/**
+ * Resolve the public Room Work selectors through the Completion service. The
+ * public request intentionally has no URI or label field; those values are
+ * read from the current Workspace/Room-authorized immutable version. The
+ * Store repeats the same validation inside its transaction, so this adapter
+ * check is not the final authorization boundary.
+ */
+export async function resolveRoomWorkResourceRefs(
+  resolver: Pick<WorkspaceCompletionService, "getResourceRefForRoom">,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
+  roomId: string,
+  value: Record<string, unknown>
+): Promise<ResourceRef[]> {
+  const raw = value.resource_refs === undefined ? [] : value.resource_refs;
+  const parsed = PublicRoomWorkResourceRefInputSchema.array().max(32).safeParse(raw);
+  if (!parsed.success) throw new WorkspaceServerError("domain_api_resource_refs_invalid", 400);
+
+  const canonical = await Promise.all(parsed.data.map(async (ref) => {
+    const resolved = await resolver.getResourceRefForRoom(context, {
+      targetRoomId: roomId,
+      resourceId: ref.id,
+      kind: ref.kind,
+      version: ref.version
+    });
+    const publicRef = PublicRoomWorkResourceRefSchema.safeParse(resolved);
+    if (!publicRef.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    return publicRef.data;
+  }));
+  return canonical;
+}
+
+/** Store requires a non-empty instruction body. A resource-only public Work
+ * therefore gets an explicit, deterministic instruction that describes the
+ * user's intent without pretending that Knowledge/Skill refs are file
+ * attachments. */
+export function roomWorkInstructionForPublicInput(
+  value: Record<string, unknown>,
+  resourceRefs: readonly ResourceRef[]
+): string | undefined {
+  if (value.instruction === undefined) {
+    return resourceRefs.length > 0 ? "Review the referenced resources." : undefined;
+  }
+  return stringField(value, "instruction").trim();
+}
+
 async function executeRoomWorkCommand(input: {
   operationId: string;
   input: Record<string, unknown>;
@@ -787,13 +1124,23 @@ async function executeRoomWorkCommand(input: {
   }
   const store = dependencies.store as unknown as RoomWorkStoreAdapter;
   const roomId = operationId === "agent.dm.open" ? undefined : requireRoom(requestContext);
+  const resourceRefs = operationId === "room.work.create" || operationId === "room.work.reply"
+    ? await resolveRoomWorkResourceRefs(
+      dependencies.completion ?? new WorkspaceCompletionService(dependencies.store),
+      operation,
+      roomId!,
+      value
+    )
+    : [];
+  const instruction = roomWorkInstructionForPublicInput(value, resourceRefs);
   let raw: unknown;
   switch (operationId) {
     case "room.work.create":
       raw = await invokeRoomWorkStore(store, "createRoomWork", operation, {
         roomId,
-        ...(value.instruction === undefined ? {} : { instruction: stringField(value, "instruction") }),
+        ...(instruction === undefined ? {} : { instruction }),
         attachments: arrayValue(value, "attachments"),
+        resourceRefs,
         ...(value.agent_id === undefined ? {} : { agentId: stringField(value, "agent_id") })
       });
       break;
@@ -802,8 +1149,9 @@ async function executeRoomWorkCommand(input: {
         roomId,
         workId: stringField(value, "work_id"),
         ...(value.assignee_id === undefined ? {} : { assigneeId: stringField(value, "assignee_id") }),
-        ...(value.instruction === undefined ? {} : { instruction: stringField(value, "instruction") }),
+        ...(instruction === undefined ? {} : { instruction }),
         attachments: arrayValue(value, "attachments"),
+        resourceRefs,
         ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
         ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
       });
@@ -1068,6 +1416,7 @@ function roomWorkRecord(value: unknown): Record<string, unknown> {
     instruction_version: numberValue(body, "instruction_version", "instructionVersion", "current_instruction_version", "currentInstructionVersion") ?? 1,
     generation: numberValue(body, "generation", "control_generation", "controlGeneration") ?? 0,
     version: numberValue(body, "version") ?? 1,
+    resource_refs: publicRoomWorkResourceRefs(body),
     assignees,
     execution_reservations: reservations.map(roomWorkExecutionReservationRecord),
     created_at: valueString(body, "created_at", "createdAt"),
@@ -1176,6 +1525,7 @@ function roomWorkInstructionRecord(value: unknown): Record<string, unknown> {
       ? body.attachments
       : Array.isArray(body.attachment_refs) ? body.attachment_refs
         : Array.isArray(body.attachmentRefs) ? body.attachmentRefs : [],
+    resource_refs: publicRoomWorkResourceRefs(body),
     version: numberValue(body, "version") ?? 1,
     generation: numberValue(body, "generation") ?? 0,
     status: publicRoomWorkInstructionStatus(valueString(body, "status", "state")),
@@ -1184,6 +1534,30 @@ function roomWorkInstructionRecord(value: unknown): Record<string, unknown> {
     created_at: createdAt,
     updated_at: valueString(body, "updated_at", "updatedAt") || createdAt
   });
+}
+
+/** Project only canonical Completion refs. Any malformed persisted ref is a
+ * server invariant failure; silently dropping it would make the public Work
+ * view disagree with the instruction actually stored and executed. */
+function publicRoomWorkResourceRefs(body: Record<string, unknown>): ResourceRef[] {
+  const raw = body.resource_refs ?? body.resourceRefs;
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+  const projected = raw.map((value) => {
+    const entry = recordValue(value);
+    return compactRecord({
+      kind: valueString(entry, "kind"),
+      id: valueString(entry, "id", "resource_id", "resourceId"),
+      uri: valueString(entry, "uri"),
+      version: typeof entry.version === "number" && Number.isSafeInteger(entry.version)
+        ? String(entry.version)
+        : optionalValue(entry, "version"),
+      label: optionalValue(entry, "label")
+    });
+  });
+  const parsed = PublicRoomWorkResourceRefSchema.array().max(32).safeParse(projected);
+  if (!parsed.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+  return parsed.data;
 }
 
 function roomWorkCommentRecord(value: unknown): Record<string, unknown> {
@@ -1368,8 +1742,11 @@ export function roomWorkEventFor(
   const body = recordValue(value);
   const workId = valueString(body, "work_id", "workId", "id") || optionalStringField(input, "work_id");
   const effectiveRoomId = roomId || valueString(body, "room_id", "roomId");
+  const workResourceRefs = operationId === "room.work.create" || operationId === "room.work.reply"
+    ? publicRoomWorkResourceRefs(body)
+    : [];
   const resourceList = effectiveRoomId
-    ? [resourceRef("room", effectiveRoomId, effectiveRoomId), ...(workId ? [resourceRef("room_work", workId, workId)] : [])]
+    ? [resourceRef("room", effectiveRoomId, effectiveRoomId), ...(workId ? [resourceRef("room_work", workId, workId)] : []), ...workResourceRefs]
     : [];
   if (operationId === "room.default_agent.set") {
     const agentId = valueString(body, "agent_id", "agentId") || optionalStringField(input, "agent_id");
@@ -1461,7 +1838,7 @@ async function executeQuery(
   context: TrustedDomainContext,
   dependencies: V1Dependencies
 ): Promise<JsonValue> {
-  const { store, artifacts } = dependencies;
+  const { store, artifacts, generatedSurfaces } = dependencies;
   if (roomWorkQueryIds.has(queryId)) {
     return await executeRoomWorkQuery(queryId, input, requestContext, {
       workspaceId: context.workspaceId,
@@ -1488,28 +1865,266 @@ async function executeQuery(
   const roomId = requireRoom(requestContext);
   if (queryId === "artifact.list") return await artifacts.list({ workspaceId: context.workspaceId, accountId: context.actorId }, roomId) as unknown as JsonValue;
   if (queryId === "artifact.view") return await artifacts.get({ workspaceId: context.workspaceId, accountId: context.actorId }, roomId, stringField(input, "id")) as unknown as JsonValue;
+  if (queryId === "generated_surface.export") {
+    return await generatedSurfaces.export({ workspaceId: context.workspaceId, accountId: context.actorId }, roomId, input as unknown as GeneratedSurfaceExportInput) as unknown as JsonValue;
+  }
   throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
 }
 
-async function appendAndEmitPublicEvent(
+type SubmittedGeneratedSurfaceAction =
+  | { kind: "executed"; result: Record<string, unknown> }
+  | { kind: "approval_required"; request: WorkspaceInteractionRequest; replayed: boolean };
+
+async function submitGeneratedSurfaceAction(
   dependencies: V1Dependencies,
+  operation: WorkspaceRequestContext,
+  input: Parameters<PostgresGeneratedSurface["prepareAction"]>[1]
+): Promise<SubmittedGeneratedSurfaceAction> {
+  const prepared = await dependencies.generatedSurfaces.prepareAction(operation, input);
+  if (!prepared.action.requires_confirmation) {
+    return { kind: "executed", result: await dependencies.generatedSurfaces.runAction(operation, input) };
+  }
+  const created = await dependencies.interactionRequests.create(operation, {
+    roomId: prepared.target.room_id,
+    kind: "approval",
+    surfaceId: prepared.target.surface_id,
+    revisionId: prepared.target.revision_id,
+    actionTarget: prepared.target as unknown as Record<string, JsonValue>,
+    title: `${prepared.surface.title}: ${prepared.action.label}`,
+    summary: "このSurface操作は、現在の対象版とRoom権限を再確認してから実行されます。",
+    options: [
+      { id: "approve", label: "実行を許可", decision: "approve" },
+      { id: "deny", label: "実行しない", decision: "deny" }
+    ]
+  });
+  if (!created.replayed) await emitInteractionRequestChange(dependencies, operation, created.request, "created");
+  return { kind: "approval_required", request: created.request, replayed: created.replayed };
+}
+
+/**
+ * Runs one accepted durable request. The caller never supplies a command,
+ * revision, payload, or backend input at this point: every value comes from
+ * the persisted request through `claimExecution`.
+ */
+async function executeAcceptedInteractionRequest(
+  dependencies: V1Dependencies,
+  req: Request,
+  responseOperation: WorkspaceRequestContext,
+  accepted: WorkspaceInteractionRequest
+): Promise<WorkspaceInteractionRequest> {
+  const ownerId = "workspace-server-interaction-executor";
+  const claimContext = interactionServerContext(responseOperation, accepted.id, "claim");
+  let executionOperationId = interactionExecutionOperationId(responseOperation.workspaceId, accepted.id, "initial");
+  let claim = await dependencies.interactionRequests.claimExecution(claimContext, {
+    roomId: accepted.roomId,
+    requestId: accepted.id,
+    expectedVersion: accepted.version,
+    ownerId,
+    executionOperationId
+  });
+  if (Date.parse(claim.claim.leaseUntil) <= Date.now()) {
+    executionOperationId = interactionExecutionOperationId(responseOperation.workspaceId, accepted.id, `recovery:${claim.request.version}`);
+    claim = await dependencies.interactionRequests.recoverExecution(
+      interactionServerContext(responseOperation, accepted.id, "recover"),
+      {
+        roomId: accepted.roomId,
+        requestId: accepted.id,
+        expectedVersion: claim.request.version,
+        ownerId,
+        executionOperationId
+      }
+    );
+  }
+  if (!claim.replayed) await emitInteractionRequestChange(dependencies, claimContext, claim.request, "executing");
+
+  const executionContext = { ...responseOperation, operationId: claim.claim.executionOperationId };
+  // The response was authorized before it was persisted. Recheck again at
+  // execution time so a later Room permission revoke cannot be reused.
+  try {
+    await dependencies.commands.assertRoomExecutable(executionContext, claim.request.roomId);
+  } catch (error) {
+    // A permission revoke is an execution-admission failure, not a transient
+    // `executing` state. Settle it through the same owned claim so it cannot
+    // be retried later without a new, explicitly created request.
+    return settleFailedAcceptedInteractionRequest(dependencies, executionContext, claim, ownerId, error);
+  }
+  if (claim.request.kind === "approval") {
+    let result: Record<string, unknown>;
+    try {
+      const target = claim.executionTarget.actionTarget as unknown as GeneratedSurfaceActionTarget;
+      result = await dependencies.generatedSurfaces.executeActionTarget(executionContext, target);
+    } catch (error) {
+      return settleFailedAcceptedInteractionRequest(dependencies, executionContext, claim, ownerId, error);
+    }
+    const settled = await dependencies.interactionRequests.settleExecution(
+      interactionServerContext(executionContext, claim.request.id, "settle"),
+      {
+        roomId: claim.request.roomId,
+        requestId: claim.request.id,
+        expectedVersion: claim.request.version,
+        ownerId,
+        executionOperationId: claim.claim.executionOperationId,
+        status: "completed",
+        summary: "Generated Surface action completed."
+      }
+    );
+    if (!settled.replayed) {
+      await emitInteractionRequestChange(dependencies, executionContext, settled.request, "completed");
+      const surfaceId = claim.executionTarget.surfaceId;
+      if (surfaceId) {
+        await appendAndEmitPublicEvent(dependencies, executionContext, {
+          eventType: "workspace.generated_surface.changed",
+          roomId: claim.request.roomId,
+          resources: [resourceRef("generated_surface", surfaceId, surfaceId)],
+          authorizationAction: "execute",
+          payload: { surface_id: surfaceId, revision_id: claim.executionTarget.revisionId, action: "action" }
+        });
+      }
+    }
+    // The interaction record and target result were persisted by the adapter.
+    // Keep this assignment explicit: confirmation result values do not come
+    // from a renderer-provided boolean or payload.
+    void result;
+    return settled.request;
+  }
+
+  const runId = claim.executionTarget.runId;
+  let execution: Awaited<ReturnType<RunControlService["execute"]>>;
+  try {
+    if (!runId || !isJsonObject(claim.executionInput)) {
+      throw new WorkspaceServerError("workspace_interaction_backend_input_invalid", 409);
+    }
+    execution = await runControlService.execute({
+      runtime: dependencies.runtimeFor(req),
+      action: "resume",
+      runId,
+      roomId: claim.request.roomId,
+      resumeInput: claim.executionInput,
+      idempotencyKey: claim.claim.executionOperationId,
+      onChanged: async ({ action, run }) => {
+        await appendAndEmitPublicEvent(dependencies, executionContext, {
+          eventType: "workspace.run.changed",
+          roomId: run.room_id,
+          authorizationAction: "execute",
+          resources: [resourceRef("backend_run", run.id, run.id)],
+          payload: { run_id: run.id, status: run.status, action }
+        });
+      }
+    });
+  } catch (error) {
+    return settleFailedAcceptedInteractionRequest(dependencies, executionContext, claim, ownerId, error);
+  }
+  const settled = await dependencies.interactionRequests.settleExecution(
+    interactionServerContext(executionContext, claim.request.id, "settle"),
+    {
+      roomId: claim.request.roomId,
+      requestId: claim.request.id,
+      expectedVersion: claim.request.version,
+      ownerId,
+      executionOperationId: claim.claim.executionOperationId,
+      status: "completed",
+      summary: "Backend input delivered to the current Run."
+    }
+  );
+  if (!settled.replayed) await emitInteractionRequestChange(dependencies, executionContext, settled.request, "completed");
+  void execution;
+  return settled.request;
+}
+
+/**
+ * Only failures from the side-effect boundary may settle a request as failed.
+ * A later event-delivery or settlement failure must leave the durable request
+ * intact for idempotent recovery instead of rewriting a completed action.
+ */
+async function settleFailedAcceptedInteractionRequest(
+  dependencies: V1Dependencies,
+  executionContext: WorkspaceRequestContext,
+  claim: { request: WorkspaceInteractionRequest; claim: { executionOperationId: string } },
+  ownerId: string,
+  error: unknown
+): Promise<WorkspaceInteractionRequest> {
+  const settled = await dependencies.interactionRequests.settleExecution(
+    interactionServerContext(executionContext, claim.request.id, "settle-failed"),
+    {
+      roomId: claim.request.roomId,
+      requestId: claim.request.id,
+      expectedVersion: claim.request.version,
+      ownerId,
+      executionOperationId: claim.claim.executionOperationId,
+      status: "failed",
+      summary: "The Server could not execute the approved request.",
+      errorCode: publicInteractionErrorCode(error)
+    }
+  );
+  if (!settled.replayed) await emitInteractionRequestChange(dependencies, executionContext, settled.request, "failed");
+  return settled.request;
+}
+
+export async function emitInteractionRequestChange(
+  dependencies: WorkspaceEventEmitterDependencies,
+  context: WorkspaceRequestContext,
+  request: WorkspaceInteractionRequest,
+  action: WorkspaceInteractionRequestEventAction,
+  options: WorkspaceInteractionRequestEventOptions = {}
+): Promise<void> {
+  const resources: ResourceRef[] = [
+    resourceRef("interaction_request", request.id, request.title),
+    resourceRef("room", request.roomId, request.roomId)
+  ];
+  if (request.runId) resources.push(resourceRef("backend_run", request.runId, request.runId));
+  if (request.surfaceId) resources.push(resourceRef("generated_surface", request.surfaceId, request.surfaceId));
+  if (request.revisionId) resources.push(resourceRef("generated_surface_revision", request.revisionId, request.revisionId));
+  await appendAndEmitPublicEvent(dependencies, context, {
+    eventType: "workspace.interaction_request.changed",
+    roomId: request.roomId,
+    resources,
+    authorizationAction: "execute",
+    ...(options.actor ? { actor: options.actor } : {}),
+    ...(options.correlationId ? { correlationId: options.correlationId } : {}),
+    payload: { request_id: request.id, kind: request.kind, status: request.status, action }
+  });
+}
+
+function interactionServerContext(context: WorkspaceRequestContext, requestId: string, phase: string): WorkspaceRequestContext {
+  return {
+    ...context,
+    operationId: `interaction_${createHash("sha256").update(`${context.workspaceId}|${requestId}|${context.operationId}|${phase}`).digest("hex").slice(0, 48)}`
+  };
+}
+
+function interactionExecutionOperationId(workspaceId: string, requestId: string, attempt: string): string {
+  return `interaction_execution_${createHash("sha256").update(`${workspaceId}|${requestId}|${attempt}`).digest("hex").slice(0, 48)}`;
+}
+
+function publicInteractionErrorCode(error: unknown): string {
+  return error instanceof WorkspaceServerError ? error.code : "workspace_interaction_execution_failed";
+}
+
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function appendAndEmitPublicEvent(
+  dependencies: WorkspaceEventEmitterDependencies,
   context: WorkspaceRequestContext,
   input: {
     eventType: string;
     roomId?: string;
     resources?: ResourceRef[];
     authorizationAction?: "edit" | "execute";
+    actor?: { kind: "human" | "system"; id?: string };
+    correlationId?: string;
     payload: Record<string, unknown>;
   }
 ): Promise<void> {
   const saved = await dependencies.commands.appendPublicEvent(context, {
     eventType: input.eventType,
     roomId: input.roomId,
-    actor: { kind: "human", id: context.accountId },
+    actor: input.actor ?? { kind: "human", id: context.accountId },
     ...(input.resources ? { resources: input.resources } : {}),
     ...(input.authorizationAction ? { authorizationAction: input.authorizationAction } : {}),
     operationId: context.operationId,
-    correlationId: context.caller?.kind === "human" ? context.caller.requestId : context.operationId,
+    correlationId: input.correlationId ?? (context.caller?.kind === "human" ? context.caller.requestId : context.operationId),
     payload: eventPayloadSchemaFor(input.eventType).parse(input.payload) as Record<string, unknown>
   });
   if (saved.replayed) return;
@@ -1556,7 +2171,7 @@ function attachV1SocketHandlers(socket: Socket, store: WorkspaceServerStore, rea
   });
 }
 
-async function emitAuthorizedV1Event(io: SocketServer, store: WorkspaceServerStore, event: WorkspacePublicEvent): Promise<void> {
+export async function emitAuthorizedV1Event(io: SocketServer, store: WorkspaceServerStore, event: WorkspacePublicEvent): Promise<void> {
   const envelope = toEventEnvelope(event);
   const subscribedSocketIds = new Set<string>();
   if (event.scope.roomId) {
@@ -2033,6 +2648,16 @@ function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+/**
+ * Interaction mutations deliberately accept a closed request shape.  In
+ * particular, accepting a legacy `confirmed` flag by silently ignoring it
+ * would make it look as though an untrusted renderer can approve an action.
+ */
+function assertOnlyFields(value: Record<string, unknown>, allowed: readonly string[], code: string): void {
+  const allowedFields = new Set(allowed);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) throw new WorkspaceServerError(code, 400);
+}
+
 function nestedRecord(value: unknown, ...keys: string[]): Record<string, unknown> {
   const body = recordValue(value);
   for (const key of keys) {
@@ -2184,11 +2809,31 @@ function pathParam(req: Request, name: string): string {
   return value;
 }
 
+function requireRoomQuery(req: Request, code: string): string {
+  const roomId = optionalQuery(req, "room_id");
+  if (!roomId) throw new WorkspaceServerError(code, 400);
+  return roomId;
+}
+
+function requireRoomBody(value: Record<string, unknown>, name: string, code: string): string {
+  const roomId = optionalStringField(value, name);
+  if (!roomId) throw new WorkspaceServerError(code, 400);
+  return roomId;
+}
+
 function optionalQuery(req: Request, name: string): string | undefined {
   const value = req.query[name];
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !value.trim()) throw new WorkspaceServerError(`${name}_invalid`, 400);
   return value;
+}
+
+function optionalBooleanQuery(req: Request, name: string): boolean | undefined {
+  const value = optionalQuery(req, name);
+  if (value === undefined) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new WorkspaceServerError(`${name}_invalid`, 400);
 }
 
 function queryLimit(req: Request): number | undefined {
@@ -2218,6 +2863,27 @@ function deterministicActivityId(workspaceId: string, roomId: string, dedupeKey:
 function stringField(value: Record<string, unknown>, name: string): string {
   if (typeof value[name] !== "string" || !value[name].trim()) throw new WorkspaceServerError(`${name}_required`, 400);
   return value[name] as string;
+}
+
+function contentField(value: Record<string, unknown>, name: string): string | Uint8Array | Record<string, JsonValue> | JsonValue[] {
+  if (typeof value[name] === "string") return value[name] as string;
+  if (Array.isArray(value[name]) && value[name].every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255)) {
+    return Uint8Array.from(value[name] as number[]);
+  }
+  if (Array.isArray(value[name])) return value[name] as JsonValue[];
+  if (value[name] && typeof value[name] === "object") return value[name] as Record<string, JsonValue>;
+  throw new WorkspaceServerError(`${name}_invalid`, 400);
+}
+
+function revisionContentField(value: Record<string, unknown>, name: string): string | Uint8Array {
+  const content = contentField(value, name);
+  if (typeof content === "string" || content instanceof Uint8Array) return content;
+  throw new WorkspaceServerError(`${name}_invalid`, 400);
+}
+
+function encodingField(value: Record<string, unknown>, name: string): "utf8" | "binary" {
+  if (value[name] !== "utf8" && value[name] !== "binary") throw new WorkspaceServerError(`${name}_invalid`, 400);
+  return value[name];
 }
 
 function optionalStringField(value: Record<string, unknown>, name: string): string | undefined {
@@ -2265,6 +2931,37 @@ function optionalString(value: Record<string, unknown>, name: string): string | 
   if (value[name] === undefined || value[name] === null) return undefined;
   if (typeof value[name] !== "string" || !value[name].trim()) throw new WorkspaceServerError(`${name}_invalid`, 400);
   return value[name] as string;
+}
+
+function generatedSurfaceDocument(
+  bundle: { html: string; css?: string; script?: string },
+  actions: Array<{ id: string }> = [],
+  assets: Array<{ path: string; content_base64: string; mime_type: string }> = []
+): string {
+  const bridge = JSON.stringify({ actions: actions.map((action) => action.id) }).replace(/</g, "\\u003c");
+  const html = inlineGeneratedSurfaceAssets(bundle.html, assets);
+  const css = (bundle.css ?? "").replace(/<\/style/gi, "<\\/style");
+  const script = (bundle.script ?? "").replace(/<\/script/gi, "<\\/script");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${generatedSurfaceCsp}"><style>${css}</style></head><body>${html}<script>${script}</script><script>window.samuraiGeneratedSurface=${bridge};window.dispatchSamuraiAction=function(actionId,payload){window.parent.postMessage({type:"samurai.generated_surface.action",action_id:actionId,payload:payload||{}},"*")};</script></body></html>`;
+}
+
+function generatedSurfaceAssetPayload(assets: Array<{ path: string; content: Buffer; mime_type: string }>): Array<{ path: string; content_base64: string; mime_type: string }> {
+  return assets.map((asset) => ({ path: asset.path, content_base64: asset.content.toString("base64"), mime_type: asset.mime_type }));
+}
+
+function inlineGeneratedSurfaceAssets(source: string, assets: Array<{ path: string; content_base64: string; mime_type: string }>): string {
+  const dataByPath = new Map<string, string>();
+  for (const asset of assets) {
+    const safePath = safeGeneratedSurfaceAssetPath(asset.path);
+    if (!safePath) continue;
+    const dataUrl = `data:${asset.mime_type};base64,${asset.content_base64}`;
+    dataByPath.set(safePath, dataUrl);
+    dataByPath.set(`assets/${safePath}`, dataUrl);
+  }
+  const replaceReference = (reference: string): string => dataByPath.get(reference.trim().replace(/^\.\//, "")) ?? reference;
+  return source
+    .replace(/((?:src|href)\s*=\s*["'])([^"']+)(["'])/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`)
+    .replace(/(url\(\s*["']?)([^"')]+)(["']?\s*\))/gi, (_match, prefix: string, reference: string, suffix: string) => `${prefix}${replaceReference(reference)}${suffix}`);
 }
 
 function safeIssue(issue: { path?: PropertyKey[]; message?: string } | undefined): Record<string, string> {

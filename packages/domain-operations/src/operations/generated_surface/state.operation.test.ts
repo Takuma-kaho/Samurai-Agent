@@ -28,15 +28,34 @@ function ports() {
 }
 
 describe("generated_surface.state handler", () => {
-  it("does not archive a session-less Surface as hidden Workspace state", async () => {
-    const fixture = ports();
-    const handler = generatedSurfaceState.createHandler(fixture.ports);
+  it("changes state for a session-less Surface without treating SessionRef as authority", async () => {
+    const cases = [
+      ["pin", "pinned", "pinned"],
+      ["unpin", "ephemeral", "unpinned"],
+      ["archive", "archived", "dismissed"]
+    ] as const;
 
-    await expect(handler.execute(sessionlessContext, generatedSurfaceState.input.parse({
-      surface_id: surface.id, action: "archive"
-    }))).rejects.toThrow("generated_surface_display_state_compatibility_required");
+    for (const [action, expectedState, expectedInteractionKind] of cases) {
+      const fixture = ports();
+      const handler = generatedSurfaceState.createHandler(fixture.ports);
 
-    expect(fixture.saveGeneratedSurfaceInteraction).not.toHaveBeenCalled();
+      await expect(handler.execute(sessionlessContext, generatedSurfaceState.input.parse({
+        surface_id: surface.id, action
+      }))).resolves.toMatchObject({
+        ok: true,
+        value: { id: surface.id, state: expectedState, current_revision_id: surface.current_revision_id }
+      });
+
+      expect(fixture.ports.updateGeneratedSurfaceState).toHaveBeenCalledWith(surface.id, expectedState);
+      const interaction = fixture.saveGeneratedSurfaceInteraction.mock.calls[0]?.[0];
+      expect(interaction).toMatchObject({
+        kind: expectedInteractionKind,
+        surface_id: surface.id,
+        revision_id: surface.current_revision_id,
+        session_ref: sessionlessContext.sessionRef
+      });
+      expect(interaction).not.toHaveProperty("session_id");
+    }
   });
 
   it("stores a message reference only for a real Session compatibility action", async () => {

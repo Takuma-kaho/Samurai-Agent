@@ -69,8 +69,11 @@ describe("provider profiles", () => {
     const geminiTools = providerTools("gemini");
     const openAiTools = providerTools("openai");
     const serializedGeminiTools = JSON.stringify(geminiTools);
-    const createArtifact = (geminiTools as Array<{ functionDeclarations: Array<{ name: string; parameters: Record<string, unknown> }> }>)[0].functionDeclarations
+    const functionDeclarations = (geminiTools as Array<{ functionDeclarations: Array<{ name: string; description: string; parameters: Record<string, unknown> }> }>)[0].functionDeclarations;
+    const createArtifact = functionDeclarations
       .find((tool) => tool.name === "create_artifact");
+    const createGeneratedSurface = functionDeclarations
+      .find((tool) => tool.name === "create_generated_surface");
 
     expect(serializedGeminiTools).not.toContain("additionalProperties");
     expect(serializedGeminiTools).not.toContain("\"$ref\"");
@@ -82,6 +85,9 @@ describe("provider profiles", () => {
     expect(properties?.metadata?.type).toBe("object");
     expect(properties?.title?.type).toBe("string");
     expect(createArtifact?.parameters.required).toEqual(expect.arrayContaining(["content", "title"]));
+    expect(createGeneratedSurface?.description).toContain("bundle.script");
+    expect(createGeneratedSurface?.description).toContain("never embed script");
+    expect(createGeneratedSurface?.description).toContain("window.dispatchSamuraiAction");
     expect(JSON.stringify(openAiTools)).toContain("additionalProperties");
   });
 
@@ -100,6 +106,8 @@ describe("provider profiles", () => {
     expect(anthropic.body).toHaveProperty("messages");
     expect(anthropic.body).toHaveProperty("tools");
     expect(JSON.stringify(gemini.body)).toContain("Output locale: ja");
+    expect(JSON.stringify(gemini.body)).toContain("bundle.html must not contain script or style tags");
+    expect(JSON.stringify(gemini.body)).toContain("window.dispatchSamuraiAction");
     expect(JSON.stringify(openai.body)).toContain("Output locale: ja");
     expect(JSON.stringify(anthropic.body)).toContain("Output locale: ja");
   });

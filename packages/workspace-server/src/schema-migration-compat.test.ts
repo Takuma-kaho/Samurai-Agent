@@ -62,6 +62,23 @@ describe("Workspace Server migration checksum compatibility", () => {
     expect(grantQuery?.text).toContain("samurai_human_work_assignment_is_superseded(TEXT, TEXT)");
   });
 
+  it("appends the Episode external-key nullability repair after existing schemas", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(125));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    const statements = client.queries.map((query) => query.text);
+    expect(statements).toContain("BEGIN");
+    expect(statements.some((statement) => statement.includes("pg_get_constraintdef"))).toBe(true);
+    expect(statements).toContain(
+      "CREATE UNIQUE INDEX IF NOT EXISTS workspace_completion_episodes_external_key_unique ON workspace_completion_episodes(workspace_id, room_id, external_episode_key) WHERE external_episode_key IS NOT NULL"
+    );
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([126, "workspace_server_completion_episode_external_key_nullability_repair"])
+    });
+  });
+
   it("accepts only the known legacy v109 checksum and converges it before v115", async () => {
     const applied = migrationRowsThrough(109).map((migration) => (
       migration.version === 109 ? { ...migration, checksum: legacyV109Checksum } : migration

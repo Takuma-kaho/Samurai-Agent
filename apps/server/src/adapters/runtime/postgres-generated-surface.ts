@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   ActivityRecordSchema,
   GeneratedSurfaceDefinitionSchema,
+  type GeneratedSurfaceActionDeclaration,
   GeneratedSurfaceRevisionRecordSchema,
   OperationRecordSchema,
   ResourceRefSchema,
@@ -18,12 +19,14 @@ import {
 } from "@samurai-agent/core-schemas";
 import {
   domainQueryReadCapability,
+  parseDomainOperationInput,
   generatedSurfaceActionRun,
   generatedSurfaceCreate,
   generatedSurfaceExport,
   generatedSurfaceInteractionRecord,
   generatedSurfaceRevise,
   generatedSurfaceState,
+  type DomainCommandId,
   type GeneratedSurfaceActionRunInput,
   type GeneratedSurfaceCreateInput,
   type GeneratedSurfaceCreatePorts,
@@ -58,9 +61,47 @@ type GeneratedSurfaceBundle = {
   assets?: Array<{ path: string; content_base64: string; mime_type: string }>;
 };
 
+/** Runtime tool ingress may add a persisted Run identity. It is never read
+ * from HTTP JSON and becomes immutable provenance on the saved revision. */
+type GeneratedSurfaceMutationContext = WorkspaceRequestContext & { runtimeRunId?: string };
+
 export interface GeneratedSurfaceTargetCommandResult {
   result?: JsonValue;
   resourceRefs?: string[];
+}
+
+/**
+ * Immutable Server-owned target for a Generated Surface action.
+ *
+ * This is persisted inside an Interaction Request before a confirmation is
+ * shown.  A renderer may initiate an action, but it never decides the command
+ * ID, target revision, or final payload used when the request is later
+ * executed.
+ */
+export interface GeneratedSurfaceActionTarget {
+  kind: "generated_surface_action";
+  room_id: string;
+  surface_id: string;
+  revision_id: string;
+  action_id: string;
+  command_id: string;
+  payload: Record<string, JsonValue>;
+  interaction_id?: string;
+  message_id?: string;
+}
+
+export type GeneratedSurfaceActionRequest = GeneratedSurfaceActionRunInput & {
+  room_id: string;
+  action_payload?: Record<string, JsonValue>;
+  interaction_id?: string;
+  message_id?: string;
+};
+
+export interface PreparedGeneratedSurfaceAction {
+  surface: GeneratedSurfaceDefinition;
+  revisionId: string;
+  action: GeneratedSurfaceActionDeclaration;
+  target: GeneratedSurfaceActionTarget;
 }
 
 /**
@@ -126,7 +167,7 @@ export class PostgresGeneratedSurface {
     return revisionFromRecord(row);
   }
 
-  async create(context: WorkspaceRequestContext, roomId: string, input: GeneratedSurfaceCreateInput): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; replayed: boolean }> {
+  async create(context: GeneratedSurfaceMutationContext, roomId: string, input: GeneratedSurfaceCreateInput): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; replayed: boolean }> {
     const parsedInput = generatedSurfaceCreate.input.parse(input);
     const inputHash = stableHash(parsedInput);
     const replayed = await this.operationAlreadyExists(context, roomId, inputHash, "generated_surface.create");
@@ -137,7 +178,7 @@ export class PostgresGeneratedSurface {
     return { ...value, replayed };
   }
 
-  async revise(context: WorkspaceRequestContext, roomId: string, input: GeneratedSurfaceReviseInput): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; replayed: boolean }> {
+  async revise(context: GeneratedSurfaceMutationContext, roomId: string, input: GeneratedSurfaceReviseInput): Promise<{ definition: GeneratedSurfaceDefinition; revision: GeneratedSurfaceRevisionRecord; replayed: boolean }> {
     const parsedInput = generatedSurfaceRevise.input.parse(input);
     const inputHash = stableHash(parsedInput);
     const replayed = await this.operationAlreadyExists(context, roomId, inputHash, "generated_surface.revise");
@@ -148,11 +189,17 @@ export class PostgresGeneratedSurface {
     return { ...value, replayed };
   }
 
-  async runAction(context: WorkspaceRequestContext, input: GeneratedSurfaceActionRunInput & { room_id: string; action_payload?: Record<string, JsonValue>; interaction_id?: string; message_id?: string; confirmed?: boolean }): Promise<Record<string, unknown>> {
+  /**
+   * Resolves and validates the exact action target before it is executed or
+   * persisted for a confirmation.  The declared command and current Surface
+   * revision remain the source of truth; client JSON can only provide values
+   * permitted by that already-declared command.
+   */
+  async prepareAction(context: WorkspaceRequestContext, input: GeneratedSurfaceActionRequest): Promise<PreparedGeneratedSurfaceAction> {
     const surface = await this.get(context, input.room_id, input.surface_id);
     await this.commands.assertRoomExecutable(context, input.room_id);
     const trusted = trustedContext(context, input.room_id, surface.session_id);
-    const revisionId = input.revision_id ?? surface.current_revision_id;
+    let resolvedRevisionId: string | undefined;
     const resolved = unwrap(await generatedSurfaceActionRun.createHandler({
       resolveGeneratedSurfaceAction: async (actionInput) => {
         const current = await this.get(context, input.room_id, actionInput.surfaceId);
@@ -162,6 +209,7 @@ export class PostgresGeneratedSurface {
         if (!action || !current.capability_manifest.allowed_domain_commands.includes(action.command_id)) {
           throw new WorkspaceServerError("generated_surface_action_not_declared", 403);
         }
+        resolvedRevisionId = revisionId;
         return { surface: current, revisionId, action };
       }
     }).execute(trusted, {
@@ -169,47 +217,107 @@ export class PostgresGeneratedSurface {
       ...(input.revision_id ? { revision_id: input.revision_id } : {}),
       surface_id: input.surface_id
     }));
-    if (resolved.action.requires_confirmation && input.confirmed !== true) {
+    if (!resolvedRevisionId) throw new WorkspaceServerError("generated_surface_action_resolution_invalid", 500);
+    const payload = resolvedGeneratedSurfaceActionPayload(resolved.action, input.action_payload);
+    return {
+      surface: resolved.surface,
+      revisionId: resolvedRevisionId,
+      action: resolved.action,
+      target: {
+        kind: "generated_surface_action",
+        room_id: input.room_id,
+        surface_id: resolved.surface.id,
+        revision_id: resolvedRevisionId,
+        action_id: resolved.action.id,
+        command_id: resolved.action.command_id,
+        payload,
+        ...(input.interaction_id ? { interaction_id: input.interaction_id } : {}),
+        ...(input.message_id ? { message_id: input.message_id } : {})
+      }
+    };
+  }
+
+  /** Executes a previously prepared current action without a confirmation. */
+  async runAction(context: WorkspaceRequestContext, input: GeneratedSurfaceActionRequest): Promise<Record<string, unknown>> {
+    const prepared = await this.prepareAction(context, input);
+    if (prepared.action.requires_confirmation) {
       throw new WorkspaceServerError("generated_surface_action_confirmation_required", 409);
     }
-    const payload = {
-      ...resolved.action.payload_template,
-      ...(input.action_payload ?? {})
-    } as Record<string, JsonValue>;
-    const commandId = resolved.action.command_id;
+    return this.executeResolvedAction(context, prepared);
+  }
+
+  /**
+   * Revalidates a durable approval target immediately before side effects.
+   * A Surface revision/action/command/payload mismatch is never silently
+   * redirected to the latest Surface.
+   */
+  async executeActionTarget(context: WorkspaceRequestContext, target: GeneratedSurfaceActionTarget): Promise<Record<string, unknown>> {
+    const parsedTarget = parseGeneratedSurfaceActionTarget(target);
+    const prepared = await this.prepareAction(context, {
+      room_id: parsedTarget.room_id,
+      surface_id: parsedTarget.surface_id,
+      revision_id: parsedTarget.revision_id,
+      action_id: parsedTarget.action_id,
+      action_payload: parsedTarget.payload,
+      ...(parsedTarget.interaction_id ? { interaction_id: parsedTarget.interaction_id } : {}),
+      ...(parsedTarget.message_id ? { message_id: parsedTarget.message_id } : {})
+    });
+    if (canonicalJson(prepared.target) !== canonicalJson(parsedTarget)) {
+      throw new WorkspaceServerError("generated_surface_action_target_stale", 409);
+    }
+    return this.executeResolvedAction(context, prepared);
+  }
+
+  private async executeResolvedAction(context: WorkspaceRequestContext, prepared: PreparedGeneratedSurfaceAction): Promise<Record<string, unknown>> {
+    const { surface, revisionId, action, target } = prepared;
+    // The check in prepareAction protects target construction. Recheck at the
+    // side-effect boundary to handle a revoked permission between approval and
+    // execution.
+    await this.commands.assertRoomExecutable(context, target.room_id);
     let targetResult: GeneratedSurfaceTargetCommandResult;
     try {
       if (!this.targetCommand) throw new WorkspaceServerError("generated_surface_target_command_not_connected", 503);
-      targetResult = await this.targetCommand(context, {
-        roomId: input.room_id,
-        commandId,
-        payload,
-        operationId: scopedOperationId(context.operationId, "target")
+      // A renderer operation ID may be a UUID, while downstream Domain and
+      // Completion operations require an opaque, namespaced identifier. Keep
+      // the user action's correlation ID on the interaction itself, but give
+      // every target side effect one deterministic, retry-safe operation ID.
+      const targetContext = scopedContext(context, "target");
+      targetResult = await this.targetCommand(targetContext, {
+        roomId: target.room_id,
+        commandId: target.command_id,
+        payload: target.payload,
+        operationId: targetContext.operationId
       });
     } catch (error) {
       const interaction = await this.recordInteraction(context, {
-        room_id: input.room_id,
-        surface_id: input.surface_id,
+        room_id: target.room_id,
+        surface_id: target.surface_id,
         revision_id: revisionId,
-        interaction_id: input.interaction_id ?? deterministicInteractionId(context.operationId),
-        message_id: input.message_id,
-        command_id: commandId,
+        interaction_id: target.interaction_id ?? deterministicInteractionId(context.operationId),
+        ...(target.message_id ? { message_id: target.message_id } : {}),
+        command_id: target.command_id,
         kind: "action",
         command_result: { ok: false, error: publicErrorCode(error) }
       }, surface.session_id);
       throw new WorkspaceServerError("generated_surface_action_failed", error instanceof WorkspaceServerError && error.status >= 500 ? 503 : 409, { interaction_id: interaction.id });
     }
     const interaction = await this.recordInteraction(context, {
-      room_id: input.room_id,
-      surface_id: input.surface_id,
+      room_id: target.room_id,
+      surface_id: target.surface_id,
       revision_id: revisionId,
-      interaction_id: input.interaction_id ?? deterministicInteractionId(context.operationId),
-      message_id: input.message_id,
-      command_id: commandId,
+      interaction_id: target.interaction_id ?? deterministicInteractionId(context.operationId),
+      ...(target.message_id ? { message_id: target.message_id } : {}),
+      command_id: target.command_id,
       kind: "action",
       command_result: { ok: true, result: targetResult.result ?? null }
     }, surface.session_id);
-    return { ...resolved, interaction, target_result: targetResult.result ?? null };
+    return {
+      surface,
+      action,
+      command: { result: { command_id: action.command_id, payload_template: action.payload_template } },
+      interaction,
+      target_result: targetResult.result ?? null
+    };
   }
 
   async recordInteraction(context: WorkspaceRequestContext, input: GeneratedSurfaceInteractionRecordInput & { room_id: string }, sessionId?: string): Promise<SurfaceInteractionRecord> {
@@ -303,7 +411,7 @@ export class PostgresGeneratedSurface {
     };
   }
 
-  private createPorts(context: WorkspaceRequestContext, roomId: string, inputHash: string): GeneratedSurfaceCreatePorts {
+  private createPorts(context: GeneratedSurfaceMutationContext, roomId: string, inputHash: string): GeneratedSurfaceCreatePorts {
     const surfaceId = deterministicSurfaceId(context, roomId);
     return {
       createGeneratedSurfaceRequestId: () => `surface_request_${stableHash(`${context.workspaceId}|${context.operationId}`)}`,
@@ -319,7 +427,7 @@ export class PostgresGeneratedSurface {
     };
   }
 
-  private revisePorts(context: WorkspaceRequestContext, roomId: string, inputHash: string, surfaceId: string): GeneratedSurfaceRevisePorts {
+  private revisePorts(context: GeneratedSurfaceMutationContext, roomId: string, inputHash: string, surfaceId: string): GeneratedSurfaceRevisePorts {
     return {
       getGeneratedSurface: (id) => this.get(context, roomId, id),
       createGeneratedSurfaceRequestId: () => `surface_request_${stableHash(`${context.workspaceId}|${context.operationId}`)}`,
@@ -633,7 +741,94 @@ export class PostgresGeneratedSurface {
   }
 }
 
-function trustedContext(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "operationId">, roomId: string, sessionId?: string): import("@samurai-agent/domain-operations").TrustedDomainContext {
+const maxGeneratedSurfaceActionPayloadBytes = 64 * 1024;
+
+/**
+ * Builds a target payload from the declared action and renderer values. A
+ * declaration's template is Server-owned: callers may repeat a fixed value,
+ * but cannot replace it with a different target such as another Collection
+ * ID or record version.
+ */
+function resolvedGeneratedSurfaceActionPayload(
+  action: GeneratedSurfaceActionDeclaration,
+  actionPayload: Record<string, JsonValue> | undefined
+): Record<string, JsonValue> {
+  if (actionPayload !== undefined && !isGeneratedSurfaceActionJsonObject(actionPayload)) {
+    throw new WorkspaceServerError("generated_surface_action_payload_invalid", 400);
+  }
+  const supplied = cloneGeneratedSurfaceActionPayload(actionPayload ?? {});
+  for (const [key, templateValue] of Object.entries(action.payload_template)) {
+    if (Object.hasOwn(supplied, key) && canonicalJson(supplied[key]) !== canonicalJson(templateValue)) {
+      throw new WorkspaceServerError("generated_surface_action_payload_template_override", 409, { key });
+    }
+  }
+  const payload = { ...supplied, ...action.payload_template } as Record<string, JsonValue>;
+  assertGeneratedSurfaceActionPayloadSize(payload);
+  try {
+    const parsed = parseDomainOperationInput(action.command_id as DomainCommandId, payload);
+    if (!isGeneratedSurfaceActionJsonObject(parsed)) throw new WorkspaceServerError("generated_surface_target_payload_invalid", 400);
+    return cloneGeneratedSurfaceActionPayload(parsed);
+  } catch (error) {
+    if (error instanceof WorkspaceServerError) throw error;
+    throw new WorkspaceServerError("generated_surface_target_payload_invalid", 400, { command_id: action.command_id });
+  }
+}
+
+function parseGeneratedSurfaceActionTarget(value: unknown): GeneratedSurfaceActionTarget {
+  if (!isGeneratedSurfaceActionJsonObject(value)
+    || value.kind !== "generated_surface_action"
+    || typeof value.room_id !== "string"
+    || typeof value.surface_id !== "string"
+    || typeof value.revision_id !== "string"
+    || typeof value.action_id !== "string"
+    || typeof value.command_id !== "string"
+    || !isGeneratedSurfaceActionJsonObject(value.payload)) {
+    throw new WorkspaceServerError("generated_surface_action_target_invalid", 400);
+  }
+  const target = {
+    kind: "generated_surface_action" as const,
+    room_id: requireGeneratedSurfaceActionId(value.room_id, "room"),
+    surface_id: requireGeneratedSurfaceActionId(value.surface_id, "surface"),
+    revision_id: requireGeneratedSurfaceActionId(value.revision_id, "revision"),
+    action_id: requireGeneratedSurfaceActionId(value.action_id, "action"),
+    command_id: requireGeneratedSurfaceActionId(value.command_id, "command"),
+    payload: cloneGeneratedSurfaceActionPayload(value.payload),
+    ...(value.interaction_id === undefined ? {} : { interaction_id: requireGeneratedSurfaceActionId(value.interaction_id, "interaction") }),
+    ...(value.message_id === undefined ? {} : { message_id: requireGeneratedSurfaceActionId(value.message_id, "message") })
+  };
+  assertGeneratedSurfaceActionPayloadSize(target.payload);
+  return target;
+}
+
+function requireGeneratedSurfaceActionId(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 256) {
+    throw new WorkspaceServerError("generated_surface_action_target_invalid", 400, { field });
+  }
+  return value.trim();
+}
+
+function cloneGeneratedSurfaceActionPayload(value: Record<string, JsonValue>): Record<string, JsonValue> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, JsonValue>;
+}
+
+function assertGeneratedSurfaceActionPayloadSize(value: Record<string, JsonValue>): void {
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > maxGeneratedSurfaceActionPayloadBytes) {
+    throw new WorkspaceServerError("generated_surface_action_payload_too_large", 400);
+  }
+}
+
+function isGeneratedSurfaceActionJsonObject(value: unknown): value is Record<string, JsonValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value).every(([key, child]) => Boolean(key) && isGeneratedSurfaceActionJsonValue(child));
+}
+
+function isGeneratedSurfaceActionJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return Number.isFinite(value as number) || typeof value !== "number";
+  if (Array.isArray(value)) return value.every(isGeneratedSurfaceActionJsonValue);
+  return isGeneratedSurfaceActionJsonObject(value);
+}
+
+function trustedContext(context: Pick<GeneratedSurfaceMutationContext, "workspaceId" | "accountId" | "operationId" | "runtimeRunId">, roomId: string, sessionId?: string): import("@samurai-agent/domain-operations").TrustedDomainContext {
   return {
     inputSource: "runtime_api",
     workspaceId: context.workspaceId,
@@ -641,6 +836,7 @@ function trustedContext(context: Pick<WorkspaceRequestContext, "workspaceId" | "
     participant: { kind: "human", participantId: context.accountId },
     roomId,
     ...(sessionId ? { sessionId } : {}),
+    ...(context.runtimeRunId ? { runId: context.runtimeRunId } : {}),
     source: { kind: "native_app", app_id: "samurai-workspace-client" },
     correlationId: context.operationId,
     idempotencyKey: context.operationId

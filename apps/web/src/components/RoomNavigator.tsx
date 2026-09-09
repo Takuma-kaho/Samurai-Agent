@@ -16,7 +16,7 @@ function roomDepth(room: NativeRoom, byId: Map<string, NativeRoom>): number {
   let depth = 0;
   const visited = new Set<string>();
   let parentId = room.parentRoomId;
-  while (parentId && !visited.has(parentId) && depth < 6) {
+  while (parentId && !visited.has(parentId)) {
     visited.add(parentId);
     depth += 1;
     parentId = byId.get(parentId)?.parentRoomId;
@@ -51,7 +51,10 @@ export function RoomNavigator({
       <ul className="native-room-list">
         {orderedRooms.map((room) => {
           const active = room.id === selectedRoomId;
-          const roomDisabled = disabled || archived || room.canExecute === false;
+          // Viewing a Room and starting Agent work are separate capabilities.
+          // Keep an authorized read-only Room reachable so its work history and
+          // artifacts are not hidden just because execution is unavailable.
+          const roomDisabled = disabled || archived || room.canView === false;
           return (
             <li key={room.id}>
               <button
@@ -64,7 +67,7 @@ export function RoomNavigator({
               >
                 <span className="native-room-mark" aria-hidden="true">{active ? "●" : "○"}</span>
                 <span>{room.name}</span>
-                {room.canExecute === false ? <span className="native-room-permission">権限なし</span> : null}
+                {room.canView === false ? <span className="native-room-permission">閲覧不可</span> : room.canExecute === false ? <span className="native-room-permission">読み取り専用</span> : null}
               </button>
             </li>
           );

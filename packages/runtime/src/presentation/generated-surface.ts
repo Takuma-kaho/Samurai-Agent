@@ -73,7 +73,12 @@ export function validateGeneratedSurfaceBundle(request: SurfaceGenerationRequest
   if (/<(?:script|iframe|object|embed|base|form)\b/i.test(bundle.html)) issues.push({ code: "surface_html_forbidden_element", message: "HTML contains a forbidden element." });
   if (/\son[a-z]+\s*=/i.test(bundle.html)) issues.push({ code: "surface_html_inline_handler", message: "Inline event handlers are forbidden." });
   if (/(?:javascript:|https?:\/\/|\/\/[^\s"'])/i.test(`${bundle.html}\n${bundle.css ?? ""}`)) issues.push({ code: "surface_external_url", message: "External URLs are forbidden." });
-  if (/(?:\beval\s*\(|\bFunction\s*\(|\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.sendBeacon|import\s*\()/i.test(bundle.script ?? "")) {
+  // `Function` is a dynamic-code constructor and must remain case-sensitive:
+  // a case-insensitive expression would also reject the ordinary JavaScript
+  // keyword `function`, preventing safe event-handler functions in a Surface.
+  const script = bundle.script ?? "";
+  if (/\bFunction\s*\(/.test(script)
+    || /(?:\beval\s*\(|\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.sendBeacon|import\s*\()/i.test(script)) {
     issues.push({ code: "surface_script_forbidden_capability", message: "Script requests a forbidden capability." });
   }
   if (/<\/style/i.test(bundle.css ?? "") || /<\/script/i.test(bundle.script ?? "")) issues.push({ code: "surface_bundle_context_breakout", message: "Bundle content attempts to escape its style or script context." });
@@ -118,25 +123,38 @@ export function buildGeneratedSurfaceRevision(input: {
   });
   const bundleHash = sha256(`${input.bundle.html}\0${input.bundle.css ?? ""}\0${input.bundle.script ?? ""}\0${JSON.stringify(input.bundle.actions)}\0${JSON.stringify(input.bundle.assets ?? [])}`);
   const revision = GeneratedSurfaceRevisionRecordSchema.parse({
-    id: revisionId, surface_id: surfaceId, revision: revisionNumber, parent_revision_id: input.existing?.current_revision_id,
-    producer_run_id: input.producerRunId, activity_id: input.request.activity_id, domain_operation_id: input.request.domain_operation_id,
-    source_resource_refs: input.request.source_resource_refs, prompt_fingerprint: input.promptFingerprint ?? stableHash(input.request.user_intent),
-    knowledge_refs: input.request.selected_knowledge_refs, skill_refs: input.request.selected_skill_refs,
-    html_ref: htmlRef, css_ref: cssRef, script_ref: scriptRef, asset_refs: assetRefs, bundle_hash: bundleHash, validation_report: validation, created_at: now
+    id: revisionId,
+    surface_id: surfaceId,
+    revision: revisionNumber,
+    ...(input.existing?.current_revision_id ? { parent_revision_id: input.existing.current_revision_id } : {}),
+    ...(input.producerRunId ? { producer_run_id: input.producerRunId } : {}),
+    ...(input.request.activity_id ? { activity_id: input.request.activity_id } : {}),
+    domain_operation_id: input.request.domain_operation_id,
+    source_resource_refs: input.request.source_resource_refs,
+    prompt_fingerprint: input.promptFingerprint ?? stableHash(input.request.user_intent),
+    knowledge_refs: input.request.selected_knowledge_refs,
+    skill_refs: input.request.selected_skill_refs,
+    html_ref: htmlRef,
+    ...(cssRef ? { css_ref: cssRef } : {}),
+    ...(scriptRef ? { script_ref: scriptRef } : {}),
+    asset_refs: assetRefs,
+    bundle_hash: bundleHash,
+    validation_report: validation,
+    created_at: now
   });
   const definition = GeneratedSurfaceDefinitionSchema.parse({
     id: surfaceId,
     state: input.existing?.state ?? (input.request.expected_lifetime === "pinned" ? "pinned" : "ephemeral"),
-    session_id: input.request.session_id,
-    session_ref: input.request.session_ref,
-    activity_id: input.request.activity_id,
+    ...(input.request.session_id ? { session_id: input.request.session_id } : {}),
+    ...(input.request.session_ref ? { session_ref: input.request.session_ref } : {}),
+    ...(input.request.activity_id ? { activity_id: input.request.activity_id } : {}),
     domain_operation_id: input.request.domain_operation_id,
     title: input.bundle.title,
     input_data_schema: input.bundle.input_data_schema ?? {},
     actions: input.bundle.actions,
     capability_manifest: { allowed_domain_commands: input.request.allowed_domain_commands, network_access: "none", workspace_write: "domain_commands_only" },
     source_refs: input.request.source_resource_refs,
-    generation_run_id: input.producerRunId,
+    ...(input.producerRunId ? { generation_run_id: input.producerRunId } : {}),
     content_hash: bundleHash,
     current_revision_id: revision.id,
     current_revision: revisionNumber,

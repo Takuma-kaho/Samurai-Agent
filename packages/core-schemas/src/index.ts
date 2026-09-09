@@ -3660,6 +3660,11 @@ export const ArtifactRecordSchema = z.object({
 }).strict();
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
 
+/** A body is either UTF-8 text or opaque bytes.  Binary content must not be
+ * represented as a base64 string at the public Artifact boundary. */
+export const ArtifactContentEncodingSchema = z.enum(["utf8", "binary"]);
+export type ArtifactContentEncoding = z.infer<typeof ArtifactContentEncodingSchema>;
+
 export const GraphNodeSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
@@ -4495,6 +4500,8 @@ export const ArtifactRevisionRecordSchema = z.object({
   blob_ref: ResourceRefSchema,
   content_hash: z.string().min(1),
   content_bytes: z.number().int().nonnegative(),
+  mime_type: z.string().trim().min(1).max(255).optional(),
+  encoding: ArtifactContentEncodingSchema.optional(),
   created_at: z.string().datetime()
 }).strict();
 export type ArtifactRevisionRecord = z.infer<typeof ArtifactRevisionRecordSchema>;

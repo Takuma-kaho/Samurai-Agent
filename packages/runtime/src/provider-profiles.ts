@@ -190,6 +190,7 @@ function stablePrompt(locale: SupportedLocale): string {
     "Normal conversation must be plain natural language content, not JSON.",
     "Use tools only for state-changing or boundary-crossing intents.",
     "Use create_artifact only when the user asks to create a durable local artifact or draft.",
+    "Use create_generated_surface only when the user asks for an independent or custom HTML/UI surface. Its bundle.html must not contain script or style tags, inline event handlers, external URLs, or network/storage APIs: put CSS in bundle.css and JavaScript in bundle.script. To trigger a declared action, have the event handler call window.dispatchSamuraiAction(actionId, payload); do not invent bridge APIs or call window.parent.postMessage directly. The saved bundle and its actions remain subject to the current Runtime and Workspace boundaries.",
     "Use subagent_delegate only when a bounded child assignment is needed for a specialist Agent already permitted in this Room. The tool receives only the target Agent, instruction, optional Server-issued attachments, and optional dependency assignment IDs; Room, Work, parent assignment, requester, and generation are server-bound.",
     "Use request_external_send when the user asks to send, publish, post, or otherwise affect an external channel.",
     "Use remember_topic only when the user explicitly asks you to remember a preference or reusable fact.",
@@ -479,6 +480,7 @@ function gatewayBoundarySummary(input: ProviderInput): string {
 }
 
 const artifactParameters = requireDomainCommandEntry("artifact.create").input_schema;
+const generatedSurfaceCreateParameters = requireDomainCommandEntry("generated_surface.create").input_schema;
 const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
 const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
@@ -540,6 +542,11 @@ function toolDefinitions(availableTools?: readonly string[]) {
       parameters: artifactParameters
     },
     {
+      name: "create_generated_surface",
+      description: "Generate and save an isolated HTML Surface for the Workspace Canvas. Put markup only in bundle.html, CSS only in bundle.css, and JavaScript only in bundle.script; never embed script or style tags, inline event handlers, external URLs, or network/storage APIs in the bundle. Trigger only declared actions with window.dispatchSamuraiAction(actionId, payload), never with an invented bridge API or window.parent.postMessage.",
+      parameters: generatedSurfaceCreateParameters
+    },
+    {
       name: "request_external_send",
       description: "Request an approval-gated external send, publish, post, or mail operation.",
       parameters: externalSendParameters
@@ -562,6 +569,7 @@ function toolDefinitions(availableTools?: readonly string[]) {
 
 function domainCommandIdForProviderTool(toolName: string): string {
   if (toolName === "create_artifact") return "artifact.create";
+  if (toolName === "create_generated_surface") return "generated_surface.create";
   if (toolName === "request_external_send") return "external.send.prepare";
   if (toolName === "remember_topic") return "memory.topic.create";
   if (toolName === "subagent_delegate") return "room.work.assignee.delegate";
@@ -590,9 +598,31 @@ function expandGeminiSchema(value: unknown, root: Record<string, unknown>, resol
     : {};
   for (const [key, entry] of Object.entries(value)) {
     if (key === "$ref" || GEMINI_SCHEMA_METADATA_KEYS.has(key)) continue;
+    if (key === "anyOf" || key === "oneOf") {
+      const variants = Array.isArray(entry)
+        ? entry.map((variant) => expandGeminiSchema(variant, root, resolvingRefs))
+        : [];
+      const selected = selectGeminiSchemaVariant(variants);
+      if (selected) Object.assign(expanded, selected);
+      continue;
+    }
     expanded[key] = expandGeminiSchema(entry, root, resolvingRefs);
   }
   return expanded;
+}
+
+/**
+ * Gemini function declarations do not accept JSON Schema unions. Project a
+ * union to its first non-null object schema at this provider boundary; the
+ * canonical domain schema remains unchanged for providers that support unions.
+ */
+function selectGeminiSchemaVariant(variants: unknown[]): Record<string, unknown> | undefined {
+  const records = variants.filter(isRecord);
+  const selected = records.find((variant) => variant.type !== "null") ?? records[0];
+  if (!selected) return undefined;
+  return records.some((variant) => variant.type === "null")
+    ? { ...selected, nullable: true }
+    : selected;
 }
 
 function expandGeminiReference(reference: string, root: Record<string, unknown>, resolvingRefs: Set<string>): Record<string, unknown> {
@@ -608,9 +638,17 @@ function resolveJsonPointer(root: Record<string, unknown>, reference: string): u
   if (!reference.startsWith("#/")) return undefined;
   let current: unknown = root;
   for (const rawSegment of reference.slice(2).split("/")) {
-    if (!isRecord(current)) return undefined;
     const segment = rawSegment.replace(/~1/g, "/").replace(/~0/g, "~");
-    current = current[segment];
+    if (Array.isArray(current)) {
+      if (!/^\d+$/.test(segment)) return undefined;
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index >= current.length) return undefined;
+      current = current[index];
+    } else if (isRecord(current)) {
+      current = current[segment];
+    } else {
+      return undefined;
+    }
   }
   return current;
 }

@@ -3,6 +3,7 @@ import type {
   ApprovalRequest,
   AutomationJobRecord,
   ArtifactRecord,
+  ArtifactRevisionRecord,
   AuditRecord,
   BackendEventRecord,
   BackendRunRecord,
@@ -58,8 +59,31 @@ export interface SessionDetail {
 export interface ArtifactDetail {
   artifact: ArtifactRecord;
   content: string;
+  content_bytes?: number[];
+  mime_type?: string;
+  encoding?: "utf8" | "binary";
+  revision?: ArtifactRevisionRecord;
   operation?: OperationRecord;
   auditRecords: AuditRecord[];
+}
+
+export interface ArtifactRevisionDetail {
+  artifact: ArtifactRecord;
+  revision: ArtifactRevisionRecord;
+  content: string;
+  content_bytes?: number[];
+  mime_type: string;
+  encoding: "utf8" | "binary";
+}
+
+export interface ArtifactMutationResult {
+  artifact: ArtifactRecord;
+  revision?: ArtifactRevisionRecord;
+  content?: string;
+  content_bytes?: number[];
+  mime_type?: string;
+  encoding?: "utf8" | "binary";
+  replayed: boolean;
 }
 
 export interface MemoryDetail {
@@ -125,6 +149,116 @@ export interface GeneratedSurfaceExportPayload {
   file_name: string;
   content_type: string;
   content_base64: string;
+}
+
+export interface GeneratedSurfaceWriteBundle {
+  title: string;
+  html: string;
+  css?: string;
+  script?: string;
+  actions: Array<Record<string, JsonValue>>;
+  input_data_schema?: Record<string, JsonValue>;
+  assets?: Array<{ path: string; content: string; encoding?: "utf8" | "base64"; mime_type?: string }>;
+}
+
+export interface GeneratedSurfaceWriteRequest {
+  user_intent: string;
+  source_resource_refs: ResourceRef[];
+  allowed_domain_commands: string[];
+  selected_knowledge_refs: ResourceRef[];
+  selected_skill_refs: ResourceRef[];
+  client_capabilities: Record<string, JsonValue>;
+  expected_lifetime: "message" | "session" | "pinned";
+  fallback_chain: Array<"built_in_surface" | "artifact" | "text">;
+}
+
+export interface GeneratedSurfaceMutationResult {
+  definition: GeneratedSurfaceDefinition;
+  revision: GeneratedSurfaceRevisionRecord;
+  replayed?: boolean;
+}
+
+export type DesktopWorkspaceInteractionKind = "approval" | "backend_input";
+export type DesktopWorkspaceInteractionStatus =
+  | "pending"
+  | "accepted"
+  | "denied"
+  | "cancelled"
+  | "expired"
+  | "executing"
+  | "completed"
+  | "failed";
+
+export interface DesktopWorkspaceInteractionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface DesktopWorkspaceInteractionInputSchemaProperty {
+  type?: "string" | "number" | "integer" | "boolean";
+  title?: string;
+  description?: string;
+  enum?: Array<string | number | boolean>;
+  minLength?: number;
+  maxLength?: number;
+}
+
+export interface DesktopWorkspaceInteractionInputSchema {
+  type?: "object";
+  properties?: Record<string, DesktopWorkspaceInteractionInputSchemaProperty>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
+export interface DesktopWorkspaceInteractionOutcome {
+  kind: "response" | "cancelled" | "expired";
+  optionId?: string;
+  decision?: "approve" | "deny" | "submit_input";
+  decidedAt?: string;
+  expiredAt?: string;
+}
+
+export interface DesktopWorkspaceInteractionExecution {
+  status: "executing" | "completed" | "failed";
+  startedAt: string;
+  finishedAt?: string;
+  summary?: string;
+  errorCode?: string;
+}
+
+/** Renderer-safe projection of the durable Server interaction request. */
+export interface DesktopWorkspaceInteractionRequest {
+  id: string;
+  workspaceId: string;
+  roomId: string;
+  version: number;
+  kind: DesktopWorkspaceInteractionKind;
+  status: DesktopWorkspaceInteractionStatus;
+  title: string;
+  summary: string;
+  runId?: string;
+  surfaceId?: string;
+  revisionId?: string;
+  actionTarget: Record<string, JsonValue>;
+  options: DesktopWorkspaceInteractionOption[];
+  inputSchema?: DesktopWorkspaceInteractionInputSchema;
+  expiresAt: string;
+  outcome?: DesktopWorkspaceInteractionOutcome;
+  execution?: DesktopWorkspaceInteractionExecution;
+  createdAt: string;
+  updatedAt: string;
+  /** Compatibility fields consumed by the existing Native request card. */
+  actionId?: string;
+  targetLabel?: string;
+  resultSummary?: string;
+  failureSummary?: string;
+  errorCode?: string;
+}
+
+export interface DesktopWorkspaceInteractionMutationResult {
+  request: DesktopWorkspaceInteractionRequest;
+  replayed?: boolean;
 }
 
 export interface SkillOptimizationDetail {
@@ -546,6 +680,8 @@ export interface DesktopWorkspaceRoomWorkInstruction {
   kind: DesktopWorkspaceRoomWorkInstructionKind;
   instruction: string;
   attachments: ResourceRef[];
+  /** Server-canonical Knowledge/Skill refs; never a file attachment. */
+  resourceRefs: ResourceRef[];
   version: number;
   generation: number;
   status: DesktopWorkspaceRoomWorkInstructionStatus;
@@ -606,6 +742,8 @@ export interface DesktopWorkspaceRoomWork {
   instructionVersion: number;
   generation: number;
   version: number;
+  /** Server-canonical Knowledge/Skill refs; never a file attachment. */
+  resourceRefs: ResourceRef[];
   assignees: DesktopWorkspaceRoomWorkAssignee[];
   executionReservations?: DesktopWorkspaceRoomWorkExecutionReservation[];
   createdAt: string;
@@ -675,6 +813,17 @@ export interface DesktopWorkspaceRoomWorkListResult {
   /** Echoed request scope so a late response cannot be rendered in another Room. */
   roomId?: string;
   nextCursor?: string;
+}
+
+/**
+ * Renderer-to-bridge selector for a server-owned Knowledge or Skill version.
+ * URI, label, and arbitrary client metadata are deliberately not part of this
+ * transport type. The server resolves the canonical URI and label.
+ */
+export interface DesktopWorkspaceRoomWorkResourceRefInput {
+  kind: "knowledge" | "skill";
+  id: string;
+  version: number;
 }
 
 export interface DesktopWorkspacePublicEvent {
@@ -902,8 +1051,8 @@ declare global {
       /** Room work API: the renderer carries Room/Work IDs, never Session IDs. */
       listWorkspaceRoomWorks?: (input: { roomId: string; status?: DesktopWorkspaceRoomWorkStatus; cursor?: string; limit?: number }) => Promise<DesktopWorkspaceRoomWorkListResult>;
       getWorkspaceRoomWork?: (input: { roomId: string; workId: string }) => Promise<DesktopWorkspaceRoomWorkView>;
-      createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId: string }) => Promise<DesktopWorkspaceRoomWork & { replayed?: boolean }>;
-      replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
+      createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; agentId?: string; operationId: string }) => Promise<DesktopWorkspaceRoomWork & { replayed?: boolean }>;
+      replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
       createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkComment & { replayed?: boolean }>;
       applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; assigneeId?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
       reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction?: "like"; enabled?: boolean; expectedVersion?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkReaction & { replayed?: boolean }>;
@@ -999,13 +1148,24 @@ declare global {
       runWorkspaceCollectionSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
       listWorkspaceArtifacts?: (input: { roomId: string }) => Promise<{ artifacts: ArtifactRecord[] }>;
       getWorkspaceArtifact?: (input: { roomId: string; artifactId: string }) => Promise<ArtifactDetail>;
-      createWorkspaceArtifact?: (input: { roomId: string; title: string; content: string | Record<string, JsonValue> | JsonValue[]; kind?: ArtifactRecord["kind"]; locale?: SupportedLocale; sourceLocales?: SupportedLocale[]; metadata?: Record<string, JsonValue>; operationId: string }) => Promise<{ artifact: ArtifactRecord; content: string; replayed?: boolean }>;
+      createWorkspaceArtifact?: (input: { roomId: string; title: string; content: string | Uint8Array | Record<string, JsonValue> | JsonValue[]; kind?: ArtifactRecord["kind"]; locale?: SupportedLocale; sourceLocales?: SupportedLocale[]; metadata?: Record<string, JsonValue>; mimeType?: string; encoding?: "utf8" | "binary"; operationId: string }) => Promise<ArtifactMutationResult>;
       runWorkspaceArtifactSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
+      listWorkspaceArtifactRevisions?: (input: { roomId: string; artifactId: string }) => Promise<ArtifactRevisionRecord[]>;
+      getWorkspaceArtifactRevision?: (input: { roomId: string; artifactId: string; revisionId: string }) => Promise<ArtifactRevisionDetail>;
+      reviseWorkspaceArtifact?: (input: { roomId: string; artifactId: string; content: string | Uint8Array; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; mimeType?: string; encoding?: "utf8" | "binary"; operationId: string }) => Promise<ArtifactMutationResult>;
+      restoreWorkspaceArtifactRevision?: (input: { roomId: string; artifactId: string; revisionId: string; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; operationId: string }) => Promise<ArtifactMutationResult>;
+      listWorkspaceGeneratedSurfaces?: (input: { roomId: string }) => Promise<GeneratedSurfaceDefinition[]>;
       getWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string }) => Promise<GeneratedSurfaceDetail>;
+      queryWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string }) => Promise<GeneratedSurfaceDetail>;
       getWorkspaceGeneratedSurfaceBundle?: (input: { roomId: string; surfaceId: string; revisionId: string }) => Promise<GeneratedSurfaceBundleDetail>;
-      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; confirmed?: boolean; actionPayload?: Record<string, JsonValue>; operationId: string }) => Promise<Record<string, unknown>>;
+      createWorkspaceGeneratedSurface?: (input: { roomId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId: string }) => Promise<GeneratedSurfaceMutationResult>;
+      reviseWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId: string }) => Promise<GeneratedSurfaceMutationResult>;
+      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; actionPayload?: Record<string, JsonValue>; operationId: string }) => Promise<Record<string, unknown>>;
       runWorkspaceGeneratedSurfaceState?: (input: { roomId: string; surfaceId: string; action: "pin" | "unpin" | "archive"; interactionId?: string; messageId?: string; operationId: string }) => Promise<GeneratedSurfaceDefinition>;
       exportWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; revisionId?: string; format: "html" | "zip" }) => Promise<GeneratedSurfaceExportPayload>;
+      listWorkspaceInteractionRequests?: (input: { roomId: string; includeResolved?: boolean }) => Promise<{ requests: DesktopWorkspaceInteractionRequest[] }>;
+      respondWorkspaceInteractionRequest?: (input: { roomId: string; requestId: string; expectedVersion: number; optionId: string; values?: Record<string, JsonValue>; operationId: string }) => Promise<DesktopWorkspaceInteractionMutationResult>;
+      cancelWorkspaceInteractionRequest?: (input: { roomId: string; requestId: string; expectedVersion: number; operationId: string }) => Promise<DesktopWorkspaceInteractionMutationResult>;
       listWorkspaceAutomationJobs?: (input: { roomId?: string }) => Promise<{ jobs: AutomationJobRecord[] }>;
       createWorkspaceAutomationJob?: (input: {
         roomId: string;
@@ -1191,12 +1351,12 @@ export const api = {
     if (bridge?.getWorkspaceRoomWork) return bridge.getWorkspaceRoomWork(input);
     return workspaceRequestRequired<DesktopWorkspaceRoomWorkView>("room.work.view");
   },
-  createRoomWork(input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId?: string }) {
+  createRoomWork(input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; agentId?: string; operationId?: string }) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.createWorkspaceRoomWork) return bridge.createWorkspaceRoomWork({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
     return workspaceRequestRequired<DesktopWorkspaceRoomWork & { replayed?: boolean }>("room.work.create");
   },
-  replyRoomWork(input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
+  replyRoomWork(input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId?: string }) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.replyWorkspaceRoomWork) return bridge.replyWorkspaceRoomWork({ ...input, operationId: input.operationId ?? createIdempotencyKey() });
     return workspaceRequestRequired<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>("room.work.reply");
@@ -1282,7 +1442,7 @@ export const api = {
     if (bridge?.getWorkspaceGeneratedSurface && activeWorkspaceRoomId) return bridge.getWorkspaceGeneratedSurface({ roomId: activeWorkspaceRoomId, surfaceId });
     return workspaceRequestRequired<GeneratedSurfaceDetail>("generated-surface.get");
   },
-  runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; confirmed?: boolean; action_payload?: Record<string, JsonValue> }) {
+  runGeneratedSurfaceAction(surfaceId: string, actionId: string, payload: { revision_id?: string; interaction_id?: string; message_id?: string; action_payload?: Record<string, JsonValue> }) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.runWorkspaceGeneratedSurfaceAction && activeWorkspaceRoomId) {
       return bridge.runWorkspaceGeneratedSurfaceAction({
@@ -1292,7 +1452,6 @@ export const api = {
         ...(payload.revision_id ? { revisionId: payload.revision_id } : {}),
         ...(payload.interaction_id ? { interactionId: payload.interaction_id } : {}),
         ...(payload.message_id ? { messageId: payload.message_id } : {}),
-        ...(payload.confirmed === true ? { confirmed: true } : {}),
         ...(payload.action_payload ? { actionPayload: payload.action_payload } : {}),
         operationId: createIdempotencyKey()
       });
@@ -1430,6 +1589,96 @@ export const api = {
       return bridge.getWorkspaceArtifact({ roomId: activeWorkspaceRoomId, artifactId: id });
     }
     return workspaceRequestRequired<ArtifactDetail>("artifact.get");
+  },
+  listWorkspaceArtifactRevisions(input: { roomId: string; artifactId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceArtifactRevisions) return bridge.listWorkspaceArtifactRevisions(input);
+    return workspaceRequestRequired<ArtifactRevisionRecord[]>("artifact.revisions.list");
+  },
+  getWorkspaceArtifactRevision(input: { roomId: string; artifactId: string; revisionId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceArtifactRevision) return bridge.getWorkspaceArtifactRevision(input);
+    return workspaceRequestRequired<ArtifactRevisionDetail>("artifact.revision.get");
+  },
+  reviseWorkspaceArtifact(input: { roomId: string; artifactId: string; content: string | Uint8Array; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; mimeType?: string; encoding?: "utf8" | "binary"; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.reviseWorkspaceArtifact) return bridge.reviseWorkspaceArtifact({ ...input, operationId });
+    return workspaceRequestRequired<ArtifactMutationResult>("artifact.revise");
+  },
+  restoreWorkspaceArtifactRevision(input: { roomId: string; artifactId: string; revisionId: string; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.restoreWorkspaceArtifactRevision) return bridge.restoreWorkspaceArtifactRevision({ ...input, operationId });
+    return workspaceRequestRequired<ArtifactMutationResult>("artifact.restore_revision");
+  },
+  listWorkspaceGeneratedSurfaces(input: { roomId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceGeneratedSurfaces) return bridge.listWorkspaceGeneratedSurfaces(input);
+    return workspaceRequestRequired<GeneratedSurfaceDefinition[]>("generated-surface.list");
+  },
+  queryWorkspaceGeneratedSurface(input: { roomId: string; surfaceId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.queryWorkspaceGeneratedSurface) return bridge.queryWorkspaceGeneratedSurface(input);
+    if (bridge?.getWorkspaceGeneratedSurface) return bridge.getWorkspaceGeneratedSurface(input);
+    return workspaceRequestRequired<GeneratedSurfaceDetail>("generated-surface.query");
+  },
+  getWorkspaceGeneratedSurface(input: { roomId: string; surfaceId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceGeneratedSurface) return bridge.getWorkspaceGeneratedSurface(input);
+    if (bridge?.queryWorkspaceGeneratedSurface) return bridge.queryWorkspaceGeneratedSurface(input);
+    return workspaceRequestRequired<GeneratedSurfaceDetail>("generated-surface.get");
+  },
+  getWorkspaceGeneratedSurfaceBundle(input: { roomId: string; surfaceId: string; revisionId: string }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceGeneratedSurfaceBundle) return bridge.getWorkspaceGeneratedSurfaceBundle(input);
+    return workspaceRequestRequired<GeneratedSurfaceBundleDetail>("generated-surface.bundle.get");
+  },
+  runWorkspaceGeneratedSurfaceAction(input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; actionPayload?: Record<string, JsonValue>; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.runWorkspaceGeneratedSurfaceAction) return bridge.runWorkspaceGeneratedSurfaceAction({ ...input, operationId });
+    return workspaceRequestRequired<Record<string, unknown>>("generated-surface.action.run");
+  },
+  listWorkspaceInteractionRequests(input: { roomId: string; includeResolved?: boolean }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceInteractionRequests) return bridge.listWorkspaceInteractionRequests(input);
+    return workspaceRequestRequired<{ requests: DesktopWorkspaceInteractionRequest[] }>("interaction-requests.list");
+  },
+  respondWorkspaceInteractionRequest(input: { roomId: string; requestId: string; expectedVersion: number; optionId: string; values?: Record<string, JsonValue>; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.respondWorkspaceInteractionRequest) return bridge.respondWorkspaceInteractionRequest({ ...input, operationId });
+    return workspaceRequestRequired<DesktopWorkspaceInteractionMutationResult>("interaction-requests.respond");
+  },
+  cancelWorkspaceInteractionRequest(input: { roomId: string; requestId: string; expectedVersion: number; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.cancelWorkspaceInteractionRequest) return bridge.cancelWorkspaceInteractionRequest({ ...input, operationId });
+    return workspaceRequestRequired<DesktopWorkspaceInteractionMutationResult>("interaction-requests.cancel");
+  },
+  runWorkspaceGeneratedSurfaceState(input: { roomId: string; surfaceId: string; action: "pin" | "unpin" | "archive"; interactionId?: string; messageId?: string; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.runWorkspaceGeneratedSurfaceState) return bridge.runWorkspaceGeneratedSurfaceState({ ...input, operationId });
+    return workspaceRequestRequired<GeneratedSurfaceDefinition>("generated-surface.state");
+  },
+  exportWorkspaceGeneratedSurface(input: { roomId: string; surfaceId: string; revisionId?: string; format: "html" | "zip" }) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.exportWorkspaceGeneratedSurface) return bridge.exportWorkspaceGeneratedSurface(input);
+    return workspaceRequestRequired<GeneratedSurfaceExportPayload>("generated-surface.export");
+  },
+  createWorkspaceGeneratedSurface(input: { roomId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.createWorkspaceGeneratedSurface) return bridge.createWorkspaceGeneratedSurface({ ...input, operationId });
+    return workspaceRequestRequired<GeneratedSurfaceMutationResult>("generated-surface.create");
+  },
+  reviseWorkspaceGeneratedSurface(input: { roomId: string; surfaceId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.reviseWorkspaceGeneratedSurface) return bridge.reviseWorkspaceGeneratedSurface({ ...input, operationId });
+    return workspaceRequestRequired<GeneratedSurfaceMutationResult>("generated-surface.revise");
   },
   getAudit() {
     const bridge = activeWorkspaceBridge();

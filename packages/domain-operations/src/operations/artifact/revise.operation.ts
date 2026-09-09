@@ -4,16 +4,23 @@ import type { ActivityInboxItem, ArtifactRecord, ArtifactRevisionRecord, JsonVal
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRevisionWriteValueSchema } from "../../value-objects/artifact.js";
 
+const artifactContentInputSchema = z.union([
+  z.string(),
+  z.array(z.number().int().min(0).max(255)).max(50_000_000)
+]);
+
 const Input = z.object({
   "artifact_id": z.string().trim().min(1),
   "base_revision_id": z.string().trim().min(1).optional(),
   "change_summary": z.string().trim().min(1).optional(),
-  "content": z.string().min(1),
+  "content": artifactContentInputSchema,
   "editor_source": z.enum(["chat", "surface", "provider", "image_provider", "restore", "system"]).optional(),
   /** Required by the external MCP adapter for existing Artifacts.  Kept
    * optional here so older internal callers remain compatible. */
   "expected_revision": z.number().int().positive().optional(),
   "extension": z.string().trim().min(1).optional(),
+  "mime_type": z.string().trim().min(1).max(255).optional(),
+  "encoding": z.enum(["utf8", "binary"]).optional(),
   "provenance": z.record(domainJsonValueSchema).default({})
 }).strict();
 const Output = artifactRevisionWriteValueSchema;
@@ -22,7 +29,7 @@ export interface ArtifactRevisePorts {
   artifactContract(id: "artifact.revise"): { id: string; proposed_effects: string[] };
   getArtifact(id: string): Promise<ArtifactRecord | undefined>; artifactNotFoundError(): Error;
   validateGraphArtifactContent(content: string): void;
-  createArtifactRevision(input: { artifactId: string; content: string; producerRunId?: string; extension?: string; baseRevisionId?: string; expectedRevision?: number; editorSource: "chat" | "surface" | "provider" | "image_provider" | "restore" | "system"; changeSummary?: string; provenance: Record<string, JsonValue> }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
+  createArtifactRevision(input: { artifactId: string; content: string | Uint8Array; producerRunId?: string; extension?: string; baseRevisionId?: string; expectedRevision?: number; editorSource: "chat" | "surface" | "provider" | "image_provider" | "restore" | "system"; changeSummary?: string; provenance: Record<string, JsonValue>; mimeType?: string; encoding?: "utf8" | "binary" }): Promise<{ artifact: ArtifactRecord; revision: ArtifactRevisionRecord }>;
   createArtifactRollback(operation: OperationRecord, refs: ResourceRef[], before: Record<string, JsonValue>, after: Record<string, JsonValue>): Promise<RollbackPoint>;
   runArtifactMutation(input: { trustedContext: TrustedDomainContext; inputSummary: string; operationName: string; proposedEffects: string[]; targetResourceRefs: ResourceRef[]; execute(operation: OperationRecord): Promise<{ resource: ArtifactRecord; ref: ResourceRef; rollbackPoint?: RollbackPoint; summary: string; extra: { revision: ArtifactRevisionRecord } }> }): Promise<{ resource: ArtifactRecord; operation: OperationRecord; rollbackPoint?: RollbackPoint; activity: ActivityInboxItem[]; revision: ArtifactRevisionRecord }>;
 }
@@ -56,6 +63,12 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
   ],
   "outputResourceKind": "artifact",
   "uiDisplayCategory": "artifact",
+  "providerToolNames": [
+    "revise_artifact",
+    "artifact.revise",
+    "samurai.artifact.revise",
+    "mcp__samurai__artifact_revise"
+  ],
   "provenance": [
     {
       "source": "samurai",
@@ -73,11 +86,11 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
       execute: async function handleArtifactRevise(context: TrustedDomainContext, input: z.infer<typeof Input>): Promise<DomainResult<z.infer<typeof Output>>> {
         const artifact = await ports.getArtifact(input.artifact_id);
         if (!artifact) throw ports.artifactNotFoundError();
-        if (artifact.kind === "graph") ports.validateGraphArtifactContent(input.content);
+        if (artifact.kind === "graph" && typeof input.content === "string") ports.validateGraphArtifactContent(input.content);
         const contract = ports.artifactContract("artifact.revise");
         const editorSource = input.editor_source ?? "system";
         const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Revise artifact: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
-          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: input.content, producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, expectedRevision: input.expected_revision, editorSource, changeSummary: input.change_summary, provenance: input.provenance });
+          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: artifactContent(input.content), producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, expectedRevision: input.expected_revision, editorSource, changeSummary: input.change_summary, provenance: input.provenance, ...(input.mime_type ? { mimeType: input.mime_type } : {}), ...(input.encoding ? { encoding: input.encoding } : {}) });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Created revision of ${artifact.title}.`, extra: { revision: created.revision } };
         }});
@@ -90,3 +103,7 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
 export default artifactRevise;
 
 function jsonRecord(artifact: ArtifactRecord): Record<string, JsonValue> { return JSON.parse(JSON.stringify(artifact)) as Record<string, JsonValue>; }
+
+function artifactContent(content: string | number[]): string | Uint8Array {
+  return Array.isArray(content) ? Uint8Array.from(content) : content;
+}

@@ -51,4 +51,24 @@ describe("generated_surface.interaction.record handler", () => {
       session_id: "session-core08", message_id: "message-core08", kind: "dismissed"
     }));
   });
+
+  it("omits absent optional fields before the Server persists an action interaction", async () => {
+    const fixture = ports();
+    const handler = generatedSurfaceInteractionRecord.createHandler(fixture.ports);
+
+    await handler.execute(sessionlessContext, generatedSurfaceInteractionRecord.input.parse({
+      surface_id: surface.id,
+      kind: "action"
+    }));
+
+    const [record] = fixture.saveGeneratedSurfaceInteraction.mock.calls[0] ?? [];
+    expect(record).toMatchObject({
+      surface_id: surface.id,
+      revision_id: surface.current_revision_id,
+      kind: "action"
+    });
+    expect(record).not.toHaveProperty("command_id");
+    expect(record).not.toHaveProperty("command_result");
+    expect(record).not.toHaveProperty("user_feedback");
+  });
 });

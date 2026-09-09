@@ -3,21 +3,22 @@
   "test_id": "D06",
   "command": "pnpm core:test:attachment",
   "status": "passed",
-  "commit_sha": "9b7e672a2fa5deaba0851b413c40c2ac4fcaf835",
+  "commit_sha": "d2e65a7e7df2adfaf3a25e896440cd3f8400a6ca",
   "worktree_clean": false,
-  "source_sha256": "ffdadc61644cbd9e66585749686e41661c8da6565617b8790a7269a139fb9ceb",
-  "source_graph_sha256": "29cc90efafcefadae7d224b3433cc9a348141756d0a5c223f4704b59b7a86153",
-  "contract_versions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "source_sha256": "271fb8637c4e81bf302a4973cd35cd77ea3e511b982c9e465175ff64162dbc17",
+  "source_graph_sha256": "4d807d9bf17175bfd91c52d7abcc954b18e56d5efa2237af1ed5872e64fe1936",
+  "contract_versions_sha256": "d9c967c821aa68c3dc592dc59e5622ad6d72f17d7c2964e49c2ebeb59d6592af",
   "source_files": [
     "packages/core-schemas/src/index.ts",
     "packages/runtime/src/attachments/ingestion.ts",
     "scripts/fixtures/attachment-ingestion.ts",
     "scripts/lib/core-evidence.mjs",
+    "scripts/lib/verifier-assertions.mjs",
     "scripts/verify-attachment-ingestion.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-08-23T06:28:59.196Z",
-  "completed_at": "2026-08-23T06:28:59.886Z",
+  "started_at": "2026-09-08T07:37:04.426Z",
+  "completed_at": "2026-09-08T07:37:04.490Z",
   "assertions": [
     {
       "name": "Six required formats",

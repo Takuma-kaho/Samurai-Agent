@@ -136,6 +136,13 @@ describe("Organization HTTP boundary", () => {
         instructionVersion: 1,
         controlGeneration: 0,
         operationId: "operation_1",
+        resourceRefs: [{
+          kind: "knowledge",
+          id: "resource_1",
+          uri: "knowledge/resource_1/v2.md",
+          version: "2",
+          label: "Decision"
+        }],
         assignments: [{
           workspaceId: "workspace_1",
           id: "assignee_1",
@@ -171,8 +178,48 @@ describe("Organization HTTP boundary", () => {
     expect(result).not.toHaveProperty("workspace_id");
     expect(result).not.toHaveProperty("operation_id");
     expect(result.completion_criteria).toEqual(["A decision is recorded"]);
+    expect(result.resource_refs).toEqual([{
+      kind: "knowledge",
+      id: "resource_1",
+      uri: "knowledge/resource_1/v2.md",
+      version: "2",
+      label: "Decision"
+    }]);
     expect((result.execution_reservations as Array<Record<string, unknown>>)[0]).not.toHaveProperty("workspace_id");
     expect((result.execution_reservations as Array<Record<string, unknown>>)[0]).not.toHaveProperty("operation_id");
+  });
+
+  it("keeps canonical Knowledge/Skill refs in Work instructions and event resources", () => {
+    const resourceRef = {
+      kind: "skill",
+      id: "skill_1",
+      uri: "skills/skill_1/v3/SKILL.md",
+      version: "3",
+      label: "Release skill"
+    };
+    const instruction = publicOperationResult("room.work.reply", {
+      id: "instruction_1",
+      workId: "work_1",
+      assignmentId: "assignee_1",
+      kind: "reply",
+      instruction: "Review the referenced resources.",
+      attachments: [],
+      resourceRefs: [resourceRef],
+      version: 2,
+      generation: 0,
+      status: "accepted",
+      createdBy: "account_1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    }) as Record<string, unknown>;
+    expect(instruction.resource_refs).toEqual([resourceRef]);
+
+    const event = roomWorkEventFor("room.work.reply", "room_1", {
+      work_id: "work_1",
+      resource_refs: [resourceRef]
+    }, { work_id: "work_1" });
+    expect(event?.resources).toEqual(expect.arrayContaining([resourceRef]));
+    expect(() => eventPayloadSchemaFor("workspace.room_work.changed").parse(event?.payload)).not.toThrow();
   });
 
   it("publishes only the safe Agent Backend availability projection", () => {

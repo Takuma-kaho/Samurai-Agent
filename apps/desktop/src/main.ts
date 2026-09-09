@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { io, type Socket } from "socket.io-client";
-import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkAttachmentSchema, type DomainApiRequest, type DomainApiTransportRequest, type PublicAgentRecord, type PublicRoomRecord } from "@samurai-agent/domain-api";
+import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkAttachmentSchema, PublicRoomWorkResourceRefSchema, type DomainApiRequest, type DomainApiTransportRequest, type PublicAgentRecord, type PublicRoomRecord } from "@samurai-agent/domain-api";
 import {
   app,
   BrowserWindow,
@@ -978,11 +978,13 @@ function registerIpcHandlers(): void {
     const roomId = requiredWorkspaceOpaqueField(input, "roomId");
     const operationId = requiredWorkspaceOpaqueField(input, "operationId");
     const value = publicRoomWorkInput(input);
+    const resourceRefs = roomWorkResourceRefsInput(value.resourceRefs);
     const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.create", {
       context: { room_id: roomId },
       input: {
         ...(typeof value.instruction === "string" ? { instruction: value.instruction } : {}),
         ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
+        ...(resourceRefs.length ? { resource_refs: resourceRefs } : {}),
         ...(typeof value.agentId === "string" ? { agent_id: value.agentId } : {})
       }
     }, { operationId, idempotencyKey: operationId });
@@ -996,6 +998,7 @@ function registerIpcHandlers(): void {
     const workId = requiredWorkspaceOpaqueField(input, "workId");
     const operationId = requiredWorkspaceOpaqueField(input, "operationId");
     const value = publicRoomWorkInput(input);
+    const resourceRefs = roomWorkResourceRefsInput(value.resourceRefs);
     const response = await activeWorkspaceDomainApiClient().executeOperation<unknown>(workspaceSnapshot.workspaceId, "room.work.reply", {
       context: { room_id: roomId },
       input: {
@@ -1003,6 +1006,7 @@ function registerIpcHandlers(): void {
         ...(typeof value.assigneeId === "string" ? { assignee_id: value.assigneeId } : {}),
         ...(typeof value.instruction === "string" ? { instruction: value.instruction } : {}),
         ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
+        ...(resourceRefs.length ? { resource_refs: resourceRefs } : {}),
         ...(typeof value.expectedVersion === "number" ? { expected_version: value.expectedVersion } : {}),
         ...(typeof value.expectedGeneration === "number" ? { expected_generation: value.expectedGeneration } : {})
       }
@@ -1589,67 +1593,202 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:workspace-server:artifacts:list", async (_event, input: unknown) => {
     const request = workspaceArtifactListRequest(input);
-    const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeQuery(requireActiveWorkspaceId(), "artifact.list", { context: { room_id: request.roomId }, input: {} });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<unknown[]>(workspaceSnapshot.workspaceId, "artifact.list", { context: { room_id: request.roomId }, input: {} });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return { artifacts: response.result };
   });
   ipcMain.handle("samurai:workspace-server:artifact:get", async (_event, input: unknown) => {
     const request = workspaceArtifactIdRequest(input);
-    const connection = requireActiveWorkspaceConnection();
-    const response = await activeWorkspaceDomainApiClient().executeQuery<{ artifact: unknown; content: string }>(requireActiveWorkspaceId(), "artifact.view", { context: { room_id: request.roomId }, input: { id: request.artifactId } });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<{ artifact: unknown; content: string }>(workspaceSnapshot.workspaceId, "artifact.view", { context: { room_id: request.roomId }, input: { id: request.artifactId } });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    if (!response.result.artifact || typeof response.result.artifact !== "object" || (response.result.artifact as { id?: unknown }).id !== request.artifactId) {
+      throw new Error("workspace_artifact_response_scope_invalid");
+    }
     return { ...response.result, auditRecords: [] };
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:revisions:list", async (_event, input: unknown) => {
+    const request = workspaceArtifactRevisionIpcInput(input);
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).listArtifactRevisions<{ revisions: unknown[] }>(workspaceSnapshot.workspaceId, request.roomId, request.artifactId);
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    if (!Array.isArray(response.revisions) || response.revisions.some((revision) => !revision || typeof revision !== "object" || (revision as { artifact_id?: unknown }).artifact_id !== request.artifactId)) {
+      throw new Error("workspace_artifact_revision_response_scope_invalid");
+    }
+    return response.revisions;
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:revision:get", async (_event, input: unknown) => {
+    const request = workspaceArtifactRevisionIpcInput(input, { requireRevisionId: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).getArtifactRevision<Record<string, unknown>>(workspaceSnapshot.workspaceId, request.roomId, request.artifactId, request.revisionId!);
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const artifact = response.artifact;
+    const revision = response.revision;
+    if (!artifact || typeof artifact !== "object" || (artifact as { id?: unknown }).id !== request.artifactId
+      || !revision || typeof revision !== "object"
+      || (revision as { id?: unknown }).id !== request.revisionId
+      || (revision as { artifact_id?: unknown }).artifact_id !== request.artifactId) {
+      throw new Error("workspace_artifact_revision_response_scope_invalid");
+    }
+    return response;
   });
   ipcMain.handle("samurai:workspace-server:artifact:create", async (_event, input: unknown) => {
     const request = workspaceArtifactCreateRequest(input);
-    const connection = requireActiveWorkspaceConnection();
-    if (typeof request.body.content !== "string") {
-      // Preserve the existing structured-content compatibility input. The v1
-      // artifact.create contract currently publishes string content only.
-      return activeWorkspaceServerRequest({
-        method: "POST",
-        path: activeWorkspaceArtifactsPath(),
-        workspaceScoped: true,
-        operationId: request.operationId,
-        idempotencyKey: request.operationId,
-        body: request.body
-      });
-    }
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
     const { room_id: roomId, locale, source_locales: sourceLocales, ...baseInput } = request.body;
-    const response = await activeWorkspaceDomainApiClient().executeOperation(requireActiveWorkspaceId(), "artifact.create", {
+    const contentMetadata = desktopArtifactContentMetadata(input);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<Record<string, unknown>>(workspaceSnapshot.workspaceId, "artifact.create", {
       context: { room_id: String(roomId) },
       input: {
         ...baseInput,
         ...(locale ? { output_locale: locale } : {}),
-        ...(Array.isArray(sourceLocales) && sourceLocales[0] ? { input_locale: sourceLocales[0] } : {})
+        ...(Array.isArray(sourceLocales) && sourceLocales[0] ? { input_locale: sourceLocales[0] } : {}),
+        ...(contentMetadata.mimeType ? { mime_type: contentMetadata.mimeType } : {}),
+        ...(contentMetadata.encoding ? { encoding: contentMetadata.encoding } : {})
       }
     }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return response.result;
   });
   ipcMain.handle("samurai:workspace-server:artifact:surface", async (_event, input: unknown) => {
     const request = workspaceArtifactSurfaceOperationRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceArtifactsPath()}/surface/operations`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceV1ArtifactsPath()}/surface/operations`, workspaceScoped: true, operationId: request.operationId, idempotencyKey: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:revise", async (_event, input: unknown) => {
+    const request = workspaceArtifactRevisionIpcInput(input, { requireContent: true, requireOperationId: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<Record<string, unknown>>(workspaceSnapshot.workspaceId, "artifact.revise", {
+      context: { room_id: request.roomId },
+      input: {
+        artifact_id: request.artifactId,
+        content: request.content!,
+        ...(request.baseRevisionId ? { base_revision_id: request.baseRevisionId } : {}),
+        ...(request.expectedRevision === undefined ? {} : { expected_revision: request.expectedRevision }),
+        ...(request.changeSummary ? { change_summary: request.changeSummary } : {}),
+        ...(request.mimeType ? { mime_type: request.mimeType } : {}),
+        ...(request.encoding ? { encoding: request.encoding } : {})
+      } as unknown as DomainApiRequest["input"]
+    }, { operationId: request.operationId!, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertDesktopArtifactMutationScope(response.result, request.artifactId);
+    return response.result;
+  });
+  ipcMain.handle("samurai:workspace-server:artifact:restore", async (_event, input: unknown) => {
+    const request = workspaceArtifactRevisionIpcInput(input, { requireRevisionId: true, requireOperationId: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<Record<string, unknown>>(workspaceSnapshot.workspaceId, "artifact.restore_revision", {
+      context: { room_id: request.roomId },
+      input: {
+        artifact_id: request.artifactId,
+        revision_id: request.revisionId,
+        ...(request.baseRevisionId ? { base_revision_id: request.baseRevisionId } : {}),
+        ...(request.expectedRevision === undefined ? {} : { expected_revision: request.expectedRevision }),
+        ...(request.changeSummary ? { change_summary: request.changeSummary } : {})
+      } as unknown as DomainApiRequest["input"]
+    }, { operationId: request.operationId!, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    assertDesktopArtifactMutationScope(response.result, request.artifactId);
+    return response.result;
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:list", async (_event, input: unknown) => {
+    const roomId = requiredWorkspaceOpaqueField(input, "roomId");
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).listGeneratedSurfaces<{ surfaces: unknown[] }>(workspaceSnapshot.workspaceId, roomId);
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    if (!Array.isArray(response.surfaces) || response.surfaces.some((surface) => !surface || typeof surface !== "object" || ((surface as { room_id?: unknown }).room_id !== undefined && (surface as { room_id?: unknown }).room_id !== roomId))) {
+      throw new Error("workspace_generated_surface_response_scope_invalid");
+    }
+    return response.surfaces;
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:get", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceRoomRequest(input);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:bundle", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceBundleRequest(input);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/revisions/${encodeURIComponent(request.revisionId)}/bundle?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/revisions/${encodeURIComponent(request.revisionId)}/bundle?room_id=${encodeURIComponent(request.roomId)}`, workspaceScoped: true });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:action", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceActionRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/actions/${encodeURIComponent(request.actionId)}/run`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/actions/${encodeURIComponent(request.actionId)}/run`, workspaceScoped: true, operationId: request.operationId, idempotencyKey: request.operationId, body: request.body });
+  });
+  ipcMain.handle("samurai:workspace-server:interaction-requests:list", async (event, input: unknown) => {
+    assertWorkspaceInteractionIpcSender(event);
+    const request = workspaceInteractionRequestListIpcInput(input);
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const query = new URLSearchParams({ room_id: request.roomId, include_resolved: String(request.includeResolved) });
+    const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "GET",
+      path: `${workspaceInteractionRequestsPath(workspaceSnapshot.workspaceId)}?${query.toString()}`,
+      workspaceScoped: true
+    });
+    return sanitizeDesktopInteractionListResponse(response, workspaceSnapshot.workspaceId, request.roomId);
+  });
+  ipcMain.handle("samurai:workspace-server:interaction-requests:respond", async (event, input: unknown) => {
+    assertWorkspaceInteractionIpcSender(event);
+    const request = workspaceInteractionRequestRespondIpcInput(input);
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "POST",
+      path: `${workspaceInteractionRequestsPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.requestId)}/respond`,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      workspaceScoped: true,
+      body: {
+        room_id: request.roomId,
+        expected_version: request.expectedVersion,
+        option_id: request.optionId,
+        ...(request.values === undefined ? {} : { values: request.values })
+      }
+    });
+    return sanitizeDesktopInteractionMutationResponse(response, workspaceSnapshot.workspaceId, request.roomId, request.requestId);
+  });
+  ipcMain.handle("samurai:workspace-server:interaction-requests:cancel", async (event, input: unknown) => {
+    assertWorkspaceInteractionIpcSender(event);
+    const request = workspaceInteractionRequestCancelIpcInput(input);
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "POST",
+      path: `${workspaceInteractionRequestsPath(workspaceSnapshot.workspaceId)}/${encodeURIComponent(request.requestId)}/cancel`,
+      operationId: request.operationId,
+      idempotencyKey: request.operationId,
+      workspaceScoped: true,
+      body: { room_id: request.roomId, expected_version: request.expectedVersion }
+    });
+    return sanitizeDesktopInteractionMutationResponse(response, workspaceSnapshot.workspaceId, request.roomId, request.requestId);
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:state", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceStateRequest(input);
-    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/state`, workspaceScoped: true, operationId: request.operationId, body: request.body });
+    return activeWorkspaceServerRequest({ method: "POST", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/state`, workspaceScoped: true, operationId: request.operationId, idempotencyKey: request.operationId, body: request.body });
   });
   ipcMain.handle("samurai:workspace-server:generated-surface:export", async (_event, input: unknown) => {
     const request = workspaceGeneratedSurfaceExportRequest(input);
     const query = new URLSearchParams({ room_id: request.roomId, format: request.format });
     if (request.revisionId) query.set("revision_id", request.revisionId);
-    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceGeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/export?${query.toString()}`, workspaceScoped: true });
+    return activeWorkspaceServerRequest({ method: "GET", path: `${activeWorkspaceV1GeneratedSurfacesPath()}/${encodeURIComponent(request.surfaceId)}/export?${query.toString()}`, workspaceScoped: true });
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:create", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceMutationIpcInput(input);
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<Record<string, unknown>>(workspaceSnapshot.workspaceId, "generated_surface.create", {
+      context: { room_id: request.roomId },
+      input: { bundle: request.bundle, request: request.request } as unknown as DomainApiRequest["input"]
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return response.result;
+  });
+  ipcMain.handle("samurai:workspace-server:generated-surface:revise", async (_event, input: unknown) => {
+    const request = workspaceGeneratedSurfaceMutationIpcInput(input, { requireSurfaceId: true });
+    const workspaceSnapshot = captureActiveWorkspaceSnapshot();
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<Record<string, unknown>>(workspaceSnapshot.workspaceId, "generated_surface.revise", {
+      context: { room_id: request.roomId },
+      input: { surface_id: request.surfaceId, bundle: request.bundle, request: request.request } as unknown as DomainApiRequest["input"]
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const definition = response.result.definition;
+    if (!definition || typeof definition !== "object" || (definition as { id?: unknown }).id !== request.surfaceId) throw new Error("workspace_generated_surface_response_scope_invalid");
+    return response.result;
   });
   ipcMain.handle("samurai:workspace-server:room-members:list", async (_event, input: unknown) => {
     const roomId = requiredWorkspaceOpaqueField(input, "roomId");
@@ -3580,6 +3719,483 @@ function assertActiveWorkspaceSnapshot(snapshot: ActiveWorkspaceSnapshot): void 
   }
 }
 
+type DesktopInteractionRequestListIpcInput = {
+  roomId: string;
+  includeResolved: boolean;
+};
+
+type DesktopInteractionRequestMutationIpcInput = {
+  roomId: string;
+  requestId: string;
+  expectedVersion: number;
+  operationId: string;
+  optionId?: string;
+  values?: Record<string, unknown>;
+};
+
+function workspaceInteractionRequestListIpcInput(input: unknown): DesktopInteractionRequestListIpcInput {
+  const value = desktopInputRecord(input, "workspace_interaction_request_input_invalid");
+  const roomId = requiredWorkspaceOpaqueField(value, "roomId");
+  if (value.includeResolved !== undefined && typeof value.includeResolved !== "boolean") {
+    throw new Error("workspace_interaction_request_includeResolved_invalid");
+  }
+  return { roomId, includeResolved: value.includeResolved === true };
+}
+
+function workspaceInteractionRequestRespondIpcInput(input: unknown): DesktopInteractionRequestMutationIpcInput {
+  const value = desktopInputRecord(input, "workspace_interaction_request_input_invalid");
+  const roomId = requiredWorkspaceOpaqueField(value, "roomId");
+  const requestId = requiredWorkspaceOpaqueField(value, "requestId");
+  const optionId = requiredWorkspaceOpaqueField(value, "optionId");
+  const operationId = requiredWorkspaceOpaqueField(value, "operationId");
+  const expectedVersion = requiredInteractionRequestVersion(value.expectedVersion);
+  return {
+    roomId,
+    requestId,
+    optionId,
+    operationId,
+    expectedVersion,
+    ...(value.values === undefined ? {} : { values: strictInteractionRequestJsonObject(value.values, "values") })
+  };
+}
+
+function workspaceInteractionRequestCancelIpcInput(input: unknown): DesktopInteractionRequestMutationIpcInput {
+  const value = desktopInputRecord(input, "workspace_interaction_request_input_invalid");
+  const roomId = requiredWorkspaceOpaqueField(value, "roomId");
+  const requestId = requiredWorkspaceOpaqueField(value, "requestId");
+  const operationId = requiredWorkspaceOpaqueField(value, "operationId");
+  return { roomId, requestId, operationId, expectedVersion: requiredInteractionRequestVersion(value.expectedVersion) };
+}
+
+function requiredInteractionRequestVersion(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error("workspace_interaction_request_expected_version_invalid");
+  }
+  return value;
+}
+
+/** Main-process transport for the three fixed interaction-request routes. */
+async function snapshotWorkspaceServerRequest(
+  snapshot: ActiveWorkspaceSnapshot,
+  input: WorkspaceServerRequestInput
+): Promise<unknown> {
+  assertActiveWorkspaceSnapshot(snapshot);
+  const connection = workspaceConnectionRegistry.connections.find((candidate) => candidate.id === snapshot.connectionId);
+  if (!connection || workspaceIdForConnection(connection) !== snapshot.workspaceId) throw new Error("workspace_navigation_changed");
+  const privateKey = await requireActiveWorkspacePrivateKey(connection);
+  assertActiveWorkspaceSnapshot(snapshot);
+  const result = await signedWorkspaceServerRequest(connection, privateKey, {
+    ...input,
+    workspaceScoped: true,
+    workspaceId: snapshot.workspaceId
+  });
+  assertActiveWorkspaceSnapshot(snapshot);
+  assertWorkspaceServerSuccess(result, "workspace_server_request_failed");
+  return result.body;
+}
+
+function sanitizeDesktopInteractionListResponse(
+  value: unknown,
+  workspaceId: string,
+  roomId: string
+): { requests: Array<Record<string, unknown>> } {
+  const rows = Array.isArray(value)
+    ? value
+    : (() => {
+      const body = desktopInteractionRecord(value, "workspace_interaction_request_list_response_invalid");
+      if (!Array.isArray(body.requests)) throw new Error("workspace_interaction_request_list_response_invalid");
+      return body.requests;
+    })();
+  return { requests: rows.map((row) => sanitizeDesktopInteractionRequest(row, workspaceId, roomId)) };
+}
+
+function sanitizeDesktopInteractionMutationResponse(
+  value: unknown,
+  workspaceId: string,
+  roomId: string,
+  requestId: string
+): { request: Record<string, unknown>; replayed?: boolean } {
+  const body = desktopInteractionRecord(value, "workspace_interaction_request_mutation_response_invalid");
+  const request = sanitizeDesktopInteractionRequest(body.request, workspaceId, roomId);
+  if (request.id !== requestId) throw new Error("workspace_interaction_request_response_scope_invalid");
+  if (body.replayed !== undefined && typeof body.replayed !== "boolean") throw new Error("workspace_interaction_request_mutation_response_invalid");
+  return { request, ...(body.replayed === undefined ? {} : { replayed: body.replayed }) };
+}
+
+function sanitizeDesktopInteractionRequest(value: unknown, workspaceId: string, roomId: string): Record<string, unknown> {
+  const record = desktopInteractionRecord(value, "workspace_interaction_request_response_invalid");
+  const actualWorkspaceId = requiredDesktopInteractionId(desktopInteractionField(record, "workspaceId", "workspace_id"), "workspaceId");
+  const actualRoomId = requiredDesktopInteractionId(desktopInteractionField(record, "roomId", "room_id"), "roomId");
+  if (actualWorkspaceId !== workspaceId || actualRoomId !== roomId) throw new Error("workspace_interaction_request_response_scope_invalid");
+
+  const kind = desktopInteractionEnum(desktopInteractionField(record, "kind"), ["approval", "backend_input"] as const, "kind");
+  const status = desktopInteractionEnum(desktopInteractionField(record, "status"), desktopInteractionRequestStatuses, "status");
+  const rawOptions = desktopInteractionField(record, "options");
+  if (!Array.isArray(rawOptions) || rawOptions.length === 0 || rawOptions.length > 128) throw new Error("workspace_interaction_request_options_invalid");
+  const options = rawOptions.map((value, index) => {
+    const option = desktopInteractionRecord(value, `workspace_interaction_request_option_${index}`);
+    const description = optionalDesktopInteractionText(desktopInteractionField(option, "description"), "option_description", 20_000);
+    return {
+      id: requiredDesktopInteractionId(desktopInteractionField(option, "id"), `option_${index}_id`),
+      label: requiredDesktopInteractionText(desktopInteractionField(option, "label"), `option_${index}_label`, 2_000),
+      ...(description === undefined ? {} : { description })
+    };
+  });
+  if (new Set(options.map((option) => option.id)).size !== options.length) throw new Error("workspace_interaction_request_options_invalid");
+
+  const inputSchemaValue = desktopInteractionField(record, "inputSchema", "input_schema");
+  const inputSchema = inputSchemaValue === undefined || inputSchemaValue === null
+    ? undefined
+    : sanitizeDesktopInteractionInputSchema(inputSchemaValue);
+  const outcomeValue = desktopInteractionField(record, "outcome");
+  const executionValue = desktopInteractionField(record, "execution");
+  const outcome = outcomeValue === undefined || outcomeValue === null ? undefined : sanitizeDesktopInteractionOutcome(outcomeValue);
+  const execution = executionValue === undefined || executionValue === null ? undefined : sanitizeDesktopInteractionExecution(executionValue);
+  const actionId = optionalDesktopInteractionId(desktopInteractionField(record, "actionId", "action_id"), "actionId");
+  const targetLabel = optionalDesktopInteractionText(desktopInteractionField(record, "targetLabel", "target_label"), "targetLabel", 2_000);
+  const executionSummary = execution?.summary;
+  return {
+    id: requiredDesktopInteractionId(desktopInteractionField(record, "id"), "id"),
+    workspaceId: actualWorkspaceId,
+    roomId: actualRoomId,
+    version: requiredInteractionRequestVersion(desktopInteractionField(record, "version")),
+    kind,
+    status,
+    title: requiredDesktopInteractionText(desktopInteractionField(record, "title"), "title", 20_000),
+    summary: requiredDesktopInteractionText(desktopInteractionField(record, "summary"), "summary", 20_000),
+    ...(optionalDesktopInteractionId(desktopInteractionField(record, "runId", "run_id"), "runId") ? { runId: optionalDesktopInteractionId(desktopInteractionField(record, "runId", "run_id"), "runId") } : {}),
+    ...(optionalDesktopInteractionId(desktopInteractionField(record, "surfaceId", "surface_id"), "surfaceId") ? { surfaceId: optionalDesktopInteractionId(desktopInteractionField(record, "surfaceId", "surface_id"), "surfaceId") } : {}),
+    ...(optionalDesktopInteractionId(desktopInteractionField(record, "revisionId", "revision_id"), "revisionId") ? { revisionId: optionalDesktopInteractionId(desktopInteractionField(record, "revisionId", "revision_id"), "revisionId") } : {}),
+    actionTarget: sanitizeDesktopInteractionActionTarget(desktopInteractionField(record, "actionTarget", "action_target")),
+    options,
+    ...(inputSchema === undefined ? {} : { inputSchema }),
+    expiresAt: requiredDesktopInteractionText(desktopInteractionField(record, "expiresAt", "expires_at"), "expiresAt", 128),
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(execution === undefined ? {} : { execution }),
+    createdAt: requiredDesktopInteractionText(desktopInteractionField(record, "createdAt", "created_at"), "createdAt", 128),
+    updatedAt: requiredDesktopInteractionText(desktopInteractionField(record, "updatedAt", "updated_at"), "updatedAt", 128),
+    ...(actionId === undefined ? {} : { actionId }),
+    ...(targetLabel === undefined ? {} : { targetLabel }),
+    ...(execution?.status === "failed" && executionSummary ? { failureSummary: executionSummary } : {}),
+    ...(execution?.status !== "failed" && executionSummary ? { resultSummary: executionSummary } : {}),
+    ...(execution?.errorCode ? { errorCode: execution.errorCode } : {})
+  };
+}
+
+function sanitizeDesktopInteractionActionTarget(value: unknown): Record<string, unknown> {
+  const target = strictInteractionRequestJsonObject(value, "actionTarget", 64 * 1024);
+  for (const key of ["input", "input_values", "execution_input", "result", "values"]) delete target[key];
+  return target;
+}
+
+function sanitizeDesktopInteractionInputSchema(value: unknown): Record<string, unknown> {
+  const source = strictInteractionRequestJsonObject(value, "inputSchema", 64 * 1024);
+  if (source.type !== undefined && source.type !== "object") throw new Error("workspace_interaction_request_input_schema_invalid");
+  const properties: Record<string, unknown> = {};
+  if (source.properties !== undefined) {
+    if (!source.properties || typeof source.properties !== "object" || Array.isArray(source.properties)) throw new Error("workspace_interaction_request_input_schema_invalid");
+    for (const [id, rawProperty] of Object.entries(source.properties as Record<string, unknown>)) {
+      if (!id.trim() || id.length > 256) throw new Error("workspace_interaction_request_input_schema_invalid");
+      const property = strictInteractionRequestJsonObject(rawProperty, "inputSchema", 8 * 1024);
+      const type = property.type;
+      if (type !== undefined && type !== "string" && type !== "number" && type !== "integer" && type !== "boolean") throw new Error("workspace_interaction_request_input_schema_invalid");
+      const enumValue = property.enum;
+      if (enumValue !== undefined && (!Array.isArray(enumValue) || enumValue.length > 128 || enumValue.some((item) => (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") || (typeof item === "number" && !Number.isFinite(item))))) {
+        throw new Error("workspace_interaction_request_input_schema_invalid");
+      }
+      const minLength = optionalInteractionSchemaInteger(property.minLength);
+      const maxLength = optionalInteractionSchemaInteger(property.maxLength);
+      if (minLength !== undefined && maxLength !== undefined && minLength > maxLength) throw new Error("workspace_interaction_request_input_schema_invalid");
+      const title = optionalDesktopInteractionText(property.title, "inputSchema_title", 2_000);
+      const description = optionalDesktopInteractionText(property.description, "inputSchema_description", 20_000);
+      properties[id] = {
+        ...(type === undefined ? {} : { type }),
+        ...(title === undefined ? {} : { title }),
+        ...(description === undefined ? {} : { description }),
+        ...(enumValue === undefined ? {} : { enum: enumValue }),
+        ...(minLength === undefined ? {} : { minLength }),
+        ...(maxLength === undefined ? {} : { maxLength })
+      };
+    }
+  }
+  const required = source.required;
+  if (required !== undefined && (!Array.isArray(required) || required.length > 256 || required.some((item) => typeof item !== "string" || !item.trim() || !Object.prototype.hasOwnProperty.call(properties, item)))) {
+    throw new Error("workspace_interaction_request_input_schema_invalid");
+  }
+  if (source.additionalProperties !== undefined && typeof source.additionalProperties !== "boolean") throw new Error("workspace_interaction_request_input_schema_invalid");
+  return {
+    ...(source.type === undefined ? {} : { type: "object" }),
+    ...(Object.keys(properties).length ? { properties } : {}),
+    ...(required === undefined ? {} : { required }),
+    ...(source.additionalProperties === undefined ? {} : { additionalProperties: source.additionalProperties })
+  };
+}
+
+function optionalInteractionSchemaInteger(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > 1_000_000) throw new Error("workspace_interaction_request_input_schema_invalid");
+  return value;
+}
+
+function sanitizeDesktopInteractionOutcome(value: unknown): Record<string, unknown> {
+  const record = desktopInteractionRecord(value, "workspace_interaction_request_outcome_invalid");
+  const kind = desktopInteractionEnum(desktopInteractionField(record, "kind"), ["response", "cancelled", "expired"] as const, "outcome_kind");
+  if (kind === "response") {
+    return {
+      kind,
+      optionId: requiredDesktopInteractionId(desktopInteractionField(record, "optionId", "option_id"), "outcome_option_id"),
+      decision: desktopInteractionEnum(desktopInteractionField(record, "decision"), desktopInteractionDecisions, "outcome_decision"),
+      decidedAt: requiredDesktopInteractionText(desktopInteractionField(record, "decidedAt", "decided_at"), "outcome_decided_at", 128)
+    };
+  }
+  if (kind === "cancelled") return { kind, decidedAt: requiredDesktopInteractionText(desktopInteractionField(record, "decidedAt", "decided_at"), "outcome_decided_at", 128) };
+  return { kind, expiredAt: requiredDesktopInteractionText(desktopInteractionField(record, "expiredAt", "expired_at"), "outcome_expired_at", 128) };
+}
+
+function sanitizeDesktopInteractionExecution(value: unknown): Record<string, unknown> {
+  const record = desktopInteractionRecord(value, "workspace_interaction_request_execution_invalid");
+  const status = desktopInteractionEnum(desktopInteractionField(record, "status"), desktopInteractionExecutionStatuses, "execution_status");
+  const summary = optionalDesktopInteractionText(desktopInteractionField(record, "summary"), "execution_summary", 20_000);
+  const errorCode = optionalDesktopInteractionText(desktopInteractionField(record, "errorCode", "error_code"), "execution_error_code", 256);
+  const finishedAt = optionalDesktopInteractionText(desktopInteractionField(record, "finishedAt", "finished_at"), "execution_finished_at", 128);
+  return {
+    status,
+    startedAt: requiredDesktopInteractionText(desktopInteractionField(record, "startedAt", "started_at"), "execution_started_at", 128),
+    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(summary === undefined ? {} : { summary }),
+    ...(errorCode === undefined ? {} : { errorCode })
+  };
+}
+
+const desktopInteractionRequestStatuses = ["pending", "accepted", "denied", "cancelled", "expired", "executing", "completed", "failed"] as const;
+const desktopInteractionExecutionStatuses = ["executing", "completed", "failed"] as const;
+const desktopInteractionDecisions = ["approve", "deny", "submit_input"] as const;
+
+function desktopInteractionRecord(value: unknown, errorCode: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(errorCode);
+  return value as Record<string, unknown>;
+}
+
+function desktopInteractionField(record: Record<string, unknown>, camelKey: string, snakeKey = camelKey.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)): unknown {
+  return record[camelKey] === undefined ? record[snakeKey] : record[camelKey];
+}
+
+function requiredDesktopInteractionId(value: unknown, field: string): string {
+  if (typeof value !== "string" || !isWorkspaceOpaqueId(value)) throw new Error(`workspace_interaction_request_${field}_invalid`);
+  return value;
+}
+
+function optionalDesktopInteractionId(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return requiredDesktopInteractionId(value, field);
+}
+
+function requiredDesktopInteractionText(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== "string" || value.length > maxLength) throw new Error(`workspace_interaction_request_${field}_invalid`);
+  return value;
+}
+
+function optionalDesktopInteractionText(value: unknown, field: string, maxLength: number): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return requiredDesktopInteractionText(value, field, maxLength);
+}
+
+function desktopInteractionEnum<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) throw new Error(`workspace_interaction_request_${field}_invalid`);
+  return value as T;
+}
+
+function strictInteractionRequestJsonObject(value: unknown, field: string, maxLength = 256 * 1024): Record<string, unknown> {
+  if (!isStrictInteractionRequestJsonObject(value, 0)) throw new Error(`workspace_interaction_request_${field}_invalid`);
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value);
+  } catch {
+    throw new Error(`workspace_interaction_request_${field}_invalid`);
+  }
+  if (encoded.length > maxLength) throw new Error(`workspace_interaction_request_${field}_invalid`);
+  try {
+    const parsed: unknown = JSON.parse(encoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new Error(`workspace_interaction_request_${field}_invalid`);
+  }
+}
+
+function isStrictInteractionRequestJsonObject(value: unknown, depth: number, seen = new WeakSet<object>()): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 8 || seen.has(value)) return false;
+  seen.add(value);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 2_000) return false;
+  return entries.every(([key, item]) => key.length <= 512 && isStrictInteractionRequestJsonValue(item, depth + 1, seen));
+}
+
+function isStrictInteractionRequestJsonValue(value: unknown, depth: number, seen: WeakSet<object>): boolean {
+  if (depth > 8) return false;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    if (seen.has(value) || value.length > 2_000) return false;
+    seen.add(value);
+    return value.every((item) => isStrictInteractionRequestJsonValue(item, depth + 1, seen));
+  }
+  return isStrictInteractionRequestJsonObject(value, depth, seen);
+}
+
+type DesktopArtifactRevisionIpcInput = {
+  roomId: string;
+  artifactId: string;
+  revisionId?: string;
+  baseRevisionId?: string;
+  operationId?: string;
+  expectedRevision?: number;
+  changeSummary?: string;
+  content?: string | number[];
+  mimeType?: string;
+  encoding?: "utf8" | "binary";
+};
+
+function workspaceArtifactRevisionIpcInput(
+  input: unknown,
+  options: { requireRevisionId?: boolean; requireContent?: boolean; requireOperationId?: boolean } = {}
+): DesktopArtifactRevisionIpcInput {
+  const value = desktopInputRecord(input, "workspace_artifact_request_invalid");
+  const roomId = requiredWorkspaceOpaqueField(value, "roomId");
+  const artifactId = requiredWorkspaceOpaqueField(value, "artifactId");
+  const revisionId = options.requireRevisionId
+    ? requiredWorkspaceOpaqueField(value, "revisionId")
+    : typeof value.revisionId === "string" ? requiredWorkspaceOpaqueField(value, "revisionId") : undefined;
+  const baseRevisionId = typeof value.baseRevisionId === "string"
+    ? requiredWorkspaceOpaqueField(value, "baseRevisionId")
+    : undefined;
+  const operationId = typeof value.operationId === "string"
+    ? requiredWorkspaceOpaqueField(value, "operationId")
+    : undefined;
+  const expectedRevision = value.expectedRevision;
+  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || (expectedRevision as number) < 1)) {
+    throw new Error("expectedRevision_invalid");
+  }
+  const changeSummary = value.changeSummary === undefined
+    ? undefined
+    : typeof value.changeSummary === "string" && value.changeSummary.trim()
+      ? value.changeSummary.trim().slice(0, 20_000)
+      : (() => { throw new Error("changeSummary_invalid"); })();
+  const content = value.content === undefined ? undefined : desktopArtifactContent(value.content);
+  if (options.requireContent && content === undefined) throw new Error("content_required");
+  if ((options.requireContent || options.requireOperationId) && !operationId) throw new Error("operationId_invalid");
+  const mimeType = value.mimeType === undefined
+    ? undefined
+    : typeof value.mimeType === "string" && value.mimeType.trim().length > 0 && value.mimeType.length <= 255
+      ? value.mimeType.trim()
+      : (() => { throw new Error("mimeType_invalid"); })();
+  const encoding = value.encoding === undefined
+    ? undefined
+    : value.encoding === "utf8" || value.encoding === "binary"
+      ? value.encoding
+      : (() => { throw new Error("encoding_invalid"); })();
+  return {
+    roomId,
+    artifactId,
+    ...(revisionId ? { revisionId } : {}),
+    ...(baseRevisionId ? { baseRevisionId } : {}),
+    ...(operationId ? { operationId } : {}),
+    ...(expectedRevision === undefined ? {} : { expectedRevision: expectedRevision as number }),
+    ...(changeSummary ? { changeSummary } : {}),
+    ...(content === undefined ? {} : { content }),
+    ...(mimeType ? { mimeType } : {}),
+    ...(encoding ? { encoding } : {})
+  };
+}
+
+function desktopArtifactContent(value: unknown): string | number[] {
+  if (typeof value === "string") return value;
+  if (isDesktopByteArray(value)) {
+    return value as number[];
+  }
+  throw new Error("content_invalid");
+}
+
+function isDesktopByteArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length <= 50_000_000
+    && value.every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255);
+}
+
+function desktopArtifactContentMetadata(input: unknown): { mimeType?: string; encoding?: "utf8" | "binary" } {
+  const value = desktopInputRecord(input, "workspace_artifact_request_invalid");
+  const mimeType = value.mimeType === undefined
+    ? undefined
+    : typeof value.mimeType === "string" && value.mimeType.trim().length > 0 && value.mimeType.length <= 255
+      ? value.mimeType.trim()
+      : (() => { throw new Error("mimeType_invalid"); })();
+  const encoding = value.encoding === undefined
+    ? undefined
+    : value.encoding === "utf8" || value.encoding === "binary"
+      ? value.encoding
+      : (() => { throw new Error("encoding_invalid"); })();
+  return { ...(mimeType ? { mimeType } : {}), ...(encoding ? { encoding } : {}) };
+}
+
+function assertDesktopArtifactMutationScope(value: unknown, artifactId: string): void {
+  const record = desktopInputRecord(value, "workspace_artifact_response_invalid");
+  const artifact = record.artifact;
+  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact) || (artifact as { id?: unknown }).id !== artifactId) {
+    throw new Error("workspace_artifact_response_scope_invalid");
+  }
+  if (record.revision !== undefined) {
+    const revision = record.revision;
+    if (!revision || typeof revision !== "object" || Array.isArray(revision) || (revision as { artifact_id?: unknown }).artifact_id !== artifactId) {
+      throw new Error("workspace_artifact_revision_response_scope_invalid");
+    }
+  }
+}
+
+type DesktopGeneratedSurfaceMutationIpcInput = {
+  roomId: string;
+  surfaceId?: string;
+  operationId: string;
+  bundle: Record<string, unknown>;
+  request: Record<string, unknown>;
+};
+
+function workspaceGeneratedSurfaceMutationIpcInput(
+  input: unknown,
+  options: { requireSurfaceId?: boolean } = {}
+): DesktopGeneratedSurfaceMutationIpcInput {
+  const value = desktopInputRecord(input, "workspace_generated_surface_request_invalid");
+  const roomId = requiredWorkspaceOpaqueField(value, "roomId");
+  const operationId = requiredWorkspaceOpaqueField(value, "operationId");
+  const surfaceId = options.requireSurfaceId
+    ? requiredWorkspaceOpaqueField(value, "surfaceId")
+    : typeof value.surfaceId === "string" ? requiredWorkspaceOpaqueField(value, "surfaceId") : undefined;
+  return {
+    roomId,
+    ...(surfaceId ? { surfaceId } : {}),
+    operationId,
+    bundle: desktopJsonRecord(value.bundle, "bundle_invalid"),
+    request: desktopJsonRecord(value.request, "request_invalid")
+  };
+}
+
+function desktopInputRecord(input: unknown, errorCode: string): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error(errorCode);
+  return input as Record<string, unknown>;
+}
+
+/** Re-encode renderer input at the Main-process JSON boundary. */
+function desktopJsonRecord(value: unknown, errorCode: string): Record<string, unknown> {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new Error(errorCode);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encoded);
+  } catch {
+    throw new Error(errorCode);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(errorCode);
+  return parsed as Record<string, unknown>;
+}
+
 async function requireActiveWorkspacePrivateKey(connection: WorkspaceConnection): Promise<string> {
   if (connection.credentialRef !== `electron-safe-storage://workspace-account/${connection.accountId}`) {
     throw new Error("workspace_identity_required");
@@ -3929,7 +4545,7 @@ function sanitizeEvidencePayload(value: unknown): unknown {
 
 const roomWorkPublicPayloadKeys = new Set([
   "id", "room_id", "workspace_id", "work_id", "requester_id", "default_agent_id", "agent_id", "target_agent_id",
-  "parent_assignee_id", "assignee_id", "title", "objective", "status", "kind", "instruction", "body", "attachments",
+  "parent_assignee_id", "assignee_id", "title", "objective", "status", "kind", "instruction", "body", "attachments", "resource_refs",
   "assignees", "instructions", "comments", "controls", "operation_id", "source_comment_id", "created_by", "action",
   "enabled", "can_execute", "agent_version", "instruction_version", "generation", "version", "reaction_count",
   "applied_instruction_ids", "unconfirmed_assignee_ids", "reaction", "created_at", "updated_at", "completed_at",
@@ -3955,6 +4571,26 @@ function publicRoomWorkInput(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
 }
 
+function roomWorkResourceRefsInput(value: unknown): Array<{ kind: "knowledge" | "skill"; id: string; version: number }> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("workspace_room_resource_ref_invalid");
+  if (value.length > 32) throw new Error("workspace_room_resource_ref_count_invalid");
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("workspace_room_resource_ref_invalid");
+    const source = item as Record<string, unknown>;
+    const id = typeof source.id === "string" ? source.id.trim() : "";
+    if ((source.kind !== "knowledge" && source.kind !== "skill")
+      || !id
+      || id.length > 512
+      || typeof source.version !== "number"
+      || !Number.isSafeInteger(source.version)
+      || source.version <= 0) {
+      throw new Error("workspace_room_resource_ref_invalid");
+    }
+    return { kind: source.kind, id, version: source.version };
+  });
+}
+
 function sanitizeRoomWorkPayload(value: unknown, depth = 0, keys = roomWorkPublicPayloadKeys, fieldKey?: string): unknown {
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") {
@@ -3969,7 +4605,9 @@ function sanitizeRoomWorkPayload(value: unknown, depth = 0, keys = roomWorkPubli
     if (publicPayloadSensitiveKey.test(key) || !keys.has(key)) continue;
     const sanitized = key === "attachments" || key === "resources"
       ? sanitizeRoomWorkResources(item)
-      : sanitizeRoomWorkPayload(item, depth + 1, keys, key);
+      : key === "resource_refs"
+        ? sanitizeRoomWorkResourceRefs(item)
+        : sanitizeRoomWorkPayload(item, depth + 1, keys, key);
     if (sanitized !== undefined) output[key] = sanitized;
   }
   return output;
@@ -4002,6 +4640,16 @@ function sanitizeRoomWorkResources(value: unknown): unknown {
       ...(typeof resource.version === "string" ? { version: resource.version.slice(0, 128) } : {}),
       ...(typeof resource.label === "string" ? { label: resource.label.slice(0, 4_096) } : {})
     }];
+  });
+}
+
+function sanitizeRoomWorkResourceRefs(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  if (value.length > 32) throw new Error("workspace_room_resource_ref_count_response_invalid");
+  return value.map((item) => {
+    const parsed = PublicRoomWorkResourceRefSchema.safeParse(item);
+    if (!parsed.success) throw new Error("workspace_room_resource_ref_response_invalid");
+    return parsed.data;
   });
 }
 
@@ -4637,8 +5285,20 @@ function activeWorkspaceArtifactsPath(): string {
   return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/artifacts`;
 }
 
+function activeWorkspaceV1ArtifactsPath(): string {
+  return `/api/v1/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/artifacts`;
+}
+
 function activeWorkspaceGeneratedSurfacesPath(): string {
   return `/api/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/generated-surfaces`;
+}
+
+function activeWorkspaceV1GeneratedSurfacesPath(): string {
+  return `/api/v1/workspaces/${encodeURIComponent(requireActiveWorkspaceId())}/generated-surfaces`;
+}
+
+function workspaceInteractionRequestsPath(workspaceId: string): string {
+  return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/interaction-requests`;
 }
 
 function activeWorkspaceClientEventsPath(): string {
@@ -5614,6 +6274,20 @@ function isAllowedMainNavigation(url: string, inputConfig: DesktopConfig): boole
     return true;
   }
   return false;
+}
+
+function assertWorkspaceInteractionIpcSender(event: { sender?: { id?: number; getURL?: () => string } }): void {
+  const sender = event?.sender;
+  if (!mainWindow || mainWindow.isDestroyed() || !sender || sender.id !== mainWindow.webContents.id) {
+    throw new Error("workspace_ipc_sender_invalid");
+  }
+  let url = "";
+  try {
+    url = sender.getURL?.() ?? "";
+  } catch {
+    throw new Error("workspace_ipc_origin_invalid");
+  }
+  if (!isAllowedMainNavigation(url, config)) throw new Error("workspace_ipc_origin_invalid");
 }
 
 function isPackagedWebFileUrl(url: string, inputConfig: DesktopConfig): boolean {

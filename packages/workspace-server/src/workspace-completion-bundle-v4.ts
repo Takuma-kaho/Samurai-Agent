@@ -2034,7 +2034,6 @@ function assertPortableRuntimeBindingRelations(
 }
 
 const humanWorkTerminalStatuses = new Set(["completed", "failed", "cancelled"]);
-const humanWorkActiveStatuses = new Set(["queued", "running", "waiting", "blocked"]);
 const humanAssignmentStatuses = new Set(["queued", "ready", "running", "waiting", "blocked", "completed", "failed", "cancelled", "outcome_unknown"]);
 
 function humanWorkRelationError(): never {

@@ -8,7 +8,7 @@ const scoreOutput = process.argv.includes("--score") || process.argv.includes("-
 const checks = [
   checkRootScripts(), checkDesktopFiles(), checkDesktopConfigAndHealth(), checkDesktopRuntimeBoundary(), checkSecureBrowserWindows(),
   checkPreloadAllowlist(), checkDesktopEntryPoints(), checkDesktopResidentBehavior(), checkClientEventQueue(), checkOsNotificationHandling(),
-  checkGatewayExternalClientBoundary(), checkAppShotTemporaryContext(), checkDeepLinkHandling(), checkWebDesktopBridge()
+  checkGatewayExternalClientBoundary(), checkAppShotTemporaryContext(), checkDeepLinkHandling(), checkWebReactRuntimeBoundary(), checkWebDesktopBridge()
 ];
 const scoreItems = buildScoreItems(checks);
 const ok = checks.every((check) => check.ok);
@@ -144,16 +144,34 @@ function checkDeepLinkHandling() {
   return missingResult("deep-link-handling", required, "invalid and missing deep links have explicit handling");
 }
 
+function checkWebReactRuntimeBoundary() {
+  const main = read("apps/web/src/main.ts");
+  const nativeApp = read("apps/web/src/native-app/NativeApp.tsx");
+  const nativeHook = read("apps/web/src/native-app/use-native-app.ts");
+  const legacyEntrypoints = ["apps/web/src/App.vue", "apps/web/src/AppWorkspace.vue"].filter((file) => existsSync(path.join(root, file)));
+  const required = [
+    [main, "createRoot(rootElement)"], [main, "createElement(NativeApp)"],
+    [nativeApp, "useNativeApp()"], [nativeApp, "RoomWorkSurface"],
+    [nativeHook, "getWorkspaceClientBridge()"], [nativeHook, "bridge?.onWorkspaceServerEvent"],
+    [nativeHook, "event.workspaceId"], [nativeHook, "event.connectionId"],
+    [nativeHook, "targetForWorkspace(selectedWorkspace, connectionRef.current)"]
+  ];
+  const missing = required.filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
+  const issues = [...missing, ...legacyEntrypoints.map((file) => `legacy:${file}`)];
+  return result("web-react-runtime", issues.length === 0, issues.length === 0 ? "NativeApp is the sole React web UI runtime and keeps target-aware realtime handling" : `React runtime boundary issues: ${issues.join(", ")}`);
+}
+
 function checkWebDesktopBridge() {
   const api = read("apps/web/src/lib/api.ts");
-  const workspace = read("apps/web/src/AppWorkspace.vue");
+  const nativeApp = read("apps/web/src/native-app/NativeApp.tsx");
+  const nativeHook = read("apps/web/src/native-app/use-native-app.ts");
   const preload = read("apps/desktop/src/preload.cts");
   const desktop = read("apps/desktop/src/main.ts");
   const protocol = read("packages/ui-protocol/src/index.ts");
   const gateway = read("packages/gateway/src/index.ts");
-  const required = [[api, "getApiBaseUrl"], [api, "window.samuraiDesktop?.apiBaseUrl"], [api, "getBackendRun"], [workspace, "onWorkspaceServerEvent"], [preload, "onWorkspaceServerEvent"], [desktop, "samurai:workspace-server:event"], [desktop, "workspaceSocketAuth"], [workspace, "openBackendRunDeepLink"], [protocol, "attachments?: ResourceRef[]"], [gateway, "attachments: MessageEnvelope[\"attachments\"]"]];
+  const required = [[api, "getApiBaseUrl"], [api, "window.samuraiDesktop?.apiBaseUrl"], [api, "getBackendRun"], [nativeApp, "RoomWorkSurface"], [nativeHook, "bridge?.onWorkspaceServerEvent"], [nativeHook, "requestWorkspaceContentRefresh"], [preload, "onWorkspaceServerEvent"], [desktop, "samurai:workspace-server:event"], [desktop, "workspaceSocketAuth"], [protocol, "attachments?: ResourceRef[]"], [gateway, "attachments: MessageEnvelope[\"attachments\"]"]];
   const missing = required.filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
-  const forbidden = [existsSync(path.join(root, "apps/web/src/lib/connect-app-socket.ts")) ? "obsolete web socket module" : "", api.includes("socket.io-client") ? "web socket.io-client import" : "", workspace.includes("connectAppSocket") ? "connectAppSocket" : ""].filter(Boolean);
+  const forbidden = [existsSync(path.join(root, "apps/web/src/lib/connect-app-socket.ts")) ? "obsolete web socket module" : "", api.includes("socket.io-client") ? "web socket.io-client import" : "", nativeApp.includes("connectAppSocket") || nativeHook.includes("connectAppSocket") ? "connectAppSocket" : ""].filter(Boolean);
   const issues = [...missing, ...forbidden.map((item) => `forbidden:${item}`)];
   return result("web-desktop-bridge", issues.length === 0, issues.length === 0 ? "Web and Desktop share signed HTTP/Core contracts" : `bridge contract issues: ${issues.join(", ")}`);
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { WorkspaceFileResourceRefSchema, type ActivityInboxItem, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type MemoryFrontmatter, type MessageRecord, type ResourceRef } from "@samurai-agent/core-schemas";
+import { ResourceRefSchema, WorkspaceFileResourceRefSchema, type ActivityInboxItem, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type MemoryFrontmatter, type MessageRecord, type ResourceRef } from "@samurai-agent/core-schemas";
 import {
   api,
   createIdempotencyKey,
@@ -30,6 +30,7 @@ import type {
   NativeRoomWorkComment,
   NativeRoomWorkControl,
   NativeRoomWorkInstruction,
+  NativeRoomWorkResourceRefInput,
   NativeRoomWorkReaction,
   NativeRoomWorkStatus,
   NativeRoomDefaultAgent,
@@ -728,6 +729,13 @@ export function nativeDraftRequestIsCurrent(request: NativeDraftRequestStamp, cu
   return request.key === current.key && request.roomOpenId === current.roomOpenId;
 }
 
+/** Joins independently prepared Work instructions without erasing a draft. */
+export function appendNativeWorkDraft(existing: string, addition: string): string {
+  const normalizedAddition = addition.trim();
+  if (!normalizedAddition) return existing;
+  return existing.trim() ? `${existing.trimEnd()}\n\n${normalizedAddition}` : normalizedAddition;
+}
+
 function nativeRoomCapabilityFields(value: Record<string, unknown>): Pick<NativeRoom, "canView" | "canEdit" | "canExecute" | "canManage" | "canStop" | "capabilities"> {
   const nested = record(value.capabilities ?? value.room_capabilities ?? value.permissions);
   const canView = optionalBoolean(value.canView, value.can_view, nested.canView, nested.can_view);
@@ -926,13 +934,60 @@ function nativeAttachmentRefs(value: unknown): ResourceRef[] {
   });
 }
 
+/**
+ * Knowledge and Skill refs have their own Room Work channel. Do not accept a
+ * generic ResourceRef here: a file attachment must remain a file attachment,
+ * and a future resource kind must be explicitly reviewed before it can reach
+ * a worker instruction.
+ */
+function nativeRoomWorkResourceRefs(value: unknown): ResourceRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry): ResourceRef => {
+    const parsed = ResourceRefSchema.safeParse(entry);
+    if (!parsed.success
+      || (parsed.data.kind !== "knowledge" && parsed.data.kind !== "skill")
+      || !parsed.data.version
+      || !/^[1-9][0-9]*$/.test(parsed.data.version)) {
+      throw new Error("room_work_resource_refs_response_invalid");
+    }
+    return parsed.data;
+  });
+}
+
+/** Normalize display selections before the bridge strips them to API input. */
+function normalizeRoomWorkResourceRefInputs(value: readonly NativeRoomWorkResourceRefInput[] | undefined): NativeRoomWorkResourceRefInput[] {
+  if (!value?.length) return [];
+  const seen = new Set<string>();
+  const normalized: NativeRoomWorkResourceRefInput[] = [];
+  for (const ref of value) {
+    if ((ref.kind !== "knowledge" && ref.kind !== "skill")
+      || !/^[a-z][a-z0-9_:-]{0,127}$/.test(ref.id)
+      || !Number.isSafeInteger(ref.version)
+      || ref.version < 1) {
+      throw new Error("room_work_resource_reference_invalid");
+    }
+    const key = `${ref.kind}\n${ref.id}\n${ref.version}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({
+      kind: ref.kind,
+      id: ref.id,
+      version: ref.version,
+      ...(typeof ref.label === "string" && ref.label.trim() ? { label: ref.label.trim().slice(0, 4_096) } : {})
+    });
+  }
+  if (normalized.length > 32) throw new Error("room_work_resource_reference_limit_exceeded");
+  return normalized;
+}
+
 function nativeInstruction(value: unknown): NativeRoomWorkInstruction | undefined {
   const item = record(value);
   const id = optionalString(item.id);
   const workId = optionalString(item.work_id ?? item.workId);
   const instruction = typeof (item.instruction ?? item.body) === "string" ? String(item.instruction ?? item.body) : "";
   const attachments = nativeAttachmentRefs(item.attachments);
-  if (!id || !workId || (!instruction && attachments.length === 0)) return undefined;
+  const resourceRefs = nativeRoomWorkResourceRefs(item.resource_refs ?? item.resourceRefs);
+  if (!id || !workId || (!instruction && attachments.length === 0 && resourceRefs.length === 0)) return undefined;
   const kind = item.kind === "reply" || item.kind === "comment_apply" || item.kind === "delegated" ? item.kind : "initial";
   const instructionStatuses: NativeRoomWorkInstruction["status"][] = ["pending", "accepted", "queued", "delivered", "applied", "failed", "rejected"];
   if (!instructionStatuses.includes(item.status as NativeRoomWorkInstruction["status"])) return undefined;
@@ -944,6 +999,7 @@ function nativeInstruction(value: unknown): NativeRoomWorkInstruction | undefine
     kind,
     instruction,
     attachments,
+    resourceRefs,
     version: positiveVersion(item.version),
     generation: nonNegativeGeneration(item.generation),
     status,
@@ -1034,6 +1090,7 @@ export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
   const defaultAgentId = optionalString(item.default_agent_id ?? item.defaultAgentId);
   if (!id || !roomId || !requesterId || !defaultAgentId) throw new Error("room_work_response_invalid");
   const assigneeRows = Array.isArray(item.assignees) ? item.assignees : Array.isArray(item.assignments) ? item.assignments : [];
+  const resourceRefs = nativeRoomWorkResourceRefs(item.resource_refs ?? item.resourceRefs);
   const instructions = Array.isArray(item.instructions) ? item.instructions.flatMap((entry) => { const parsed = nativeInstruction(entry); return parsed ? [parsed] : []; }) : undefined;
   const comments = Array.isArray(item.comments) ? item.comments.flatMap((entry) => { const parsed = nativeComment(entry); return parsed ? [parsed] : []; }) : undefined;
   const reactions = Array.isArray(item.reactions) ? item.reactions.flatMap((entry) => { const parsed = nativeReaction(entry); return parsed ? [parsed] : []; }) : undefined;
@@ -1058,6 +1115,7 @@ export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
     generation: nonNegativeGeneration(item.generation),
     version: positiveVersion(item.version),
     assignees: assigneeRows.flatMap((entry) => { const parsed = nativeAssignee(entry); return parsed ? [parsed] : []; }),
+    ...(resourceRefs.length ? { resourceRefs } : {}),
     ...(stopState ? { stopState } : {}),
     ...(instructions ? { instructions } : {}),
     ...(comments ? { comments } : {}),
@@ -1280,8 +1338,8 @@ function nativeAgentDmFromUnknown(value: unknown): NativeAgentDm {
 export interface NativeRoomWorkClient {
   list: (roomId: string) => Promise<NativeRoomWork[]>;
   view: (roomId: string, workId: string) => Promise<NativeRoomWork>;
-  create: (input: { roomId: string; instruction?: string; attachments?: NativeRoomWorkInstruction["attachments"]; agentId?: string; operationId: string }) => Promise<NativeRoomWork>;
-  reply: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: NativeRoomWorkInstruction["attachments"]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkInstruction>;
+  create: (input: { roomId: string; instruction?: string; attachments?: NativeRoomWorkInstruction["attachments"]; resourceRefs?: NativeRoomWorkResourceRefInput[]; agentId?: string; operationId: string }) => Promise<NativeRoomWork>;
+  reply: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: NativeRoomWorkInstruction["attachments"]; resourceRefs?: NativeRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<NativeRoomWorkInstruction>;
   comment: (input: { roomId: string; workId: string; body?: string; attachments?: NativeRoomWorkComment["attachments"]; expectedVersion?: number; operationId: string }) => Promise<NativeRoomWorkComment>;
   applyComment: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string; operationId: string }) => Promise<NativeRoomWorkInstruction>;
   reactComment: (input: { roomId: string; workId: string; commentId: string; expectedVersion?: number; operationId: string }) => Promise<unknown>;
@@ -1321,6 +1379,7 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
     create: async (input) => nativeRoomWorkFromUnknown(await call("room.work.create", input.roomId, {
       ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      ...(input.resourceRefs?.length ? { resource_refs: input.resourceRefs.map(({ kind, id, version }) => ({ kind, id, version })) } : {}),
       ...(input.agentId ? { agent_id: input.agentId } : {})
     }, input.operationId, candidate.createWorkspaceRoomWork ? () => candidate.createWorkspaceRoomWork!(input) : undefined)),
     reply: async (input) => {
@@ -1329,6 +1388,7 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
         ...(input.assigneeId ? { assignee_id: input.assigneeId } : {}),
         ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.resourceRefs?.length ? { resource_refs: input.resourceRefs.map(({ kind, id, version }) => ({ kind, id, version })) } : {}),
         ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
         ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
       }, input.operationId, candidate.replyWorkspaceRoomWork ? () => candidate.replyWorkspaceRoomWork!(input) : undefined);
@@ -1646,6 +1706,20 @@ export function useNativeApp() {
     workDrafts.current.set(draftKey, value);
     if (nativeDraftRequestIsCurrent({ key: draftKey, roomOpenId: draftContextRoomOpenId }, { key: draftContextRef.current.workKey, roomOpenId: draftContextRef.current.roomOpenId })) setWorkDraftState(value);
   }, [draftContextRoomOpenId, workDraftContextKey]);
+
+  /**
+   * Adds a prepared instruction to its intended Work context before changing
+   * reply state. This avoids writing a source-Work instruction into the
+   * "new Work" draft during React's asynchronous state transition.
+   */
+  const appendWorkDraft = useCallback((value: string, targetReplyWorkId?: string): void => {
+    const nextKey = `${workContextKey}\n${targetReplyWorkId ?? "new"}`;
+    const existing = workDrafts.current.get(nextKey) ?? (nextKey === workDraftContextKey ? workDraft : "");
+    const next = appendNativeWorkDraft(existing, value);
+    workDrafts.current.set(nextKey, next);
+    setReplyWorkId(targetReplyWorkId);
+    setWorkDraftState(next);
+  }, [workContextKey, workDraft, workDraftContextKey]);
 
   const setWorkCommentDraft = useCallback((value: string): void => {
     const draftKey = workCommentDraftContextKey;
@@ -2543,14 +2617,22 @@ export function useNativeApp() {
     workspaceContentRefreshCoordinatorRef.current?.request();
   }, []);
 
-  const sendRoomWork = useCallback(async (content: string, targetWorkId?: string, targetAssigneeId?: string, operationId?: string, attachments?: ResourceRef[]): Promise<NativeRoomWorkMutationResult> => {
+  const sendRoomWork = useCallback(async (
+    content: string,
+    targetWorkId?: string,
+    targetAssigneeId?: string,
+    operationId?: string,
+    attachments?: ResourceRef[],
+    resourceRefs?: NativeRoomWorkResourceRefInput[]
+  ): Promise<NativeRoomWorkMutationResult> => {
     if (!roomWorkClient || !selectedRoom || !selectedWorkspace || selectedWorkspace.access !== "granted" || selectedWorkspace.state !== "active") {
       throw new Error("room_work_api_unavailable");
     }
     if (!nativeRoomCapability(selectedRoom, "canExecute")) throw new Error("room_work_execute_forbidden");
     const instruction = content.trim();
     const attachmentRefs = attachments?.length ? attachments : [];
-    if (!instruction && attachmentRefs.length === 0) throw new Error("room_work_instruction_required");
+    const normalizedResourceRefs = normalizeRoomWorkResourceRefInputs(resourceRefs);
+    if (!instruction && attachmentRefs.length === 0 && normalizedResourceRefs.length === 0) throw new Error("room_work_instruction_required");
     if (!targetWorkId && targetAssigneeId) throw new Error("room_work_assignee_invalid");
     const requestRoomId = selectedRoom.id;
     const requestTargetKey = chatContextRef.current.workspaceTargetKey;
@@ -2573,6 +2655,7 @@ export function useNativeApp() {
             ...(targetAssigneeId ? { assigneeId: targetAssigneeId } : {}),
             ...(instruction ? { instruction } : {}),
             ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+            ...(normalizedResourceRefs.length ? { resourceRefs: normalizedResourceRefs } : {}),
             ...(work?.version === undefined ? {} : { expectedVersion: work.version }),
             ...(work?.generation === undefined ? {} : { expectedGeneration: work.generation }),
             operationId: requestOperationId
@@ -2583,6 +2666,7 @@ export function useNativeApp() {
             roomId: requestRoomId,
             ...(instruction ? { instruction } : {}),
             ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+            ...(normalizedResourceRefs.length ? { resourceRefs: normalizedResourceRefs } : {}),
             ...(selectedRoom.defaultAgentId ? { agentId: selectedRoom.defaultAgentId } : {}),
             operationId: requestOperationId
           });
@@ -3731,6 +3815,7 @@ export function useNativeApp() {
     setReplyWorkId,
     workDraft,
     setWorkDraft,
+    appendWorkDraft,
     clearWorkDraft,
     workCommentDraft,
     setWorkCommentDraft,
@@ -3756,6 +3841,7 @@ export function useNativeApp() {
     selectOrganization,
     selectWorkspace,
     openRoom,
+    refreshWorkspaceContent,
     refreshRoomWorkList,
     sendRoomWork,
     createRoomWorkComment,

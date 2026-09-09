@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ArtifactRecordSchema, ArtifactRevisionRecordSchema, nowIso, type ArtifactRecord, type ArtifactRevisionRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { ArtifactContentEncodingSchema, ArtifactRecordSchema, ArtifactRevisionRecordSchema, nowIso, type ArtifactContentEncoding, type ArtifactRecord, type ArtifactRevisionRecord, type JsonValue, type SupportedLocale } from "@samurai-agent/core-schemas";
 import { createSurfaceRenderSpec, type SurfaceOperation, type SurfaceOperationResultEnvelope, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
 import {
   canonicalJson,
@@ -15,11 +15,13 @@ import {
 export interface PostgresArtifactCreateInput {
   roomId: string;
   title: string;
-  content: string | Record<string, JsonValue> | JsonValue[];
+  content: string | Uint8Array | Record<string, JsonValue> | JsonValue[];
   kind?: ArtifactRecord["kind"];
   locale?: SupportedLocale;
   sourceLocales?: SupportedLocale[];
   metadata?: Record<string, JsonValue>;
+  mimeType?: string;
+  encoding?: ArtifactContentEncoding;
 }
 
 export interface PostgresArtifactRevisionInput {
@@ -32,7 +34,23 @@ export interface PostgresArtifactRevisionInput {
   changeSummary?: string;
   provenance?: Record<string, JsonValue>;
   extension?: string;
+  mimeType?: string;
+  encoding?: ArtifactContentEncoding;
 }
+
+export interface PostgresArtifactContentProjection {
+  /** UTF-8 content. Empty for binary bodies; use content_bytes in that case. */
+  content: string;
+  /** Actual bytes for binary bodies. This is never a base64 representation. */
+  content_bytes?: number[];
+  mime_type: string;
+  encoding: ArtifactContentEncoding;
+}
+
+export type PostgresArtifactDetail = {
+  artifact: ArtifactRecord;
+  revision?: ArtifactRevisionRecord;
+} & PostgresArtifactContentProjection;
 
 type CompletionActivityIngest = (
   context: WorkspaceRequestContext,
@@ -77,26 +95,63 @@ export class PostgresArtifact {
       .filter((artifact) => artifact.metadata.transaction_state !== "pending");
   }
 
-  async get(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, artifactId: string): Promise<{ artifact: ArtifactRecord; content: string }> {
+  async get(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, artifactId: string): Promise<PostgresArtifactDetail> {
     const record = await this.commands.getRecord(context, { roomId, recordType: "artifact", id: artifactId });
     const artifact = artifactFromPayload(record.payload);
     if (artifact.metadata.transaction_state === "pending") {
       throw new WorkspaceServerError("artifact_recovery_required", 503, { artifact_id: artifact.id });
     }
     const file = await this.files.read(context, { roomId, path: artifact.file_ref.uri });
-    const contentType = typeof artifact.metadata.content_type === "string" ? artifact.metadata.content_type : "";
-    const binary = artifact.kind === "pdf" || artifact.kind === "image" || contentType === "application/pdf" || contentType.startsWith("image/");
-    return { artifact, content: binary ? file.content.toString("base64") : file.content.toString("utf8") };
+    const revision = await this.currentRevision(context, roomId, artifact);
+    if (revision && file.file.sha256 !== revision.content_hash) throw new WorkspaceServerError("artifact_revision_hash_mismatch", 500, { artifact_id: artifact.id, revision_id: revision.id });
+    return { artifact, ...(revision ? { revision } : {}), ...contentProjection(file.content, artifact, revision) };
   }
 
-  async getRevision(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, revisionId: string): Promise<ArtifactRevisionRecord> {
+  async listRevisions(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, artifactId: string): Promise<ArtifactRevisionRecord[]> {
+    await this.commands.getRecord(context, { roomId, recordType: "artifact", id: artifactId });
+    const transactions = await this.commands.listRecords(context, { roomId, recordType: ARTIFACT_TRANSACTION_RECORD_TYPE, limit: 500 });
+    const activeRevisionIds = new Set(transactions
+      .map((record) => artifactTransactionFromPayload(record.payload))
+      .filter((transaction) => transaction.phase !== "completed" && transaction.artifact_id === artifactId && transaction.revision_id)
+      .map((transaction) => transaction.revision_id as string));
+    const records = await this.commands.listRecords(context, { roomId, recordType: "artifact_revision", limit: 500 });
+    return records
+      .map((record) => artifactRevisionFromPayload(record.payload))
+      .filter((revision) => revision.artifact_id === artifactId && !activeRevisionIds.has(revision.id))
+      .sort((left, right) => left.revision - right.revision);
+  }
+
+  async getRevision(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, revisionId: string, artifactId?: string): Promise<ArtifactRevisionRecord> {
     const record = await this.commands.getRecord(context, { roomId, recordType: "artifact_revision", id: revisionId });
     const revision = artifactRevisionFromPayload(record.payload);
+    if (artifactId && revision.artifact_id !== artifactId) throw new WorkspaceServerError("artifact_revision_not_found", 404);
     const transaction = await this.findActiveTransaction(context, roomId, { revisionId });
     if (transaction) {
       throw new WorkspaceServerError("artifact_revision_recovery_required", 503, { revision_id: revision.id });
     }
     return revision;
+  }
+
+  async getRevisionDetail(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, artifactId: string, revisionId: string): Promise<PostgresArtifactDetail> {
+    const artifactRecord = await this.commands.getRecord(context, { roomId, recordType: "artifact", id: artifactId });
+    const artifact = artifactFromPayload(artifactRecord.payload);
+    if (artifact.metadata.transaction_state === "pending") throw new WorkspaceServerError("artifact_recovery_required", 503, { artifact_id: artifact.id });
+    const revision = await this.getRevision(context, roomId, revisionId, artifactId);
+    const file = await this.files.read(context, { roomId, path: revision.file_ref.uri });
+    if (file.file.sha256 !== revision.content_hash) throw new WorkspaceServerError("artifact_revision_hash_mismatch", 500, { artifact_id: artifactId, revision_id: revisionId });
+    return { artifact, revision, ...contentProjection(file.content, artifact, revision) };
+  }
+
+  /** Read the current or requested revision as real bytes for the HTTP File route. */
+  async readContent(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, artifactId: string, revisionId?: string): Promise<{ bytes: Buffer; mimeType: string; encoding: ArtifactContentEncoding; revision?: ArtifactRevisionRecord }> {
+    const record = await this.commands.getRecord(context, { roomId, recordType: "artifact", id: artifactId });
+    const artifact = artifactFromPayload(record.payload);
+    if (artifact.metadata.transaction_state === "pending") throw new WorkspaceServerError("artifact_recovery_required", 503, { artifact_id: artifact.id });
+    const revision = revisionId ? await this.getRevision(context, roomId, revisionId, artifactId) : await this.currentRevision(context, roomId, artifact);
+    const file = await this.files.read(context, { roomId, path: revision?.file_ref.uri ?? artifact.file_ref.uri });
+    if (revision && file.file.sha256 !== revision.content_hash) throw new WorkspaceServerError("artifact_revision_hash_mismatch", 500, { artifact_id: artifactId, revision_id: revision.id });
+    const projection = contentProjection(file.content, artifact, revision);
+    return { bytes: Buffer.from(file.content), mimeType: projection.mime_type, encoding: projection.encoding, ...(revision ? { revision } : {}) };
   }
 
   async readRevisionContent(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, revisionId: string): Promise<Uint8Array> {
@@ -123,7 +178,7 @@ export class PostgresArtifact {
       throw new WorkspaceServerError("artifact_recovery_required", 503, { artifact_id: artifact.id });
     }
 
-    const current = await this.currentRevision(context, roomId, artifact);
+    const current = await this.ensureInitialRevision(context, roomId, artifactRecord, artifact);
     assertRevisionExpectation(current, input.baseRevisionId, input.expectedRevision);
     const revisionId = `artifact_revision_${createHash("sha256").update(`${context.workspaceId}|${context.operationId}|${input.artifactId}`).digest("hex").slice(0, 40)}`;
     const bytes = Buffer.from(input.content);
@@ -147,6 +202,8 @@ export class PostgresArtifact {
       blob_ref: { kind: "artifact_blob", id: contentHash, uri: blobPath, label: contentHash },
       content_hash: contentHash,
       content_bytes: bytes.byteLength,
+      mime_type: resolveMimeType(input.mimeType ?? current.mime_type ?? artifact.metadata.content_type, artifact.kind),
+      encoding: resolveContentEncoding(input.encoding ?? current.encoding ?? artifact.metadata.content_encoding, artifact.kind, input.mimeType),
       created_at: now
     });
     const transaction = await this.putTransaction(context, roomId, transactionId, {
@@ -183,7 +240,9 @@ export class PostgresArtifact {
       editorSource: "restore",
       changeSummary: input.changeSummary ?? `Restore revision ${source.revision}`,
       provenance: { restored_from_revision_id: source.id },
-      extension: pathExtension(source.file_ref.uri)
+      extension: pathExtension(source.file_ref.uri),
+      ...(source.mime_type ? { mimeType: source.mime_type } : {}),
+      ...(source.encoding ? { encoding: source.encoding } : {})
     });
   }
 
@@ -234,31 +293,50 @@ export class PostgresArtifact {
     return { artifact, repair: { repaired: true }, replayed: false };
   }
 
-  async create(context: WorkspaceRequestContext, input: PostgresArtifactCreateInput): Promise<{ artifact: ArtifactRecord; content: string; replayed: boolean }> {
+  async create(context: WorkspaceRequestContext, input: PostgresArtifactCreateInput): Promise<PostgresArtifactDetail & { replayed: boolean }> {
     const roomId = requiredText(input.roomId, "artifact_room_id_required", 160);
     const title = requiredText(input.title, "artifact_title_required", 20_000);
     const kind = input.kind ?? "markdown";
-    const content = serializeContent(input.content);
+    const bytes = serializeContentBytes(input.content);
     const artifactId = `artifact_${createHash("sha256").update(`${context.workspaceId}|${context.operationId}`).digest("hex").slice(0, 40)}`;
-    const extension = kind === "pdf" ? "pdf" : kind === "image" ? "bin" : kind === "table" || kind === "chart" || kind === "graph" || kind === "structured_draft" ? "json" : "md";
-    const filePath = `artifacts/${artifactId}.${extension}`;
+    const mimeType = resolveMimeType(input.mimeType ?? input.metadata?.content_type, kind);
+    const encoding = resolveContentEncoding(input.encoding ?? input.metadata?.content_encoding, kind, input.mimeType);
+    const extension = encoding === "binary" || kind === "pdf" || kind === "image"
+      ? (kind === "pdf" ? "pdf" : "bin")
+      : kind === "table" || kind === "chart" || kind === "graph" || kind === "structured_draft" ? "json" : "md";
+    const sourceFilePath = `artifacts/${artifactId}.${extension}`;
     const now = nowIso();
-    const contentHash = createHash("sha256").update(content).digest("hex");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const revisionId = initialRevisionId(context.workspaceId, artifactId);
+    const revisionPath = `artifacts/${artifactId}/revisions/1-${revisionId}.${extension}`;
+    const blobPath = `artifacts/${artifactId}/blobs/${contentHash}.${extension}`;
+    const revision = ArtifactRevisionRecordSchema.parse({
+      id: revisionId,
+      artifact_id: artifactId,
+      revision: 1,
+      provenance: {},
+      source_ref: { kind: "artifact", id: artifactId, uri: sourceFilePath, version: now, label: title },
+      file_ref: { kind: "artifact_revision", id: revisionId, uri: revisionPath, version: now, label: `${title} r1` },
+      blob_ref: { kind: "artifact_blob", id: contentHash, uri: blobPath, label: contentHash },
+      content_hash: contentHash,
+      content_bytes: bytes.byteLength,
+      mime_type: mimeType,
+      encoding,
+      created_at: now
+    });
     const artifact = ArtifactRecordSchema.parse({
       id: artifactId,
       title,
       kind,
       locale: input.locale ?? "ja",
       source_locales: input.sourceLocales ?? [input.locale ?? "ja"],
-      file_ref: { kind: "artifact", id: artifactId, uri: filePath, version: now, label: title },
+      file_ref: revision.file_ref,
       metadata: {
         ...userArtifactMetadata(input.metadata),
-        content_type: kind === "pdf" ? "application/pdf" : kind === "image" ? "image/*" : kind === "table" || kind === "chart" || kind === "graph" || kind === "structured_draft" ? "application/json" : "text/markdown",
-        status: "draft",
-        byte_size: Buffer.byteLength(content, "utf8"),
-        content_hash: contentHash,
-        preview: createPreview(content),
-        word_count: content.trim().split(/\s+/).filter(Boolean).length
+        ...contentMetadata(kind, mimeType, encoding, bytes, contentHash),
+        current_revision_id: revision.id,
+        current_revision: revision.revision,
+        status: "draft"
       },
       source_operation_id: context.operationId,
       created_by: context.accountId,
@@ -273,8 +351,10 @@ export class PostgresArtifact {
       kind,
       locale: input.locale,
       sourceLocales: input.sourceLocales,
-      metadata: input.metadata
-    }, Buffer.from(content));
+      metadata: input.metadata,
+      mimeType,
+      encoding
+    }, bytes);
     const existingTransaction = await this.readTransaction(context, roomId, transactionId);
     if (existingTransaction) {
       assertTransactionRequest(existingTransaction.payload, requestHash);
@@ -293,9 +373,10 @@ export class PostgresArtifact {
       if (saved.metadata.transaction_state === "pending") {
         throw new WorkspaceServerError("artifact_recovery_required", 503, { artifact_id: saved.id });
       }
-      const body = await this.files.read(context, { roomId, path: saved.file_ref.uri });
-      await this.ensureCreationActivity(context, roomId, saved);
-      return { artifact: saved, content: body.content.toString("utf8"), replayed: true };
+      if (!saved.metadata.current_revision_id) await this.ensureInitialRevision(context, roomId, existing, saved);
+      const detail = await this.get(context, roomId, artifactId);
+      await this.ensureCreationActivity(context, roomId, detail.artifact);
+      return { ...detail, replayed: true };
     }
 
     const transaction = await this.putTransaction(context, roomId, transactionId, {
@@ -305,10 +386,13 @@ export class PostgresArtifact {
       phase: "prepared",
       room_id: roomId,
       artifact_id: artifactId,
-      content_base64: Buffer.from(content).toString("base64"),
+      revision_id: revision.id,
+      content_base64: bytes.toString("base64"),
       content_hash: contentHash,
-      file_path: filePath,
+      file_path: sourceFilePath,
+      blob_path: blobPath,
       artifact_payload: artifact as unknown as Record<string, unknown>,
+      revision_payload: revision as unknown as Record<string, unknown>,
       created_at: now
     }, 0);
     const resumed = await this.resumeCreateTransaction(context, transaction);
@@ -395,6 +479,66 @@ export class PostgresArtifact {
       .map((record) => artifactRevisionFromPayload(record.payload))
       .filter((revision) => revision.artifact_id === artifact.id)
       .sort((left, right) => right.revision - left.revision)[0];
+  }
+
+  /** Migrate an older Artifact that predates immutable revisions before the
+   * first edit. The original file remains the revision's source_ref; the
+   * revision file and content blob are immutable copies. */
+  private async ensureInitialRevision(
+    context: WorkspaceRequestContext,
+    roomId: string,
+    artifactRecord: WorkspaceRecord,
+    artifact: ArtifactRecord
+  ): Promise<ArtifactRevisionRecord> {
+    const existing = await this.currentRevision(context, roomId, artifact);
+    if (existing) return existing;
+    const source = await this.files.read(context, { roomId, path: artifact.file_ref.uri });
+    const bytes = Buffer.from(source.content);
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const revisionId = initialRevisionId(context.workspaceId, artifact.id);
+    const extension = pathExtension(artifact.file_ref.uri);
+    const revision = ArtifactRevisionRecordSchema.parse({
+      id: revisionId,
+      artifact_id: artifact.id,
+      revision: 1,
+      provenance: { migrated_from_legacy_artifact: true },
+      source_ref: artifact.file_ref,
+      file_ref: { kind: "artifact_revision", id: revisionId, uri: `artifacts/${artifact.id}/revisions/1-${revisionId}.${extension}`, label: `${artifact.title} r1` },
+      blob_ref: { kind: "artifact_blob", id: contentHash, uri: `artifacts/${artifact.id}/blobs/${contentHash}.${extension}`, label: contentHash },
+      content_hash: contentHash,
+      content_bytes: bytes.byteLength,
+      mime_type: resolveMimeType(artifact.metadata.content_type, artifact.kind),
+      encoding: resolveContentEncoding(artifact.metadata.content_encoding, artifact.kind, artifact.metadata.content_type),
+      created_at: artifact.created_at
+    });
+    await this.ensureFileContent(context, roomId, revision.file_ref.uri, bytes, "artifact_initial_revision_file_conflict");
+    await this.ensureFileContent(context, roomId, revision.blob_ref.uri, bytes, "artifact_initial_revision_blob_conflict");
+    try {
+      await this.commands.getRecord(context, { roomId, recordType: "artifact_revision", id: revision.id });
+    } catch (error) {
+      if (!(error instanceof WorkspaceServerError) || error.status !== 404) throw error;
+      await this.commands.putRecord(transactionContext(context, revision.id, "initial_revision", 0), {
+        roomId,
+        recordType: "artifact_revision",
+        id: revision.id,
+        payload: revision as unknown as Record<string, unknown>,
+        searchText: `${artifact.title} initial revision`,
+        expectedVersion: 0
+      });
+    }
+    const latest = await this.commands.getRecord(context, { roomId, recordType: "artifact", id: artifact.id });
+    const latestArtifact = artifactFromPayload(latest.payload);
+    if (latestArtifact.metadata.current_revision_id) return this.getRevision(context, roomId, String(latestArtifact.metadata.current_revision_id));
+    const updated = artifactWithRevision(latestArtifact, revision, nowIso(), bytes);
+    await this.commands.putRecord(transactionContext(context, revision.id, "initial_artifact", latest.version), {
+      roomId,
+      recordType: "artifact",
+      id: updated.id,
+      payload: updated as unknown as Record<string, unknown>,
+      searchText: `${updated.title} initial revision`,
+      expectedVersion: latest.version
+    });
+    return revision;
   }
 
   private async readTransaction(
@@ -491,10 +635,16 @@ export class PostgresArtifact {
     }
   }
 
-  private async resumeCreateTransaction(context: WorkspaceRequestContext, transaction: ArtifactTransactionRecord): Promise<{ artifact: ArtifactRecord; content: string }> {
+  private async resumeCreateTransaction(context: WorkspaceRequestContext, transaction: ArtifactTransactionRecord): Promise<PostgresArtifactDetail> {
     if (transaction.payload.kind !== "create" || !transaction.payload.artifact_payload) throw new WorkspaceServerError("artifact_transaction_invalid", 503);
     const bytes = Buffer.from(transaction.payload.content_base64, "base64");
     await this.ensureFileContent(context, transaction.payload.room_id, transaction.payload.file_path, bytes, "artifact_creation_file_conflict");
+    const revision = transaction.payload.revision_payload ? artifactRevisionFromPayload(transaction.payload.revision_payload) : undefined;
+    if (revision) {
+      if (!transaction.payload.blob_path || transaction.payload.blob_path !== revision.blob_ref.uri) throw new WorkspaceServerError("artifact_transaction_invalid", 503);
+      await this.ensureFileContent(context, transaction.payload.room_id, revision.file_ref.uri, bytes, "artifact_initial_revision_file_conflict");
+      await this.ensureFileContent(context, transaction.payload.room_id, transaction.payload.blob_path, bytes, "artifact_initial_revision_blob_conflict");
+    }
     let current = await this.setTransactionPhase(context, transaction, "files_written");
     let record: WorkspaceRecord | undefined;
     try {
@@ -518,6 +668,27 @@ export class PostgresArtifact {
     }
     artifact = artifactFromPayload(record.payload);
     if (artifact.metadata.content_hash !== transaction.payload.content_hash) throw new WorkspaceServerError("artifact_creation_hash_conflict", 409);
+    if (revision) {
+      let revisionRecord: WorkspaceRecord | undefined;
+      try {
+        revisionRecord = await this.commands.getRecord(context, { roomId: transaction.payload.room_id, recordType: "artifact_revision", id: revision.id });
+      } catch (error) {
+        if (!(error instanceof WorkspaceServerError) || error.status !== 404) throw error;
+      }
+      if (revisionRecord) {
+        const stored = artifactRevisionFromPayload(revisionRecord.payload);
+        if (stored.content_hash !== revision.content_hash) throw new WorkspaceServerError("artifact_initial_revision_hash_conflict", 409);
+      } else {
+        await this.commands.putRecord(transactionContext(context, transaction.record.id, "initial_revision", 0), {
+          roomId: transaction.payload.room_id,
+          recordType: "artifact_revision",
+          id: revision.id,
+          payload: revision as unknown as Record<string, unknown>,
+          searchText: `${artifact.title} initial revision`,
+          expectedVersion: 0
+        });
+      }
+    }
     current = await this.setTransactionPhase(context, current, "records_written");
     await this.ensureCreationActivity(context, transaction.payload.room_id, artifact);
     if (artifact.metadata.transaction_state === "pending") {
@@ -534,7 +705,8 @@ export class PostgresArtifact {
     }
     current = await this.setTransactionPhase(context, current, "activity_confirmed");
     await this.completeTransaction(context, current);
-    return { artifact, content: bytes.toString("utf8") };
+    const projection = contentProjection(bytes, artifact, revision);
+    return { artifact, ...(revision ? { revision } : {}), ...projection };
   }
 
   private async resumeRevisionTransaction(
@@ -701,20 +873,26 @@ function artifactRevisionFromPayload(payload: Record<string, unknown>): Artifact
 
 function artifactWithRevision(artifact: ArtifactRecord, revision: ArtifactRevisionRecord, updatedAt = nowIso(), content?: Uint8Array): ArtifactRecord {
   const bytes = content?.byteLength ?? revision.content_bytes;
-  const preview = content ? createPreview(Buffer.from(content).toString("utf8")) : artifact.metadata.preview;
-  const wordCount = content ? Buffer.from(content).toString("utf8").trim().split(/\s+/).filter(Boolean).length : artifact.metadata.word_count;
+  const metadata: Record<string, JsonValue> = {
+    ...artifact.metadata,
+    current_revision_id: revision.id,
+    current_revision: revision.revision,
+    content_hash: revision.content_hash,
+    byte_size: bytes,
+    ...(revision.mime_type ? { content_type: revision.mime_type } : {}),
+    ...(revision.encoding ? { content_encoding: revision.encoding } : {})
+  };
+  delete metadata.preview;
+  delete metadata.word_count;
+  if (revision.encoding !== "binary" && content) {
+    const text = Buffer.from(content).toString("utf8");
+    metadata.preview = createPreview(text);
+    metadata.word_count = text.trim().split(/\s+/).filter(Boolean).length;
+  }
   return ArtifactRecordSchema.parse({
     ...artifact,
     file_ref: revision.file_ref,
-    metadata: {
-      ...artifact.metadata,
-      current_revision_id: revision.id,
-      current_revision: revision.revision,
-      content_hash: revision.content_hash,
-      byte_size: bytes,
-      ...(preview === undefined ? {} : { preview }),
-      ...(wordCount === undefined ? {} : { word_count: wordCount })
-    },
+    metadata,
     updated_at: updatedAt
   });
 }
@@ -729,6 +907,53 @@ function pathExtension(value: string): string {
   return safeExtension(extension);
 }
 
+function initialRevisionId(workspaceId: string, artifactId: string): string {
+  return `artifact_revision_${createHash("sha256").update(`${workspaceId}|${artifactId}|initial`).digest("hex").slice(0, 40)}`;
+}
+
+function contentProjection(bytes: Uint8Array, artifact: ArtifactRecord, revision?: ArtifactRevisionRecord): PostgresArtifactContentProjection {
+  const mimeType = resolveMimeType(revision?.mime_type ?? artifact.metadata.content_type, artifact.kind);
+  const encoding = resolveContentEncoding(revision?.encoding ?? artifact.metadata.content_encoding, artifact.kind, mimeType);
+  if (encoding === "binary") return { content: "", content_bytes: Array.from(bytes), mime_type: mimeType, encoding };
+  return { content: Buffer.from(bytes).toString("utf8"), mime_type: mimeType, encoding };
+}
+
+function contentMetadata(kind: ArtifactRecord["kind"], mimeType: string, encoding: ArtifactContentEncoding, bytes: Uint8Array, contentHash: string): Record<string, JsonValue> {
+  const metadata: Record<string, JsonValue> = {
+    content_type: mimeType,
+    content_encoding: encoding,
+    byte_size: bytes.byteLength,
+    content_hash: contentHash
+  };
+  if (encoding !== "binary") {
+    const text = Buffer.from(bytes).toString("utf8");
+    metadata.preview = createPreview(text);
+    metadata.word_count = text.trim().split(/\s+/).filter(Boolean).length;
+  }
+  void kind;
+  return metadata;
+}
+
+function resolveMimeType(value: unknown, kind: ArtifactRecord["kind"]): string {
+  if (typeof value === "string") {
+    const normalized = value.trim().slice(0, 255);
+    if (/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(normalized)) return normalized;
+  }
+  if (kind === "pdf") return "application/pdf";
+  if (kind === "image") return "application/octet-stream";
+  if (kind === "table" || kind === "chart" || kind === "graph" || kind === "structured_draft") return "application/json";
+  if (kind === "document") return "text/plain";
+  return "text/markdown";
+}
+
+function resolveContentEncoding(value: unknown, kind: ArtifactRecord["kind"], mimeType?: unknown): ArtifactContentEncoding {
+  const parsed = ArtifactContentEncodingSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  if (kind === "pdf" || kind === "image") return "binary";
+  if (typeof mimeType === "string" && (mimeType === "application/pdf" || mimeType.startsWith("image/"))) return "binary";
+  return "utf8";
+}
+
 function safeExtension(value: string): string {
   const normalized = value.replace(/^\./, "").toLowerCase();
   if (!/^[a-z0-9]{1,16}$/.test(normalized)) throw new WorkspaceServerError("artifact_extension_invalid", 400);
@@ -739,8 +964,10 @@ function hashPath(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
-function serializeContent(content: string | Record<string, JsonValue> | JsonValue[]): string {
-  return typeof content === "string" ? content : `${JSON.stringify(content, null, 2)}\n`;
+function serializeContentBytes(content: string | Uint8Array | Record<string, JsonValue> | JsonValue[]): Buffer {
+  if (typeof content === "string") return Buffer.from(content, "utf8");
+  if (content instanceof Uint8Array) return Buffer.from(content);
+  return Buffer.from(`${JSON.stringify(content, null, 2)}\n`, "utf8");
 }
 
 function createPreview(content: string): string {
@@ -775,5 +1002,6 @@ function requiredText(value: string | undefined, code: string, max: number): str
 }
 
 function userArtifactMetadata(value: Record<string, JsonValue> | undefined): Record<string, JsonValue> {
-  return Object.fromEntries(Object.entries(value ?? {}).filter(([key]) => key !== "transaction_state")) as Record<string, JsonValue>;
+  const reserved = new Set(["transaction_state", "current_revision_id", "current_revision", "content_hash", "byte_size", "content_type", "content_encoding", "preview", "word_count", "status"]);
+  return Object.fromEntries(Object.entries(value ?? {}).filter(([key]) => !reserved.has(key))) as Record<string, JsonValue>;
 }

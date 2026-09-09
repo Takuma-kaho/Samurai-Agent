@@ -1169,6 +1169,267 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(calls[0]?.values).toEqual(["workspace_store_default", "room_store_default"]);
   });
 
+  it("stores create resource refs separately from file attachments and projects them on the Work", async () => {
+    const workspaceId = "workspace_store_resource_create";
+    const roomId = "room_store_resource_create";
+    const operationId = "operation_store_resource_create";
+    const timestamp = "2026-09-08T00:00:00.000Z";
+    const attachment = { kind: "file" as const, id: "a".repeat(64), uri: "docs/input.md", version: "3" };
+    const resourceRef = {
+      kind: "knowledge" as const,
+      id: "completion_knowledge_create",
+      uri: "knowledge/completion_knowledge_create/v2.md",
+      version: "2",
+      label: "Canonical knowledge"
+    };
+    const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
+    const workRow = {
+      workspace_id: workspaceId,
+      id: "room_work_room_store_resource_create_operation_store_resource_create",
+      room_id: roomId,
+      requester_account_id: "account_store_resource_create",
+      default_agent_id: "agent_store_resource_create",
+      default_agent_version: "1",
+      title: "Review the referenced resources.",
+      objective: "Review the referenced resources.",
+      completion_criteria: [],
+      resource_refs: [resourceRef],
+      status: "queued" as const,
+      stop_state: "none" as const,
+      instruction_version: "1",
+      control_generation: "0",
+      operation_id: operationId,
+      created_at: timestamp,
+      updated_at: timestamp
+    };
+    const store = storeWithQuery(async (text, values) => {
+      calls.push({ text, values });
+      if (text.includes("INSERT INTO workspace_operations")) return { rows: [{ id: operationId }] };
+      if (text.includes("FROM rooms WHERE workspace_id = $1 AND id = $2")) return { rows: [{
+        workspace_id: workspaceId,
+        id: roomId,
+        parent_room_id: null,
+        room_kind: "normal",
+        default_agent_id: "agent_store_resource_create",
+        default_agent_version: "1",
+        dm_account_id: null,
+        name: "Resource room",
+        version: "1",
+        can_manage: true,
+        can_execute: true,
+        created_at: timestamp,
+        updated_at: timestamp
+      }] };
+      if (text.includes("SELECT samurai_can_room")) return { rows: [{ allowed: true }] };
+      if (text.includes("FROM workspace_files")) return { rows: [{ path: attachment.uri, version: 3, sha256: attachment.id }] };
+      if (text.includes("FROM workspace_completion_resources AS resource")) return { rows: [{
+        workspace_id: workspaceId,
+        id: resourceRef.id,
+        scope_kind: "room",
+        room_id: roomId,
+        resource_kind: "knowledge",
+        title: resourceRef.label,
+        lifecycle_state: "active",
+        version: resourceRef.version,
+        file_path: resourceRef.uri,
+        version_lifecycle_state: "active"
+      }] };
+      if (text.includes("samurai_lock_room_default_agent")) return { rows: [{ default_agent_id: "agent_store_resource_create", default_agent_version: "1" }] };
+      if (text.includes("FROM workspace_agents")) return { rows: [{ version: "1", status: "active", enabled: true }] };
+      if (text.includes("SELECT samurai_create_human_work")) return { rows: [{ result: { replayed: false } }] };
+      if (text.includes("FROM workspace_human_works WHERE workspace_id = $1 AND id = $2")) return { rows: [workRow] };
+      if (text.includes("FROM workspace_human_work_launch_reservations WHERE workspace_id = $1 AND id = $2")) return { rows: [{
+        workspace_id: workspaceId,
+        id: "reservation_store_resource_create",
+        work_id: workRow.id,
+        assignment_id: "assignment_store_resource_create",
+        room_id: roomId,
+        generation: "0",
+        status: "reserved",
+        operation_id: operationId,
+        scheduled_at: timestamp,
+        lease_owner: null,
+        lease_expires_at: null,
+        claimed_at: null,
+        released_at: null,
+        created_at: timestamp,
+        updated_at: timestamp
+      }] };
+      return { rows: [] };
+    });
+
+    const result = await store.createRoomWork(
+      { workspaceId, accountId: "account_store_resource_create", operationId },
+      {
+        roomId,
+        attachments: [attachment],
+        resourceRefs: [resourceRef]
+      }
+    );
+
+    expect(result.work).toMatchObject({ id: workRow.id, resourceRefs: [resourceRef] });
+    const createCall = calls.find(({ text }) => text.includes("SELECT samurai_create_human_work"));
+    expect(JSON.parse(String(createCall?.values?.[13]))).toEqual([attachment]);
+    expect(JSON.parse(String(createCall?.values?.[14]))).toEqual([resourceRef]);
+    expect(createCall?.values?.[13]).not.toBe(createCall?.values?.[14]);
+    expect(createCall?.values?.[12]).toBe("Review the referenced resources.");
+  });
+
+  it("appends a Room-work reply and preserves resource refs separately from attachments", async () => {
+    const workspaceId = "workspace_store_resource_reply";
+    const roomId = "room_store_resource_reply";
+    const workId = "work_store_resource_reply";
+    const accountId = "account_store_resource_reply";
+    const operationId = "operation_store_resource_reply";
+    const timestamp = "2026-09-08T00:00:00.000Z";
+    const resourceRef = {
+      kind: "skill" as const,
+      id: "completion_skill_reply",
+      uri: "skills/completion_skill_reply/v4.md",
+      version: "4",
+      label: "Canonical skill"
+    };
+    const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
+    const workRow = {
+      workspace_id: workspaceId,
+      id: workId,
+      room_id: roomId,
+      requester_account_id: accountId,
+      default_agent_id: "agent_store_resource_reply",
+      default_agent_version: "1",
+      title: "Reply with resource",
+      objective: "Keep resource refs distinct",
+      completion_criteria: [],
+      resource_refs: [],
+      status: "running" as const,
+      stop_state: "none" as const,
+      instruction_version: "1",
+      control_generation: "0",
+      operation_id: "operation_store_resource_reply_create",
+      created_at: timestamp,
+      updated_at: timestamp
+    };
+    const instructionId = "room_work_instruction_resource_reply";
+    const instructionRow = {
+      workspace_id: workspaceId,
+      id: instructionId,
+      work_id: workId,
+      assignment_id: null,
+      room_id: roomId,
+      version: "2",
+      body: "Review the referenced resources.",
+      attachment_refs: [],
+      resource_refs: [resourceRef],
+      source_kind: "reply" as const,
+      source_comment_id: null,
+      source_comment_version: null,
+      state: "pending" as const,
+      created_by: accountId,
+      created_at: timestamp
+    };
+    const store = storeWithQuery(async (text, values) => {
+      calls.push({ text, values });
+      if (text.includes("INSERT INTO workspace_operations")) return { rows: [{ id: operationId }] };
+      if (text.includes("FROM workspace_human_works WHERE workspace_id = $1 AND id = $2")) return { rows: [workRow] };
+      if (text.includes("FROM workspace_completion_resources AS resource")) return { rows: [{
+        workspace_id: workspaceId,
+        id: resourceRef.id,
+        scope_kind: "workspace",
+        room_id: null,
+        resource_kind: "skill",
+        title: resourceRef.label,
+        lifecycle_state: "active",
+        version: resourceRef.version,
+        file_path: resourceRef.uri,
+        version_lifecycle_state: "active"
+      }] };
+      if (text.includes("SELECT samurai_can_room")) return { rows: [{ allowed: true }] };
+      if (text.includes("SELECT samurai_append_human_work_instruction")) return { rows: [{ result: { version: 2 } }] };
+      if (text.includes("FROM workspace_human_work_instructions WHERE workspace_id = $1 AND id = $2")) return { rows: [instructionRow] };
+      if (text.includes("SELECT organization_id FROM workspaces")) return { rows: [{ organization_id: null }] };
+      if (text.includes("INSERT INTO workspace_events")) return { rows: [{
+        id: 1,
+        workspace_id: workspaceId,
+        room_id: roomId,
+        kind: "room.work.instruction.created",
+        record_type: "room_work_instruction",
+        record_id: instructionId,
+        operation_id: operationId,
+        payload: {},
+        created_at: timestamp
+      }] };
+      return { rows: [] };
+    });
+
+    const result = await store.replyToRoomWork(
+      { workspaceId, accountId, operationId },
+      { roomId, workId, resourceRefs: [resourceRef], attachments: [] }
+    );
+
+    expect(result).toMatchObject({ id: instructionId, resourceRefs: [resourceRef], attachments: [] });
+    const appendCall = calls.find(({ text }) => text.includes("SELECT samurai_append_human_work_instruction"));
+    expect(appendCall?.values?.[9]).toBe("[]");
+    expect(JSON.parse(String(appendCall?.values?.[10]))).toEqual([resourceRef]);
+    expect(appendCall?.values?.[4]).toBe("Review the referenced resources.");
+  });
+
+  it.each([
+    [{ kind: "memory", id: "resource_invalid_kind", uri: "memory/resource.md", version: "1" }],
+    [{ kind: "knowledge", id: "resource_unknown_key", uri: "knowledge/resource.md", version: "1", extra: true }],
+    [{ kind: "knowledge", id: "resource_invalid_uri", uri: "", version: "1" }]
+  ])("rejects malformed or non Knowledge/Skill Room Work resource refs", async (resourceRef) => {
+    const store = storeWithQuery(async () => ({ rows: [] }));
+    await expect(store.replyToRoomWork(
+      { workspaceId: "workspace_store_resource_invalid", accountId: "account_store_resource_invalid", operationId: "operation_store_resource_invalid" },
+      {
+        roomId: "room_store_resource_invalid",
+        workId: "work_store_resource_invalid",
+        instruction: "Reject this ref",
+        resourceRefs: [resourceRef as never]
+      }
+    )).rejects.toMatchObject({ code: "room_work_resource_reference_invalid", status: 400 });
+  });
+
+  it("terminally fails a claimed launch when a resource ref is malformed", async () => {
+    const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
+    const store = storeWithQuery(async (text, values) => {
+      calls.push({ text, values });
+      if (text.includes("SELECT samurai_claim_human_work_launch")) return { rows: [{ claim: { reservation_id: "reservation_store_resource_invalid_claim" } }] };
+      if (text.includes("FROM workspace_human_work_launch_reservations AS reservation")) return { rows: [{
+        workspace_id: "workspace_store_resource_invalid_claim",
+        reservation_id: "reservation_store_resource_invalid_claim",
+        work_id: "work_store_resource_invalid_claim",
+        assignment_id: "assignment_store_resource_invalid_claim",
+        room_id: "room_store_resource_invalid_claim",
+        generation: "0",
+        scheduled_at: "2026-09-08T00:00:00.000Z",
+        control_generation: "0",
+        instruction_version: "1",
+        agent_id: "agent_store_resource_invalid_claim",
+        agent_configuration_version: "1",
+        parent_assignment_id: null,
+        parent_backend_id: null,
+        parent_agent_id: null,
+        parent_backend_session_id: null,
+        parent_runtime_binding: null,
+        session_id: null,
+        instruction: "Do not launch this work",
+        resource_refs: [{ kind: "memory", id: "foreign_kind", uri: "memory/foreign.md", version: "1" }],
+        attachments: [],
+        attachments_have_unresolved: false
+      }] };
+      if (text.includes("SELECT samurai_fail_human_work_launch_preflight")) return { rows: [{ failed: true }] };
+      return { rows: [] };
+    });
+
+    await expect(store.claimRoomWorkReservation(
+      { workspaceId: "workspace_store_resource_invalid_claim", accountId: "account_store_resource_invalid_claim" },
+      { workerId: "worker_store_resource_invalid_claim", leaseMs: 1_000, now: "2026-09-08T00:00:00.000Z", limit: 1 }
+    )).resolves.toBeUndefined();
+    const preflight = calls.find(({ text }) => text.includes("SELECT samurai_fail_human_work_launch_preflight"));
+    expect(preflight?.values?.[6]).toBe("room_work_resource_reference_invalid");
+  });
+
   it("appends a Room-work reply and preserves the idempotent replay flag", async () => {
     const workspaceId = "workspace_store_reply";
     const roomId = "room_store_reply";
