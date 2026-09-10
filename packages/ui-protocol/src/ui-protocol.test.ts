@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { builtinSurfaceRendererRegistryEntries, negotiateSurfaceRenderSpec, parseSurfaceOperation, SurfaceOperationDispatchPlanSchema, SurfaceRenderSpecSchema, surfaceOperationResultKinds, surfaceRenderKinds, type SurfaceOperationResultEnvelope } from "./index";
+import { builtinSurfaceRendererRegistryEntries, GeneratedSurfaceFrameActionErrorSchema, GeneratedSurfaceFrameActionRequestSchema, GeneratedSurfaceFrameActionResultSchema, GeneratedSurfaceFrameMessageSchema, GeneratedSurfaceFrameReadySchema, negotiateSurfaceRenderSpec, parseSurfaceOperation, SurfaceOperationDispatchPlanSchema, SurfaceRenderSpecSchema, surfaceOperationResultKinds, surfaceRenderKinds, type SurfaceOperationResultEnvelope } from "./index";
 
 describe("surface operation protocol", () => {
   it("fills ids for lightweight message submit clients", () => {
@@ -129,6 +129,55 @@ describe("surface operation protocol", () => {
 
     expect(envelope.render_spec.kind).toBe("chat");
     expect(envelope.render_specs?.map((spec) => spec.kind)).toEqual(["chat"]);
+  });
+
+  it("correlates Generated Surface frame requests with accepted, completed, and failed results", () => {
+    const identity = { surface_id: "surface_report", revision_id: "surface_revision_1" };
+    expect(GeneratedSurfaceFrameReadySchema.parse({
+      type: "samurai.generated_surface.ready",
+      ...identity
+    })).toMatchObject(identity);
+    expect(GeneratedSurfaceFrameActionRequestSchema.parse({
+      type: "samurai.generated_surface.action",
+      request_id: "request_1",
+      ...identity,
+      action_id: "refresh",
+      payload: { scope: "latest" }
+    })).toMatchObject({ request_id: "request_1", action_id: "refresh" });
+    expect(GeneratedSurfaceFrameActionResultSchema.parse({
+      type: "samurai.generated_surface.action.result",
+      request_id: "request_1",
+      operation_id: "operation_1",
+      ...identity,
+      status: "accepted",
+      saved: false
+    })).toMatchObject({ request_id: "request_1", operation_id: "operation_1", saved: false });
+    expect(GeneratedSurfaceFrameMessageSchema.parse({
+      type: "samurai.generated_surface.action.result",
+      request_id: "request_1",
+      operation_id: "operation_1",
+      ...identity,
+      status: "completed",
+      saved: true,
+      result: { ok: true },
+      latest: { surface: { id: "surface_report" }, artifact: { id: "artifact_1" }, data: { ok: true } }
+    })).toMatchObject({ status: "completed", saved: true, latest: { artifact: { id: "artifact_1" } } });
+    expect(GeneratedSurfaceFrameActionErrorSchema.parse({
+      type: "samurai.generated_surface.action.error",
+      request_id: "request_1",
+      operation_id: "operation_1",
+      ...identity,
+      status: "failed",
+      error: { code: "generated_surface_action_failed", message: "failed", retryable: true }
+    })).toMatchObject({ status: "failed", error: { retryable: true } });
+    expect(() => GeneratedSurfaceFrameActionResultSchema.parse({
+      type: "samurai.generated_surface.action.result",
+      request_id: "request_1",
+      operation_id: "operation_1",
+      ...identity,
+      status: "accepted",
+      saved: true
+    })).toThrow();
   });
 
   it("validates render specs returned by Host surface operations", () => {

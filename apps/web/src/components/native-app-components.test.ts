@@ -7,7 +7,7 @@ import OrganizationSwitcher from "./OrganizationSwitcher";
 import RoomNavigator from "./RoomNavigator";
 import WorkspaceNavigator from "./WorkspaceNavigator";
 import ConnectionRequired from "./ConnectionRequired";
-import WorkspaceConnectionSettings, { workspaceConnectionActionError, workspaceConnectionActionLabel, workspaceConnectionActionSuccess, WorkspaceConnectionFeedback } from "./WorkspaceConnectionSettings";
+import WorkspaceConnectionSettings, { workspaceConnectionActionError, workspaceConnectionActionLabel, workspaceConnectionActionSuccess, workspaceConnectionDraftAfterSave, workspaceConnectionDraftIsDirty, WorkspaceConnectionFeedback } from "./WorkspaceConnectionSettings";
 import { EmptyMainState } from "../native-app/NativeApp";
 import { preferredWorkspaceTargetForState, workspaceConnectionStateFromUnknown } from "../native-app/use-native-app";
 
@@ -127,6 +127,17 @@ describe("Native App component states", () => {
     expect(workspaceConnectionActionLabel("save", "save")).toBe("保存中…");
     expect(workspaceConnectionActionLabel("select", "select")).toBe("切替中…");
     expect(workspaceConnectionActionLabel("import", null)).toBe("コピー済みの秘密鍵を読み込む");
+  });
+
+  it("keeps connection input typed during save, while allowing a successful retry to clear only its snapshot", () => {
+    const submitted = { label: "Server B", serverUrl: "http://127.0.0.1:4318", accountId: "account_b" };
+    const newer = { ...submitted, accountId: "account_c" };
+
+    expect(workspaceConnectionDraftIsDirty({ label: "", serverUrl: "", accountId: "" })).toBe(false);
+    expect(workspaceConnectionDraftIsDirty(submitted)).toBe(true);
+    expect(workspaceConnectionDraftAfterSave(submitted, submitted)).toEqual({ label: "", serverUrl: "", accountId: "" });
+    expect(workspaceConnectionDraftAfterSave(newer, submitted)).toEqual(newer);
+    expect(workspaceConnectionDraftAfterSave(submitted, submitted, false)).toEqual(submitted);
   });
 
   it("shows the newest failure instead of a previous success", () => {
@@ -253,6 +264,28 @@ describe("Native App component states", () => {
 
     expect(markup).toContain("Archive room");
     expect(markup).toMatch(/button[^>]*disabled/);
+  });
+
+  it("keeps deep, read-only Rooms reachable while blocking an explicit view denial", () => {
+    const rooms = Array.from({ length: 9 }, (_, index) => ({
+      id: `room_${index}`,
+      workspaceId: "workspace_1",
+      name: `Room ${index}`,
+      ...(index === 0 ? {} : { parentRoomId: `room_${index - 1}` }),
+      ...(index === 8 ? { canExecute: false } : {})
+    }));
+    const markup = renderToStaticMarkup(createElement(RoomNavigator, {
+      rooms: [...rooms, { id: "room_hidden", workspaceId: "workspace_1", name: "Hidden", canView: false }],
+      onSelect: vi.fn()
+    }));
+
+    expect(markup).toContain("--native-room-depth:8");
+    expect(markup).toContain("読み取り専用");
+    const readOnlyStart = markup.indexOf("Room 8");
+    expect(markup.slice(readOnlyStart - 180, readOnlyStart + 160)).not.toContain("disabled");
+    const deniedStart = markup.indexOf("Hidden");
+    expect(markup.slice(deniedStart - 180, deniedStart + 160)).toContain("disabled");
+    expect(markup).toContain("閲覧不可");
   });
 
   it("offers reconnect and retry affordances after an Agent failure", () => {

@@ -1,4 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
+import { NativeDraftNavigationPrompt } from "../native-app/NativeDraftNavigationPrompt";
+import { useNativeDraftNavigation, type NativeDraftNavigationControllerChange } from "../native-app/use-native-draft-navigation";
 import type { DesktopWorkspaceConnection } from "../lib/api";
 
 export type WorkspaceConnectionDraft = {
@@ -6,6 +8,36 @@ export type WorkspaceConnectionDraft = {
   serverUrl: string;
   accountId: string;
 };
+
+export interface WorkspaceConnectionDraftState {
+  dirty: boolean;
+  saving: boolean;
+}
+
+const emptyWorkspaceConnectionDraft = (): WorkspaceConnectionDraft => ({ label: "", serverUrl: "", accountId: "" });
+
+export function workspaceConnectionDraftIsDirty(draft: WorkspaceConnectionDraft): boolean {
+  return Object.values(draft).some((value) => value.length > 0);
+}
+
+export function workspaceConnectionDraftMatchesSnapshot(
+  current: WorkspaceConnectionDraft,
+  submitted: WorkspaceConnectionDraft
+): boolean {
+  return current.label === submitted.label
+    && current.serverUrl === submitted.serverUrl
+    && current.accountId === submitted.accountId;
+}
+
+/** Clear only the values that the completed save actually submitted. */
+export function workspaceConnectionDraftAfterSave(
+  current: WorkspaceConnectionDraft,
+  submitted: WorkspaceConnectionDraft,
+  succeeded = true
+): WorkspaceConnectionDraft {
+  if (!succeeded || !workspaceConnectionDraftMatchesSnapshot(current, submitted)) return current;
+  return emptyWorkspaceConnectionDraft();
+}
 
 type WorkspaceConnectionAction = "save" | "select" | "import" | "register";
 
@@ -19,6 +51,7 @@ export interface WorkspaceConnectionSettingsProps {
   onSelect: (connectionId: string) => void | Promise<void>;
   onImportIdentity: () => void | Promise<void>;
   onRegisterAccount: () => void | Promise<void>;
+  onDraftNavigationControllerChange?: NativeDraftNavigationControllerChange;
 }
 
 export function workspaceConnectionActionError(action: WorkspaceConnectionAction): string {
@@ -101,29 +134,45 @@ export function WorkspaceConnectionSettings({
   onSave,
   onSelect,
   onImportIdentity,
-  onRegisterAccount
+  onRegisterAccount,
+  onDraftNavigationControllerChange
 }: WorkspaceConnectionSettingsProps) {
-  const [draft, setDraft] = useState<WorkspaceConnectionDraft>({ label: "", serverUrl: "", accountId: "" });
+  const [draft, setDraft] = useState<WorkspaceConnectionDraft>(emptyWorkspaceConnectionDraft);
+  const draftRef = useRef(draft);
   const [saving, setSaving] = useState(false);
   const [runningAction, setRunningAction] = useState<WorkspaceConnectionAction | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
 
-  const update = (key: keyof WorkspaceConnectionDraft, value: string) => {
-    setDraft((current) => ({ ...current, [key]: value }));
+  const update = (key: keyof WorkspaceConnectionDraft, value: string): void => {
+    const next = { ...draftRef.current, [key]: value };
+    draftRef.current = next;
+    setDraft(next);
+    setFormError(null);
+    setFormSuccess(null);
   };
 
-  const run = async (action: WorkspaceConnectionAction, operation: () => void | Promise<void>) => {
+  const run = async (
+    action: WorkspaceConnectionAction,
+    operation: () => void | Promise<void>,
+    submittedDraft?: WorkspaceConnectionDraft
+  ): Promise<boolean> => {
     setFormError(null);
     setFormSuccess(null);
     setSaving(true);
     setRunningAction(action);
     try {
       await operation();
-      if (action === "save") setDraft({ label: "", serverUrl: "", accountId: "" });
+      if (action === "save" && submittedDraft) {
+        const next = workspaceConnectionDraftAfterSave(draftRef.current, submittedDraft);
+        draftRef.current = next;
+        setDraft(next);
+      }
       setFormSuccess(workspaceConnectionActionSuccess(action));
+      return true;
     } catch {
       setFormError(workspaceConnectionActionError(action));
+      return false;
     } finally {
       setSaving(false);
       setRunningAction(null);
@@ -132,21 +181,62 @@ export function WorkspaceConnectionSettings({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const snapshot = { ...draftRef.current };
     const input = {
-      label: draft.label.trim(),
-      serverUrl: draft.serverUrl.trim(),
-      accountId: draft.accountId.trim()
+      label: snapshot.label.trim(),
+      serverUrl: snapshot.serverUrl.trim(),
+      accountId: snapshot.accountId.trim()
     };
     if (!input.label || !input.serverUrl || !input.accountId) {
       setFormSuccess(null);
       setFormError("表示名、Server URL、Account IDを入力してください。");
       return;
     }
-    void run("save", () => onSave(input));
+    void run("save", () => onSave(input), snapshot);
   };
+
+  const saveDraftAndNavigate = async (): Promise<boolean> => {
+    const snapshot = { ...draftRef.current };
+    if (!workspaceConnectionDraftIsDirty(snapshot)) return true;
+    const input = {
+      label: snapshot.label.trim(),
+      serverUrl: snapshot.serverUrl.trim(),
+      accountId: snapshot.accountId.trim()
+    };
+    if (!input.label || !input.serverUrl || !input.accountId) {
+      setFormSuccess(null);
+      setFormError("表示名、Server URL、Account IDを入力してください。入力値を保持しています。");
+      return false;
+    }
+    const succeeded = await run("save", () => onSave(input), snapshot);
+    return succeeded && !workspaceConnectionDraftIsDirty(draftRef.current);
+  };
+
+  const discardDraft = (): void => {
+    const next = emptyWorkspaceConnectionDraft();
+    draftRef.current = next;
+    setDraft(next);
+    setFormError(null);
+    setFormSuccess(null);
+  };
+
+  const draftNavigation = useNativeDraftNavigation({
+    scopeKey: "connection-settings",
+    label: "接続設定",
+    dirty: workspaceConnectionDraftIsDirty(draft),
+    saving,
+    canSave: true,
+    save: saveDraftAndNavigate,
+    discard: discardDraft,
+    onControllerChange: onDraftNavigationControllerChange
+  });
 
   const disabled = loading || saving;
   const active = connections.find((connection) => connection.id === activeConnectionId);
+
+  const requestClose = (): void => {
+    draftNavigation.requestNavigation(onClose);
+  };
 
   return (
     <div className="native-dialog-backdrop" role="presentation">
@@ -156,7 +246,7 @@ export function WorkspaceConnectionSettings({
             <span className="native-section-eyebrow">Desktop only</span>
             <h2 id="native-connection-settings-title">Server接続設定</h2>
           </div>
-          <button className="native-icon-button" type="button" onClick={onClose} aria-label="閉じる">×</button>
+          <button className="native-icon-button" type="button" onClick={requestClose} aria-label="閉じる">×</button>
         </div>
 
         <p className="native-muted-note">接続先はこの端末だけに保存されます。秘密鍵はこの画面に貼り付けず、ElectronがOSの保護領域へ直接読み込みます。</p>
@@ -164,7 +254,7 @@ export function WorkspaceConnectionSettings({
         {connections.length ? <div className="native-connection-list" aria-label="登録済みServer">
           {connections.map((connection) => {
             const selected = connection.id === activeConnectionId;
-            return <button key={connection.id} className={`native-connection-row${selected ? " is-active" : ""}`} type="button" disabled={disabled || selected} onClick={() => void run("select", () => onSelect(connection.id))}>
+            return <button key={connection.id} className={`native-connection-row${selected ? " is-active" : ""}`} type="button" disabled={disabled || selected} onClick={() => { draftNavigation.requestNavigation(() => { void run("select", () => onSelect(connection.id)); }); }}>
               <span className="native-connection-row-copy"><strong>{connection.label}</strong><small>{connection.serverUrl}</small><em>{connection.accountId}</em></span>
               <span>{selected ? "選択中" : workspaceConnectionActionLabel("select", runningAction)}</span>
             </button>;
@@ -173,9 +263,9 @@ export function WorkspaceConnectionSettings({
 
         <form className="native-form-grid native-connection-settings-form" onSubmit={submit}>
           <span className="native-section-eyebrow">Add server</span>
-          <label><span>表示名</span><input value={draft.label} onChange={(event) => update("label", event.currentTarget.value)} maxLength={100} placeholder="検証用 Server B" autoComplete="off" required /></label>
-          <label><span>Server URL</span><input value={draft.serverUrl} onChange={(event) => update("serverUrl", event.currentTarget.value)} inputMode="url" placeholder="http://127.0.0.1:4318" autoComplete="url" required /></label>
-          <label><span>Account ID</span><input value={draft.accountId} onChange={(event) => update("accountId", event.currentTarget.value)} maxLength={128} placeholder="account_..." autoComplete="off" required /></label>
+          <label><span>表示名</span><input value={draft.label} onChange={(event) => update("label", event.currentTarget.value)} disabled={disabled} maxLength={100} placeholder="検証用 Server B" autoComplete="off" required /></label>
+          <label><span>Server URL</span><input value={draft.serverUrl} onChange={(event) => update("serverUrl", event.currentTarget.value)} disabled={disabled} inputMode="url" placeholder="http://127.0.0.1:4318" autoComplete="url" required /></label>
+          <label><span>Account ID</span><input value={draft.accountId} onChange={(event) => update("accountId", event.currentTarget.value)} disabled={disabled} maxLength={128} placeholder="account_..." autoComplete="off" required /></label>
           <p className="native-muted-note">保存すると、このServerを選択します。</p>
           <button className="native-button native-button-primary" type="submit" disabled={disabled}>{workspaceConnectionActionLabel("save", runningAction)}</button>
         </form>
@@ -190,6 +280,8 @@ export function WorkspaceConnectionSettings({
         </div> : null}
 
         <WorkspaceConnectionFeedback success={formSuccess} error={formError ?? error} />
+        {workspaceConnectionDraftIsDirty(draft) ? <p className="native-inline-note" role="status">未保存の接続設定下書きを保持しています。</p> : null}
+        <NativeDraftNavigationPrompt controller={draftNavigation} />
       </section>
     </div>
   );

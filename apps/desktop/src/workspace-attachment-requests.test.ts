@@ -29,6 +29,32 @@ describe("Desktop workspace attachment boundary", () => {
     expect(() => workspaceAttachmentRequest({ roomId: "room_product", path: "attachments/file", contentBase64: "aGk=", expectedVersion: -1, operationId: "attachment_write_1" })).toThrow("expectedVersion_invalid");
   });
 
+  it("keeps the target outside the signed attachment body", () => {
+    const request = workspaceAttachmentRequest({
+      roomId: "room_product",
+      path: "attachments/image-1.png",
+      contentBase64: "aGk=",
+      expectedVersion: 0,
+      operationId: "attachment_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    });
+
+    expect(request).toMatchObject({
+      operationId: "attachment_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      body: { room_id: "room_product", expected_version: 0 }
+    });
+    expect(request.body).not.toHaveProperty("target");
+    expect(() => workspaceAttachmentRequest({
+      roomId: "room_product",
+      path: "attachments/image-1.png",
+      contentBase64: "aGk=",
+      expectedVersion: 0,
+      operationId: "attachment_invalid_target",
+      target: { connectionId: "", workspaceId: "workspace_a" }
+    })).toThrow("workspace_target_invalid");
+  });
+
   it("requires a server-issued immutable file reference", () => {
     const sha256 = "a".repeat(64);
     expect(workspaceAttachmentResourceRef({

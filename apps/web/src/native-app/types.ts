@@ -14,10 +14,42 @@ export type WorkspaceState = "active" | "archived" | "read_only";
 export interface NativeWorkspaceTarget {
   connectionId: string;
   workspaceId: string;
+  /** Optional Room scope. Omitted for Workspace-level and legacy callers. */
+  roomId?: string;
+  /** Immutable selection generation supplied by the caller when available. */
+  selectionGeneration?: number;
 }
 
 export function nativeWorkspaceTargetKey(target: NativeWorkspaceTarget): string {
   return `${target.connectionId}\n${target.workspaceId}`;
+}
+
+/** Stable identity for an asynchronous operation's complete navigation scope. */
+export function nativeWorkspaceTargetIdentityKey(target: NativeWorkspaceTarget): string {
+  return JSON.stringify([
+    target.connectionId,
+    target.workspaceId,
+    target.roomId ?? null,
+    target.selectionGeneration ?? null
+  ]);
+}
+
+/**
+ * Compare the scope a caller captured with the scope currently reported by a
+ * bridge. Older bridges do not report Room/generation yet, so those optional
+ * fields remain compatible wildcards; whenever the bridge reports them they
+ * are compared instead of being inferred.
+ */
+export function nativeWorkspaceTargetMatches(
+  expected: NativeWorkspaceTarget,
+  actual: NativeWorkspaceTarget
+): boolean {
+  if (expected.connectionId !== actual.connectionId || expected.workspaceId !== actual.workspaceId) return false;
+  if (expected.roomId !== undefined && actual.roomId !== undefined && expected.roomId !== actual.roomId) return false;
+  if (expected.selectionGeneration !== undefined
+    && actual.selectionGeneration !== undefined
+    && expected.selectionGeneration !== actual.selectionGeneration) return false;
+  return true;
 }
 
 export type NativeConnectionAvailability = "unknown" | "connected" | "reconnecting" | "offline";
@@ -118,6 +150,46 @@ export type NativeRoomWorkAssigneeStatus =
   | "cancelled"
   | "outcome_unknown";
 
+export type NativeRoomWorkResultResourceKind =
+  | "artifact"
+  | "artifact_revision"
+  | "generated_surface"
+  | "generated_surface_revision";
+
+export type NativeRoomWorkResultState = "created" | "updated";
+
+/** A validated Server result reference that is safe to turn into a Room tool entry. */
+export interface NativeRoomWorkResultResourceRef {
+  kind: NativeRoomWorkResultResourceKind;
+  id: string;
+  uri: string;
+  /** Required by Server for revision refs; identifies the Artifact/Surface they belong to. */
+  parentId?: string;
+  version?: string;
+  label?: string;
+  connectionId?: string;
+  workspaceId?: string;
+  roomId?: string;
+}
+
+export interface NativeRoomWorkAssignmentResult {
+  resourceRefs?: NativeRoomWorkResultResourceRef[];
+  state?: NativeRoomWorkResultState;
+  summary?: string;
+}
+
+/** The only resource shapes that can be opened directly from a Room Work result. */
+export interface NativeArtifactWorkspaceInitialResource {
+  kind: "artifact" | "generated_surface";
+  id: string;
+  uri: string;
+  revisionId?: string;
+  label?: string;
+  connectionId?: string;
+  workspaceId?: string;
+  roomId?: string;
+}
+
 export type NativeRoomWorkInstructionStatus = "pending" | "accepted" | "queued" | "delivered" | "applied" | "failed" | "rejected";
 
 export interface NativeRoomWorkAssignee {
@@ -129,6 +201,7 @@ export interface NativeRoomWorkAssignee {
   instructionVersion: number;
   generation: number;
   version: number;
+  result?: NativeRoomWorkAssignmentResult;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -140,6 +213,12 @@ export interface NativeRoomWorkInstruction {
   kind: "initial" | "reply" | "comment_apply" | "delegated";
   instruction: string;
   attachments: ResourceRef[];
+  /**
+   * Server-canonical Knowledge/Skill versions used for this instruction.
+   * These are intentionally distinct from file attachments: a resource can
+   * be read by the worker without becoming a user-uploaded file.
+   */
+  resourceRefs?: ResourceRef[];
   version: number;
   generation: number;
   status: NativeRoomWorkInstructionStatus;
@@ -147,6 +226,18 @@ export interface NativeRoomWorkInstruction {
   sourceCommentId?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/**
+ * The renderer may name only a stable Knowledge/Skill version.  The public
+ * API resolves URI and label server-side before a Room Work is persisted.
+ */
+export interface NativeRoomWorkResourceRefInput {
+  kind: "knowledge" | "skill";
+  id: string;
+  version: number;
+  /** Display-only title; it is never sent as an authority field. */
+  label?: string;
 }
 
 export interface NativeRoomWorkComment {
@@ -205,6 +296,8 @@ export interface NativeRoomWork {
   generation: number;
   version: number;
   assignees: NativeRoomWorkAssignee[];
+  /** Latest server-canonical resource set for the Work, if projected. */
+  resourceRefs?: ResourceRef[];
   stopState?: "none" | "requested" | "confirmed" | "unconfirmed";
   instructions?: NativeRoomWorkInstruction[];
   comments?: NativeRoomWorkComment[];
@@ -323,17 +416,17 @@ export interface NativeRoomWorkBridge {
   removeWorkspaceRoomAgent?: (input: { roomId: string; agentId: string; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
   listWorkspaceAgentBackends?: (input?: { target?: NativeWorkspaceTarget }) => Promise<unknown>;
   createWorkspaceRoom?: (input: NativeRoomCreateInput) => Promise<unknown>;
-  listWorkspaceRoomWorks?: (input: { roomId: string; status?: NativeRoomWorkStatus; cursor?: string; limit?: number }) => Promise<unknown>;
-  getWorkspaceRoomWork?: (input: { roomId: string; workId: string }) => Promise<unknown>;
-  createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; agentId?: string; operationId: string }) => Promise<unknown>;
-  replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
-  createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string }) => Promise<unknown>;
-  applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string; operationId: string }) => Promise<unknown>;
-  reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction: "like"; enabled?: boolean; expectedVersion?: number; operationId: string }) => Promise<unknown>;
+  listWorkspaceRoomWorks?: (input: { roomId: string; status?: NativeRoomWorkStatus; cursor?: string; limit?: number; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  getWorkspaceRoomWork?: (input: { roomId: string; workId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: NativeRoomWorkResourceRefInput[]; agentId?: string; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: NativeRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; expectedVersion?: number; expectedGeneration?: number; assigneeId?: string; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction: "like"; enabled?: boolean; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
   setWorkspaceRoomDefaultAgent?: (input: { roomId: string; agentId: string; expectedVersion?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
-  stopWorkspaceRoomWork?: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
-  stopWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
-  reassignWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<unknown>;
+  stopWorkspaceRoomWork?: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  stopWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
+  reassignWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
   delegateWorkspaceRoomWorkAssignee?: (input: {
     roomId: string;
     workId: string;
@@ -345,9 +438,10 @@ export interface NativeRoomWorkBridge {
     expectedVersion?: number;
     expectedGeneration?: number;
     operationId: string;
+    target?: NativeWorkspaceTarget;
   }) => Promise<unknown>;
   openWorkspaceAgentDm?: (input: { agentId: string; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
-  runWorkspaceRoomWorkOperation?: (input: { operation: string; roomId: string; payload: Record<string, unknown>; operationId: string }) => Promise<unknown>;
+  runWorkspaceRoomWorkOperation?: (input: { operation: string; roomId: string; payload: Record<string, unknown>; operationId: string; target?: NativeWorkspaceTarget }) => Promise<unknown>;
 }
 
 export interface NativeOrganizationMember {

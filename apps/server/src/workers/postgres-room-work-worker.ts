@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { WorkspaceFileResourceRefSchema, nowIso, type ResourceRef, type SessionRecord } from "@samurai-agent/core-schemas";
+import { ResourceRefSchema, RoomWorkResultResourceRefSchema, WorkspaceFileResourceRefSchema, nowIso, type ResourceRef, type RoomWorkResultResourceRef, type SessionRecord } from "@samurai-agent/core-schemas";
 import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 import type { RunChatTurnResult } from "@samurai-agent/runtime";
 import {
@@ -71,8 +71,21 @@ interface RoomWorkStoreAdapter {
     limit: number;
   }) => Promise<unknown>;
   settleRoomWorkAssignment?: (context: WorkspaceRequestContext, input: Record<string, unknown>) => Promise<unknown>;
+  readRoomWorkCompletionEvidence?: (context: WorkspaceRequestContext, input: {
+    workId: string;
+    assignmentId: string;
+    roomId: string;
+    runId: string;
+  }) => Promise<unknown>;
   viewRoomWork?: (context: WorkspaceRequestContext, input: { roomId: string; workId: string }) => Promise<unknown>;
   getAgent?: (context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, agentId: string) => Promise<unknown>;
+}
+
+interface RoomWorkCompletionEvidence {
+  runId: string;
+  runStatus: string;
+  outputSummary?: string | null;
+  resourceRefs: RoomWorkResultResourceRef[];
 }
 
 /**
@@ -118,6 +131,7 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
       const operationId = roomWorkRuntimeOperationId(claimedReservation);
       const runContext = { ...context, operationId };
       let settlementAttempted = false;
+      let runtimeRunId: string | undefined;
       try {
         if (!claimedReservation.reservationId || !claimedReservation.leaseOwner) {
           throw new WorkspaceServerError("room_work_reservation_lease_missing", 409);
@@ -151,23 +165,58 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           } catch {
             existingRun = undefined;
           }
-          const recoveredStatus = recoveryTerminalStatus(existingRun?.status);
-          const recoveredRunId = existingRun?.id === claimedReservation.currentRunId
-            ? existingRun.id
+          let completionEvidence: RoomWorkCompletionEvidence | undefined;
+          try {
+            completionEvidence = await this.readCompletionEvidence(runContext, {
+              workId: claimedReservation.workId,
+              assignmentId: claimedReservation.assignmentId,
+              roomId: claimedReservation.roomId,
+              runId: claimedReservation.currentRunId
+            });
+          } catch (error) {
+            // A terminal Runtime row without reconstructable Server evidence
+            // is not a successful Work result. Keep the assignment explicitly
+            // unknown so a later control/recovery pass can inspect it again;
+            // never launch the Backend a second time.
+            const evidenceErrorCode = errorCode(error);
+            settlementAttempted = true;
+            await this.settle(runContext, claimedReservation, {
+              status: "outcome_unknown",
+              runId: claimedReservation.currentRunId,
+              errorCode: evidenceErrorCode,
+              errorMessage: error instanceof Error ? error.message : String(error),
+              result: {
+                status: "outcome_unknown",
+                recovery: true,
+                runtime_run_id: claimedReservation.currentRunId,
+                ...(existingRun?.status ? { runtime_status: existingRun.status } : {}),
+                error_code: evidenceErrorCode
+              },
+              now: nowIso()
+            });
+            outcomeUnknown += 1;
+            continue;
+          }
+          const recoveredStatus = recoveryTerminalStatus(completionEvidence.runStatus);
+          const recoveredRunId = completionEvidence.runId === claimedReservation.currentRunId
+            ? completionEvidence.runId
             : undefined;
           settlementAttempted = true;
           await this.settle(runContext, claimedReservation, {
             status: recoveredStatus,
             ...(recoveredRunId ? { runId: recoveredRunId } : {}),
-            ...(recoveredStatus === "completed" && existingRun?.output_summary
-              ? { outputSummary: existingRun.output_summary }
+            ...(recoveredStatus === "completed" && (completionEvidence.outputSummary ?? existingRun?.output_summary)
+              ? { outputSummary: completionEvidence.outputSummary ?? existingRun?.output_summary ?? undefined }
               : {}),
             result: {
               status: recoveredStatus,
               recovery: true,
               runtime_run_id: claimedReservation.currentRunId,
-              ...(existingRun?.status ? { runtime_status: existingRun.status } : {}),
-              ...(existingRun?.output_summary ? { output_summary: existingRun.output_summary } : {})
+              runtime_status: completionEvidence.runStatus,
+              ...(recoveredStatus === "completed" ? { resource_refs: completionEvidence.resourceRefs } : {}),
+              ...(completionEvidence.outputSummary ?? existingRun?.output_summary
+                ? { output_summary: completionEvidence.outputSummary ?? existingRun?.output_summary }
+                : {})
             },
             now: nowIso()
           });
@@ -198,7 +247,26 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           ...(reservation.resumeBackendContinuation ? { resumeBackendContinuation: reservation.resumeBackendContinuation } : {}),
           signal: input.signal
         }) as RunChatTurnResult;
+        runtimeRunId = stringValue(recordValue((result as unknown as Record<string, unknown>).backendRun), "id") || undefined;
+        assertRunChatTurnResult(result);
+        runtimeRunId = result.backendRun.id;
         const settledStatus = terminalStatus(result.backendRun.status);
+        const completionEvidence = settledStatus === "completed"
+          ? await this.readCompletionEvidence(runContext, {
+              workId: reservation.workId,
+              assignmentId: reservation.assignmentId,
+              roomId: reservation.roomId,
+              runId: result.backendRun.id
+            })
+          : undefined;
+        if (completionEvidence && completionEvidence.runStatus !== "completed") {
+          throw new WorkspaceServerError(
+            completionEvidence.runStatus === "failed"
+              ? "room_work_completion_status_failed"
+              : "room_work_completion_status_unknown",
+            409
+          );
+        }
         settlementAttempted = true;
         await this.settle(runContext, claimedReservation, {
           status: settledStatus,
@@ -207,6 +275,7 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           result: {
             run_id: result.backendRun.id,
             status: result.backendRun.status,
+            ...(completionEvidence ? { resource_refs: completionEvidence.resourceRefs } : {}),
             ...(result.backendRun.output_summary ? { output_summary: result.backendRun.output_summary } : {})
           },
           now: nowIso()
@@ -242,8 +311,10 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
             result: {
               status,
               error_code: errorCode(error),
+              ...(runtimeRunId ? { run_id: runtimeRunId } : {}),
               ...(error instanceof Error ? { error_message: error.message } : {})
             },
+            ...(runtimeRunId ? { runId: runtimeRunId } : {}),
             now: nowIso()
           });
         } catch (settlementError) {
@@ -450,6 +521,148 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
       now: result.now
     });
   }
+
+  private async readCompletionEvidence(
+    context: WorkspaceRequestContext,
+    input: { workId: string; assignmentId: string; roomId: string; runId: string }
+  ): Promise<RoomWorkCompletionEvidence> {
+    const read = this.storeAdapter.readRoomWorkCompletionEvidence;
+    if (!read) throw new WorkspaceServerError("room_work_completion_evidence_unavailable", 503);
+    const value = await read.call(this.storeAdapter, context, input);
+    const body = recordValue(value);
+    const runId = stringValue(body, "runId", "run_id");
+    const runStatus = stringValue(body, "runStatus", "run_status", "status");
+    const outputSummary = body.outputSummary ?? body.output_summary;
+    const refs = RoomWorkResultResourceRefSchema.array().max(32).safeParse(body.resourceRefs ?? body.resource_refs);
+    if (!runId || !runStatus || !refs.success || (outputSummary !== undefined && outputSummary !== null && typeof outputSummary !== "string")) {
+      throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+    }
+    if (runId !== input.runId) throw new WorkspaceServerError("room_work_completion_evidence_binding_invalid", 409);
+    return {
+      runId,
+      runStatus,
+      ...(outputSummary === undefined || outputSummary === null ? {} : { outputSummary }),
+      resourceRefs: refs.data
+    };
+  }
+}
+
+const roomWorkCompletionResourceKinds = new Set([
+  "artifact",
+  "artifact_revision",
+  "generated_surface",
+  "generated_surface_revision"
+]);
+
+const runChatTurnResultArrayFields = [
+  "messages",
+  "messagePresentations",
+  "backendEvents",
+  "workspaceChanges",
+  "operations",
+  "policyDecisions",
+  "artifacts",
+  "memories",
+  "approvalRequests",
+  "auditRecords",
+  "rollbackPoints",
+  "activity",
+  "reflectionRuns",
+  "reflectionSuggestions",
+  "toolRuns"
+] as const;
+const roomWorkCompletionArrayFields = ["backendEvents", "workspaceChanges", "operations", "artifacts"] as const;
+
+function assertArrayFields(body: Record<string, any>, fields: readonly string[]): void {
+  for (const field of fields) {
+    if (!Array.isArray(body[field])) {
+      throw new WorkspaceServerError("room_work_result_contract_invalid", 500);
+    }
+  }
+}
+
+function assertRunChatTurnResult(value: unknown): asserts value is RunChatTurnResult {
+  const body = recordValue(value);
+  const session = recordValue(body.session);
+  const backendRun = recordValue(body.backendRun);
+  if (!stringValue(session, "id") || !stringValue(backendRun, "id") || !stringValue(backendRun, "status")) {
+    throw new WorkspaceServerError("room_work_result_contract_invalid", 500);
+  }
+  assertArrayFields(body, runChatTurnResultArrayFields);
+}
+
+/**
+ * Completion evidence comes only from Runtime's server-persisted projections:
+ * event refs, Workspace changes, operation result refs, and server Artifact
+ * records. Provider messages/tool output are intentionally not inspected.
+ */
+export function roomWorkCompletionResourceRefs(
+  result: Pick<RunChatTurnResult, "backendEvents" | "workspaceChanges" | "operations" | "artifacts">,
+  runId: string,
+  workId: string,
+  roomId: string
+): ResourceRef[] {
+  assertArrayFields(recordValue(result), roomWorkCompletionArrayFields);
+  const backendEvents = result.backendEvents;
+  const workspaceChanges = result.workspaceChanges;
+  const operations = result.operations;
+  const artifacts = result.artifacts;
+  const candidates: unknown[] = [];
+  for (const event of backendEvents) {
+    if (event.run_id !== runId) continue;
+    if (!Array.isArray(event.resource_refs)) {
+      throw new WorkspaceServerError("room_work_result_contract_invalid", 500);
+    }
+    candidates.push(...event.resource_refs);
+  }
+  for (const change of workspaceChanges) {
+    if (change.run_id === runId && (!change.room_id || change.room_id === roomId)) candidates.push(change.resource_ref);
+  }
+  for (const operation of operations) {
+    if ((!operation.run_id || operation.run_id === runId) && (!operation.room_id || operation.room_id === roomId) && operation.result_ref) {
+      candidates.push(operation.result_ref);
+    }
+  }
+  const changedResourceIds = new Set(workspaceChanges
+    .filter((change) => change.run_id === runId && (!change.room_id || change.room_id === roomId))
+    .map((change) => change.resource_ref.id));
+  for (const artifact of artifacts) {
+    const metadata = artifact.metadata;
+    const sourceRunId = typeof metadata.source_run_id === "string" ? metadata.source_run_id : undefined;
+    const sourceWorkId = typeof metadata.source_work_id === "string" ? metadata.source_work_id : undefined;
+    if (sourceRunId !== runId && sourceWorkId !== workId && !changedResourceIds.has(artifact.id) && !changedResourceIds.has(artifact.file_ref.id)) continue;
+    candidates.push({
+      kind: "artifact",
+      id: artifact.id,
+      uri: `artifacts/${artifact.id}`,
+      label: artifact.title
+    });
+    if (artifact.file_ref.kind === "artifact_revision") {
+      candidates.push({
+        ...artifact.file_ref,
+        parent_id: artifact.id
+      });
+    }
+  }
+
+  const refs: ResourceRef[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const candidateRecord = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? candidate as Record<string, unknown>
+      : undefined;
+    const { parent_id: _parentId, ...genericCandidate } = candidateRecord ?? {};
+    const generic = ResourceRefSchema.safeParse(genericCandidate);
+    if (!generic.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    if (!roomWorkCompletionResourceKinds.has(generic.data.kind)) continue;
+    const parsed = RoomWorkResultResourceRefSchema.safeParse(candidate);
+    if (!parsed.success) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    const key = `${parsed.data.kind}|${parsed.data.id}|${parsed.data.uri}|${parsed.data.version ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refs.push(parsed.data);
+  }
+  return refs;
 }
 
 function roomWorkDomainContext(

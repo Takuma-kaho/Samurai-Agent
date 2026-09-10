@@ -21,11 +21,13 @@ describe("Desktop Workspace transfer coordination", () => {
     expect(end).toBeGreaterThan(start);
     const activationSource = mainSource.slice(start, end);
 
-    expect(activationSource).toContain("const selectionGeneration = ++workspaceSelectionGeneration;");
+    expect(activationSource).toContain("const activationGeneration = ++workspaceActivationGeneration;");
+    expect(activationSource).toContain("workspaceSelectionGeneration += 1;");
+    expect(activationSource).toContain("if (targetChanged) workspaceTargetGeneration += 1;");
     expect(activationSource.indexOf("const authorization = await reauthorizeWorkspaceTarget")).toBeLessThan(
       activationSource.indexOf("upsertWorkspaceTarget(nextRegistry, target)")
     );
-    expect((activationSource.match(/selectionGeneration !== workspaceSelectionGeneration/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect((activationSource.match(/activationGeneration !== workspaceActivationGeneration/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
   it("invalidates delayed authorization when an explicit connection has no target", () => {
@@ -35,10 +37,13 @@ describe("Desktop Workspace transfer coordination", () => {
     expect(end).toBeGreaterThan(start);
     const selectionSource = mainSource.slice(start, end);
     const invalidation = selectionSource.indexOf("workspaceSelectionGeneration += 1;");
+    const workspaceInvalidation = selectionSource.indexOf("workspaceTargetGeneration += 1;");
     const registrySelection = selectionSource.indexOf("selectWorkspaceConnection(workspaceConnectionRegistry, selected.id)");
 
     expect(invalidation).toBeGreaterThanOrEqual(0);
+    expect(workspaceInvalidation).toBeGreaterThanOrEqual(0);
     expect(invalidation).toBeLessThan(registrySelection);
+    expect(workspaceInvalidation).toBeLessThan(registrySelection);
   });
 
   it("resumes an exported or read-only source with receipt before complete", () => {

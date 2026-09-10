@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 /**
  * Fixed request descriptors for the Organization bridge.
  *
@@ -15,6 +17,9 @@ export interface OrganizationRequestDescriptor {
   body?: Record<string, unknown>;
   operationId?: string;
   idempotencyKey?: string;
+  /** The connection/workspace target captured by the renderer. Organization
+   * routes use only connectionId because they are account-scoped. */
+  target?: WorkspaceTargetRequest;
   /** Organization routes authenticate the Account, not a Workspace. */
   workspaceScoped: false;
 }
@@ -31,12 +36,12 @@ export type WorkspaceOrganizationWorkspaceLifecycle = "archive" | "restore" | "d
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const operationIdPattern = opaqueIdPattern;
 
-export function workspaceOrganizationListRequest(): OrganizationRequestDescriptor {
-  return get("/api/organizations");
+export function workspaceOrganizationListRequest(input?: unknown): OrganizationRequestDescriptor {
+  return get("/api/organizations", input);
 }
 
 export function workspaceOrganizationViewRequest(input: unknown): OrganizationRequestDescriptor {
-  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}`);
+  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}`, input);
 }
 
 export function workspaceOrganizationCreateRequest(input: unknown): OrganizationRequestDescriptor {
@@ -46,7 +51,7 @@ export function workspaceOrganizationCreateRequest(input: unknown): Organization
     name: requiredText(value, "name", 240),
     ...(optionalText(value, "description", 20_000) ? { description: optionalText(value, "description", 20_000) } : {}),
     ...(optionalText(value, "icon", 2_000) ? { icon: optionalText(value, "icon", 2_000) } : {})
-  });
+  }, value);
 }
 
 export function workspaceOrganizationPatchRequest(input: unknown): OrganizationRequestDescriptor {
@@ -60,7 +65,7 @@ export function workspaceOrganizationPatchRequest(input: unknown): OrganizationR
   return mutation("PATCH", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}`, operationId, {
     ...patch,
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationDeleteRequest(input: unknown): OrganizationRequestDescriptor {
@@ -69,11 +74,11 @@ export function workspaceOrganizationDeleteRequest(input: unknown): Organization
   return mutation("DELETE", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}`, operationId, {
     confirm: requiredBoolean(value, "confirm"),
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationMembersRequest(input: unknown): OrganizationRequestDescriptor {
-  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}/members`);
+  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}/members`, input);
 }
 
 export function workspaceOrganizationMemberRoleRequest(input: unknown): OrganizationRequestDescriptor {
@@ -84,25 +89,25 @@ export function workspaceOrganizationMemberRoleRequest(input: unknown): Organiza
   return mutation("PATCH", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/members/${encodeURIComponent(requiredId(value, "accountId"))}`, operationId, {
     role,
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationMemberRemoveRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("DELETE", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/members/${encodeURIComponent(requiredId(value, "accountId"))}`, requiredOperationId(value), {
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationMemberLeaveRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/members/leave`, requiredOperationId(value), {
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationInvitationsRequest(input: unknown): OrganizationRequestDescriptor {
-  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}/invitations`);
+  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}/invitations`, input);
 }
 
 export function workspaceOrganizationInvitationCreateRequest(input: unknown): OrganizationRequestDescriptor {
@@ -117,21 +122,21 @@ export function workspaceOrganizationInvitationCreateRequest(input: unknown): Or
     role,
     workspace_grants: workspaceGrants ?? [],
     ...(optionalText(value, "expiresAt", 80) ? { expires_at: optionalText(value, "expiresAt", 80) } : {})
-  });
+  }, value);
 }
 
 export function workspaceOrganizationInvitationRevokeRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/invitations/${encodeURIComponent(requiredId(value, "invitationId"))}/revoke`, requiredOperationId(value), {
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationInvitationReissueRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/invitations/${encodeURIComponent(requiredId(value, "invitationId"))}/reissue`, requiredOperationId(value), {
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationInvitationExtendRequest(input: unknown): OrganizationRequestDescriptor {
@@ -139,7 +144,7 @@ export function workspaceOrganizationInvitationExtendRequest(input: unknown): Or
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/invitations/${encodeURIComponent(requiredId(value, "invitationId"))}/extend`, requiredOperationId(value), {
     expires_at: requiredText(value, "expiresAt", 80),
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 /**
@@ -150,11 +155,11 @@ export function workspaceOrganizationInvitationAcceptRequest(input: unknown): Or
   const value = object(input);
   const token = requiredToken(value.token);
   const operationId = requiredOperationId(value);
-  return mutation("POST", `/api/organization-invitations/${encodeURIComponent(token)}/accept`, operationId, {});
+  return mutation("POST", `/api/organization-invitations/${encodeURIComponent(token)}/accept`, operationId, {}, value);
 }
 
 export function workspaceOrganizationWorkspacesRequest(input: unknown): OrganizationRequestDescriptor {
-  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}/workspaces`);
+  return get(`/api/organizations/${encodeURIComponent(requiredId(input, "organizationId"))}/workspaces`, input);
 }
 
 export function workspaceSelectionWorkspaceViewRequest(input: unknown): WorkspaceSelectionRequestDescriptor {
@@ -183,7 +188,7 @@ export function workspaceCreateRequest(input: unknown): OrganizationRequestDescr
   return mutation("POST", "/api/workspaces", requiredOperationId(value), {
     workspace_id: requiredId(value, "workspaceId"),
     name: requiredText(value, "name", 240)
-  });
+  }, value);
 }
 
 /** Export a standalone Workspace without an Organization route segment. */
@@ -191,7 +196,7 @@ export function workspaceStandaloneBundleExportRequest(input: unknown): Organiza
   const value = object(input);
   return mutation("POST", `/api/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/bundle/export`, requiredOperationId(value), {
     ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
-  });
+  }, value);
 }
 
 /** Restore a Server-managed Bundle as a standalone Workspace. */
@@ -202,14 +207,14 @@ export function workspaceStandaloneBundleRestoreRequest(input: unknown): Organiz
     bundle_id: requiredId(value, "bundleId"),
     confirm: true,
     ...(targetWorkspaceId ? { target_workspace_id: targetWorkspaceId } : {})
-  });
+  }, value);
 }
 
 export function workspaceOrganizationWorkspaceCreateRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces`, requiredOperationId(value), {
     name: requiredText(value, "name", 240)
-  });
+  }, value);
 }
 
 /** Attach is an explicit same-Server control-plane operation. */
@@ -220,7 +225,7 @@ export function workspaceOrganizationWorkspaceAttachRequest(input: unknown): Org
   return mutation("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/attach`, requiredOperationId(value), {
     ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") }),
     ...(value.confirmGuestMemberships === undefined ? {} : { confirm_guest_memberships: requiredBoolean(value, "confirmGuestMemberships") })
-  });
+  }, value);
 }
 
 /** Detach preserves the Workspace and all Workspace-owned content. */
@@ -230,7 +235,7 @@ export function workspaceOrganizationWorkspaceDetachRequest(input: unknown): Org
   const workspaceId = requiredId(value, "workspaceId");
   return mutation("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/detach`, requiredOperationId(value), {
     ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationWorkspacePatchRequest(input: unknown): OrganizationRequestDescriptor {
@@ -241,21 +246,21 @@ export function workspaceOrganizationWorkspacePatchRequest(input: unknown): Orga
   return mutation("PATCH", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}`, requiredOperationId(value), {
     ...patch,
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationWorkspaceMemberGrantRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   const role = value.role;
   if (role !== "owner" && role !== "admin" && role !== "member" && role !== "guest") throw new Error("role_invalid");
-  return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/members/${encodeURIComponent(requiredId(value, "accountId"))}`, requiredOperationId(value), { role });
+  return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/members/${encodeURIComponent(requiredId(value, "accountId"))}`, requiredOperationId(value), { role }, value);
 }
 
 export function workspaceOrganizationWorkspaceMemberRevokeRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("DELETE", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/members/${encodeURIComponent(requiredId(value, "accountId"))}`, requiredOperationId(value), {
     ...(value.expectedVersion === undefined ? {} : { expected_version: requiredVersion(value, "expectedVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationWorkspaceLifecycleRequest(input: unknown): OrganizationRequestDescriptor {
@@ -271,12 +276,12 @@ export function workspaceOrganizationWorkspaceLifecycleRequest(input: unknown): 
     return mutation("DELETE", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}`, operationId, {
       confirm,
       ...(expectedVersion === undefined ? {} : { expected_version: expectedVersion })
-    });
+    }, value);
   }
   return mutation("POST", `/api/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/${lifecycle}`, operationId, {
     confirm,
     ...(expectedVersion === undefined ? {} : { expected_version: expectedVersion })
-  });
+  }, value);
 }
 
 /** Move is deliberately a two-step preview/commit operation. */
@@ -285,7 +290,7 @@ export function workspaceOrganizationWorkspaceMovePreviewRequest(input: unknown)
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/move/preflight`, requiredOperationId(value), {
     target_organization_id: requiredId(value, "targetOrganizationId"),
     ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationWorkspaceMoveRequest(input: unknown): OrganizationRequestDescriptor {
@@ -295,12 +300,12 @@ export function workspaceOrganizationWorkspaceMoveRequest(input: unknown): Organ
     target_organization_id: requiredId(value, "targetOrganizationId"),
     confirm_guest_membership: requiredBoolean(value, "confirmGuestMembership"),
     ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
-  });
+  }, value);
 }
 
 export function workspaceOrganizationWorkspaceMoveStatusRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
-  return get(`/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/move/${encodeURIComponent(requiredId(value, "operationId"))}`);
+  return get(`/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/move/${encodeURIComponent(requiredId(value, "operationId"))}`, value);
 }
 
 /**
@@ -312,14 +317,14 @@ export function workspaceOrganizationBundleRestoreRequest(input: unknown): Organ
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/bundles/restore`, requiredOperationId(value), {
     bundle_id: requiredId(value, "bundleId"),
     confirm: requiredBoolean(value, "confirm")
-  });
+  }, value);
 }
 
 export function workspaceOrganizationBundleExportRequest(input: unknown): OrganizationRequestDescriptor {
   const value = object(input);
   return mutation("POST", `/api/organizations/${encodeURIComponent(requiredId(value, "organizationId"))}/workspaces/${encodeURIComponent(requiredId(value, "workspaceId"))}/bundle/export`, requiredOperationId(value), {
     ...(value.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: requiredVersion(value, "expectedWorkspaceVersion") })
-  });
+  }, value);
 }
 
 /**
@@ -348,19 +353,27 @@ export function workspaceEvidenceRequest(input: unknown): {
   };
 }
 
-function get(path: string): OrganizationRequestDescriptor {
-  return { method: "GET", path, workspaceScoped: false };
+function get(path: string, input?: unknown): OrganizationRequestDescriptor {
+  const target = organizationTarget(input);
+  return { method: "GET", path, workspaceScoped: false, ...(target ? { target } : {}) };
 }
 
-function mutation(method: "POST" | "PATCH" | "DELETE", path: string, operationId: string, body?: Record<string, unknown>): OrganizationRequestDescriptor {
+function mutation(method: "POST" | "PATCH" | "DELETE", path: string, operationId: string, body?: Record<string, unknown>, targetInput?: unknown): OrganizationRequestDescriptor {
+  const target = organizationTarget(targetInput);
   return {
     method,
     path,
     operationId,
     idempotencyKey: operationId,
     workspaceScoped: false,
+    ...(target ? { target } : {}),
     ...(body === undefined ? {} : { body })
   };
+}
+
+function organizationTarget(input: unknown): WorkspaceTargetRequest | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  return workspaceTargetRequest((input as Record<string, unknown>).target);
 }
 
 function object(input: unknown): Record<string, unknown> {

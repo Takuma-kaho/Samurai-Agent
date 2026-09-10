@@ -1,20 +1,25 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const artifactKinds = new Set(["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"]);
 const locales = new Set(["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"]);
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
-export function workspaceArtifactListRequest(input: unknown): { roomId: string } {
+export function workspaceArtifactListRequest(input: unknown): { roomId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { roomId: requiredOpaque(value, "roomId") };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), ...(target ? { target } : {}) };
 }
 
-export function workspaceArtifactIdRequest(input: unknown): { roomId: string; artifactId: string } {
+export function workspaceArtifactIdRequest(input: unknown): { roomId: string; artifactId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { roomId: requiredOpaque(value, "roomId"), artifactId: requiredOpaque(value, "artifactId") };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), artifactId: requiredOpaque(value, "artifactId"), ...(target ? { target } : {}) };
 }
 
-export function workspaceArtifactCreateRequest(input: unknown): { operationId: string; body: Record<string, JsonValue> } {
+export function workspaceArtifactCreateRequest(input: unknown): { operationId: string; target?: WorkspaceTargetRequest; body: Record<string, JsonValue> } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   const content = value.content;
   if (typeof content !== "string" && !isJsonValue(content)) throw new Error("content_invalid");
   const body: Record<string, JsonValue> = {
@@ -32,14 +37,15 @@ export function workspaceArtifactCreateRequest(input: unknown): { operationId: s
     body.source_locales = value.sourceLocales;
   }
   if (value.metadata !== undefined) body.metadata = requiredJsonObject(value.metadata, "metadata");
-  return { operationId: requiredOpaque(value, "operationId"), body };
+  return { operationId: requiredOpaque(value, "operationId"), ...(target ? { target } : {}), body };
 }
 
-export function workspaceArtifactSurfaceOperationRequest(input: unknown): { roomId: string; operationId: string; body: Record<string, unknown> } {
+export function workspaceArtifactSurfaceOperationRequest(input: unknown): { roomId: string; operationId: string; target?: WorkspaceTargetRequest; body: Record<string, unknown> } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   const operation = requiredJsonObject(value.operation, "operation");
   if (typeof operation.id !== "string" || !opaqueIdPattern.test(operation.id) || operation.kind !== "artifact.request") throw new Error("artifact_surface_operation_invalid");
-  return { roomId: requiredOpaque(value, "roomId"), operationId: operation.id, body: { room_id: requiredOpaque(value, "roomId"), operation } };
+  return { roomId: requiredOpaque(value, "roomId"), operationId: operation.id, ...(target ? { target } : {}), body: { room_id: requiredOpaque(value, "roomId"), operation } };
 }
 
 function object(input: unknown): Record<string, unknown> {

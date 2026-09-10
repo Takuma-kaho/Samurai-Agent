@@ -10,9 +10,12 @@ import {
   nativeRoomCreateResponseIsCurrent,
   nativeRoomsAfterRoomCreate,
   nativeDraftRequestIsCurrent,
+  appendNativeWorkDraft,
   nativeRoomWorkListRequestIsCurrent,
   nativeRoomWorkErrorIsExplicitServerFailure,
+  nativeRoomWorkAssignmentResultFromUnknown,
   nativeRoomWorkFromUnknown,
+  nativeRoomWorkResultResourceRefFromUnknown,
   nativeWorkspaceContentRefreshRequestIsCurrent,
   nativeWorkspaceRealtimeEventAction,
   shouldDiscardWorkspaceTargetAfterReauthorizationFailure,
@@ -365,6 +368,43 @@ describe("Room work bridge adapter", () => {
     }));
   });
 
+  it("sends only a stable Knowledge/Skill id and version through the Room Work operation", async () => {
+    const calls: Array<{ operation: string; roomId: string; payload: Record<string, unknown>; operationId: string }> = [];
+    const client = createNativeRoomWorkClient({
+      runWorkspaceRoomWorkOperation: vi.fn(async (input: typeof calls[number]) => {
+        calls.push(input);
+        if (input.operation === "room.work.list") return { works: [] };
+        return {
+          id: "work_resource",
+          room_id: input.roomId,
+          requester_id: "account_owner",
+          default_agent_id: "agent_research",
+          title: "方針を確認",
+          objective: "",
+          status: "queued",
+          instruction_version: 1,
+          generation: 0,
+          version: 1,
+          assignees: []
+        };
+      })
+    });
+
+    await client?.create({
+      roomId: "room_public",
+      resourceRefs: [{ kind: "knowledge", id: "knowledge_policy", version: 4, label: "公開方針" }],
+      operationId: "op_resource"
+    });
+
+    expect(calls[0]).toMatchObject({
+      operation: "room.work.create",
+      roomId: "room_public",
+      payload: { resource_refs: [{ kind: "knowledge", id: "knowledge_policy", version: 4 }] },
+      operationId: "op_resource"
+    });
+    expect(calls[0]?.payload.resource_refs).not.toEqual(expect.arrayContaining([expect.objectContaining({ label: expect.anything() })]));
+  });
+
   it("carries an explicitly selected assignee through the reply adapter", async () => {
     const reply = vi.fn(async (input: { workId: string; assigneeId?: string; instruction?: string }) => ({
       id: "instruction_reply",
@@ -528,9 +568,121 @@ describe("Room work bridge adapter", () => {
 
     expect(projected.instructions?.[0]).toMatchObject({ id: "instruction_pending", status: "pending" });
   });
+
+  it("keeps canonical Knowledge/Skill refs separate from file attachments in a public instruction", () => {
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_resource",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "方針を確認",
+      objective: "",
+      status: "queued",
+      instruction_version: 1,
+      generation: 0,
+      version: 1,
+      assignees: [],
+      resource_refs: [{ kind: "knowledge", id: "knowledge_policy", uri: "knowledge/policy.md", version: "4", label: "公開方針" }],
+      instructions: [{
+        id: "instruction_resource",
+        work_id: "work_resource",
+        kind: "initial",
+        instruction: "",
+        attachments: [],
+        resource_refs: [{ kind: "skill", id: "skill_review", uri: "skills/review.md", version: "2", label: "レビュー" }],
+        status: "accepted",
+        version: 1,
+        generation: 0,
+        created_by: "account_owner"
+      }]
+    });
+
+    expect(projected.resourceRefs).toEqual([{ kind: "knowledge", id: "knowledge_policy", uri: "knowledge/policy.md", version: "4", label: "公開方針" }]);
+    expect(projected.instructions?.[0]?.attachments).toEqual([]);
+    expect(projected.instructions?.[0]?.resourceRefs).toEqual([{ kind: "skill", id: "skill_review", uri: "skills/review.md", version: "2", label: "レビュー" }]);
+  });
+});
+
+describe("Room Work result resource refs", () => {
+  it("normalizes Artifact and Generated Surface refs with their revision and update state", () => {
+    const result = nativeRoomWorkAssignmentResultFromUnknown({
+      resource_refs: [
+        {
+          kind: "artifact",
+          id: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z",
+          label: "調査レポート"
+        },
+        {
+          kind: "artifact_revision",
+          id: "artifact_revision_2",
+          parent_id: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z"
+        }
+      ],
+      summary: "Artifact 調査レポートの版を保存しました。",
+      output: { revision_id: "artifact_revision_2" }
+    });
+
+    expect(result).toMatchObject({
+      state: "updated",
+      summary: "Artifact 調査レポートの版を保存しました。",
+      resourceRefs: [
+        {
+          kind: "artifact",
+          id: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z",
+          label: "調査レポート"
+        },
+        {
+          kind: "artifact_revision",
+          id: "artifact_revision_2",
+          parentId: "artifact_report",
+          uri: "artifacts/artifact_report/revisions/2.md",
+          version: "2026-09-09T00:00:00.000Z"
+        }
+      ]
+    });
+  });
+
+  it("rejects an external result URI and ignores a non-openable result kind", () => {
+    expect(() => nativeRoomWorkResultResourceRefFromUnknown({ kind: "artifact", id: "artifact_report", uri: "https://example.com/report" }))
+      .toThrow("room_work_result_resource_ref_invalid");
+    expect(nativeRoomWorkResultResourceRefFromUnknown({ kind: "room_work_assignee", id: "assignment_child", uri: "samurai://room-work-assignees/assignment_child" }))
+      .toBeUndefined();
+  });
+
+  it("keeps a legacy work result summary without inventing result cards", () => {
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_legacy_result",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "旧結果",
+      objective: "旧形式の結果",
+      status: "completed",
+      instruction_version: 1,
+      generation: 0,
+      version: 1,
+      assignees: [],
+      result_summary: "旧形式の結果概要"
+    });
+
+    expect(projected.resultSummary).toBe("旧形式の結果概要");
+    expect(projected.assignees).toEqual([]);
+  });
 });
 
 describe("Room work draft request stamp", () => {
+  it("adds an Artifact request without overwriting the draft already prepared for that Work", () => {
+    expect(appendNativeWorkDraft("先に書いた追加指示", "[成果物の修正依頼]\n対象版: revision_2"))
+      .toBe("先に書いた追加指示\n\n[成果物の修正依頼]\n対象版: revision_2");
+    expect(appendNativeWorkDraft("", "  修正依頼  ")).toBe("修正依頼");
+  });
+
   it("rejects a late completion from an older Room or draft key", () => {
     expect(nativeDraftRequestIsCurrent(
       { key: "workspace\nroom_a\nnew", roomOpenId: 1 },

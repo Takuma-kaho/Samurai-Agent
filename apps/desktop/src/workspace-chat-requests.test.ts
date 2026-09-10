@@ -21,6 +21,17 @@ describe("workspace chat request contract", () => {
     expect(() => workspaceChatSessionRequest({ roomId: "room_1" })).toThrow("operationId_invalid");
   });
 
+  it("carries the target outside the signed Chat input", () => {
+    const target = { connectionId: "server_a", workspaceId: "workspace_a" };
+    const session = workspaceChatSessionRequest({ roomId: "room_1", operationId: "session_target_1", target });
+    const turn = workspaceChatTurnRequest({ sessionId: "session_1", idempotencyKey: "turn_target_1", content: "確認", target });
+
+    expect(session).toMatchObject({ operationId: "session_target_1", target, body: { room_id: "room_1" } });
+    expect(turn).toMatchObject({ sessionId: "session_1", idempotencyKey: "turn_target_1", target, body: { content: "確認" } });
+    expect(session.body).not.toHaveProperty("target");
+    expect(turn.body).not.toHaveProperty("target");
+  });
+
   it("keeps AppShot context ephemeral in the signed Chat request body", () => {
     const request = workspaceChatTurnRequest({
       sessionId: "session_1",

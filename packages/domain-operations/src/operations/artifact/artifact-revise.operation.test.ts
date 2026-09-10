@@ -39,4 +39,102 @@ describe("artifact.revise handler", () => {
     await expect(handler.execute(context, artifactRevise.input.parse({ artifact_id: artifact.id, content: "invalid" }))).rejects.toThrow("graph_invalid");
     expect(runArtifactMutation).not.toHaveBeenCalled();
   });
+
+  it("keeps numeric table content as JSON instead of guessing bytes", async () => {
+    const createArtifactRevision = vi.fn(async () => ({ artifact, revision }));
+    const handler = artifactRevise.createHandler({
+      artifactContract: () => ({ id: "artifact.revise", proposed_effects: ["Revise"] }),
+      getArtifact: async () => ({ ...artifact, kind: "table" }),
+      artifactNotFoundError: () => new Error("artifact_not_found"),
+      validateGraphArtifactContent: () => undefined,
+      createArtifactRevision,
+      createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
+      runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
+    });
+
+    await handler.execute(contextWithRun, artifactRevise.input.parse({
+      artifact_id: artifact.id,
+      content: [1, 2, 3],
+      mime_type: "application/json",
+      encoding: "utf8",
+      editor_source: "provider"
+    }));
+
+    expect(createArtifactRevision).toHaveBeenCalledWith(expect.objectContaining({
+      content: "[\n  1,\n  2,\n  3\n]\n",
+      mimeType: "application/json",
+      encoding: "utf8"
+    }));
+    expect(createArtifactRevision.mock.calls[0]?.[0].content).not.toBeInstanceOf(Uint8Array);
+  });
+
+  it("converts only an explicit image byte transport to binary content", async () => {
+    const createArtifactRevision = vi.fn(async () => ({ artifact, revision }));
+    const handler = artifactRevise.createHandler({
+      artifactContract: () => ({ id: "artifact.revise", proposed_effects: ["Revise"] }),
+      getArtifact: async () => ({ ...artifact, kind: "image" }),
+      artifactNotFoundError: () => new Error("artifact_not_found"),
+      validateGraphArtifactContent: () => undefined,
+      createArtifactRevision,
+      createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
+      runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
+    });
+    const bytes = [1, 2, 3, 255];
+
+    await handler.execute(contextWithRun, artifactRevise.input.parse({
+      artifact_id: artifact.id,
+      content: bytes,
+      mime_type: "image/png",
+      encoding: "binary",
+      editor_source: "provider"
+    }));
+
+    const content = createArtifactRevision.mock.calls[0]?.[0].content;
+    expect(content).toBeInstanceOf(Uint8Array);
+    expect(Array.from(content as Uint8Array)).toEqual(bytes);
+  });
+
+  it("rejects non-byte content under an explicit binary contract", async () => {
+    const createArtifactRevision = vi.fn(async () => ({ artifact, revision }));
+    const handler = artifactRevise.createHandler({
+      artifactContract: () => ({ id: "artifact.revise", proposed_effects: ["Revise"] }),
+      getArtifact: async () => ({ ...artifact, kind: "image" }),
+      artifactNotFoundError: () => new Error("artifact_not_found"),
+      validateGraphArtifactContent: () => undefined,
+      createArtifactRevision,
+      createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
+      runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
+    });
+
+    await expect(handler.execute(contextWithRun, artifactRevise.input.parse({
+      artifact_id: artifact.id,
+      content: "not bytes",
+      encoding: "binary",
+      editor_source: "provider"
+    }))).rejects.toThrow("artifact_binary_content_transport_required");
+
+    expect(createArtifactRevision).not.toHaveBeenCalled();
+  });
+
+  it("rejects binary-looking content without an explicit binary encoding", async () => {
+    const createArtifactRevision = vi.fn(async () => ({ artifact, revision }));
+    const handler = artifactRevise.createHandler({
+      artifactContract: () => ({ id: "artifact.revise", proposed_effects: ["Revise"] }),
+      getArtifact: async () => ({ ...artifact, kind: "pdf" }),
+      artifactNotFoundError: () => new Error("artifact_not_found"),
+      validateGraphArtifactContent: () => undefined,
+      createArtifactRevision,
+      createArtifactRollback: async () => ({ id: "rollback_1" }) as never,
+      runArtifactMutation: async (input) => { const executed = await input.execute(operation); return { resource: executed.resource, operation, rollbackPoint: executed.rollbackPoint, activity: [], ...executed.extra }; }
+    });
+
+    await expect(handler.execute(contextWithRun, artifactRevise.input.parse({
+      artifact_id: artifact.id,
+      content: [0x25, 0x50, 0x44, 0x46],
+      mime_type: "application/pdf",
+      editor_source: "provider"
+    }))).rejects.toThrow("artifact_binary_content_transport_required");
+
+    expect(createArtifactRevision).not.toHaveBeenCalled();
+  });
 });

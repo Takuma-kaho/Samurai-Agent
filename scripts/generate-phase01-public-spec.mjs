@@ -11,6 +11,7 @@ import {
   PublicEventEnvelopeSchema,
   domainApiVersion,
   eventCatalog,
+  publicManagementContractDefinitions,
   publicDomainOperationIds,
   publicOperationOutputSchemaFor,
   runControlCatalog,
@@ -24,22 +25,39 @@ const publicOperationIdSet = new Set(publicDomainOperationIds);
 const publicDefinitions = operationDefinitions
   .filter((definition) => publicOperationIdSet.has(definition.id) && definition.sources.includes("runtime_api"))
   .sort((left, right) => left.id.localeCompare(right.id));
+const generatedDefinitionIds = new Set(publicDefinitions.map((definition) => definition.id));
+const publicManagementDefinitions = publicManagementContractDefinitions
+  .filter((definition) => publicOperationIdSet.has(definition.id) && !generatedDefinitionIds.has(definition.id))
+  .sort((left, right) => left.id.localeCompare(right.id));
 
-if (publicDefinitions.length !== publicDomainOperationIds.length) {
-  throw new Error(`phase01_public_operation_catalog_incomplete:${publicDefinitions.length}/${publicDomainOperationIds.length}`);
+if (publicDefinitions.length + publicManagementDefinitions.length !== publicDomainOperationIds.length) {
+  throw new Error(`phase01_public_operation_catalog_incomplete:${publicDefinitions.length + publicManagementDefinitions.length}/${publicDomainOperationIds.length}`);
 }
 
-const contracts = publicDefinitions.map((definition) => ({
-  id: definition.id,
-  kind: definition.kind,
-  version: definition.version,
-  availability: definition.availability,
-  input_schema: schemaForPublicContract(definition.input, `${definition.id}.input`),
-  output_schema: schemaForPublicContract(publicOperationOutputSchemaFor(definition.id, definition.output), `${definition.id}.output`),
-  idempotency: definition.idempotency,
-  concurrency: definition.concurrency,
-  sources: [...definition.sources]
-}));
+const contracts = [
+  ...publicDefinitions.map((definition) => ({
+    id: definition.id,
+    kind: definition.kind,
+    version: definition.version,
+    availability: definition.availability,
+    input_schema: schemaForPublicContract(definition.input, `${definition.id}.input`),
+    output_schema: schemaForPublicContract(publicOperationOutputSchemaFor(definition.id, definition.output), `${definition.id}.output`),
+    idempotency: definition.idempotency,
+    concurrency: definition.concurrency,
+    sources: [...definition.sources]
+  })),
+  ...publicManagementDefinitions.map((definition) => ({
+    id: definition.id,
+    kind: definition.kind,
+    version: definition.version,
+    availability: definition.availability,
+    input_schema: schemaForPublicContract(definition.input, `${definition.id}.input`),
+    output_schema: schemaForPublicContract(definition.output, `${definition.id}.output`),
+    idempotency: definition.idempotency,
+    concurrency: definition.concurrency,
+    sources: [...definition.sources]
+  }))
+].sort((left, right) => left.id.localeCompare(right.id));
 
 const catalog = DomainApiCatalogSchema.parse({
   api_version: domainApiVersion,

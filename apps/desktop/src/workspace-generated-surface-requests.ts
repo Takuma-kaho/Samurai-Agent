@@ -1,16 +1,21 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export function workspaceGeneratedSurfaceRoomRequest(input: unknown): { roomId: string; surfaceId: string } {
+export function workspaceGeneratedSurfaceRoomRequest(input: unknown): { roomId: string; surfaceId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { roomId: requiredOpaque(value, "roomId"), surfaceId: requiredOpaque(value, "surfaceId") };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), surfaceId: requiredOpaque(value, "surfaceId"), ...(target ? { target } : {}) };
 }
 
-export function workspaceGeneratedSurfaceBundleRequest(input: unknown): { roomId: string; surfaceId: string; revisionId: string } {
+export function workspaceGeneratedSurfaceBundleRequest(input: unknown): { roomId: string; surfaceId: string; revisionId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId: requiredOpaque(value, "roomId"),
     surfaceId: requiredOpaque(value, "surfaceId"),
-    revisionId: requiredOpaque(value, "revisionId")
+    revisionId: requiredOpaque(value, "revisionId"),
+    ...(target ? { target } : {})
   };
 }
 
@@ -19,9 +24,11 @@ export function workspaceGeneratedSurfaceActionRequest(input: unknown): {
   surfaceId: string;
   actionId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: Record<string, unknown>;
 } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   const roomId = requiredOpaque(value, "roomId");
   const surfaceId = requiredOpaque(value, "surfaceId");
   const actionId = requiredOpaque(value, "actionId");
@@ -31,7 +38,7 @@ export function workspaceGeneratedSurfaceActionRequest(input: unknown): {
     if (value[key] !== undefined) body[outputKey] = requiredOpaque(value, key);
   }
   if (value.actionPayload !== undefined) body.action_payload = requiredJsonObject(value.actionPayload, "actionPayload");
-  return { roomId, surfaceId, actionId, operationId, body };
+  return { roomId, surfaceId, actionId, operationId, ...(target ? { target } : {}), body };
 }
 
 export function workspaceGeneratedSurfaceStateRequest(input: unknown): {
@@ -39,9 +46,11 @@ export function workspaceGeneratedSurfaceStateRequest(input: unknown): {
   surfaceId: string;
   operationId: string;
   action: "pin" | "unpin" | "archive";
+  target?: WorkspaceTargetRequest;
   body: Record<string, unknown>;
 } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   const action = value.action;
   if (action !== "pin" && action !== "unpin" && action !== "archive") throw new Error("action_invalid");
   const roomId = requiredOpaque(value, "roomId");
@@ -52,6 +61,7 @@ export function workspaceGeneratedSurfaceStateRequest(input: unknown): {
     surfaceId,
     operationId,
     action,
+    ...(target ? { target } : {}),
     body: {
       room_id: roomId,
       action,
@@ -66,15 +76,18 @@ export function workspaceGeneratedSurfaceExportRequest(input: unknown): {
   surfaceId: string;
   revisionId?: string;
   format: "html" | "zip";
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   const format = value.format;
   if (format !== "html" && format !== "zip") throw new Error("format_invalid");
   return {
     roomId: requiredOpaque(value, "roomId"),
     surfaceId: requiredOpaque(value, "surfaceId"),
     ...(value.revisionId === undefined ? {} : { revisionId: requiredOpaque(value, "revisionId") }),
-    format
+    format,
+    ...(target ? { target } : {})
   };
 }
 

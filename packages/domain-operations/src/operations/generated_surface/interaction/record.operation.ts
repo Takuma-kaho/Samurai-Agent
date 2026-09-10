@@ -80,8 +80,10 @@ const generatedSurfaceInteractionRecord = defineCommand<GeneratedSurfaceInteract
           ...(context.sessionRef ? { session_ref: context.sessionRef } : {}),
           surface_id: surface.id, revision_id: input.revision_id ?? surface.current_revision_id,
           ...(input.message_id ? { message_id: input.message_id } : {}),
-          command_id: input.command_id, command_result: input.command_result,
-          user_feedback: input.user_feedback, created_at: nowIso()
+          ...(input.command_id ? { command_id: input.command_id } : {}),
+          ...(input.command_result === undefined ? {} : { command_result: input.command_result }),
+          ...(input.user_feedback === undefined ? {} : { user_feedback: input.user_feedback }),
+          created_at: nowIso()
         });
         return { ok: true, value: Output.parse(await ports.saveGeneratedSurfaceInteraction(record)) };
       }

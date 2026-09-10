@@ -21,3 +21,4 @@ export * from "./workspace-server-commands";
 export * from "./workspace-server-store";
 export * from "./workspace-runtime-activity";
 export * from "./operator-health";
+export * from "./workspace-interaction-request-service";

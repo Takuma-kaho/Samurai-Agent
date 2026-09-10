@@ -53,4 +53,22 @@ describe("Desktop learning and completion operation boundaries", () => {
       body: { scope_kind: "room", room_id: "room_product", remove_override: true, expected_version: 3 }
     });
   });
+
+  it("keeps learning settings bound to the renderer target", () => {
+    const request = workspaceLearningSettingsRequest({
+      scopeKind: "room",
+      roomId: "room_product",
+      enabled: true,
+      expectedVersion: 3,
+      operationId: "learning_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    });
+
+    expect(request).toMatchObject({
+      operationId: "learning_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      body: { scope_kind: "room", room_id: "room_product", expected_version: 3 }
+    });
+    expect(request.body).not.toHaveProperty("target");
+  });
 });

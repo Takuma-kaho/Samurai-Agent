@@ -822,8 +822,7 @@ describe("Domain Operation strict gate coverage", () => {
       ["reflection.suggestion.apply", { sessionId: undefined }],
       ["resource.translation_job.save", { roomId: undefined }],
       ["skill.view", { runId: undefined }],
-      ["skill.usage.record", { runId: undefined }],
-      ["generated_surface.state", { sessionId: undefined }]
+      ["skill.usage.record", { runId: undefined }]
     ];
     for (const [operationId, override] of contextBoundaryCases) {
       const fixture = executionCases.get(operationId)!;

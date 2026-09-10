@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 124 }, (_, index) => index + 1));
+    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 128 }, (_, index) => index + 1));
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -214,6 +214,21 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("samurai_import_workspace_agent_room_permission");
     expect(schema).toContain("samurai_import_workspace_connection_descriptor");
     expect(schema).toContain("workspace_completion_episodes_external_key_unique");
+    const episodeExternalKeyRepairMigration = migrations.find((migration) => migration.version === 126);
+    expect(episodeExternalKeyRepairMigration?.name).toBe("workspace_server_completion_episode_external_key_nullability_repair");
+    const episodeExternalKeyRepairSql = episodeExternalKeyRepairMigration?.statements.join("\n") ?? "";
+    expect(episodeExternalKeyRepairSql).toContain("pg_get_constraintdef");
+    expect(episodeExternalKeyRepairSql).toContain("UNIQUE NULLS NOT DISTINCT (workspace_id, room_id, external_episode_key)");
+    expect(episodeExternalKeyRepairSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS workspace_completion_episodes_external_key_unique");
+    expect(episodeExternalKeyRepairSql).toContain("WHERE external_episode_key IS NOT NULL");
+    const runtimeBindingScopeFixMigration = migrations.find((migration) => migration.version === 127);
+    expect(runtimeBindingScopeFixMigration?.name).toBe("workspace_server_human_work_runtime_binding_scope_fix");
+    const runtimeBindingScopeFixSql = runtimeBindingScopeFixMigration?.statements.join("\n") ?? "";
+    expect(runtimeBindingScopeFixSql).toContain("has_human_work_binding");
+    expect(runtimeBindingScopeFixSql).toContain("IF NOT has_human_work_binding THEN RETURN NEW; END IF;");
+    expect(runtimeBindingScopeFixSql).toContain("binding ->> 'work_id'");
+    expect(runtimeBindingScopeFixSql).toContain("binding ->> 'reservation_id'");
+    expect(runtimeBindingScopeFixSql).toContain("RAISE EXCEPTION 'human_work_runtime_binding_invalid'");
     for (const table of ["workspace_runtime_sessions", "workspace_runtime_messages", "workspace_runtime_runs", "workspace_runtime_events", "workspace_runtime_activities", "workspace_runtime_resources"]) {
       expect(schema).toContain(`CREATE TABLE ${table}`);
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -1223,6 +1238,20 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(sql).toContain("binding ->> 'reservation_id'");
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_recover_human_work_launch");
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_assert_human_work_runtime_admission_v2");
+  });
+
+  it("restores human-work Completion refs only through the guarded v128 import", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 128);
+    expect(migration?.name).toBe("workspace_server_human_work_resource_refs_bundle_import");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_validate_human_work_resource_refs(");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_import_workspace_human_work_v2(");
+    expect(sql).toContain("workspace_bundle_human_work_resource_reference_invalid");
+    expect(sql).toContain("workspace_bundle_human_work_resource_reference_not_found");
+    expect(sql).toContain("workspace_bundle_human_work_resource_reference_scope_invalid");
+    expect(sql).toContain("resource_refs");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_import_workspace_human_work_v2");
+    expect(sql).toContain("PERFORM samurai_import_workspace_human_work(");
   });
 
 });

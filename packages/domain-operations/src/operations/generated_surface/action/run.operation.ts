@@ -1,11 +1,14 @@
 // Domain operation module. Keep its contract and handler together.
 import { z } from "zod";
-import type { GeneratedSurfaceDefinition, GeneratedSurfaceActionDeclaration } from "@samurai-agent/core-schemas";
+import { jsonValueSchema, type GeneratedSurfaceDefinition, type GeneratedSurfaceActionDeclaration } from "@samurai-agent/core-schemas";
 import { defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { generatedSurfaceActionValueSchema } from "../../../value-objects/generated-surface.js";
 
 const Input = z.object({
   "action_id": z.string().trim().min(1).max(256),
+  "action_payload": z.record(jsonValueSchema).optional(),
+  "interaction_id": z.string().trim().min(1).max(256).optional(),
+  "message_id": z.string().trim().min(1).max(256).optional(),
   "revision_id": z.string().trim().min(1).max(256).optional(),
   "surface_id": z.string().trim().min(1).max(256)
 }).strict();
@@ -27,15 +30,15 @@ const generatedSurfaceActionRun = defineCommand<GeneratedSurfaceActionRunPorts>(
   "id": "generated_surface.action.run",
   "version": "4.1",
   "availability": "active",
-  "title": "Validate generated surface action",
-  "description": "Validate a declared Generated Surface action; the ingress adapter dispatches its target command.",
+  "title": "Run a generated surface action",
+  "description": "Authorize and run the declared target command for a Generated Surface action.",
   "sources": [
     "runtime_api",
     "generated_surface"
   ],
-  "effect": "read_only",
-  "idempotency": "none",
-  "concurrency": "none",
+  "effect": "workspace_mutation",
+  "idempotency": "required",
+  "concurrency": "external_idempotency",
   "render": [
     "status_timeline"
   ],

@@ -183,6 +183,22 @@ function authHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+/**
+ * Provider-facing contract for rendering the result of a Surface action.
+ *
+ * This is shared by the stable system prompt and the tool description so that
+ * every provider receives the same receive-only bridge semantics and lifecycle
+ * states. The host installs the bridge after bundle.script starts, which is why
+ * the CustomEvent form is the safest registration example for generated code.
+ */
+const generatedSurfaceProviderInstruction = [
+  "The generated Surface runs in a sandboxed iframe, so every state-changing Surface must include a visible status or result region inside that iframe (for example, a div with role=status and aria-live=polite); showing JSON only in the parent chat is not sufficient.",
+  "In bundle.script, receive the parent-authorized result through the public bridge: preferably register window.addEventListener(\"samurai.generated_surface.action.result\", handler) and window.addEventListener(\"samurai.generated_surface.action.error\", handler), or assign window.samuraiGeneratedSurface.onActionResult after window.samuraiGeneratedSurface exists.",
+  "The callback argument or CustomEvent detail is the result envelope. For samurai.generated_surface.action.result, treat status=\"accepted\" with saved=false as pending and never as a completed save; treat status=\"completed\" with saved=true as the only successful save, then render its result and any parent-authorized latest.data, latest.artifact, or latest.surface snapshot.",
+  "For samurai.generated_surface.action.error, render error.message and the retryable state in the iframe, preserve the user's input, and offer a retry only when retryable is true. Update existing DOM nodes with safe DOM APIs such as textContent; do not reload or recreate the iframe just to display an action result, invent bridge fields, or claim success from the original button click.",
+  "The result bridge is receive-only. Send a declared action only from an explicit event listener through window.dispatchSamuraiAction(actionId, payload); never use the result bridge, window.parent.postMessage, a form submission, an external URL, network API, or browser storage as a sending or persistence mechanism."
+].join(" ");
+
 function stablePrompt(locale: SupportedLocale): string {
   return [
     "You are Samurai Agent, a GUI-first personal agent workspace assistant.",
@@ -190,6 +206,8 @@ function stablePrompt(locale: SupportedLocale): string {
     "Normal conversation must be plain natural language content, not JSON.",
     "Use tools only for state-changing or boundary-crossing intents.",
     "Use create_artifact only when the user asks to create a durable local artifact or draft.",
+    "Use create_generated_surface only when the user asks for an independent or custom HTML/UI surface. Its bundle.html must not contain script or style tags, form elements, inline event handlers, external URLs, or network/storage APIs: put CSS in bundle.css and JavaScript in bundle.script. Use a non-form container with explicit button event listeners for input controls. To trigger a declared action, have the event handler call window.dispatchSamuraiAction(actionId, payload); do not invent bridge APIs or call window.parent.postMessage directly. The saved bundle and its actions remain subject to the current Runtime and Workspace boundaries.",
+    generatedSurfaceProviderInstruction,
     "Use subagent_delegate only when a bounded child assignment is needed for a specialist Agent already permitted in this Room. The tool receives only the target Agent, instruction, optional Server-issued attachments, and optional dependency assignment IDs; Room, Work, parent assignment, requester, and generation are server-bound.",
     "Use request_external_send when the user asks to send, publish, post, or otherwise affect an external channel.",
     "Use remember_topic only when the user explicitly asks you to remember a preference or reusable fact.",
@@ -479,6 +497,7 @@ function gatewayBoundarySummary(input: ProviderInput): string {
 }
 
 const artifactParameters = requireDomainCommandEntry("artifact.create").input_schema;
+const generatedSurfaceCreateParameters = requireDomainCommandEntry("generated_surface.create").input_schema;
 const externalSendParameters = requireDomainCommandEntry("external.send.prepare").input_schema;
 const rememberTopicParameters = requireDomainCommandEntry("memory.topic.create").input_schema;
 
@@ -540,6 +559,14 @@ function toolDefinitions(availableTools?: readonly string[]) {
       parameters: artifactParameters
     },
     {
+      name: "create_generated_surface",
+      description: [
+        "Generate and save an isolated HTML Surface for the Workspace Canvas. Put markup only in bundle.html, CSS only in bundle.css, and JavaScript only in bundle.script; never embed script or style tags, form elements, inline event handlers, external URLs, or network/storage APIs in the bundle. Use a non-form container with explicit button event listeners for input controls. Trigger only declared actions with window.dispatchSamuraiAction(actionId, payload), never with an invented bridge API or window.parent.postMessage.",
+        generatedSurfaceProviderInstruction
+      ].join(" "),
+      parameters: generatedSurfaceCreateParameters
+    },
+    {
       name: "request_external_send",
       description: "Request an approval-gated external send, publish, post, or mail operation.",
       parameters: externalSendParameters
@@ -562,6 +589,7 @@ function toolDefinitions(availableTools?: readonly string[]) {
 
 function domainCommandIdForProviderTool(toolName: string): string {
   if (toolName === "create_artifact") return "artifact.create";
+  if (toolName === "create_generated_surface") return "generated_surface.create";
   if (toolName === "request_external_send") return "external.send.prepare";
   if (toolName === "remember_topic") return "memory.topic.create";
   if (toolName === "subagent_delegate") return "room.work.assignee.delegate";
@@ -590,9 +618,31 @@ function expandGeminiSchema(value: unknown, root: Record<string, unknown>, resol
     : {};
   for (const [key, entry] of Object.entries(value)) {
     if (key === "$ref" || GEMINI_SCHEMA_METADATA_KEYS.has(key)) continue;
+    if (key === "anyOf" || key === "oneOf") {
+      const variants = Array.isArray(entry)
+        ? entry.map((variant) => expandGeminiSchema(variant, root, resolvingRefs))
+        : [];
+      const selected = selectGeminiSchemaVariant(variants);
+      if (selected) Object.assign(expanded, selected);
+      continue;
+    }
     expanded[key] = expandGeminiSchema(entry, root, resolvingRefs);
   }
   return expanded;
+}
+
+/**
+ * Gemini function declarations do not accept JSON Schema unions. Project a
+ * union to its first non-null object schema at this provider boundary; the
+ * canonical domain schema remains unchanged for providers that support unions.
+ */
+function selectGeminiSchemaVariant(variants: unknown[]): Record<string, unknown> | undefined {
+  const records = variants.filter(isRecord);
+  const selected = records.find((variant) => variant.type !== "null") ?? records[0];
+  if (!selected) return undefined;
+  return records.some((variant) => variant.type === "null")
+    ? { ...selected, nullable: true }
+    : selected;
 }
 
 function expandGeminiReference(reference: string, root: Record<string, unknown>, resolvingRefs: Set<string>): Record<string, unknown> {
@@ -608,9 +658,17 @@ function resolveJsonPointer(root: Record<string, unknown>, reference: string): u
   if (!reference.startsWith("#/")) return undefined;
   let current: unknown = root;
   for (const rawSegment of reference.slice(2).split("/")) {
-    if (!isRecord(current)) return undefined;
     const segment = rawSegment.replace(/~1/g, "/").replace(/~0/g, "~");
-    current = current[segment];
+    if (Array.isArray(current)) {
+      if (!/^\d+$/.test(segment)) return undefined;
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index >= current.length) return undefined;
+      current = current[index];
+    } else if (isRecord(current)) {
+      current = current[segment];
+    } else {
+      return undefined;
+    }
   }
   return current;
 }

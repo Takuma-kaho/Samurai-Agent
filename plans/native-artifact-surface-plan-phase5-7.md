@@ -1,9 +1,10 @@
 # Native App・Artifact・Surface 実装プラン — Phase 5残作業・7
 
 - 作成日: 2026-09-07
-- 更新日: 2026-09-08。旧Vueの機能評価を反映し、Phase 5の範囲・工程・完了条件を補強
-- 状態: 置換方針と成果物の製品範囲は会話で合意済み。機能評価に基づく実装前の技術プラン。個別の画面配置は設計案であり、コード実装・実機検証は未実施
-- 調査基準: 初回HEAD `a7a8c174243bf7ee20d6b367afca821284b81ff9`。更新時は現行sourceを再確認し、既存の本プラン・簡略版・関連設計3文書の差分を継続して編集
+- 更新日: 2026-09-10。機能E2Eを全てAI担当へ変更し、必須CI・製品方針・OSSコード品質を完了条件へ反映
+- 状態: 元の製品範囲・要件・工程を維持。初回実装と一部の実機検証は存在するが、対象範囲の完了は未達。本改訂のコード修正・追加検証は未着手
+- 調査基準: 現行HEAD `2cbf2b2d81caeb535df3eae264dd3712144de084`、計画改訂開始時の作業ツリーはclean。初回計画の調査HEADは `a7a8c174243bf7ee20d6b367afca821284b81ff9`
+- 改訂範囲: この詳細版と簡略版だけ。設計書・コード・検証report・Git履歴は変更しない
 - 対象: 元のNative AppロードマップのPhase 5の残作業とPhase 7
 - 簡略版: [非エンジニア向けプラン](native-artifact-surface-overview-plan-phase5-7.md)
 - 詳細設計: [Artifact・Surface](../docs/designs/artifact-surface.md)、[Native App](../docs/designs/native-app.md)
@@ -20,6 +21,8 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 
 本書のPhase番号は利用者提示の元ロードマップを指す。[Workspace-first・Organization再設計](workspace-first-organization-realignment-master-plan.md)のPhase番号とは別である。実装順序は本書内の工程A–Fで表し、元Phaseを改番しない。
 
+今回の目的は、再レビューで挙がった問題を直すことに加え、当初のR01–R17、V01–V15、実使用シナリオの未接続・未検証を閉じることである。「指摘数がゼロ」「CIが成功」「代表的なSurfaceを一つ操作できた」だけで全体を完了にしない。既に成立している実装は再利用し、成果物の上書き・下書き消失・二重実行・中断復旧を先に修正する。
+
 ## 2. 禁止事項
 
 - 合意済みのWorkspace所有、Room認可、Session内部化、既定Agent・専門Agentの仕事モデルを変更しない。
@@ -33,6 +36,14 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 - 型を広げるだけ、テスト専用経路、成功表示の固定、検証の弱体化で要件を満たしたことにしない。
 - 既存差分を消さない。文書作成の承認をbranch作成、コード実装、commit、push、PR作成の承認として扱わない。
 - 未実行・失敗・skipを成功扱いしない。同じ条件の重い検証を繰り返さない。
+- 要件、元Phase、工程、完了条件を独断で省略・統合・改名しない。未合意の仕様・概念を追加しない。
+- テストを通すために必須値を空値へ補完したり、認可・版・参照の検査を緩めたりしない。必要な移行互換と、不正な現行入力を区別する。
+- 不具合を避けるために、合意済みの編集・再利用・移植・複数Server/Room・交換可能なAgentという製品能力を削らない。正規の操作を恒久的に読取専用へ変える、対象形式を狭める、複数接続を禁止する等を修正の代わりにしない。
+- 内部実装の都合だけで、不要な承認、手入力の内部ID、利用者によるデータ修復、追加の運用手順を要求しない。制約は実際の認可・整合性・能力限界に必要な範囲へ限定し、理由・適用範囲・解除条件を説明できるものにする。
+- 保存競合を防ぐためにアプリ全体を操作不能にしたり、再送を一律禁止したりしない。例えば保存中の一時的な編集抑止は当該bufferだけに限定し、無関係のRoom/仕事/閲覧を止めない。
+- HTTP/IPC controller、React component/hook、巨大なRuntime分岐へ、データ整合性・認可ルール・業務判断を継ぎ足して解決しない。入口ごとに同じルールを複製したり、汎用helperへ移しただけで責務分離済みと扱ったりしない。
+- 読みやすさを犠牲にする過剰な条件分岐、型の強制変換、例外の握り潰し、暗黙の副作用、循環依存、用途不明の抽象化を追加しない。品質改善のために無関係な全体リファクタリングへ広げることも禁止する。
+- 画面操作による機能検証を利用者へ引き渡して完了にしない。実Electronの操作・生成・保存・再表示と必須CIはAIが実施し、主観的なUI評価の回答待ちを完了条件にしない。
 
 ## 3. 正本と確定事項
 
@@ -56,6 +67,10 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 | 進め方 | Phase 5の残りとPhase 7をまとめ、プランと必要な設計書を先に作る |
 | Phase 5の評価基準 | 今の設計に必要な機能を評価して採用する。旧Vueの全機能は移植しない |
 | 旧Vueの扱い | 採用機能はReactでの成立確認後に削除。不要機能は参照・依存確認後に移植せず削除。共有処理は用途を確認して活用する |
+| 今回の改訂 | 再レビューの21項目、接続切替の競合候補、追加変更の品質問題を扱い、元のPhase 5・7の全完了条件まで計画する。今は実装しない |
+| 2026-09-10の検証担当変更 | 仕様どおりの機能・画面操作・実Electron E2E・必須CIは全て実装担当AIが実施する。利用者の主観的なUI評価は任意とし、完了条件から外す |
+| AI生成の検証 | 前回の検証で使った、利用者提供のGemini APIキーを無料枠内で使用してよい。値を文書やログへ出さず、既存の安全な実行環境を利用する |
+| 修正の品質 | 製品の本質を変える便宜的制約を追加せず、OSSとして第三者が理解・再利用・保守できる責務分離と安全な実装を守る |
 
 ### 3.3 今回の技術提案
 
@@ -65,35 +80,48 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 - Chat横のパネル、Roomの成果物一覧、手動保存、版比較と復元を既存構造から具体化する。
 - Surfaceの保存先は既存ArtifactまたはCollection等のDomain資源へ固定する。
 - Clientを共通Domain APIへ接続し、本文の大きさ・binary配信は認可されたFile APIと分担する。
-- 個々の検証担当は既存Backend設計を引き継ぎ、Native+Geminiを実装担当、公式認証のCodex/Claude Codeと操作感を利用者担当とする。
+- 機能検証の担当は3.4の最新合意に従う。Native+Geminiによる生成と実Client操作をAIが行い、利用者の操作確認票を要求しない。
 - Phase 5の採用範囲は4.1の評価表を実装基準にする。Knowledge/Skillの基本管理、Room管理、検索、必要な設定、実行確認、自動化の基本管理を加える。学習アルゴリズムや専用業務アプリ群は追加しない。
 - 各補助機能はRoomの文脈から必要時に開く。旧Vueの常設メニュー群を再現せず、Chatと補助パネルに戻れる導線を揃える。
+- 本改訂では、下書きの対象・基準版固定、保存中の編集抑止、送信先を伴うIPC、既存の永続記録を使った操作再照会を具体案とする。製品機能の追加ではなく、既存の保存・認可・復旧要件を満たす方法である。内部の型名や小さなmodule分割は実装判断に残す。
+
+### 3.4 最新合意による担当・完了条件の変更
+
+2026-09-10の利用者の明示指示により、前版の本人操作を必須にした条件を次のように変更する。R01–R17、V01–V15、工程A–F、P5/P7/Tの番号は維持し、機能範囲は削減しない。関連設計書に残る旧担当の記述より、この会話の最新合意を優先する。今回、設計書自体は変更しない。
+
+| 前版の項目 | 今回の対応 | 完了への影響 |
+| --- | --- | --- |
+| P5-08: 利用者の主要操作確認 | 同じIDでAIによる全必須機能の実画面操作・客観的な操作性のE2Eへ変更 | AIの操作記録と保存結果が必須。利用者の検証作業は不要 |
+| Phase 5 利用者確認完了 | Phase 5 画面操作E2E完了（AI担当）へ変更 | 本人確認待ちのgateを廃止 |
+| 工程F: 統合E2E・dogfooding・完了判定 | 工程F: 統合E2E・品質確認・完了判定 | 実操作、第三者視点の品質確認、対象commitの必須CIをAIが閉じる |
+| 見た目・好み・心地よさの本人評価 | 任意の主観的feedback | 未実施でも本プランの完了を妨げない |
+| 必須CIはPR時に別途確認 | 同じ最終実装commitに対する既存必須CIの成功を本プラン完了条件へ追加 | CI待ち・失敗・必須jobのskipを完了としない |
+| 外部Backendの機能確認を利用者へ依頼 | 今回の変更対象の機能確認はAIが担当。本人にしかできない認証操作が必要な場合だけ最小限の入力を依頼 | 機能テストの代行を利用者へ戻さない。Backend別の実証と環境不足は10.2で区別 |
+
+製品内で「本人の応答」「利用者の操作」と書く場合は、テストAccountを操作するAIがその手順を行う。実ユーザーの承認を捏造したり、認可を省略したりする意味ではない。merge等のリポジトリ公開操作の許可は、機能の本人確認とは別に扱う。
 
 ## 4. 現行実装と不足
 
-これはsourceの読み取り結果であり、実動作の証明ではない。
+以下は2026-09-09のsource・test・既存reportの読み取り結果であり、この改訂で実行したテストの結果ではない。
 
 | 責務 | 確認したファイルと事実 | 今回必要な作業 |
 | --- | --- | --- |
-| React起動 | `apps/web/src/main.ts`は`NativeApp`を起動。`apps/web/vite.config.ts`はReactのみをproduction entryに指定 | Vue部品の存在を現在のUI実装と数えず、対象機能をReactへ接続 |
-| Room Work UI | `apps/web/src/native-app/RoomWorkSurface.tsx`、`use-native-app.ts`、`types.ts`に仕事・担当・添付・Evidenceの経路がある | 仕事の結果とArtifact/Surfaceの参照、開く・修正・保存を接続 |
-| 旧表示部品 | `apps/web/src/components/WorkspaceCanvas.vue`、`GeneratedSurfaceFrame.vue`、`CustomViewFrame.vue`、`apps/web/src/lib/use-surface-workspace.ts` | 操作の参考として使い、Vue状態管理・Session前提を持ち込まない |
-| Artifact契約 | `packages/core-schemas/src/index.ts`にArtifact/Revision。`packages/domain-operations/src/operations/artifact/`にcreate/revise/restore/view/list等 | 直接編集・履歴・ダウンロードの不足するQueryと型を追加。初期版と空内容も扱う |
-| 実保存 | `apps/server/src/adapters/runtime/postgres-artifact.ts`にRoom付き取得、版競合、immutable revision、blob、File Transaction復旧 | read/write/Eventまで同じ保存結果を指すことを確認し、binary登録・配信を完成 |
-| 公開API | `apps/server/src/workspace-server/domain-api-v1.ts`はArtifact作成・修正・復元とlist/viewを実装 | Surface・履歴等の必要契約を公開入口へ接続。既存契約の単なる登録を実行可能と扱わない |
-| Bridge | `apps/web/src/lib/workspace-browser-bridge.ts`と`apps/desktop/src/main.ts`にArtifact/Surface経路 | Artifactの構造化内容とSurfaceには旧workspace API経路が残る。新UIを共通契約へ揃える |
-| Surface保存・操作 | `apps/server/src/adapters/runtime/postgres-generated-surface.ts`に生成物保存、版、状態、出力、action処理 | Roomからの一覧・再表示・更新通知、actionの固定対象・入力検証・再送・承認を一貫させる |
-| 実Agent tool | `apps/server/src/workspace-server/http-server.ts`の`createPostgresRuntimeToolExecutionPort`の通常executeはcreate_artifact/artifact.createを受け付ける | Artifact修正・生成Surfaceの作成/修正を、実RuntimeとBackendのtool受付へ接続 |
-| Surface target | 同ファイルの`createPostgresGeneratedSurfaceTargetCommand`はArtifact作成とCollection操作等を分岐する | UIが宣言できる操作と実装済みのtargetを一致させ、必要な修正操作を接続 |
-| sandbox | `packages/runtime/src/presentation/generated-surface.ts`にbundle/CSP検査。Generated HTML内の`form`要素も現在は禁止 | 入力・保存をaction bridgeで成立させる。禁止を一括解除しない |
-| binary表示 | `PostgresArtifact.get`は画像/PDFをbase64で返す。旧content routeはJSON以外をtext/plainで返す | binary、encoding、MIMEを明示し、表示とダウンロードで実byteを保持 |
-| 検証 | `postgres-artifact.test.ts`はFakeFiles/FakeCommandsによる復旧test | 実PostgreSQL・File Store・Electronの証拠を別に取得 |
+| Reactと管理 | `apps/web/src/native-app/NativeApp.tsx`、`NativeKnowledgeTools.tsx`、`use-native-knowledge-tools.ts`、`NativeInteractionRequests.tsx`に管理・確認パネルがある | Knowledge作成、全ページ、検索先、拒否、下書き保護などの不足を補う |
+| 成果物UI | `ArtifactSurfacePanel.tsx`、`NativeArtifactWorkspace.tsx`に表示・編集・履歴・復元と結果カードからの入口がある | 資源切替、基準版、保存後の現在版、画像/PDF修正依頼を修正 |
+| Collection/Surface UI | `NativeCollectionPanel.tsx`、`GeneratedSurfaceFrame.tsx`に入力・action・固定・exportがある | 競合、同一操作の再送、結果/data/assetの反映、stateと保管導線を完成 |
+| 公開API/bridge | `apps/server/src/workspace-server/domain-api-v1.ts`にArtifact/Surface/interactionの公開経路、Desktopに要求処理中の接続snapshotがある | R12–R16の旧専用経路を公開Query/Operation/Eventへ接続。IPC受付前の切替も対象固定で防ぐ |
+| Artifact保存 | `apps/server/src/adapters/runtime/postgres-artifact.ts`にimmutable revision、blob、File Transactionがある | create/revise双方のbinary変換と保存結果・参照を揃える |
+| Runtime/仕事確定 | `http-server.ts`にArtifact/Surface tool、`apps/server/src/workers/postgres-room-work-worker.ts`に結果ref集約がある | 同一Run内の複数版と保存済みの終端証拠を、通常完了/再起動復旧で同じ意味にする |
+| 参照/移植 | `packages/workspace-server/src/workspace-server-store.ts`、`schema.ts`、`workspace-completion-bundle-v4.ts`に認可・仕事・Bundleがある | mutableな現在pointerとimmutableな結果を分け、work/instructionのresource_refsを移植 |
+| 承認/入力復旧 | `workspace-interaction-request-service.ts`とmaintenance workerがpending期限切れ・executing中断を処理する | accepted直後の中断と、停止済みRunへの入力を正しく終端化・回収 |
+| 既存UI test | `ArtifactSurfacePanel.test.ts`、`native-artifact-workspace.test.ts`、`native-knowledge-tools.test.ts`、`native-interaction-requests.test.ts`等は静的markupと関数testが中心 | mount後の編集・再render・遅延保存・操作を検証するComponent testを追加 |
+| 旧Vue | 既存reportではVue source 0と境界検査成功を記録。現行の対象UIはReact | 旧実装を復活・再削除せず、採用した挙動の移行漏れと最終build graphを確認 |
 
 ### 4.1 Phase 5の機能評価と処置
 
-2026-09-08の読み取り調査では、Vueの画面・部品15ファイルとVueをimportする状態管理10ファイルが残っていた。次は旧画面への到達や実動作の証拠ではなく、sourceと現在のReact入口・APIを照合した評価である。工程Aで初めて要否を決めるのではなく、この表を開始時の実装基準とし、sourceの変化と依存関係だけを更新する。
+次のV01–V15は2026-09-08時点の旧機能の採用・廃止判断を維持した表である。列内のVueファイル名と不足の記述はその時点の評価であり、現在もファイルが存在するという意味ではない。初回実装で削除されたsourceはGit履歴を必要な箇所だけ参照し、復活させない。工程A/Fで各Vの現在のReact入口・検証証拠を対応付け、採用済み挙動を削除済みファイルと一緒に失わない。
 
-| ID | 現行source・機能 | 評価と今回の処置 | 到達先・要件 |
+| ID | 旧source・機能（初回評価時点） | 評価と今回の処置 | 到達先・要件 |
 | --- | --- | --- | --- |
 | V01 | `App.vue`、`AppWorkspace.vue`、`AppSidebar.vue`のSession一覧、新規会話、Backend選択中心の構成 | 旧構成を廃止。現行Workspace→Room→仕事・Agentの構成を使う。Session管理を利用者へ戻さない | Phase 5 / R01・R11・R17 |
 | V02 | `WorkspaceConnectionSettings.vue`、旧Chat・添付・stream制御 | Reactの接続、Room Work、返信・コメント添付は実装あり。旧経路を重複移植せず、現在の導線の不足・回帰だけを直す | Phase 5 / R11・R17 |
@@ -115,10 +143,43 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 
 ### 4.2 接続の不足と過去の証拠
 
-- `api.ts`の`runSurfaceOperation`はCollectionと`artifact.request`を扱う一方、旧form.submit/table.patch/chart.request/custom_view.actionは未接続の拒否へ落ちる。`updateMessagePresentationViewState`も未接続。旧入力欄の存在を保存済み機能と数えない。
-- 同ファイルの旧approve/deny/rollbackは入力を使わず拒否する。Phase 5/7で必要な承認は現在のCoreの要求・判断・実行結果へ接続し、旧関数を呼ぶボタンだけを作らない。
-- 現在の公開v1にはRoom/仕事/Agent/Artifact等があるが、Knowledge・検索・自動化等は既存workspace bridgeに処理がある。R12–R16に必要な公開Query/Operation/Eventの不足も今回の作業に含める。API整備をPhase 9任せにしてReactを旧専用経路へ戻さない。
-- [Phase 3・4・6の検証記録](../reports/room-agent-collaboration-phase3-4-6/report.md)には実Electron・Native+Gemini・隔離PostgreSQLで依頼/返信/委譲/成果物保存を確認した記録がある。本改訂で実行した検証ではなく、R11の再利用基盤の証拠である。公式Codex/Claude Code、Hosted、操作感の未検証を引き継ぐ。
+- [初回実装の検証記録](../reports/native-artifact-surface-phase5-7/report.md)に、自動test/build、隔離PGでの各形式の作成・更新・再起動、実Desktop/Native+GeminiからのArtifact/Surface生成・action・再起動成功がある。途中のGemini 503は後日の成功記録で解消されている。
+- 同reportの代表経路の成功を、R01–R17すべての実Client操作の成功へ拡張しない。report末尾の「上記以外は実施済み」という総括だけでは、人の直接編集・競合・移植・全管理導線の証拠にならない。工程Aで証拠の対象commit・Client・操作・保存照合を記録し、修正で影響する経路は更新する。
+- [Phase 3・4・6の検証記録](../reports/room-agent-collaboration-phase3-4-6/report.md)はR11の再利用基盤。今回その全Phaseを再実装・再監査しない。
+- Knowledge・検索・自動化などの旧workspace bridgeは実処理を持つが、R12–R16の不足する公開Query/Operation/Eventも元から今回の必須範囲。Phase 9へ先送りしない。旧互換APIも同じ認可・サービスを利用する。
+- 「旧Wiki全体を開けない」は採用しない。WikiはCompletion Knowledge上のprojectionであり、その経路を確認済み。旧Memoryを含む資源種別・metadata・履歴・管理操作の保持はV03の検証で別に確認する。
+
+### 4.3 再レビューの指摘台帳
+
+I01–I13は前回13項目、I14–I21は今回追加した8項目に一対一で対応する。I22は再現未実施の競合候補、I23は追加変更の契約品質問題であり、確認済みの実行障害と同数扱いしない。全項目が本改訂時点で未修正。下記の検証T01–T11は10.2の追加シナリオを指す。
+
+| ID | 問題と成立条件 | 主な対象 | 要件 / 工程 / 検証 |
+| --- | --- | --- | --- |
+| I01 | 表Aのdirty stateを表Bが引き継ぎ、BのID/現在版でAの内容を保存する | `ArtifactSurfacePanel.tsx` | R03・R04・R07 / C・D / T01 |
+| I02 | Collection再取得でexpected versionだけ進み、古いdraftが他者変更を上書きする | `NativeCollectionPanel.tsx` | R03・R04・R06 / D・E / T02 |
+| I03 | target object/gatewayの再生成が同一Roomのパネル初期化を起こす | `NativeApp.tsx`、`NativeArtifactWorkspace.tsx` | R03・R08・R11 / C・D / T01 |
+| I04 | 同一Runの作成→改訂で旧論理refも集約し、現在pointerとの照合で仕事確定が失敗する | `postgres-room-work-worker.ts`、`workspace-server-store.ts` | R02・R04・R09 / B / T04 |
+| I05 | Surface再試行で新operation IDを作り、副作用が重複し得る。Collection作成も対象 | `NativeArtifactWorkspace.tsx`、`NativeCollectionPanel.tsx` | R06・R09 / B・E / T06 |
+| I06 | 結果カードの初期revision指定を保存/復元後も再使用し、古い版を表示する | `NativeArtifactWorkspace.tsx` | R02・R04 / C・D / T01 |
+| I07 | 数値セルを空欄にして再入力すると文字列になる | `ArtifactSurfacePanel.tsx` | R03 / D / T02 |
+| I08 | Native toolのbinary作成で配列をbyteへ変換せずJSONとして保存する | `http-server.ts`、`postgres-artifact.ts` | R02・R05・R09 / B / T05 |
+| I09 | Bundleのexport/restoreがwork/instructionのKnowledge/Skill参照を落とす | `workspace-completion-bundle-v4.ts`、`schema.ts` | R09・R12 / B / T10 |
+| I10 | Surfaceの結果/data/asset反映、現在state更新とarchive導線が不足 | `GeneratedSurfaceFrame.tsx`、`NativeArtifactWorkspace.tsx` | R06・R08・R09 / E / T06 |
+| I11 | 終了・取消済みRunへの入力が配送されなくても要求をcompletedにする | `domain-api-v1.ts`、`run-control-service.ts` | R15 / B・C / T07 |
+| I12 | 検索結果に仕事・履歴・成果物のopen先がなく、Appにもhandlerが未接続 | `NativeApp.tsx`、`use-native-knowledge-tools.ts` | R14 / B・C / T08 |
+| I13 | Knowledge作成UIがなく、無効Skillが一覧から消えて再有効化できない | `NativeKnowledgeTools.tsx`、Completion service | R12 / B・C / T08 |
+| I14 | 閉じる・Room/資源切替で未保存入力を確認なく破棄する | Artifact/Knowledge/CollectionとAppの離脱処理 | R03・R08・R11・R12 / C・D / T03 |
+| I15 | 表/Knowledgeの保存中に追加入力できるが、完了処理でその入力を消す | editor、`use-native-knowledge-tools.ts` | R03・R12 / C・D / T03 |
+| I16 | Run終端後・仕事確定前の再起動で、復旧経路が結果refを回収しない | `postgres-room-work-worker.ts` | R02・R09 / B / T04 |
+| I17 | 画像/PDFにAgent修正依頼の操作がない | `ArtifactSurfacePanel.tsx`、Room Work入力 | R05 / C・D / T05 |
+| I18 | 一覧の次cursorを使わず、検索した一覧外Knowledgeも開けない | Completion Query/bridge、Knowledge hook | R12・R14 / B・C / T08 |
+| I19 | backend入力の拒否にも入力値検証・添付を行い、空欄/入力済みの双方で失敗する | `NativeInteractionRequests.tsx`、interaction service | R15 / B・C / T07 |
+| I20 | 応答をacceptedへ保存した後・実行claim前に中断すると回収されない | interaction service、maintenance worker、Domain API | R09・R15 / B・C / T07 |
+| I21 | 採用済み管理機能の公開v1接続が不足し、旧専用APIが主経路に残る | Domain API/registry/台帳、Desktop/Browser bridge | R12–R16 / A・B・C / T09 |
+| I22 | 接続確認とIPC受付の間で切替が起こると、別Serverに同ID資源がある場合に誤送信し得る | `native-workspace-target.ts`、Desktop main/preload、Browser bridge | R07・R09 / B・C / T11 |
+| I23 | 必須のRuntime結果配列を`?? []`で補い、欠落と正常な空結果を区別しない | `postgres-room-work-worker.ts`、`RunChatTurnResult`、test fixture | R02・R10 / A・B / T04 |
+
+I22は工程Aで遅延を制御した再現testを作り、成立時は修正、非成立なら保護する実経路と反証testを記録する。I23は現行productionで欠落が起きると断定せず、必須契約とfixtureの一致を回復する。いずれも無言で対象外にしない。
 
 ## 5. 対象・対象外
 
@@ -157,6 +218,24 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 10. Room移動・メンバー変更はServerの現在の権限と版で再検査する。事前の影響確認を権限証明にしない。DMを通常の共有Roomに変換しない。
 11. Coreの承認と外部Backendの入力待ちを型で区別し、仕事・担当・要求ID・期限と対応付ける。親画面のbuttonや`confirmed: true`だけを永続した承認と扱わない。
 
+### 6.1 OSSとして守る責務分離と再利用性
+
+第三者が単一の入口を読めば呼出し先と契約を追え、同じ業務ルールをNative App・外部Client・Runtimeから再利用できる構造にする。データ整合性をcontrollerの呼出し順序だけに依存させない。
+
+| 層 | 持つ責務 | 持ち込まない責務 |
+| --- | --- | --- |
+| React component/hook | 表示、入力buffer、選択・保存中・失敗状態、操作要求の組立て | 権限の最終判断、DB整合性、仕事完了の判定、保存済み結果の捏造 |
+| HTTP/IPC controller・bridge | wire入力検査、認証由来contextと捕捉targetの受渡し、共通サービス呼出し、型付き結果/安全なerrorへの変換 | revision整合・重複排除・参照解決・復旧の独自実装、直接の複数DB/file更新 |
+| Domain Operation / application service | Room認可、対象/版/参照の業務条件、操作の同一性、処理順序とtransaction境界の統括 | HTTP/React/Electronへの依存、別入口専用の例外、永続化方式を混ぜた巨大関数 |
+| Repository / PostgreSQL・File adapter | 条件付き更新、制約、transaction、immutable revision、File Transaction、永続記録の取得 | UI文言・表示状態、利用者が押したbuttonを権限証明とする判断 |
+| Runtime / worker | 認可済み実行の調整、保存証拠の回収、claim・再開・終端の制御 | controllerと重複する業務ルール、結果不明の副作用の無条件再実行 |
+
+- 既存のservice/port/adapterを優先し、今回触る責務だけを適切な既存moduleへ切り出す。`http-server.ts`、`domain-api-v1.ts`、Desktop main、NativeApp周辺にある大きな処理は、今回の変更が関わるルールから分離する。全ファイルの行数削減や新しいフレームワーク導入を目的にしない。
+- 公開入力、Domain入力、保存record、表示用projectionを型で区別する。状態遷移・option・結果を判別可能にし、必須項目を`any`や二重castで通さない。重複した業務条件は一つの責務に集約する。
+- 名前は既存の製品/Domain用語に合わせる。副作用、transaction範囲、版競合、再送、失敗後の状態、互換理由を、型・短い説明・意味のあるtestから第三者が追えるようにする。
+- 認可と整合性は全入口から同じサービスで検査し、DB制約/条件付き更新でも競合を防ぐ。Clientの検査は操作支援であり、Serverの検査を省く根拠にしない。本文・path・frame messageを未信頼入力として扱い、credentialや内部errorを公開結果へ漏らさない。
+- 再利用性は、既存の複数入口が同じサービスを呼び、HTTP/GUIなしでもその業務条件をtestできることを基準にする。仮想の将来用途だけを理由に汎用基盤を増やさない。
+
 ## 7. 要件と工程の対応
 
 | 要件 | 元Phase | 実装工程 | 完了証拠 |
@@ -170,7 +249,7 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 | R07 Room・DM・Server認可 | 5・7 | B–F | 権限外拒否、失効、遅延応答の混入防止 |
 | R08 隔離表示と失敗の扱い | 7 | C・E | sandbox/bridge拒否、fallback、下書き保持 |
 | R09 再接続・再起動・移植 | 5・7 | B・E・F | Event replay、再起動、隔離Export/Restoreとhash |
-| R10 実使用と既存機能回帰 | 5・7 | F | Backend別・Client別・配置別の結果と利用者確認 |
+| R10 実使用と既存機能回帰 | 5・7 | F | AIが行う実画面操作E2E、Backend別・Client別・配置別の結果、OSS品質確認、対象commitの必須CI |
 | R11 日常利用できるReact App | 5 | C・F | 初回接続、Workspace/Room/Agent、依頼・添付・返信・コメント・委譲・停止、設定/復旧へ到達 |
 | R12 Knowledge・Skillの基本管理 | 5 | B・C・F | 一覧/本文/出所/履歴、編集・保管/復元・AI更新固定または有効状態、競合と再表示 |
 | R13 Room構造と人間の権限管理 | 5 | B・C・F | 子Room作成・移動・影響確認、参加/解除・role変更、親制約・最後のOwner・DM拒否 |
@@ -184,6 +263,8 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 2026-09-07版のR01–R10と工程A–Fは全て維持する。R01の対象を評価済みApp全体へ広げ、R11–R17で不足を追加した。旧Cの成果物表示はC.2へそのまま対応し、C.1にAppの補強、C.3とFに整理・完了確認を追加する。D/Eの成果物編集・Surface要件は削減しない。
 
 ## 8. 実装工程
+
+各工程は既存実装の差分修正として実行する。以下の元の実装項目は残すが、成立済みの機能を作り直す指示ではない。Aで指摘と証拠の台帳を固定し、Bで保存・参照・復旧・公開契約、Cで対象固定と管理導線、Dで編集、EでSurface、Fで実使用と全体判定を閉じる。Bの契約が固まる前にC–Eが独自の暫定APIを増やさない。
 
 ### 工程A: 対応表と接続契約の確定
 
@@ -200,12 +281,17 @@ Phase 7では、RoomでAgentが作った文書・表・画像・PDF・HTMLを開
 5. Markdown/PDF/chart部品の必要条件を確認する。表示品質、保守性、ライセンス、bundleへの影響を評価し、既存部品で足りる部分には依存を増やさない。
 6. 各Vに「現行入口→Reactの配置→Query/Operation/Event→共有保存処理→旧呼出し元→削除条件→検証」を記入する。`rg`でsource、test、script、package、型宣言、CSS、生成物の参照を追う。4.1の採用範囲に入口またはAPIがない場合はB/Cの実装項目にする。
 7. Room管理、Knowledge/Skill、検索、設定、自動化、承認/入力待ちの公開契約を既存サービスへ対応付ける。Surface用の承認UIはR15を共用し、画面ごとに別の承認状態を作らない。
+8. I01–I23を現在の実行経路とtestへ結び付ける。I01–I21は再現条件と期待動作を定義し、対応工程で修正前に再現testを用意する。同じ原因のtestはまとめ、Aで全機能のtestを一括実装しない。I22はIPC受付前/後を別々に遅延させ、別Serverに同じworkspace/resource IDを置いた境界で反証も可能にする。製品にtest専用の動作分岐は設けない。
+9. 追加変更を「契約上必要な補強」「不具合修正」「互換」「test fixture修正」に分類する。Vitest/coverage更新、Desktop snapshot、出所/参照の追加を一括で戻さず、I04/I06/I23を生んだ箇所だけ是正する。既存のMigration v126/v127等を削除・書換えしない。
+10. UI test基盤を確認する。静的markupを維持しつつ、実React Componentをmountして操作できる最小のDOM環境を追加する。新しいtest依存が必要ならtest用途に限定し、runtime依存・汎用E2E基盤の全面刷新はしない。
+11. 実装記録に、Rごとの入口→公開契約→保存先→Event→実使用シナリオ→証拠を作る。IのないR13/R16等も空欄を許さない。過去の成功は対象commitを付けた背景資料とし、今回の完成証拠へ転記しない。最終gateは修正後の対象コードに対する証拠で閉じる。
+12. 変更対象の業務ルールと保存不変条件を6.1の各層へ割り当て、controllerの新しい分岐へ押し込まない構成を決める。新しい制約を提案する場合は、製品上の根拠・必要な範囲・解除条件を示し、入力snapshotや条件付き更新など機能を保つ方法で解決できないか確認する。
 
 **境界:** Office互換や任意のアプリ構築へ広げない。HTML生成を学習ループと結合しない。
 
 **検証・セルフレビュー:** 全てのRに入口、保存先、参照元、確認方法があるかを文書で照合する。未確定の技術選定を実装済みと書かない。
 
-**完了・次工程条件:** 必須経路の未分類がない。製品範囲を変える問題があれば先に相談し、それ以外の実装判断は担当が具体化してBへ進む。
+**完了・次工程条件:** 必須経路の未分類がなく、R01–R17/V01–V15/I01–I23を追跡できる。I22の判定方法と再現用境界、最小のComponent test手段、公開契約の不足が具体化されている。製品範囲を変える問題があればその点だけ相談し、通常の実装判断は担当が具体化してBへ進む。
 
 ### 工程B: Domain・Runtime・保存の接続
 
@@ -228,9 +314,52 @@ Phase 5の接続元は`packages/workspace-server/src/workspace-completion-servic
 9. 承認要求/入力待ちの取得、応答、取消・期限切れ、結果再照会を、現在のCore/Run Controlへ接続する。永続したrequest・operation・run・decisionの対応と現在の権限をServerで検証する。旧approve/deny/rollbackの拒否関数や、iframeからの自己申告を新経路の実装に使わない。
 10. 追加schema/Migrationは既存recordに不足する関係・版・履歴だけに限定する。Knowledge/Wiki/Memoryの一括変換や、Vue削除に合わせたDB/file削除は行わない。旧資源を現在のRoomから読めるQuery adapterを用意し、編集不可の形式はその理由と参照方法を示す。
 
+#### B.1 結果参照・仕事確定・復旧を揃える（I04・I16・I23）
+
+- `postgres-room-work-worker.ts`、`workspace-server-store.ts`、`packages/runtime/src/agent-runtime.ts`の通常完了と復旧を同じ参照規則へ接続する。論理Artifactの同一性、保存されたrevision、表示用の現在版pointerを分ける。
+- 同一Runで作成→複数回改訂した場合は、そのRunが確定したrevisionとの関係を保存し、変更後の現在pointerだけで過去結果を不正扱いしない。カードをまとめる場合も中間revisionと出所の証拠は失わない。URI/labelの一致条件を単に削るのではなく、Server側で資源・revision・Room・出所を解決する。
+- 他Run/人による後続編集・改名があっても、元の仕事を失敗にせず元の結果を開ける。他Roomのref、存在しないrevision、取り違えた資源は引き続き拒否する。
+- Runtimeの保存済みRun・event・operation・revisionから結果を再構成し、Run終端後・仕事確定前の停止でも正常完了と同じrefを回収する。既存の`projectChatTurn`等の保存履歴projectionを調べて再利用し、復旧のためにAgentを再実行しない。証拠が足りなければ既存の不明/失敗状態に理由を残す。
+- `RunChatTurnResult`の必須配列は正常時も全て返す。成果物を作らない正常Runは明示的な空配列で成功し、必須配列の欠落・不正refは境界でエラーにする。legacy adapterの実利用がある場合だけadapter内部に明示した互換変換を置く。fixtureを完成した型へ直し、productionで`?? []`を重ねて補わない。
+
+#### B.2 Binaryと可搬参照を保存する（I08・I09）
+
+- Native tool、公開Artifact Operation、adapterのcontent/encoding/MIME境界を統一する。create/reviseで同じ正規化を使い、byte配列は整数0–255・サイズを検査して実byteへ変換する。base64とtextを区別し、実内容と矛盾するMIME・壊れた入力は保存前に拒否する。
+- `workspace-completion-bundle-v4.ts`のexport列、型/検証、`schema.ts`内のimport関数、`workspace-server-store.ts`の参照検査を一続きで変更する。work/instruction両方のresource_refsと参照先のID・版・scopeを保持する。指示の有効条件も現行作成契約と揃え、旧attachment/body条件のまま現行の有効な指示を拒否しない。
+- 適用済みMigrationの本文は変えず、新しい追記Migrationでimport関数等を更新する。空DBへの適用と現行DBからのupgradeを分けて確認する。
+- 旧Bundleに存在しなかったrefと、新Bundleにあるはずのrefの欠落・不正値を区別する。既存versionの互換方針とmanifest検証に従い、必要なversion/feature識別を追加する場合はexport/import/公開schemaを同時に更新する。旧Bundleの正規な欠如だけを空として扱い、既存資源の参照を推測で生成しない。
+- 別Serverへの復元では接続URLを再解決し、元Serverの一時URLや認証情報を持ち込まない。不正参照を含むimportは既存のtransaction/abort/cleanupで失敗させ、部分的な成功にしない。
+
+#### B.3 公開契約と送信先を固定する（I12・I13・I18・I21・I22）
+
+公開接続の対象は次の表の全行。既存契約があれば接続と不整合を直し、未実装分だけ追加する。公開の名前は既存registry・生成規則へ合わせ、ここに仮のURLを正規仕様として新設しない。
+
+| 責務 | Query | Operation / Event | Clientでの照合 |
+| --- | --- | --- | --- |
+| Knowledge/Skillと旧資源 | scope・kind・archive状態・cursorを持つ一覧、detail/body/version/evidence、Skill本文 | Knowledge作成/編集/保管・復元/固定、Skill本文編集・有効状態、旧資源の対応済み管理操作。確定後に公開Event | 管理画面、仕事へのref、全ページ、再接続 |
+| Room/人間membership | 移動・membership影響確認、現在の権限/版 | 既存作成/移動/参加/解除/role。現在版・権限の再検査とEvent | 既存Room管理の公開接続を確認し、重複新設しない |
+| Room検索 | 認可した仕事/履歴/Artifact/Knowledge、kindとopen先ref | 検索はreadのみ。更新通知後は必要なQueryを再取得 | 抜粋の認可、旧履歴、削除済み、一覧外の結果 |
+| 必要な設定 | 表示/出力言語、学習基本状態とWorkspace/Room scope | 既存設定変更/Room上書き解除とEvent。端末local preferenceは既存の保存責務を維持 | 対象Server/Account/scopeの一致、再起動 |
+| 既存自動化 | 一覧・次回予定・管理状態・履歴 | 停止/再開とEvent。実行中Run停止を代行しない | Server再取得・旧状態からの操作・権限失効 |
+| 承認/入力・操作再照会 | pending/accepted/executing/結果と、本人に認可された同一操作の保存結果 | 応答/取消/実行claim/終端/中断の既存契約を補完 | 受付と実行結果、同一操作の再送、再起動 |
+
+- `packages/domain-api/src/index.ts`、`packages/domain-operations/src/operations/`、公開registry/catalog、生成Client/spec/台帳、Server dispatch、Desktop/Browser bridgeを同時に揃える。処理がない項目を公開catalogへ広告しない。旧互換入口は同じサービスへ委譲し、利用元確認なしに削除しない。
+- 管理用Skill一覧は実行時の有効Skill検索と分け、無効/保管済みも必要な権限で取得できるようにする。ページング前にscope/kind等を絞り、Room資源で埋まった先頭ページからWorkspace資源をClientだけで探す形にしない。
+- Desktopは更新要求自体に捕捉したconnection/workspace targetを含め、preloadの検査を経てmainで照合し、そのsnapshotに束縛したclientで実行する。呼出し時のactive接続への読替えは禁止する。Browserも署名・認証を含む送信先を同じ要求targetに固定する。
+- main受付前の不一致は送信前に拒否する。受付後の切替で、既に正しい旧targetへ出した操作を新targetへ再送しない。応答と結果再照会は旧target/operationに対応付け、新画面へ混ぜない。I22の再現が非成立でも、実際の保護をT11で固定する。
+
+#### B.4 同一操作と承認・入力の復旧（I05・I11・I19・I20）
+
+- 一回の利用者操作にtarget・資源/版・action・入力内容・operation IDを結び付け、送信失敗後の再試行では同じIDと同じ入力を使う。別の明示操作だけに新IDを発行する。内容が変わった同一IDの要求は拒否する。
+- Client再起動後の結果照会は既存Operation/interaction/Domain結果の永続記録から行う。本人に認可された対象資源・actionの操作履歴から該当するoperationを解決し、同じIDの結果を再表示する。操作を一意に特定できなければ結果不明として再確認へ戻し、入力が似ているだけで同一操作と推測しない。不足するread経路だけ公開契約へ追加する。Clientにcredentialや本文を保存する汎用outbox、新しいjob基盤は作らず、結果不明の作成を新IDで自動再送しない。
+- 入力応答optionの意味をServer発行の型で伝える。`submit_input`だけ入力値を検証・添付し、denyでは空欄検証も入力添付もしない。ラベル文字列から判断しない。Serverはoption IDから再判定する。
+- Run Controlの返り値と保存された配送証拠を照合する。終端Runへのno-op/replayを新しい配送成功と数えず、停止/取消/期限切れ/非対応は既存の失敗・取消等の状態と理由で示す。過去に同じ操作で実配送済みの再照会だけを成功の再表示にする。
+- `accepted`の保存後にプロセスやEvent配信が落ちても、既存maintenance/claim経路が回収する。実行前に同じ要求の現在権限、期限、停止、対象版を再検査し、未実行で許可された操作だけを同じIDで一度claimする。`executing`の副作用が不明なら従来の中断/失敗扱いを維持し、無条件に再実行しない。
+- `workspace-interaction-request-service.ts`、`workspace-interaction-request-maintenance-worker.ts`、`domain-api-v1.ts`、`run-control-service.ts`で受付・実行・Event・結果照会を整合させる。応答後の再接続もポーリング/公開Event再取得で追跡し、受付済みのボタンを再送不能のまま放置しない。
+
 **検証:** Artifact/Domain/RuntimeとR12–R16のfocused test、型検査、実PGで初期版・競合・再送・中断復旧・認可拒否・binaryの往復を確認する。Room影響確認後の版変更、承認の二重応答、検索結果への非許可情報の混入も対象とする。
 
-**セルフレビュー:** schemaが存在するだけで未接続のcommandを広告していないか。target commandとイベントが同じoperationを指すか。初回保存前の内容が失われないか。
+**セルフレビュー:** schemaが存在するだけで未接続のcommandを広告していないか。target commandとイベントが同じoperationを指すか。初回保存前の内容が失われないか。厳格な検査を削ってI04を隠していないか。正常な空結果と壊れた戻り値、未実行と結果不明の副作用を区別しているか。HTTP/IPC/Runtimeの入口に同じ業務条件を複製していないか。transaction・認可・条件付き更新が適切なサービス/保存層で守られているか。
 
 **完了・次工程条件:** R03–R09・R12–R16のServer側経路が実DB・fileで成立し、C/D/Eが使う契約を固定できる。既存サービスの未変更部分は再実装せず、不足する公開接続を閉じる。画面完成とはまだ判定しない。
 
@@ -252,6 +381,10 @@ Phase 5の接続元は`packages/workspace-server/src/workspace-completion-servic
 8. 仕事の詳細から、実行状態、利用した知識、ツール/変更の要約、承認/入力待ちを開く。要求の対象・影響・期限と許可された選択肢を表示し、応答→受付→実行結果を分ける。再起動後はServerの未解決要求を読み、停止後・期限切れ・他人/別Runへの応答を拒否する。資源を持たない旧汎用「元に戻す」は表示しない。
 9. Roomの既存自動化を一覧し、次回予定・有効状態・最近の実行結果を確認して停止/再開できるようにする。予約停止と実行中の仕事の停止を区別し、後者は現在のRun Controlへ案内する。新しいschedulerやjob作成editorは作らない。
 10. 依頼・返信・コメントの添付、コピー、scroll、keyboard、フォーカス復帰、読み込み/失敗表示を確認する。狭い画面や長いRoom一覧・履歴でも通常の操作に到達できる。UIだけで有効になる架空の承認/学習feedbackは置かない。
+11. `NativeKnowledgeTools.tsx`とhookにKnowledge新規作成、全ページへの到達、保管/無効Skillの再表示と再有効化をつなぐ。検索からは一覧への事前読み込みを必須にせず、返された資源refをdetail Queryで再認可する。旧Wikiのmetadata・履歴・種別を保持し、旧Memoryの読取/保管経路もP5-03で確認する。
+12. `NativeApp.tsx`に型付き検索先のhandlerを接続し、仕事/旧履歴/Artifact/Knowledgeごとの入口へ遷移する。別Roomへ黙って切替えたり、仕事のない履歴を架空の仕事へ変換したりしない。削除・失効済みは理由を表示する。
+13. 下書き保護は成果物・Knowledge/Skill・Collection・依頼入力・対象設定の共通の離脱方針に揃える。通常の閉じる、資源/Room/Workspace切替、アプリの通常終了に保存・破棄・戻るを接続する。OS強制終了後の未保存本文の永続復旧を新しい必須仕様にはしない。権限失効時には保存を許さず、別scopeへの持出しや共有キャッシュ保存で代替しない。
+14. `NativeInteractionRequests.tsx`はB.4のoption型と保存結果を使い、拒否は入力不要、受付と実行完了は別表示にする。再接続後にaccepted/executingも再照会し、停止・期限切れ・失敗を完了表示で隠さない。
 
 #### C.2 成果物の表示とPhase 7への接続
 
@@ -261,10 +394,12 @@ Phase 5の接続元は`packages/workspace-server/src/workspace-completion-servic
 4. 閉じる・再表示・狭い画面・keyboard操作を用意する。編集中はAgentの新しい成果物が表示を奪わない。
 5. ダウンロードは実byte・適切なfilename/MIMEを使う。Object URL、iframe、購読を切替・権限失効・終了時に解放する。
 6. production entryとbuild graphを確認し、対象導線が旧Vue画面へ戻らないことを確かめる。
+7. 同じconnection/workspace/Roomの再renderやEventではcontroller/gatewayを再生成・初期化しない。依存をprimitiveなtargetの同一性で安定させ、資源変更時は離脱処理を経て別の編集状態を開く。`key`の追加だけでdirty stateを破棄する修正にはしない。
+8. 結果カードからの初回表示は指定された過去版を尊重する。人が保存/復元した後は返された新revisionを表示中の版・現在版へ反映する。元の仕事の保存済みrefと履歴は書き換えず、次の編集も実際に読んだ版から行う。
 
 #### C.3 Vue整理の開始
 
-V01–V15ごとに採用機能のReact入口と検証結果を記録する。共有する純粋関数をVue hookから分離し、不要な旧画面は参照を解消した単位で削除する。D/Eで利用する抽出前の処理は必要な部分を先に移し、Vueを保険用画面として残さない。最終的な依存・test設定・CSS・型宣言の整理と削除後の検証はFで閉じる。
+V01–V15ごとに採用機能のReact入口と検証結果を記録する。既に削除されたVueは再導入しない。残存する専用処理があれば共有関数の利用元を確認して整理し、移行漏れはReact/共通契約へ補う。最終的な依存・test設定・CSS・型宣言の確認と、削除後の挙動をFで閉じる。
 
 **検証:** Component/bridge test、Web/Desktop typecheck・build。C.1は管理操作・draft・権限表示・承認状態・検索の切替を確認し、C.2は対象形式を確認する。実Electronの統合確認は10章のP5/P7シナリオへまとめる。
 
@@ -287,6 +422,11 @@ V01–V15ごとに採用機能のReact入口と検証結果を記録する。共
 5. 元の仕事を制御できる人はその仕事への追加指示を使う。それ以外は既存権限に従う別の依頼とし、DM共有や仕事の制御を迂回しない。
 6. 保存成功・Agent修正成功はDB/file/新revisionの確定後に表示する。Backendが未対応なら対応不可を返し、元の内容を保つ。
 7. 修正要求に指定した版が既に古い場合は、現在版への黙った読替え・選択箇所の誤適用を避ける。対象と新旧版を示して再確認へ戻す。構造化した表は列ID/row IDを保持し、行番号だけで別行を更新しない。
+8. editorはtarget/resource ID、読み始めたbase revision/version、buffer、dirty、送信中snapshotを一組として持つ。refreshでserver snapshotだけが更新されてもdirty bufferとbaseを進めない。Collectionのversion Mapをdirty rowのbaseとして代用しない。
+9. 保存要求は捕捉した対象とbaseから組み立て、現在選択中のpropsから資源IDを補完しない。競合なら最新内容と比較できる状態で保持し、再読み込み/破棄は明示操作にする。成功時は送信した対象・世代のbufferだけを確定し、別資源のbufferを消さない。
+10. 保存中は当該bufferの本文・表・Knowledge/Skill編集だけを一時停止し、二度押しを同期的に防ぐ。IME確定前に送信せず、保存完了まで画面離脱で結果を取り違えない。他の仕事・Room・閲覧を一律に止めない。追加入力を許す実装を選ぶ場合は送信snapshotと新bufferを分けて保持し、機能を保てる既存実装があれば一律の無効化へ戻さない。
+11. 表の型は現在セルの値だけで推測せず、保存schemaまたは読み込み時の列型を保持する。数値→空欄→数値、0、false、nullを区別し、無効な数値を文字列やNaNへ黙って変換しない。schema不明/安定row IDなしは既存の読取制限と理由を維持する。
+12. 画像/PDFにも共通のAgent修正依頼欄を置き、対象ファイルref・revision・説明をRoom Workへ渡す。画像/PDFの手動編集は追加しない。実Backendの対応能力を検査し、未対応の説明と実際に対応する修正経路の検証を分ける。
 
 **検証:** 空文書、型付きセル、IME、保存失敗、切替、二人とAgentの競合、対象版指定の修正、復元をComponentと実Client/PGで確認する。
 
@@ -312,6 +452,11 @@ V01–V15ごとに採用機能のReact入口と検証結果を記録する。共
 8. 旧form.submit/table.patch等の未接続経路を経由せず、実装済みの保存commandに対応する入力部品だけを提供する。必須の文書/表/フォームは未対応表示で完了にせず、Bの接続を完成させる。Collectionの入力変換・型・版制御を再利用し、専用業務アプリ群を必須にしない。
 9. chartは実データを軸・値・単位とともに描画し、絞り込みの結果が表の値と一致することを確認する。任意種類のグラフeditorや全チャート種別を増やさない。タイトル/JSON/参照IDだけの表示を完成にしない。
 10. Surfaceのactionが承認を要する場合はR15の同じ要求/応答経路を使う。親の明示操作であっても、現在の要求・対象版・権限を再検査し、Surface更新後に古い承認で別操作を実行しない。
+11. `GeneratedSurfaceActionRequest`とcallbackの結果型を、B.4のoperation ID・相関ID・保存結果/失敗へ接続する。iframeの相関IDは権限やoperation IDとして盲信せず、親が保持する操作へ束縛する。request→responseの対応を検査し、承認待ちは保存成功として返さない。
+12. 保存完了後は新しいデータ/版を公開Queryから再取得し、対応するframeと親画面へ返す。別actionの失敗・旧frameの応答を現在のフォームへ適用しない。通常のdata更新でframeを作り直して未送信入力を消すことも避ける。承認が必要なactionも終端結果まで追跡して反映する。
+13. bundle内のassetは認可済みの同じrevisionから読み、検証済みpath・MIME・サイズで参照を解決する。外部URL、path traversal、active content、credentialの持込みを拒否する。表示とHTML/ZIP書出しで必要assetの整合を確認し、切替・失効・終了時にObject URL等を解放する。CSPの任意network解禁で表示を直さない。
+14. pin/unpin/archiveの成功時はServerが返すstateで一覧と開いているdetailを更新する。archive操作を親UIへ用意し、archive後は保存済み履歴を保持してactionを停止する。pin直後のunpin、再表示、旧版action拒否まで通す。
+15. Collectionの追加/更新/削除も同じ再送規則を使う。作成中のrecord IDとoperation IDを保持し、応答消失で別recordを作らない。I02のdirty base・型付きbufferをDと共用し、refreshの自動version更新で競合検査を迂回しない。
 
 **検証:** bundle検査、frameなりすまし、CSP/sandbox、入力改ざん、二重click、応答消失、revision更新、承認、実DB保存と再表示を確認する。
 
@@ -319,27 +464,31 @@ V01–V15ごとに採用機能のReact入口と検証結果を記録する。共
 
 **完了・次工程条件:** R06–R09が実Clientから閉じ、Fで全体を通せる。
 
-### 工程F: 統合E2E・dogfooding・完了判定
+### 工程F: 統合E2E・品質確認・完了判定
 
-**目的:** 合意した体験を実環境で一続きに確認する。
+**目的:** AIが実アプリを操作して合意した全必須機能を一つずつ確認し、コード品質と必須CIまで揃えて、利用者の機能検証なしで完了を判定する。
 
 **対象:** 本書全体、既存回帰test、実Electron・実PostgreSQL・実ファイル・実Agent、既存Workspace Export/Restore。
 
 **作業:**
 
 1. V01–V15の全項目を、Reactで検証済み/不要として削除/後続Phaseへ機能を引継ぎ、のいずれかで閉じる。後続扱いでも旧Vue実装を実行経路やテスト専用runtimeとして温存しない。保存済みデータと共有Coreは独立して保持する。
-2. `App.vue`、`AppWorkspace.vue`、旧Vue部品、Vue専用hookを削除し、抽出した処理の利用元と意味のあるtestを残す。`CustomViewFrame.test.ts`、`CollectionWorkspaceView.test.ts`等の認可・入力・隔離の検証を対応するReact/共通契約へ移し、単に失敗するtestを外さない。廃止機能だけのtestは削除理由を対応表に記録する。
+2. `App.vue`、`AppWorkspace.vue`等の削除済みsourceは履歴と現在のbuild graphで確認する。残存がある場合だけ用途を確かめて整理する。旧`CustomViewFrame.test.ts`、`CollectionWorkspaceView.test.ts`等が担った認可・入力・隔離の検証がReact/共通契約で実行できることを照合し、廃止機能だけのtestは削除理由を対応表に記録する。
 3. ルートと`apps/web/package.json`の不要Vue依存、`vitest.config.ts`のVue plugin、WebのVue型宣言とtsconfig対象、Vue前提のscript・生成物を整理し、lockfileを正規手順で更新する。Vueが推移依存として残る場合も由来を確認し、Samuraiのruntime/testの直接依存が残っていないことを説明する。
 4. `apps/web/src/styles/app.css`から未使用の旧selectorだけを削除する。Reactと共用する変数・基礎styleは残し、Sidebar・dialog・入力・狭い画面を再確認する。歴史的な検証記録にVueという語が残ることを実装残存と混同しない。現在の起動案内・検証script・有効な文書リンクは更新する。
 5. 削除後に、隔離した作業用環境でlockfileに基づく`pnpm install --frozen-lockfile`と対象typecheck/test/buildを一回まとめて実行する。ネットワーク/cache不足は実行不能と記録し、手元の古いnode_modulesで成功したことだけで依存整理完了にしない。既存開発環境のnode_modulesや利用者データを検証のために消さない。
-6. 最終bundleで10章のP5/P7シナリオを実行する。既存の成功証拠は変更との関係を確認して再利用し、変更した経路と削除の影響を受ける入口を実画面で通す。途中で使った旧Desktop bundleを最終証拠にしない。
+6. 実装担当AIが最終bundleのElectronを起動し、Computer Use/Browser Use等で10章のP5/P7/Tシナリオを操作する。各機能を画面の入口→入力/クリック→結果表示→保存先照合→再表示まで通し、利用者へ未実行手順を渡して代替しない。過去の成功は手順・調査の参考に留め、今回の完成証拠へ転記しない。同じ最終コードを対象とした今回の証拠は複数項目で共用できる。途中で使った旧Desktop bundleを最終証拠にしない。
 7. 実装者のセルフレビュー後、利用可能なら`.codex/agents/reviewer.toml`と`completion_judge.toml`の役割による読み取り専用レビューを行う。範囲追加をレビューで勝手に決めず、指摘を修正した範囲だけ再検証する。
+8. I01–I23の修正/反証とR01–R17の証拠を照合する。Iが解消していても、元シナリオの必須操作・公開契約・再起動/移植の未検証があれば技術完了にしない。古い成功reportを上書きして修正後の成功に見せず、今回の条件・結果を追記して区別する。
+9. P5-08もAIが担当し、操作の到達性、keyboard/IME、狭い画面、失敗表示、フォーカス復帰を確認する。対象内の客観的な操作不良を修正し、影響範囲だけ再検証する。利用者の見た目・好みの主観評価は任意のfeedbackとし、完了を止める条件にしない。
+10. 9.1の品質基準を第三者視点でセルフレビューし、責務漏れ・重複した業務ルール・エラー隠蔽・セキュリティ上の不備を解消する。レビュー自体をE2Eの代替にしない。確認済みの対象内問題は直し、無関係な抽象化・好みの書換えだけで工程を繰り返さない。
+11. AIが同じ最終実装commitの既存必須CIを起動・追跡し、失敗原因を修正して必要な範囲を再実行する。job名、実行URL、対象SHA、success/failed/skippedを報告する。CI未実行・必須jobのskip・異なるcommitの成功では本プランを完了にしない。
 
-**完了・次工程条件:** R01–R17とV01–V15の処置・証拠・未検証を一覧化し、11章のPhase別判定と利用者の操作確認へ渡す。必須の未接続経路やVue依存が残る間はPhase 5を閉じない。最終操作確認とコード変更の承認後にのみ、依頼されたGit操作へ進む。Phase 8/9/10は開始しない。
+**完了・次工程条件:** R01–R17/V01–V15/I01–I23とP5/P7/Tの証拠、9.1の品質確認、対象commitの必須CI成功が揃い、11章を満たす。必須の未接続・不具合・未検証があれば閉じない。本人の機能検証や主観評価は待たない。完了後に、別途許可されたmerge等へ進める状態として報告し、Phase 8/9/10の実装はこの作業へ混ぜない。
 
 ## 9. 参照資料と品質上の注意
 
-2026-09-07に以下の公式資料・公開sourceを読んだ。2026-09-08の補強ではこの参照を引き継ぎ、Samuraiの現行sourceと要件を再確認した。参照先のmainは変わるため、実装開始時には使用するcommitを記録する。外部アプリ自体の操作検証は行っていない。
+初回計画の体験上の参照を以下に残す。2026-09-09の改訂ではMulmoClaudeのMarkdown ViewとBuzzのChannelCanvasの公開sourceを読み、保存buffer・対象切替・保存中の入力抑止に絞って確認した。2026-09-10はその参照結果を引き継ぐ。MulmoClaude HTML Viewの再取得は失敗したため、再読済みと扱わない。残りは初回計画の参照記録であり、本改訂での実アプリ操作の証拠ではない。mainは変化するため、実装開始時には利用するsourceのcommitを記録する。
 
 | 参照 | 確認した点 | Samuraiへの適用 |
 | --- | --- | --- |
@@ -350,13 +499,34 @@ V01–V15ごとに採用機能のReact入口と検証結果を記録する。共
 | [OpenClaw Session Dashboards](https://docs.openclaw.ai/web/dashboards) | 必要なwidgetを表示・pin・更新し、人が操作する | 操作できるSurfaceと復元。Gateway/Sessionによる所有方式は移植しない |
 | [Buzz ChannelCanvas](https://github.com/block/buzz/blob/main/desktop/src/features/channels/ui/ChannelCanvas.tsx) | Markdownの表示、編集draft、保存・取消、canEdit/archive | 人による文章編集と権限による操作表示。Nostr/Event保存方式は移植しない |
 
+今回確認した品質上の参考は、MulmoClaudeの`persistMarkdown`が保存した文書と現在の選択を照合して別文書への反映を避ける点、保存失敗時に編集を閉じない点と、Buzzが保存中のtextareaを無効にする点である。Samuraiでは文書pathだけでは足りず、connection/workspace/Room/resource/base revisionを固定し、Serverの認可と競合制御へ通す。参照OSSにも今回と同等の復旧・競合保証があるとは推定せず、該当する書き方だけを参考にする。
+
 失敗しやすい点は、Vue部品の存在をReact完成と誤認すること、汎用Office編集へ拡大すること、Backendで未対応のtoolをUIだけ表示すること、他者変更を保存時に上書きすること、フォームの入力状態と保存データを混同すること、HTMLへ親の権限を渡すことである。
 
 Phase 5では、旧画面の削除を理由に知識・権限・保存APIをまとめて消すこと、逆に要否を判断せず全機能を移すことの両方を避ける。Reactの管理画面もChatと同じ認可を使い、設定変更や検索結果の表示だけが別の保護境界にならないようにする。
 
+今回特に避ける修正は、`key`変更だけによる下書き破棄、refreshでのexpected version更新、既存配列欠落の空補完、古いrefを一覧から落とすだけの仕事確定、再送ごとのUUID発行、保存後のiframe丸ごと再生成、権限確認前後のactive接続読替えである。小さく見える修正でも保存・表示・証拠の整合が崩れる。逆にCRDT、汎用状態管理基盤、別DB、任意の処理を再実行するoutboxへ拡大しない。
+
+### 9.1 OSSコード品質の受入基準
+
+次を今回変更する責務の受入基準にし、工程ごとのセルフレビューとFの最終確認で証拠を残す。全repositoryの書換えや、主観的な命名の好みを無期限に直すgateではない。
+
+| 観点 | 完了時に確認すること | 確認方法 |
+| --- | --- | --- |
+| 製品との整合 | 合意した機能を維持し、追加制約が不具合回避だけの都合になっていない | 変更前後の利用者操作、制約の理由/範囲/解除条件、該当RのE2Eを照合 |
+| 薄いcontroller | HTTP/IPC入口は検証・context生成・サービス呼出し・結果変換へ限定され、業務条件と保存整合を抱えない | 変更経路と呼出し先を追い、6.1の責務表と差分を照合 |
+| 再利用性 | Native/公開API/Runtimeが共通の業務サービスを使い、同じ認可・版・再送規則を再実装していない | 関連する複数入口の契約testと、HTTP/GUIに依存しないservice test |
+| 可読性・保守性 | 型、名前、moduleの責務、正常/失敗/中断の流れが明確で、巨大な分岐・循環依存・型検査回避を追加していない | lint/typecheck、変更対象の境界検査、第三者が追える説明とfocused test |
+| 整合性・セキュリティ | transaction/条件付き更新/不変履歴を守り、全入口で認可。frame/path/入力改ざん、誤送信、秘密値漏出を防ぐ | T01–T11の該当条件、実PG、拒否経路、差分のセキュリティ確認 |
+| 失敗の透明性 | 欠損・競合・結果不明を空値や成功に変換せず、利用者と実装者が次の操作を判断できる | 失敗test、実画面のerror/retry表示、保存状態との照合 |
+
+受入基準に反する確認済みの設計逸脱・整合性不良・セキュリティ不備は修正する。任意の整形や将来の汎用化だけの提案は後続候補として分離し、完成後に次のPhaseへ進める範囲を保つ。
+
 ## 10. レビューと検証
 
 ### 10.1 選定した検証
+
+`samurai-plan-creator`の検証選定ガイドを読了し、現行`package.json`、`.github/workflows/ci.yml`、対象testを照合した。表の既存commandは実在する。新しいTシナリオは既存test/verifierの責務に追加し、作成前の専用commandが存在するとは記載しない。全てのコード検証は本改訂では未実行。
 
 | 検証 | 理由・対象・command | 実行時期と成功条件 |
 | --- | --- | --- |
@@ -364,17 +534,23 @@ Phase 5では、旧画面の削除を理由に知識・権限・保存APIをま�
 | lint | `pnpm lint`。変更責務のsource品質 | 実装のまとまりで一回。失敗は修正。小変更ごとには反復しない |
 | 型 | `pnpm --filter @samurai-agent/web --filter @samurai-agent/desktop --filter @samurai-agent/server --filter @samurai-agent/workspace-server --filter @samurai-agent/room-permissions --filter @samurai-agent/runtime --filter @samurai-agent/core-schemas --filter @samurai-agent/domain-api --filter @samurai-agent/domain-operations run typecheck` | 共有型変更後と最終。実際に影響したpackageへ絞る |
 | Artifact/Domain focused | `pnpm core:test:artifact`、`pnpm exec vitest run packages/domain-operations/src/operations/artifact/artifact-revise.operation.test.ts packages/domain-operations/src/operations/artifact/artifact-restore-revision.operation.test.ts packages/runtime/src/generated-surface-action-ingress.test.ts`と今回追加する対象test | B/D/E。競合・復旧・再送・失敗を確認。fake testは実PGの代わりにしない |
-| Client/bridge focused | `RoomWorkSurface.test.ts`、`use-native-app.test.ts`、`NativeApp.test.ts`、`apps/web/src/lib/api.test.ts`、`apps/desktop/src/preload.test.ts`、今回のrenderer/request test | C–E。対象を指定して`pnpm exec vitest run`。draft・切替・操作・権限表示を確認 |
+| Client/bridge focused | `apps/web/src/native-app/ArtifactSurfacePanel.test.ts`、`native-artifact-workspace.test.ts`、`native-collection-panel.test.ts`、`native-knowledge-tools.test.ts`、`native-interaction-requests.test.ts`、`GeneratedSurfaceFrame.test.ts`、`apps/web/src/lib/workspace-browser-bridge.test.ts`、`apps/desktop/src/preload.test.ts`と追加するmain送信先test | C–E。対象指定の`pnpm exec vitest run`。DOM上で編集/再render/遅延Promise/保存/離脱を操作する。静的markupやhelperの呼出しだけではT01–T03を完了にしない |
 | Phase 5管理・契約focused | `apps/web/src/lib/workspace-room-tree.test.ts`、`workspace-room-capabilities.test.ts`、`apps/server/src/workspace-server/http-server-completion.test.ts`、`completion-contract.test.ts`、`packages/room-permissions/src/index.test.ts`、今回のReact管理/検索/設定/承認test | B/C。実際に変更した責務に絞り、基本管理の永続化・競合・認可・要求IDを確認。静的markupだけを操作検証としない |
 | 自動化・共有入力の回帰 | `apps/server/src/adapters/runtime/postgres-runtime-automation.test.ts`、`apps/web/src/lib/collection-view-state.test.ts`と変更対象の既存test | B/C/E。job管理と型付き入力に変更がある時だけ実行。scheduler本体を変更しなければ全学習gateを反復しない |
+| 仕事確定・interaction・移植focused | `apps/server/src/workers/postgres-room-work-worker.test.ts`、`apps/server/src/workspace-server/run-control-service.test.ts`、`packages/workspace-server/src/workspace-interaction-request-service.test.ts`、`workspace-server-store.test.ts`、`workspace-completion-bundle-v4.test.ts`とmaintenance worker test | B。T04/T07/T10の正常・中断・欠損を検証。保存済み証拠からの復旧と現在版からの推測を区別する。実DB検証は別に必要 |
 | 契約とbundle検査 | `pnpm core:domain-contracts:verify`、`pnpm phase01:verify`、`pnpm core:test:generated-surface` | B/Eの共有契約変更後。生成物と実装が一致し、悪いbundleを拒否 |
 | Build | `pnpm --filter @samurai-agent/web run build`、`pnpm desktop:build`、`pnpm desktop:verify` | UI/bridge統合後。React production entryとDesktop bundleを確認 |
 | Vue削除・依存整合性 | V01–V15の参照調査、隔離環境の`pnpm install --frozen-lockfile`、最終typecheck/test/build | F。旧専用source・直接依存・型/plugin設定が残らず、共有機能の検証も成立。環境不足は削除gateの未検証として残す |
 | 実PG・File Integration | 既存`pnpm verify:postgres-deep`と、今回の認可・revision・action・移植の追加シナリオ | B/F。隔離環境でDBとfileとeventを照合。実行条件不足は未検証 |
-| 実Client/Agent E2E | 10.2。実Electron、実Native+Gemini、実保存 | F。各形式と主要操作を画面から通す |
+| 実Client/Agent E2E | 10.2。AIが実Electron、実Native+Gemini、実保存を操作 | F。全必須機能を画面の入口から通し、機能別の証拠を残す。利用者操作で代替しない |
 | Accessibility | keyboard、フォーカス復帰、入力名、エラー通知、IME、狭い画面 | C–FのComponent/実UI確認にまとめる |
 | 依存追加時の確認 | 新規依存のlicense、保守状態、`pnpm audit`結果の影響確認 | 依存選定時のみ。既知問題・未対応を記録 |
-| 既存CI | `.github/workflows/ci.yml`の3OS契約/型検査とLinux統合gate | PR時。重い共通検証を各工程で重複しない。CI成功を3OSのNative GUI確認と同一視しない |
+| OSS品質・責務境界 | 6.1/9.1と変更対象のservice/controller/adapter、既存Architecture gate | 各工程とF。責務分離・再利用性・可読性・安全性を確認。lint成功だけで設計品質を代替しない |
+| 既存必須CI | `.github/workflows/ci.yml`と対象PR/branchに設定された必須check。3OS契約/型検査、Linux test/build/audit、PG等 | AIがFで最終実装commitの実行と全必須checkの成功を確認。未実行/失敗/skipは全体未完了。CI成功を3OSのNative GUI確認と同一視しない |
+
+採用する検証の分担は、純粋変換/状態遷移をfocused、mount後の入力保護をComponent、保存・認可・Migration・中断・移植を実PG/file、画面→Server→再表示を実Clientとする。最終の全体typecheck/test/audit/buildは既存CIへまとめ、ローカルでは変更packageと技術E2Eに必要なbuildを行う。共有契約検査とPG verifierに重複がある場合は実行項目を確認して一方の証拠を参照する。追加変更、失敗、未解決の懸念がない同一条件の再実行はしない。
+
+新しいtestは既存CIのtest収集または既存PG verifierへ接続し、ローカルだけで成功する未収載testにしない。CIのskip・閾値緩和・必須契約の削除は修正方法にしない。今回変更しない性能基盤の負荷試験や、全OSのGUI検証を追加の必須gateにはしない。実行できない検証は理由・影響するR・担当を残し、そのgateを未完了とする。
 
 `core:test:generated-surface`等には既存reportを書き出すscriptがある。実装時は事前に副作用を確認し、他作業の証拠を上書きしない形で結果を保存する。今回の計画作成中はこれらのコード検証を実行しない。
 
@@ -383,6 +559,8 @@ Phase 5では、旧画面の削除を理由に知識・権限・保存APIをま�
 ### 10.2 実使用シナリオ
 
 本番や既存データへ書き込まず、repo外の専用DB・storage・Account・Roomを用いる。
+
+**実行担当は全シナリオでAI。** Electronの実ウィンドウ/rendererをComputer Use/Browser Use等で操作し、機能ごとに前提→操作→期待結果→画面の実結果→DB/file/Event→再表示を記録する。APIはfixture準備と保存結果の照合に使えるが、画面から行う必須操作をAPI直呼びに置き換えない。確認dialog、保存失敗、再接続も実画面で扱う。主観を伴う見た目の好みは確認対象外だが、buttonに到達できる、入力を失わない、keyboard/IMEが使える等はAIが検証する。
 
 #### Phase 5: App全体の確認
 
@@ -395,7 +573,7 @@ Phase 5では、旧画面の削除を理由に知識・権限・保存APIをま�
 | P5-05 | 仕事の証拠と未解決の承認/入力要求を開き、許可・拒否等の応答後に再表示する | 隔離Domain操作から実際の要求を作り、永続decisionと実行/拒否結果を照合。再送・別Account・期限切れ・停止後・再接続で誤実行しない。実外部CLI由来の要求は別証拠 |
 | P5-06 | 既存jobの予定・履歴を開き、停止→再取得→再開する | 実Serverのjob管理状態と履歴が一致。予約の停止を実行中Runの停止と誤表示しない |
 | P5-07 | 複数Serverの切替、一方のoffline、再接続、App/Server再起動、権限失効、既存Workspaceの再表示 | 設定/知識/検索/draft/iframeの混入なし。旧データを読め、Vueを削除した最終bundleだけで成立 |
-| P5-08 | ドパガキくんが主要な仕事と補助機能を操作する | Chatへ戻れる、必要な操作が見つかる、長い一覧と狭い画面でも操作可能。指摘を対象内/後続へ分け、合意した必須問題を解消 |
+| P5-08 | AIが実Electronで主要な仕事と全必須補助機能を一つずつ操作し、P5/P7/Tの機能別記録を完成させる | Chatへの復帰、必要な操作への到達、長い一覧、狭い画面、keyboard/IME、失敗/確認dialogを含め実動作を確認。仕様上の操作不良を解消し、利用者の機能検証を要求しない |
 
 P5-01の既存仕事経路は変更・削除の影響に応じてまとめて確認する。新しい管理操作はモックだけで閉じず、P5-02–P5-06で実Serverの結果を照合する。Browserは共有React画面と署名済みbridgeの代表操作・失効を確認し、Desktop専用のcredential/移転機能をBrowserで成功と扱わない。
 
@@ -416,15 +594,45 @@ P5-01の既存仕事経路は変更・削除の影響に応じてまとめて確
 
 追加重点: 6の保存操作では組込みフォーム/Collection表と生成HTMLの双方を実DBへ通す。承認が必要なactionはP5-05と同じ実要求/応答を使い、Surface更新後の古い承認を拒否する。旧版指定のAgent修正と、旧保存経路に頼らないことも確認する。P5と重なる再接続・権限・承認は共通シナリオの証拠を使い、同じ条件で重複実行しない。
 
-実装担当はNative+Geminiを使用し、provider fallbackで検証結果を置き換えない。Codex/Claude Codeの公式認証による実CLI確認は利用者担当を維持し、必要な修正依頼・成果物取込み・再表示だけの手順を渡す。
+AI生成が必要な必須E2Eは、前回使用した利用者提供のGemini APIキーを既存の安全な設定経路で利用し、Native+Geminiの無料枠内で行う。有料枠への変更や別providerへの自動fallbackで結果を置き換えない。429/503等は原因を区別し、理由のある限定的な再試行に留め、成功まで無制限に呼び続けない。キーや無料枠を利用できなければAIが原因と影響gateを報告し、必須の実Agent確認は未完了とする。
+
+Codex/Claude Codeを含む今回変更した機能の契約・表示・失敗処理もAIが確認する。公式CLIの実接続を検証する場合は、利用可能な認可済み環境でAIが操作する。本人にしかできないログイン/認証入力が必要な場合だけ、その操作に限って依頼し、機能確認や再現作業は依頼しない。全外部Backendの再認証・全機能実証は従来どおり本Phaseの範囲を広げず、実CLI未実証をNative+Gemini成功と同一視しない。旧来の「利用者が公式Backendを検証する」という提出待ちは完了条件に残さない。今回の必須機能に影響する環境不足は未完了、元から対象外の実証は後続として明示する。
 
 Self-hostとHostedは結果を分ける。まず用意できる隔離Self-hostで技術E2Eを閉じる。実Hostedが用意できなければ未検証を残し、両配置対応の完成とは報告しない。Windows/Linux GUI、署名・配布物はPhase 10に残す。
 
-### 10.3 証拠保存とGit操作前の停止
+#### 再レビューを閉じる追加シナリオ
 
-実装・検証を開始した時点で、`reports/`の規則に従う対象フォルダに条件・command・結果・未検証・利用者用手順を記録する。今回の読み取り調査と計画だけでは検証reportを作らない。
+P5-01–P5-08とPhase 7の1–12を維持し、次のT01–T11を必要な箇所へ組み込む。これは別のPhaseや新しい製品要件ではない。同じ実行が複数のR/I/P5/P7を証明する場合は証拠を共用する。初回実装で成功した代表経路だけで置き換えない。
 
-検証失敗は原因に対応する変更を行ってから該当範囲を再実行する。Agentレビューは実動作の代わりにしない。利用者へ変更内容、実装担当の技術E2E、本人担当の公式認証と操作感、未検証配置を分けて報告し、依頼されるまでcommit/push/PRは行わない。
+表内の`P7-n`は直前のPhase 7シナリオの番号nを短く参照する表記であり、元の番号と内容を変更しない。
+
+| ID / 指摘 | 条件と操作 | 必須の確認 / 主な検証 |
+| --- | --- | --- |
+| T01 / I01・I03・I06 | 表Aを編集→同一Roomの親再render/Event→表Bへの切替。別操作で、仕事の過去版カードを開いて保存/復元/続けて編集 | A/Bのbuffer・対象ID・baseが混ざらず、離脱で選択できる。保存後は返された新revisionを表示し元の結果refは不変。Component＋実Electron/PG、P7-2/3/8 |
+| T02 / I02・I07 | 表ArtifactとCollectionで数値→空欄→数値、0/false/null、sort後の編集。Account Aがdirty中にB/Agentが同じrecordを変更し、Aで一覧refresh→保存 | typed値/row IDを保持。refresh後もAのbaseは進まず競合し、Bの変更とAの下書きが残る。Component＋実PG＋実画面、P7-3/8 |
+| T03 / I14・I15 | 文書/表/Knowledge/Skill/Collectionを編集し、保存Promiseを止める。閉じる・資源/Room/Workspace切替・通常アプリ終了、IME、保存失敗も行う | 保存中の入力抑止、保存/破棄/戻る、失敗時のdraft保持、元target以外への送信ゼロ。依頼/設定の未保存保護もP5-04/07で確認。Component＋実Electron |
+| T04 / I04・I16・I23 | 実Runtime toolから作成→同一Run内の複数改訂→仕事確定。他者の後続編集/改名も挟む。Run終端保存後・仕事確定前にServer停止→復旧。正常空結果と必須配列欠落を別入力で検証 | 元の仕事・Run・全revision・カードの一致、通常/復旧のrefの一致、再実行/副作用の重複ゼロ。欠落を正常空結果にしない。focused＋実PG/file/Server再起動＋画面、P7-1/10/11 |
+| T05 / I08・I17 | byte配列とbase64の実画像/PDFを通常Native tool/APIから登録し、画面表示・download。UIから対象版付き修正依頼を送り、対応するBackendで修正版を作る。破損・範囲外byte・MIME不一致も投入 | 元/新ファイルのbyte数・hash・revision・Work/Run関係。表示だけで修正成功と数えない。非対応表示はそのBackendの証拠であり、対応経路の実修正検証を代替しない。実Native+Gemini/Client/PG/file、P7-5 |
+| T06 / I05・I10 | 実フォームと生成HTML双方で保存→結果/data表示→再表示。二度押し、保存確定後に応答だけ遮断→同一ID再送/アプリ再起動後照会。asset付きbundle、pin→unpin→archive、再生成、HTML/ZIP出力 | operation/作成record/新revisionが一回、同じ結果を再表示。未送信入力と確定データを保持。asset整合、detail/list state一致、古いframe/action拒否、次のAgentが保存済みデータを参照。Component＋実Client/PG/file、P7-6/7/9/10 |
+| T07 / I11・I19・I20 | backend入力で空欄のdeny/入力済みdeny/submit。停止済みRun、期限切れ、別Account、二重応答。accepted保存直後、claim直後、副作用直後、結果通知前を別々に中断 | denyは入力不要で保存。未配送をcompletedにしない。acceptedは同一要求の再認可後に一度実行/拒否へ進み、不明な副作用は自動再実行しない。Event失敗も保存結果を失わない。focused＋実PG/再起動＋実画面、P5-05/P7-10 |
+| T08 / I12・I13・I18 | Knowledge新規作成・本文/履歴・保管/復元・固定、Skill編集→無効→画面を閉じる→再有効。ページ上限を超えるRoom/Workspace資源、同名の旧Memory/Wiki、一覧外の検索結果、仕事/旧履歴/成果物検索 | 種別/ID/metadata/権限/版を保持。全ページへ到達し、検索先を開ける。無効Skillは実行用には使われず管理用に取得できる。公開API＋実Client/PG、P5-03/04 |
+| T09 / I21 | R12–R16の公開Query/Operation/Eventを生成契約と照合し、管理画面から代表的な取得/更新/拒否/再接続を行う | UIの実通信が公開入口を使用。catalogのみの未接続ゼロ、旧互換も同じ認可/保存サービス。Room移動/最後のOwner/DM保護、設定scope、自動化停止/再開を含む。契約test＋実PG/Client、P5-02–06 |
+| T10 / I09 | 現行DBをupgrade、全形式の複数revision・Surface/asset・Collection・Knowledge/Skillを作りwork/instructionに参照を添える。export→隔離した別Serverへrestore→画面と次の仕事で参照。旧Bundleと不正refも確認 | 本文/hash/全版/ID/scope/参照/出所が一致。旧Bundleは仕様どおり、不正Bundleは部分成功せずcleanup。元ServerのURL不要、現在の権限で再認可。実PG/file/2 Server/Client、P7-11/P5-03/07 |
+| T11 / I22 | 同じworkspace/resource IDを持つ別接続A/Bで、事前確認後・IPC受付前に切替。受付後・HTTP応答前の切替と失効も別条件で行う | Bへの誤更新ゼロ、受付時targetが変われば送信前拒否。Aへ確定した操作はAで再照会しBへ混入しない。Desktop main/preload/Browserの遅延制御test＋実2 Server/Client、P5-07/P7-9/10 |
+
+T04/T07の中断位置はtest harnessの依存注入・プロセス制御で確定し、単に任意時刻にServerを再起動したことだけでは証拠にしない。新しい本番用failpoint APIは作らない。T05で利用可能なBackendに修正能力がない場合はR05の該当実証を未検証として残し、新しいprovider契約で埋めない。
+
+### 10.3 証拠保存・必須CI・Git操作の境界
+
+実装・検証を開始した時点で、`reports/`の規則に従い、既存の`reports/native-artifact-surface-phase5-7/`へ今回の条件・command・結果・未検証・AIが実行した操作手順を追記する。初回実装の記録を消さず、後日の修正結果と区別する。今回の読み取り調査と計画だけでは検証reportを作らない。
+
+証拠の各行は、R/V/I/Tまたは元シナリオ、対象commitと差分、Client/Backend/認証方式、DB/OS/配置、AIが行った画面操作とcommand、期待結果、実結果、DB/file/Eventとの照合、必要な画面記録のpath、未検証理由を持つ。全体testの件数だけを各Rの証拠にしない。秘密値は保存せず、検証資源のID/hashだけを必要な範囲で残す。9.1の品質確認には変更対象の責務・共通サービス・test・未解決指摘を記録する。
+
+実環境はrepo外の専用DB/storage/Account/Room/Browser profile/Electron user-data-dirへ隔離する。対象を明記してから正規Migrationを適用し、既存Desktop profile・既存DB・本番データを使わない。AIが起動・操作・停止と証拠保存まで行い、終了後は今回作成した資源だけをcleanupする。任意のUI評価を利用者が希望する場合は別途起動手順を渡せるが、環境の引継ぎや利用者操作を完成の前提にしない。Geminiキーの値を文書・ログ・画面記録へ出さず、許可された安全な実行環境経由で利用する。
+
+検証失敗はAIが原因に対応する変更を行ってから該当範囲を再実行する。Agentレビューは実動作の代わりにしない。対象の最終実装commitとE2Eのコード状態を対応付け、AIが既存必須CIの全checkを確認する。コード変更で証拠の対象が変われば影響範囲を再検証し、古いcommitのCI結果を使わない。
+
+利用者へは、修正内容、機能別のAI E2E結果、OSS品質確認、必須CIの対象SHA/実行URL/結果、元から対象外の未検証を報告する。CI起動に必要なcommit/push/PR更新は、その時点で与えられた許可の範囲でAIが行う。必要なGit操作の許可やCI実行環境が不足していれば具体的に示し、CI待ちとして全体未完了を維持する。これは機能検証を利用者へ依頼するgateではない。今回のplan-only依頼を即時のコード実装・Git操作・mergeの許可へ拡張しない。mergeは別の明示指示に従う。
 
 ## 11. 完了条件・未検証事項
 
@@ -432,12 +640,14 @@ Self-hostとHostedは結果を分ける。まず用意できる隔離Self-host�
 
 | 判定 | 必要条件 |
 | --- | --- |
-| Phase 5 技術確認完了 | R01・R11–R17とAppに関係するR07/R09/R10が成立。採用した管理・検索・設定・確認操作、基本の仕事と成果物入口がReactで使え、Vue専用source/直接依存の整理と削除後の検証が終了。初回・再起動・既存データの利用を実Client/PGで確認 |
-| Phase 5 利用者確認完了 | P5-08の操作確認と、その場で必須とした使い勝手の問題を解消。技術確認だけで利用者確認まで済んだと扱わない |
-| Phase 7 技術確認完了 | R02–R09と関係するR10/R15が成立。全対象形式の表示、文章/表の直接編集、Agent修正、Surfaceの実入力保存、履歴・競合・隔離・復旧・移植を実Client/PG/fileで確認 |
-| 本プラン完了 | 上記とR01–R17の証拠が揃い、対象内の必須不具合・未接続・Vue残存がない。利用者確認を経て、Backend/OS/配置の未検証と後続担当を明示 |
+| Phase 5 技術確認完了 | AIがR01・R11–R17とAppに関係するR07/R09/R10を確認。採用した管理・検索・設定・確認操作、基本の仕事と成果物入口がReactで使え、Vue専用source/直接依存の整理と削除後の検証が終了。初回・再起動・既存データの利用を実Client/PGで確認 |
+| Phase 5 画面操作E2E完了（AI担当） | AIがP5-08を含む全必須機能を実Electronで操作し、機能別の画面・保存先・再表示の証拠を記録。keyboard/IME、狭い画面、到達性、確認/失敗表示等の客観的な操作不良を解消 |
+| Phase 7 技術確認完了 | AIがR02–R09と関係するR10/R15を確認。全対象形式の表示、文章/表の直接編集、Agent修正、Surfaceの実入力保存、履歴・競合・隔離・復旧・移植を実Client/PG/fileで確認 |
+| OSS品質確認完了 | 6.1/9.1を満たし、変更対象のファットコントローラー化、業務ルール重複、型/エラー隠蔽、整合性・セキュリティ上の確認済み不備がない。製品能力を不必要に制限して問題を隠していない |
+| 必須CI完了 | 最終実装commitに対する対象PR/branchの全必須checkが成功し、AIがSHA・実行URL・結果を記録。未実行/失敗/必須jobのskipを成功扱いしない |
+| 本プラン完了 | 上記とR01–R17/V01–V15/P5/P7/TのAI検証証拠が揃い、I01–I21の修正、I22の修正または実経路での反証、I23の契約是正が終了。対象内の必須不具合・未接続・Vue残存・必要な技術検証の未実行がない。元から対象外のBackend/OS/配置を明示。利用者の機能検証・主観評価は条件に含めない |
 
-Phase 5と7は番号・責務を分けて判定する。成果物パネルだけの成功や、旧機能を未分類のまま対象外にすることでPhase 5を閉じない。公式Codex/Claude Codeの本人認証・実CLI、未用意のHosted、Windows/Linux GUI・配布の検証は従来の担当/後続Phaseへ残し、本プランの実装時に確認するmacOS・Self-host・Native+Geminiと区別する。それらが未検証の間は「全Backend・全OS・両配置で製品完成」と報告しない。
+Phase 5と7は番号・責務を分けて判定する。成果物パネルだけの成功や、旧機能を未分類のまま対象外にすることでPhase 5を閉じない。必須の実画面操作はAIがmacOS・Self-host・Native+Geminiで確認する。外部Backendの実証範囲は10.2に従い、未用意の実Hosted、Phase 10のWindows/Linux GUI・配布は元の対象外を維持する。これらを「利用者が後で機能確認する」という未処理の必須作業に置き換えず、全Backend・全OS・両配置で製品完成とも報告しない。
 
 ### 共通の照合条件
 
@@ -446,12 +656,32 @@ Phase 5と7は番号・責務を分けて判定する。成果物パネルだけ
 - 文書・表の直接編集、対象を指定したAgent修正、Surfaceの入力保存が実際のDomain/DB/fileへ通っている。
 - 版競合、権限失効、再送、途中失敗、再起動、移植を扱え、未確定の結果を完成扱いしない。
 - V01–V15の採用/廃止/後続と参照元が記録され、採用機能の移行漏れ・動かないボタン・不要なVue実行依存がない。保存データを維持し、採用範囲の既存成果物・知識・Collectionは認可された入口から参照できる。Phase 8へ送る改善候補の専用UIはこのgateに含めない。
-- 対象外機能を追加せず、利用者が操作確認できる。Backend・OS・配置別の未検証を明示している。
+- 対象外機能を追加せず、AIが仕様どおりの機能・操作を確認する。利用者の主観評価は任意。Backend・OS・配置別の未検証を明示している。
+- T01–T11を元シナリオへ対応付け、変更した経路のComponent/実PG/実Client証拠が揃う。単なるmarkup、mock、API単体の成功で実画面操作を代替しない。
+- 必須経路に影響する未解決の指摘が追加で見つかった場合も台帳へ追加し、修正と対応検証を行う。件数を21に固定して発見を打ち切らず、逆に対象外の機能追加へは広げない。
 
-### 作成時点の証拠
+### 完了判定の手順
 
-確認済みは、会話の合意、正本・関連設計、列挙したsourceと既存test/script/CIの構造、参照資料である。既存testがあることは今回のtest成功を示さない。
+1. 実装者がR01–R17、V01–V15、I01–I23、P5-01–P5-08/P7-1–12/T01–T11の対応を点検する。成功・未検証・対象外・根拠付き反証を分け、未記入を成功にしない。
+2. AIがP5-08を含む実画面操作と技術gateを全て通し、Phase 5/7それぞれの結果を記録する。未実証があればAIの検証待ちとして未完了を維持し、機能テストを利用者へ戻さない。
+3. 9.1のOSS品質確認と、同じ最終実装commitの必須CI成功まで揃ったら、本プランの合意済み範囲を完了と判定する。主観的なUI評価が未提出でも判定を止めない。元から対象外の環境は明示し、全環境で成功したと報告しない。
+4. 完了報告に修正内容、AIによる機能別E2E、品質確認、必須CIの証拠、対象外の未検証を添える。10.3の許可範囲に従ってGit操作を扱い、mergeの指示があれば進められる状態にする。merge承認と本人の機能検証を混同しない。
 
-今回の追加機能・廃止判断は4.1に示した評価をもとにした計画上の採用範囲であり、旧Vueの機能が全て現在も動くという意味ではない。新しいUIの詳細配置・library選定・公開型の追加名は技術的な実装事項として残す。採用範囲の削減、学習仕様や保存形式の変更が必要になった場合だけ、理由と影響を示して利用者と相談する。
+### 改訂時点の証拠と未決定事項
 
-コード実装、Migration、依存追加、実DB、実Agent、実Electron、Hosted/Self-host E2E、利用者dogfoodingは本プランに対して未実施。文書の構造・リンク・差分確認は作成後に行い、チャットで結果を報告する。
+確認済みは、会話の合意、正本・関連設計、現行sourceと既存test/script/CIの構造、4.2の過去の検証記録、9章で今回読んだ参照OSSの該当sourceである。過去の実装/成功記録を全未実施とは扱わず、本改訂でのコード修正・再実行とも混同しない。
+
+製品範囲を左右する未決定事項は現時点でない。I22の成立条件、互換Bundleのversion/feature識別、DOM test依存と公開型の追加名は工程A/Bで現行契約から確定する実装事項であり、利用者の回答待ちではない。採用範囲の削減、学習仕様や資源所有・保存形式の変更が必要になった場合だけ、理由と影響を示して相談する。
+
+この改訂によるコード実装、Migration、依存追加、T01–T11、実DB/実Agent/実Clientの追加E2E、対象コードの必須CIは未実施。計画文書だけを更新し、文書構造・リンク・用語・差分を検査する。コード検証のreportは作成しない。任意の主観的UI評価は未実施でも必須gateの未検証には数えない。
+
+### プランのセルフレビューで反映したこと
+
+- 古い「実装前・全て未実施」という記述を修正し、初回実装の成功範囲と今回の未達を区別した。
+- R01–R17/V01–V15/工程A–F/P5-01–P5-08/Phase 7の1–12の番号と機能範囲を維持した。最新合意で変更したP5-08・工程F・完了gateの担当と名称は3.4に旧新対応を記録した。管理・権限・自動化・旧データの検証も省略していない。
+- I01–I21、反証可能なI22、品質上のI23を工程とTへ対応付けた。未確定の競合候補を既知の実機障害に数えていない。
+- 別の資源へ書く事故をUI stateだけでなく送信先・基準版・保存先で防ぐ計画にした。再起動復旧は保存結果の回収と実行再開の安全性を分けた。
+- 不具合を示す動的Component testと実PG/実Clientを追加し、全体検証の反復、CIの弱体化、参照OSSの丸ごと移植を要求していない。
+- 機能E2E・実Electron操作・品質確認・必須CIをAI担当に統一し、本人の機能検証と主観評価を完了条件から外した。認証入力と機能検証を区別し、後続OS/配置を今回の成功へ含めていない。
+- 製品の本質を損なう制約、ファットコントローラー、重複した業務ルール、保守性の悪化を禁止事項と受入基準の双方へ反映した。対象外の全体リファクタリングや、指摘のないレビュー反復を要求していない。
+- plan-onlyの範囲でコード・report・Git履歴は変更しない。

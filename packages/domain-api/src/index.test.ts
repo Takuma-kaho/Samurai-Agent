@@ -10,10 +10,22 @@ import {
   PublicRoomAgentRemoveInputSchema,
   PublicRoomAgentPermissionRecordSchema,
   PublicAgentBackendRecordSchema,
+  PublicAutomationJobListSchema,
+  PublicAutomationRunSchema,
+  PublicCompletionResourceBodySchema,
+  PublicCompletionResourceCreateInputSchema,
+  PublicCompletionResourceDetailSchema,
+  PublicCompletionResourcePageSchema,
+  PublicCompletionResourceMutationResultSchema,
+  PublicLearningSettingsLayersSchema,
+  PublicLearningSettingsPatchInputSchema,
   PublicRoomMemberListRecordSchema,
   PublicRoomDomainApiRequestSchema,
   PublicRoomWorkCommentCreateInputSchema,
   PublicRoomWorkCreateInputSchema,
+  PublicRoomWorkReplyInputSchema,
+  PublicRoomWorkResourceRefInputSchema,
+  PublicRoomWorkResourceRefSchema,
   PublicEventEnvelopeSchema,
   PublicWorkspaceDirectorySchema,
   PublicWorkspaceTransferManifestSchema,
@@ -24,9 +36,12 @@ import {
   isEventVersionCompatible,
   publicLegacyDomainOperationCompatibility,
   legacyPublicDomainOperationIds,
+  publicManagementContractDefinitions,
   parsePublicEventPayload,
   publicDomainOperationIds,
   publicOperationOutputSchemaFor,
+  publicOperationInputSchemaFor,
+  PublicRuntimeSettingsSchema,
   runControlRequestSchemaFor
 } from "./index";
 
@@ -63,8 +78,23 @@ describe("public Domain API contract", () => {
       context: { room_id: "room_1" },
       input: { instruction: "Use the Room work contract." }
     }).success).toBe(true);
+    const resourceSelector = { kind: "knowledge", id: "resource_1", version: 2 } as const;
+    expect(PublicRoomWorkCreateInputSchema.safeParse({ resource_refs: [resourceSelector] }).success).toBe(true);
+    expect(PublicRoomWorkReplyInputSchema.safeParse({ work_id: "work_1", resource_refs: [resourceSelector] }).success).toBe(true);
+    expect(publicOperationInputSchemaFor("room.work.create", z.any()).safeParse({ resource_refs: [resourceSelector] }).success).toBe(true);
+    expect(PublicRoomWorkResourceRefInputSchema.safeParse({ ...resourceSelector, uri: "client://must-be-rejected" }).success).toBe(false);
+    expect(PublicRoomWorkResourceRefInputSchema.safeParse({ kind: "policy", id: "resource_1", version: 2 }).success).toBe(false);
+    expect(PublicRoomWorkResourceRefInputSchema.safeParse({ kind: "knowledge", id: "resource_1" }).success).toBe(false);
+    expect(PublicRoomWorkResourceRefSchema.safeParse({
+      kind: "skill",
+      id: "resource_2",
+      uri: "skills/resource_2/SKILL.md",
+      version: "3",
+      label: "A Skill"
+    }).success).toBe(true);
     expect(PublicRoomWorkCreateInputSchema.safeParse({ instruction: "Use the Room work contract.", session_id: "session_1" }).success).toBe(false);
     expect(PublicRoomWorkCommentCreateInputSchema.safeParse({ work_id: "work_1", body: "A comment", actor_id: "spoofed" }).success).toBe(false);
+    expect(PublicRoomWorkCommentCreateInputSchema.safeParse({ work_id: "work_1", resource_refs: [resourceSelector] }).success).toBe(false);
 
     expect(PublicRoomCreateInputSchema.safeParse({
       name: "Product",
@@ -254,6 +284,48 @@ describe("public Domain API contract", () => {
     }).success).toBe(false);
   });
 
+  it("publishes Artifact revision and Generated Surface public contracts", () => {
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
+      "artifact.list",
+      "artifact.view",
+      "artifact.create",
+      "artifact.revise",
+      "artifact.restore_revision",
+      "generated_surface.create",
+      "generated_surface.revise",
+      "generated_surface.action.run",
+      "generated_surface.state",
+      "generated_surface.export"
+    ]));
+    expect(eventCatalog.map((entry) => entry.event_type)).toEqual(expect.arrayContaining([
+      "workspace.artifact.changed",
+      "workspace.generated_surface.changed",
+      "workspace.interaction_request.changed"
+    ]));
+    expect(eventPayloadSchemaFor("workspace.artifact.changed").safeParse({
+      artifact_id: "artifact_1",
+      action: "revised",
+      revision_id: "revision_2"
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.generated_surface.changed").safeParse({
+      surface_id: "surface_1",
+      action: "state_changed"
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.interaction_request.changed").safeParse({
+      request_id: "request_1",
+      kind: "approval",
+      status: "pending",
+      action: "created"
+    }).success).toBe(true);
+    expect(eventPayloadSchemaFor("workspace.interaction_request.changed").safeParse({
+      request_id: "request_1",
+      kind: "backend_input",
+      status: "accepted",
+      action: "responded",
+      values: { answer: "must not be public" }
+    }).success).toBe(false);
+  });
+
   it("publishes Organization events and keeps sensitive fields outside payloads", () => {
     const eventTypes = [
       "organization.created",
@@ -376,6 +448,175 @@ describe("public Domain API contract", () => {
       { method: "POST", path: "/api/organizations/organization_1/workspaces/workspace_1/detach", body: {}, operationId: "detach_1", idempotencyKey: "detach_1" },
       { method: "POST", path: "/api/v1/workspaces/workspace_1/domain/queries/agent.backend.list", body: { context: {}, input: {} } }
     ]);
+  });
+
+  it("uses fixed Room-scoped Artifact and Generated Surface v1 routes", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    });
+
+    await client.listArtifactRevisions("workspace_1", "room_1", "artifact_1");
+    await client.getArtifactRevision("workspace_1", "room_1", "artifact_1", "revision_1");
+    await client.listGeneratedSurfaces("workspace_1", "room_1");
+    await client.getGeneratedSurface("workspace_1", "room_1", "surface_1");
+    await client.getGeneratedSurfaceBundle("workspace_1", "room_1", "surface_1", "surface_revision_1");
+    await client.runGeneratedSurfaceAction("workspace_1", "room_1", "surface_1", "refresh", {
+      revision_id: "surface_revision_1",
+      action_payload: { record_id: "record_1" }
+    }, { operationId: "surface_action_1" });
+    await client.runGeneratedSurfaceState("workspace_1", "room_1", "surface_1", { action: "pin" }, { operationId: "surface_state_1" });
+    await client.exportGeneratedSurface("workspace_1", "room_1", "surface_1", { format: "html" });
+    await client.runArtifactSurfaceOperation("workspace_1", "room_1", { id: "surface_op_1", kind: "artifact.request", action: "create" }, { operationId: "artifact_surface_1" });
+
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /api/v1/workspaces/workspace_1/artifacts/artifact_1/revisions?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/artifacts/artifact_1/revisions/revision_1?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/revisions/surface_revision_1/bundle?room_id=room_1",
+      "POST /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/actions/refresh/run",
+      "POST /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/state",
+      "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/export?room_id=room_1&format=html",
+      "POST /api/v1/workspaces/workspace_1/artifacts/surface/operations"
+    ]);
+    expect(requests[5]).toMatchObject({
+      body: {
+        room_id: "room_1",
+        revision_id: "surface_revision_1",
+        action_payload: { record_id: "record_1" }
+      }
+    });
+    expect(requests[8]).toMatchObject({
+      body: {
+        room_id: "room_1",
+        operation: { id: "artifact_surface_1", kind: "artifact.request", action: "create" }
+      }
+    });
+    await expect(client.runArtifactSurfaceOperation("workspace_1", "room_1", "invalid", { operationId: "invalid_surface" }))
+      .rejects.toThrow("artifact_surface_operation_invalid");
+  });
+
+  it("publishes the implemented management contracts, projections, and events", () => {
+    const ids = publicManagementContractDefinitions.map((definition) => definition.id);
+    const requiredManagementCommands = [
+      "settings.patch",
+      "automation.job.save",
+      "automation.job.manager_stop",
+      "automation.job.manager_resume",
+      "automation.job.run_now"
+    ];
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(expect.arrayContaining(requiredManagementCommands));
+    for (const operationId of requiredManagementCommands) {
+      const definition = publicManagementContractDefinitions.find((candidate) => candidate.id === operationId);
+      expect(definition).toBeDefined();
+      expect(publicOperationInputSchemaFor(operationId, z.never())).toBe(definition?.input);
+      expect(publicOperationOutputSchemaFor(operationId, z.never())).toBe(definition?.output);
+    }
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
+      "completion.resource.list", "completion.resource.view", "completion.resource.body",
+      "completion.resource.create", "completion.resource.update", "completion.resource.archive", "completion.resource.fix",
+      "settings.view", "settings.patch", "learning.settings.view", "learning.settings.patch",
+      "automation.job.list", "automation.run.list", "automation.job.save", "automation.job.manager_stop", "automation.job.manager_resume", "automation.job.run_now"
+    ]));
+    expect(ids).toEqual(expect.arrayContaining([
+      "completion.resource.list", "completion.resource.create", "learning.settings.patch", "automation.job.run_now"
+    ]));
+    expect(eventCatalog.map((entry) => entry.event_type)).toEqual(expect.arrayContaining([
+      "completion.resource.created", "completion.resource.updated", "completion.resource.archived", "completion.resource.fixed",
+      "workspace.settings.changed", "learning.settings.updated", "automation.job.created", "automation.job.management_changed"
+    ]));
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "room", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact",
+      title: "A fact", content: "The body", reason: "human edit"
+    }).success).toBe(true);
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "workspace", room_id: "room_1", kind: "skill", title: "A skill", content: "# Skill", reason: "human edit"
+    }).success).toBe(false);
+    expect(PublicCompletionResourcePageSchema.safeParse({ resources: [], next_cursor: "cursor_1" }).success).toBe(true);
+    expect(PublicCompletionResourceDetailSchema.safeParse({
+      resource: {
+        workspaceId: "workspace_1", id: "resource_1", scope: { kind: "room", roomId: "room_1" }, kind: "knowledge", knowledgeKind: "fact",
+        title: "A fact", evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", aiManaged: false,
+        version: 2, createdBy: "account_1", updatedBy: "account_1", createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+      },
+      current_version: {
+        workspaceId: "workspace_1", id: "version_2", resourceId: "resource_1", version: 2, contentHash: "hash", contentSize: 8,
+        evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", metadata: {}, reason: "human edit",
+        actorAccountId: "account_1", createdAt: "2026-09-01T00:00:00.000Z"
+      },
+      versions: [], evidence: []
+    }).success).toBe(true);
+    expect(PublicCompletionResourceBodySchema.safeParse({
+      resource: {
+        workspaceId: "workspace_1", id: "resource_1", scope: { kind: "workspace" }, kind: "skill", title: "A skill", evidenceState: "confirmed",
+        lifecycleState: "active", aiProtection: "editable", creationSource: "human", aiManaged: false, version: 1, createdBy: "account_1", updatedBy: "account_1",
+        createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+      },
+      version: {
+        workspaceId: "workspace_1", id: "version_1", resourceId: "resource_1", version: 1, contentHash: "hash", contentSize: 7,
+        evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", metadata: {}, reason: "human edit",
+        actorAccountId: "account_1", createdAt: "2026-09-01T00:00:00.000Z"
+      },
+      content: "# Skill"
+    }).success).toBe(true);
+    expect(PublicRuntimeSettingsSchema.safeParse({
+      ui_locale: "ja", output_locale: "ja", memory_capture_mode: "auto", knowledge_wiki_capture_mode: "auto", skill_capture_mode: "auto",
+      learning_enabled: true, learning_budget_ratio: 0.1, learning_budget_window_days: 7, external_provider_role: "assistive",
+      updated_at: "2026-09-01T00:00:00.000Z"
+    }).success).toBe(true);
+    expect(PublicLearningSettingsPatchInputSchema.safeParse({ scope_kind: "room", room_id: "room_1", enabled: false }).success).toBe(true);
+    expect(PublicLearningSettingsLayersSchema.safeParse({
+      settings: {
+        workspaceId: "workspace_1", id: "workspace_learning_settings", scope: { kind: "workspace" }, enabled: true, currencyUsed: 0,
+        tokensUsed: 0, currencyReserved: 0, tokensReserved: 0, version: 1, updatedBy: "account_1", updatedAt: "2026-09-01T00:00:00.000Z"
+      }
+    }).success).toBe(true);
+    expect(PublicAutomationJobListSchema.safeParse({ jobs: [] }).success).toBe(true);
+    expect(PublicAutomationRunSchema.safeParse({
+      id: "run_1", kind: "custom_instruction", source: "manual", status: "completed", job_id: "job_1", workspace_id: "workspace_1", room_id: "room_1",
+      scheduled_at: "2026-09-01T00:00:00.000Z", started_at: "2026-09-01T00:00:00.000Z", attempt_no: 1
+    }).success).toBe(true);
+    expect(PublicCompletionResourceMutationResultSchema.safeParse({ resource: {} }).success).toBe(false);
+  });
+
+  it("routes typed management client calls to the versioned GET/POST/PATCH paths", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    });
+    await client.listCompletionResources("workspace_1", { scope_kind: "room", room_id: "room_1", include_archived: true, cursor: "cursor_1" });
+    await client.createCompletionResource("workspace_1", { scope_kind: "room", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact", title: "Fact", content: "Body", reason: "Save" }, { operationId: "completion_create" });
+    await client.updateCompletionResource("workspace_1", "resource_1", { scope_kind: "room", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact", title: "Fact", content: "Body 2", reason: "Edit", expected_version: 1 }, { operationId: "completion_update" });
+    await client.getRuntimeSettings("workspace_1");
+    await client.patchRuntimeSettings("workspace_1", { learning_enabled: false }, { operationId: "settings_patch" });
+    await client.getLearningSettings("workspace_1", "room_1");
+    await client.patchLearningSettings("workspace_1", { scope_kind: "room", room_id: "room_1", enabled: false }, { operationId: "learning_patch" });
+    await client.listAutomationJobs("workspace_1", "room_1");
+    await client.listAutomationRuns("workspace_1", { room_id: "room_1" });
+    await client.setCompletionResourceArchived("workspace_1", "resource_1", { room_id: "room_1", archived: true, expected_version: 1, reason: "Archive" }, { operationId: "completion_archive" });
+    await client.setCompletionResourceFixed("workspace_1", "resource_1", { room_id: "room_1", fixed: true, expected_version: 1, reason: "Fix" }, { operationId: "completion_fix" });
+    await client.setAutomationManagement("workspace_1", "job_1", "manager_stopped", { operationId: "automation_stop" });
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /api/v1/workspaces/workspace_1/completion/resources?scope_kind=room&room_id=room_1&include_archived=true&cursor=cursor_1",
+      "POST /api/v1/workspaces/workspace_1/completion/resources",
+      "PATCH /api/v1/workspaces/workspace_1/completion/resources/resource_1",
+      "GET /api/v1/workspaces/workspace_1/settings",
+      "PATCH /api/v1/workspaces/workspace_1/settings",
+      "GET /api/v1/workspaces/workspace_1/learning/settings?room_id=room_1",
+      "PATCH /api/v1/workspaces/workspace_1/learning/settings",
+      "GET /api/v1/workspaces/workspace_1/automation/jobs?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/automation/runs?room_id=room_1",
+      "POST /api/v1/workspaces/workspace_1/completion/resources/resource_1/archive",
+      "POST /api/v1/workspaces/workspace_1/completion/resources/resource_1/fix",
+      "POST /api/v1/workspaces/workspace_1/automation/jobs/job_1/management"
+    ]);
+    expect(requests[2]).toMatchObject({ method: "PATCH", operationId: "completion_update", idempotencyKey: "completion_update" });
+    expect(requests[9]).toMatchObject({ method: "POST", operationId: "completion_archive", idempotencyKey: "completion_archive", body: expect.objectContaining({ room_id: "room_1" }) });
+    expect(requests[10]).toMatchObject({ method: "POST", operationId: "completion_fix", idempotencyKey: "completion_fix", body: expect.objectContaining({ room_id: "room_1" }) });
   });
 
   it("validates transfer proof and keeps cutover stages explicit", () => {

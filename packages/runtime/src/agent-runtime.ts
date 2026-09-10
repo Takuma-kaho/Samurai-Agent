@@ -26,6 +26,9 @@ import { workspaceBackendInput } from "./host/workspace-backend-input.js";
 import { runtimeOperationIds } from "./runtime-operation-composition.js";
 import { executeGeneratedSurfaceAction } from "./generated-surface-action-ingress.js";
 import {
+  normalizeGeneratedSurfaceProviderToolArguments
+} from "./generated-surface-provider-normalization.js";
+import {
   isArtifactRecordResource,
   isMemoryFrontmatterResource,
   operationAuditRuntimeResult,
@@ -4206,7 +4209,6 @@ export class AgentRuntime {
     actionId: string;
     interactionId: string;
     messageId?: string;
-    confirmed?: boolean;
     actionPayload?: Record<string, JsonValue>;
   }, trusted: TrustedDomainRuntimeContext = {}): Promise<{ surface: GeneratedSurfaceDefinition; action: GeneratedSurfaceActionDeclaration; command: unknown; interaction: unknown }> {
     const persistedSurface = await this.store.getGeneratedSurface(input.surfaceId);
@@ -4272,8 +4274,11 @@ export class AgentRuntime {
     if (!surface || !targetCommandId || typeof action.id !== "string") {
       throw new RuntimeRequestError("internal", "generated_surface_action_resolution_invalid");
     }
-    if (action.requires_confirmation && input.confirmed !== true) {
-      throw new RuntimeRequestError("conflict", "generated_surface_action_confirmation_required");
+    if (action.requires_confirmation) {
+      // This legacy Runtime helper has no durable Interaction Request store.
+      // Production confirmation therefore belongs to the Workspace Server
+      // lifecycle, which persists the immutable target before execution.
+      throw new RuntimeRequestError("conflict", "generated_surface_action_interaction_request_required");
     }
     const revisionId = input.revisionId ?? surface.current_revision_id;
     const ingressResult = await executeGeneratedSurfaceAction({
@@ -12211,15 +12216,16 @@ function normalizeGeneratedSurfaceCommandPayload(
   args: Record<string, JsonValue>,
   runInput: BackendRunInput
 ): Record<string, JsonValue> {
-  assertProviderGeneratedSurfaceServerFieldsAbsent(args);
-  const suppliedBundle = recordPayload(args.bundle);
+  const normalizedArgs = normalizeGeneratedSurfaceProviderToolArguments(args);
+  assertProviderGeneratedSurfaceServerFieldsAbsent(normalizedArgs);
+  const suppliedBundle = recordPayload(normalizedArgs.bundle);
   const actionValues = Array.isArray(suppliedBundle.actions)
     ? suppliedBundle.actions
-    : Array.isArray(args.actions)
-      ? args.actions
+    : Array.isArray(normalizedArgs.actions)
+      ? normalizedArgs.actions
       : [];
   const actions = actionValues.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
-  const suppliedRequest = recordPayload(args.request);
+  const suppliedRequest = recordPayload(normalizedArgs.request);
   const selectedSkillRefs: ResourceRef[] = (runInput.selected_skills ?? []).map((skill) => ({
     kind: "skill",
     id: skill.id,
@@ -12243,16 +12249,19 @@ function normalizeGeneratedSurfaceCommandPayload(
     fallback_chain: surfaceFallbackChain(suppliedRequest.fallback_chain ?? args.fallback_chain)
   };
   const bundle: Record<string, JsonValue> = Object.keys(suppliedBundle).length > 0
-    ? suppliedBundle
+    ? {
+        ...suppliedBundle,
+        ...(Array.isArray(suppliedBundle.actions) ? { actions: actionValues } : {})
+      }
     : {
-        title: stringPayload(args.title),
-        html: stringPayload(args.html),
-        ...(typeof args.css === "string" ? { css: args.css } : {}),
-        ...(typeof args.script === "string" ? { script: args.script } : {}),
+        title: stringPayload(normalizedArgs.title),
+        html: stringPayload(normalizedArgs.html),
+        ...(typeof normalizedArgs.css === "string" ? { css: normalizedArgs.css } : {}),
+        ...(typeof normalizedArgs.script === "string" ? { script: normalizedArgs.script } : {}),
         actions: actions as unknown as JsonValue,
-        ...(Array.isArray(args.assets) ? { assets: args.assets } : {}),
-        ...(args.input_data_schema && typeof args.input_data_schema === "object" && !Array.isArray(args.input_data_schema)
-          ? { input_data_schema: args.input_data_schema }
+        ...(Array.isArray(normalizedArgs.assets) ? { assets: normalizedArgs.assets } : {}),
+        ...(normalizedArgs.input_data_schema && typeof normalizedArgs.input_data_schema === "object" && !Array.isArray(normalizedArgs.input_data_schema)
+          ? { input_data_schema: normalizedArgs.input_data_schema }
           : {})
       };
   const isRevision = Object.hasOwn(recordPayload(command.input_schema.properties), "surface_id");

@@ -37,6 +37,13 @@ export interface WorkspaceExecutionJobWorkerPort {
   close?(): Promise<void>;
 }
 
+/** Durable expiry and interrupted-execution reconciliation for requests that
+ * require a human or Native input before Server-owned work can continue. */
+export interface WorkspaceInteractionRequestMaintenanceWorkerPort {
+  runTick(context: WorkspaceRequestContext, input: { workerId: string; maxRuns: number; signal: AbortSignal }): Promise<unknown>;
+  close?(): Promise<void>;
+}
+
 /** Process-owned lane for normal Room work.  This is deliberately separate
  * from the skill-optimization worker: human requests are Room work records,
  * not learning jobs, and must keep their own reservation/lease/generation
@@ -115,6 +122,7 @@ export interface WorkspaceWorkerSupervisorOptions {
   retryMaxMs?: number;
   maxRuns?: number;
   executionJobWorker?: WorkspaceExecutionJobWorkerPort;
+  interactionRequestMaintenanceWorker?: WorkspaceInteractionRequestMaintenanceWorkerPort;
   roomWorkWorker?: WorkspaceRoomWorkWorkerPort;
   roomWorkStopWorker?: WorkspaceRoomWorkStopWorkerPort;
   automationScheduler?: WorkspaceAutomationSchedulerPort;
@@ -271,6 +279,7 @@ export class WorkspaceWorkerSupervisor {
     };
     closePort(this.options.learningRunner);
     closePort(this.options.executionJobWorker);
+    closePort(this.options.interactionRequestMaintenanceWorker);
     closePort(this.options.roomWorkWorker);
     closePort(this.options.roomWorkStopWorker);
     closePort(this.options.automationScheduler);
@@ -350,6 +359,13 @@ export class WorkspaceWorkerSupervisor {
         const context: WorkspaceRequestContext = { ...workerContext, operationId };
         if (this.options.executionJobWorker) {
           await this.options.executionJobWorker.runTick(context, {
+            workerId: this.options.workerId,
+            maxRuns: this.options.maxRuns,
+            signal: this.controller.signal
+          });
+        }
+        if (this.options.interactionRequestMaintenanceWorker) {
+          await this.options.interactionRequestMaintenanceWorker.runTick(context, {
             workerId: this.options.workerId,
             maxRuns: this.options.maxRuns,
             signal: this.controller.signal

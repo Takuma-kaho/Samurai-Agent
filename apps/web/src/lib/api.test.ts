@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 
 const browserBridgeSource = readFileSync(new URL("./workspace-browser-bridge.ts", import.meta.url), "utf8");
+const apiSource = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -34,6 +35,45 @@ describe("chat idempotency keys", () => {
 });
 
 describe("Room work bridge", () => {
+  it("keeps Artifact and Generated Surface writes on the explicit JSON bridge", () => {
+    expect(browserBridgeSource).toContain("listWorkspaceArtifactRevisions");
+    expect(browserBridgeSource).toContain("getWorkspaceArtifactRevision");
+    expect(browserBridgeSource).toContain("reviseWorkspaceArtifact");
+    expect(browserBridgeSource).toContain("restoreWorkspaceArtifactRevision");
+    expect(browserBridgeSource).toContain("listWorkspaceGeneratedSurfaces");
+    expect(browserBridgeSource).toContain("queryWorkspaceGeneratedSurface");
+    expect(browserBridgeSource).toContain("runWorkspaceGeneratedSurfaceAction");
+    expect(browserBridgeSource).toContain("runWorkspaceGeneratedSurfaceState");
+    expect(browserBridgeSource).toContain("exportWorkspaceGeneratedSurface");
+    expect(browserBridgeSource).toContain("toBridgeJson(input.operation)");
+    expect(browserBridgeSource).toContain("toBridgeJson(input.bundle)");
+    expect(browserBridgeSource).toContain("toBridgeJson(input.request)");
+  });
+
+  it("does not route Artifact creation through the legacy REST shortcut", () => {
+    const start = browserBridgeSource.indexOf("createWorkspaceArtifact: async");
+    const end = browserBridgeSource.indexOf("runWorkspaceArtifactSurfaceOperation", start);
+    const source = browserBridgeSource.slice(start, end);
+    expect(source).toContain('executeOperation<ArtifactMutationResult>');
+    expect(source).not.toContain('workspaceRequest("POST", "/artifacts"');
+  });
+
+  it("keeps Knowledge/Skill selectors separate from attachment transport", () => {
+    const createStart = browserBridgeSource.indexOf("createWorkspaceRoomWork: async");
+    const replyStart = browserBridgeSource.indexOf("replyWorkspaceRoomWork: async", createStart);
+    const commentStart = browserBridgeSource.indexOf("createWorkspaceRoomWorkComment: async", replyStart);
+    expect(createStart).toBeGreaterThanOrEqual(0);
+    expect(replyStart).toBeGreaterThan(createStart);
+    expect(commentStart).toBeGreaterThan(replyStart);
+    expect(browserBridgeSource.slice(createStart, replyStart)).toContain("strictRoomWorkResourceRefs(input.resourceRefs)");
+    expect(browserBridgeSource.slice(createStart, replyStart)).toContain("resource_refs: resourceRefs");
+    expect(browserBridgeSource.slice(replyStart, commentStart)).toContain("strictRoomWorkResourceRefs(input.resourceRefs)");
+    expect(browserBridgeSource.slice(replyStart, commentStart)).toContain("resource_refs: resourceRefs");
+    expect(browserBridgeSource).toContain("publicRoomWorkResourceRefs(record)");
+    expect(browserBridgeSource).toContain("room_work_resource_ref_count_invalid");
+    expect(browserBridgeSource).toContain("room_work_resource_refs_${index}_response_invalid");
+  });
+
   it("accepts a delegated projection without an optional parent scope while retaining scope checks", () => {
     const start = browserBridgeSource.indexOf("async function delegateBrowserRoomWork");
     const end = browserBridgeSource.indexOf("/** Uploads still use", start);
@@ -97,6 +137,43 @@ describe("Room work bridge", () => {
     expect(createWorkspaceRoomWork.mock.calls[0]?.[0]).not.toHaveProperty("sessionId");
   });
 
+  it("passes only the typed Knowledge/Skill selector through the Room Work bridge", async () => {
+    const createWorkspaceRoomWork = vi.fn(async (input: {
+      roomId: string;
+      resourceRefs?: Array<{ kind: "knowledge" | "skill"; id: string; version: number }>;
+      operationId: string;
+    }) => ({
+      id: "work_1",
+      roomId: input.roomId,
+      requesterId: "account_1",
+      defaultAgentId: "agent_1",
+      title: "参照",
+      objective: "Knowledgeを読む",
+      status: "queued" as const,
+      instructionVersion: 1,
+      generation: 0,
+      version: 1,
+      resourceRefs: [],
+      assignees: [],
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:00:00.000Z",
+      replayed: false
+    }));
+    vi.stubGlobal("window", { samuraiDesktop: { createWorkspaceRoomWork } });
+
+    await api.createRoomWork({
+      roomId: "room_1",
+      resourceRefs: [{ kind: "knowledge", id: "knowledge_policy", version: 3 }]
+    });
+
+    expect(createWorkspaceRoomWork).toHaveBeenCalledWith(expect.objectContaining({
+      roomId: "room_1",
+      resourceRefs: [{ kind: "knowledge", id: "knowledge_policy", version: 3 }]
+    }));
+    expect(createWorkspaceRoomWork.mock.calls[0]?.[0]).not.toHaveProperty("uri");
+    expect(createWorkspaceRoomWork.mock.calls[0]?.[0]).not.toHaveProperty("label");
+  });
+
   it("keeps Room work listing on the typed bridge", async () => {
     const listWorkspaceRoomWorks = vi.fn(async () => ({ works: [], nextCursor: "cursor_2" }));
     vi.stubGlobal("window", { samuraiDesktop: { listWorkspaceRoomWorks } });
@@ -154,5 +231,44 @@ describe("Room work bridge", () => {
 
     expect(setWorkspaceRoomDefaultAgent).toHaveBeenCalledWith(expect.objectContaining({ roomId: "room_1", operationId: "default_1", target }));
     expect(openWorkspaceAgentDm).toHaveBeenCalledWith({ agentId: "agent_1", operationId: "dm_1", target });
+  });
+});
+
+describe("durable Interaction Request API", () => {
+  it("exposes fixed list/respond/cancel methods without a generic signed request", async () => {
+    const request = {
+      id: "interaction_1",
+      workspaceId: "workspace_1",
+      roomId: "room_1",
+      version: 1,
+      kind: "approval" as const,
+      status: "pending" as const,
+      title: "確認",
+      summary: "実行前の確認",
+      actionTarget: { actionId: "publish" },
+      options: [{ id: "approve", label: "実行" }],
+      expiresAt: "2026-09-08T01:00:00.000Z",
+      createdAt: "2026-09-08T00:00:00.000Z",
+      updatedAt: "2026-09-08T00:00:00.000Z"
+    };
+    const listWorkspaceInteractionRequests = vi.fn(async () => ({ requests: [request] }));
+    const respondWorkspaceInteractionRequest = vi.fn(async (input: { operationId: string }) => ({ request, replayed: input.operationId === "respond_1" }));
+    const cancelWorkspaceInteractionRequest = vi.fn(async () => ({ request, replayed: false }));
+    vi.stubGlobal("window", { samuraiDesktop: { listWorkspaceInteractionRequests, respondWorkspaceInteractionRequest, cancelWorkspaceInteractionRequest } });
+
+    await expect(api.listWorkspaceInteractionRequests({ roomId: "room_1", includeResolved: true })).resolves.toEqual({ requests: [request] });
+    await api.respondWorkspaceInteractionRequest({ roomId: "room_1", requestId: "interaction_1", expectedVersion: 1, optionId: "approve", operationId: "respond_1" });
+    await api.cancelWorkspaceInteractionRequest({ roomId: "room_1", requestId: "interaction_1", expectedVersion: 1, operationId: "cancel_1" });
+
+    expect(listWorkspaceInteractionRequests).toHaveBeenCalledWith({ roomId: "room_1", includeResolved: true });
+    expect(respondWorkspaceInteractionRequest).toHaveBeenCalledWith(expect.objectContaining({ roomId: "room_1", requestId: "interaction_1", optionId: "approve", operationId: "respond_1" }));
+    expect(cancelWorkspaceInteractionRequest).toHaveBeenCalledWith(expect.objectContaining({ roomId: "room_1", requestId: "interaction_1", operationId: "cancel_1" }));
+  });
+
+  it("removes confirmed from the Generated Surface action API", () => {
+    const start = apiSource.indexOf("runGeneratedSurfaceAction(surfaceId");
+    const end = apiSource.indexOf("getGeneratedSurfaceBundle(surfaceId", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(apiSource.slice(start, end)).not.toContain("confirmed");
   });
 });

@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const attachmentPathPattern = /^attachments\/[A-Za-z0-9._-]{1,220}$/;
 const maxAttachmentBase64Length = Math.ceil((8 * 1024 * 1024) / 3) * 4;
@@ -6,10 +8,7 @@ export type WorkspaceAttachmentRequest = {
   roomId: string;
   filePath: string;
   operationId: string;
-  target?: {
-    connectionId: string;
-    workspaceId: string;
-  };
+  target?: WorkspaceTargetRequest;
   body: {
     room_id: string;
     content_base64: string;
@@ -104,13 +103,7 @@ export function workspaceAttachmentRequest(input: unknown): WorkspaceAttachmentR
   const filePath = value.path;
   if (typeof filePath !== "string" || !attachmentPathPattern.test(filePath)) throw new Error("path_invalid");
   const operationId = requiredOpaque(value, "operationId");
-  const targetValue = value.target;
-  const target = targetValue && typeof targetValue === "object" && !Array.isArray(targetValue)
-    ? {
-      connectionId: requiredOpaque(targetValue as Record<string, unknown>, "target.connectionId"),
-      workspaceId: requiredOpaque(targetValue as Record<string, unknown>, "target.workspaceId")
-    }
-    : undefined;
+  const target = workspaceTargetRequest(value.target);
   const contentBase64 = value.contentBase64;
   if (typeof contentBase64 !== "string" || contentBase64.length > maxAttachmentBase64Length || contentBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) {
     throw new Error("contentBase64_invalid");

@@ -1915,6 +1915,30 @@ describe("PostgresRuntimeChat provider tool execution", () => {
     expect(outcome).toMatchObject({ status: "failed", errorCode: "runtime_tool_execution_unavailable" });
   });
 
+  it("admits Artifact revisions and Generated Surface tools before requiring the Host port", async () => {
+    const chat = bareChat();
+    const executeToolCall = (chat as unknown as {
+      executeToolCall: (input: { admission: unknown; runInput: BackendRunInput; started: BackendEventRecord; eventBridge: unknown }) => Promise<{ status: string; errorCode?: string; actionId?: string }>
+    }).executeToolCall.bind(chat);
+
+    for (const [toolCallId, providerToolName, actionId] of [
+      ["artifact-revise", "revise_artifact", "artifact.revise"],
+      ["surface-create", "create_generated_surface", "generated_surface.create"],
+      ["surface-revise", "generated_surface.revise", "generated_surface.revise"]
+    ] as const) {
+      await expect(executeToolCall({
+        admission: {},
+        runInput: {} as BackendRunInput,
+        started: startedEvent(toolCallId, providerToolName, actionId),
+        eventBridge: {}
+      })).resolves.toMatchObject({
+        status: "failed",
+        actionId,
+        errorCode: "runtime_tool_execution_unavailable"
+      });
+    }
+  });
+
   it("rejects a direct delegation event when the admitted Run has no trusted Room-work binding", async () => {
     const delegate = vi.fn();
     const chat = new PostgresRuntimeChat({

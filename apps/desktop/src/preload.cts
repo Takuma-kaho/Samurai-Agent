@@ -10,7 +10,15 @@ import {
   sanitizeWorkspaceBundleExportInput,
   sanitizeWorkspaceBundleRestoreInput,
   sanitizeWorkspaceChatSessionInput,
-  sanitizeWorkspaceCreateInput
+  sanitizeWorkspaceCreateInput,
+  sanitizeWorkspaceArtifactRevisionInput,
+  sanitizeWorkspaceGeneratedSurfaceMutationInput,
+  sanitizeWorkspaceInteractionRequestCancelInput,
+  sanitizeWorkspaceInteractionRequestListInput,
+  sanitizeWorkspaceInteractionRequestResultInput,
+  sanitizeWorkspaceInteractionRequestRespondInput,
+  sanitizeWorkspaceOperationHistoryInput,
+  sanitizeWorkspaceRoomWorkResourceRefs
 } from "./preload-sanitizers.js";
 import { workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests.js";
 
@@ -44,7 +52,7 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   importActiveWorkspaceIdentityFromClipboard: () => ipcRenderer.invoke("samurai:workspace-identity:import-active-from-clipboard"),
   registerWorkspaceServerAccount: (displayName: unknown) => ipcRenderer.invoke("samurai:workspace-server:register-active-account", typeof displayName === "string" ? displayName.slice(0, 160) : ""),
   getWorkspaceServerStatus: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:status", sanitizeWorkspaceTargetInput(input)),
-  listOrganizations: () => ipcRenderer.invoke("samurai:workspace-server:organization:list"),
+  listOrganizations: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:list", sanitizeOrganizationIdInput(input)),
   getOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:get", sanitizeOrganizationIdInput(input)),
   createOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:create", sanitizeOrganizationMutationInput(input, ["name", "description", "icon", "operationId"])),
   patchOrganization: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:patch", sanitizeOrganizationMutationInput(input, ["organizationId", "name", "description", "icon", "operationId", "expectedVersion"])),
@@ -72,7 +80,7 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   getOrganizationWorkspaceMoveStatus: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:workspace:move-status", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "operationId"])),
   exportOrganizationWorkspaceBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:bundle:export", sanitizeOrganizationMutationInput(input, ["organizationId", "workspaceId", "operationId", "expectedWorkspaceVersion"])),
   restoreOrganizationBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:organization:bundle:restore", sanitizeOrganizationBundleRestoreInput(input)),
-  listWorkspaceRooms: () => ipcRenderer.invoke("samurai:workspace-server:rooms:list"),
+  listWorkspaceRooms: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:rooms:list", sanitizeWorkspaceAgentTargetInput(input)),
   listWorkspaceAgents: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:agents:list-target", sanitizeWorkspaceAgentTargetInput(input)),
   viewWorkspaceAgent: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:agent:view", sanitizeWorkspaceAgentOperationInput(input, ["agentId", "target"])),
   createWorkspaceAgent: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:agent:create", sanitizeWorkspaceAgentOperationInput(input, ["name", "role", "instructions", "backendId", "enabled", "operationId", "target"])),
@@ -82,10 +90,10 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   setWorkspaceRoomAgentPermission: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-agent-permission:set", sanitizeWorkspaceAgentOperationInput(input, ["roomId", "agentId", "canView", "canEdit", "canExecute", "operationId", "target"])),
   removeWorkspaceRoomAgent: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-agent:remove", sanitizeWorkspaceAgentOperationInput(input, ["roomId", "agentId", "operationId", "target"])),
   listWorkspaceAgentBackends: async (input: unknown) => sanitizeWorkspaceAgentBackendList(await ipcRenderer.invoke("samurai:workspace-server:agent-backends:list-target", sanitizeWorkspaceAgentTargetInput(input))),
-  getWorkspaceSettings: () => ipcRenderer.invoke("samurai:workspace-server:settings:get"),
+  getWorkspaceSettings: (input?: unknown) => ipcRenderer.invoke("samurai:workspace-server:settings:get", sanitizeWorkspaceAgentTargetInput(input)),
   patchWorkspaceSettings: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:settings:patch", sanitizeWorkspaceSettingsPatch(input)),
-  getWorkspaceSurfaceContract: (source: unknown) => ipcRenderer.invoke("samurai:workspace-server:surface:contract", typeof source === "string" ? source.slice(0, 80) : undefined),
-  listWorkspaceChatSessions: () => ipcRenderer.invoke("samurai:workspace-server:chat:sessions:list"),
+  getWorkspaceSurfaceContract: (source: unknown) => ipcRenderer.invoke("samurai:workspace-server:surface:contract", sanitizeWorkspaceSurfaceContractInput(source)),
+  listWorkspaceChatSessions: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:sessions:list", sanitizeWorkspaceAgentTargetInput(input)),
   createWorkspaceChatSession: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:session:create", sanitizeWorkspaceChatSessionInput(input)),
   getWorkspaceChatSession: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:session:get", sanitizeWorkspaceChatSessionIdInput(input)),
   sendWorkspaceChatMessage: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:message:send", sanitizeWorkspaceChatTurnInput(input)),
@@ -101,7 +109,7 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   retryWorkspaceBackendRun: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:run:retry", sanitizeWorkspaceRunControlInput(input)),
   reconnectWorkspaceServer: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:reconnect", sanitizeWorkspaceReconnectInput(input)),
   readWorkspaceEvidence: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:evidence:read", sanitizeWorkspaceEvidenceInput(input)),
-  getWorkspaceAudit: () => ipcRenderer.invoke("samurai:workspace-server:audit:get"),
+  getWorkspaceAudit: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:audit:get", sanitizeWorkspaceAgentTargetInput(input)),
   listWorkspaceCompletionResources: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resources:list", sanitizeWorkspaceCompletionOperation(input)),
   getWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:get", sanitizeWorkspaceCompletionOperation(input)),
   getWorkspaceCompletionResourceBody: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:body", sanitizeWorkspaceCompletionOperation(input)),
@@ -148,13 +156,26 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   listWorkspaceArtifacts: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifacts:list", sanitizeWorkspaceArtifactOperation(input)),
   getWorkspaceArtifact: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:get", sanitizeWorkspaceArtifactOperation(input)),
   createWorkspaceArtifact: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:create", sanitizeWorkspaceArtifactOperation(input)),
+  listWorkspaceArtifactRevisions: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:revisions:list", sanitizeWorkspaceArtifactOperation(input)),
+  getWorkspaceArtifactRevision: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:revision:get", sanitizeWorkspaceArtifactOperation(input)),
+  reviseWorkspaceArtifact: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:revise", sanitizeWorkspaceArtifactRevisionInput(input)),
+  restoreWorkspaceArtifactRevision: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:restore", sanitizeWorkspaceArtifactRevisionInput(input)),
   runWorkspaceArtifactSurfaceOperation: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:artifact:surface", sanitizeWorkspaceArtifactOperation(input)),
+  listWorkspaceGeneratedSurfaces: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:list", sanitizeWorkspaceArtifactOperation(input)),
   getWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:get", workspaceGeneratedSurfaceRoomRequest(input)),
+  queryWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:get", workspaceGeneratedSurfaceRoomRequest(input)),
   getWorkspaceGeneratedSurfaceBundle: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:bundle", workspaceGeneratedSurfaceBundleRequest(input)),
+  createWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:create", sanitizeWorkspaceGeneratedSurfaceMutationInput(input)),
+  reviseWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:revise", sanitizeWorkspaceGeneratedSurfaceMutationInput(input)),
   runWorkspaceGeneratedSurfaceAction: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:action", workspaceGeneratedSurfaceActionRequest(input)),
   runWorkspaceGeneratedSurfaceState: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:state", workspaceGeneratedSurfaceStateRequest(input)),
   exportWorkspaceGeneratedSurface: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:generated-surface:export", workspaceGeneratedSurfaceExportRequest(input)),
-  listWorkspaceRoomMembers: (roomId: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-members:list", typeof roomId === "string" ? roomId.slice(0, 128) : ""),
+  listWorkspaceInteractionRequests: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:list", sanitizeWorkspaceInteractionRequestListInput(input)),
+  getWorkspaceInteractionRequestResult: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:result", sanitizeWorkspaceInteractionRequestResultInput(input)),
+  listWorkspaceOperationHistory: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:operation-history:list", sanitizeWorkspaceOperationHistoryInput(input)),
+  respondWorkspaceInteractionRequest: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:respond", sanitizeWorkspaceInteractionRequestRespondInput(input)),
+  cancelWorkspaceInteractionRequest: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:interaction-requests:cancel", sanitizeWorkspaceInteractionRequestCancelInput(input)),
+  listWorkspaceRoomMembers: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-members:list", sanitizeWorkspaceRoomMemberListInput(input)),
   listWorkspaceRoomWorks: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-work:list", sanitizeWorkspaceRoomWorkListInput(input)),
   getWorkspaceRoomWork: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-work:view", sanitizeWorkspaceRoomWorkViewInput(input)),
   createWorkspaceRoomWork: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-work:create", sanitizeWorkspaceRoomWorkCreateInput(input)),
@@ -175,7 +196,7 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   moveWorkspaceRoom: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room:move", sanitizeWorkspaceRoomOperation(input)),
   previewWorkspaceRoomMember: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-member:preview", sanitizeWorkspaceRoomOperation(input)),
   setWorkspaceRoomMember: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:room-member:set", sanitizeWorkspaceRoomOperation(input)),
-  getWorkspaceLearningSettings: (roomId: unknown) => ipcRenderer.invoke("samurai:workspace-server:learning:settings:get", { roomId: typeof roomId === "string" ? roomId.slice(0, 128) : "" }),
+  getWorkspaceLearningSettings: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:learning:settings:get", sanitizeWorkspaceLearningSettingsReadInput(input)),
   updateWorkspaceLearningSettings: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:learning:settings:put", sanitizeWorkspaceLearningOperation(input)),
   onWorkspaceServerEvent: (listener: unknown) => {
     if (typeof listener !== "function") return () => undefined;
@@ -238,17 +259,32 @@ function sanitizeWorkspaceSelectionInput(input: unknown, kind: "organization" | 
   for (const key of ["connectionId", "organizationId", "workspaceId", "roomId"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 128);
   }
+  const target = value.target;
+  if (target && typeof target === "object" && !Array.isArray(target)) {
+    const targetValue = target as Record<string, unknown>;
+    for (const key of ["connectionId", "workspaceId"] as const) {
+      if (output[key] === undefined && typeof targetValue[key] === "string") output[key] = targetValue[key].slice(0, 128);
+    }
+    if (kind === "room" && output.roomId === undefined && typeof targetValue.roomId === "string") {
+      output.roomId = targetValue.roomId.slice(0, 128);
+    }
+  }
   return output;
 }
 
-function sanitizeWorkspaceTargetInput(input: unknown): { connectionId: string; workspaceId: string } | undefined {
+function sanitizeWorkspaceTargetInput(input: unknown): { connectionId: string; workspaceId: string; roomId?: string; selectionGeneration?: number } | undefined {
   if (input === undefined || input === null) return undefined;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { connectionId: "", workspaceId: "" };
   const value = input as Record<string, unknown>;
-  return {
+  const target: { connectionId: string; workspaceId: string; roomId?: string; selectionGeneration?: number } = {
     connectionId: typeof value.connectionId === "string" ? value.connectionId.slice(0, 128) : "",
     workspaceId: typeof value.workspaceId === "string" ? value.workspaceId.slice(0, 128) : ""
   };
+  if (value.roomId !== undefined) target.roomId = typeof value.roomId === "string" ? value.roomId.slice(0, 128) : "";
+  if (value.selectionGeneration !== undefined) {
+    target.selectionGeneration = typeof value.selectionGeneration === "number" ? value.selectionGeneration : -1;
+  }
+  return target;
 }
 
 function sanitizeWorkspaceAgentTargetInput(input: unknown): Record<string, unknown> {
@@ -258,6 +294,16 @@ function sanitizeWorkspaceAgentTargetInput(input: unknown): Record<string, unkno
       || (!("connectionId" in value) && !("workspaceId" in value)))) return {};
   const target = sanitizeWorkspaceTargetInput(value.target ?? input);
   return target?.connectionId && target.workspaceId ? { target } : { target: { connectionId: "", workspaceId: "" } };
+}
+
+function sanitizeWorkspaceSurfaceContractInput(input: unknown): unknown {
+  if (typeof input === "string") return input.slice(0, 80);
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  if (typeof value.source === "string") output.source = value.source.slice(0, 80);
+  copyWorkspaceTargetInput(value, output);
+  return output;
 }
 
 function sanitizeWorkspaceAgentOperationInput(input: unknown, keys: string[]): Record<string, unknown> {
@@ -281,6 +327,15 @@ function sanitizeWorkspaceAgentOperationInput(input: unknown, keys: string[]): R
     if (typeof value[key] === "string") output[key] = value[key].trim().slice(0, key === "instructions" ? 20_000 : key === "role" ? 500 : key === "name" ? 200 : 512);
   }
   return output;
+}
+
+/** Keep the caller's Workspace target explicit at the IPC boundary. */
+function copyWorkspaceTargetInput(value: Record<string, unknown>, output: Record<string, unknown>): void {
+  if (!("target" in value)) return;
+  const target = sanitizeWorkspaceTargetInput(value.target);
+  output.target = target?.connectionId && target.workspaceId
+    ? target
+    : { connectionId: "", workspaceId: "" };
 }
 
 function sanitizeWorkspaceTargetCutoverInput(input: unknown): Record<string, unknown> {
@@ -326,8 +381,10 @@ function sanitizeWorkspaceTransferInput(input: unknown): Record<string, unknown>
   return output;
 }
 
-function sanitizeOrganizationIdInput(input: unknown): Record<string, string> {
-  return sanitizeWorkspaceSelectionInput(input, "organization");
+function sanitizeOrganizationIdInput(input: unknown): Record<string, unknown> {
+  const output = sanitizeWorkspaceSelectionInput(input, "organization") as Record<string, unknown>;
+  if (input && typeof input === "object" && !Array.isArray(input)) copyWorkspaceTargetInput(input as Record<string, unknown>, output);
+  return output;
 }
 
 function sanitizeOrganizationMutationInput(input: unknown, keys: string[]): Record<string, unknown> {
@@ -340,6 +397,7 @@ function sanitizeOrganizationMutationInput(input: unknown, keys: string[]): Reco
     if (typeof value[key] === "boolean") output[key] = value[key];
     if (typeof value[key] === "number" && Number.isSafeInteger(value[key])) output[key] = value[key];
   }
+  copyWorkspaceTargetInput(value, output);
   return output;
 }
 
@@ -362,13 +420,15 @@ function sanitizeOrganizationInvitationInput(input: unknown): Record<string, unk
   return output;
 }
 
-function sanitizeOrganizationInvitationAcceptInput(input: unknown): Record<string, string> {
+function sanitizeOrganizationInvitationAcceptInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  return {
+  const output: Record<string, unknown> = {
     token: typeof value.token === "string" ? value.token.slice(0, 512) : "",
     operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : ""
   };
+  copyWorkspaceTargetInput(value, output);
+  return output;
 }
 
 function sanitizeOrganizationBundleRestoreInput(input: unknown): Record<string, unknown> {
@@ -379,17 +439,20 @@ function sanitizeOrganizationBundleRestoreInput(input: unknown): Record<string, 
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }
   if (typeof value.confirm === "boolean") output.confirm = value.confirm;
+  copyWorkspaceTargetInput(value, output);
   return output;
 }
 
 function sanitizeWorkspaceRunControlInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  return {
+  const output: Record<string, unknown> = {
     runId: typeof value.runId === "string" ? value.runId.slice(0, 128) : "",
     operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : "",
     ...(typeof value.confirmUnknown === "boolean" ? { confirmUnknown: value.confirmUnknown } : {})
   };
+  copyWorkspaceTargetInput(value, output);
+  return output;
 }
 
 function sanitizeWorkspaceReconnectInput(input: unknown): Record<string, string> {
@@ -411,16 +474,19 @@ function sanitizeWorkspaceEvidenceInput(input: unknown): Record<string, string> 
 function sanitizeWorkspaceChatSessionIdInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  return { sessionId: typeof value.sessionId === "string" ? value.sessionId.slice(0, 128) : "" };
+  const output: Record<string, unknown> = { sessionId: typeof value.sessionId === "string" ? value.sessionId.slice(0, 128) : "" };
+  copyWorkspaceTargetInput(value, output);
+  return output;
 }
 
-function sanitizeWorkspaceRuntimeQuery(input: unknown): Record<string, string> {
+function sanitizeWorkspaceRuntimeQuery(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  const output: Record<string, string> = {};
+  const output: Record<string, unknown> = {};
   for (const key of ["roomId", "sessionId", "runId", "query"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 200_000);
   }
+  copyWorkspaceTargetInput(value, output);
   return output;
 }
 
@@ -428,6 +494,7 @@ function sanitizeWorkspaceSkillOptimizationInput(input: unknown): Record<string,
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["skillId", "roomId", "runId", "action", "candidateId", "promotionId", "snapshotId", "operationId", "objective"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "objective" ? 10_000 : 160);
   }
@@ -442,16 +509,19 @@ function sanitizeWorkspaceSettingsPatch(input: unknown): Record<string, unknown>
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const patch = value.patch && typeof value.patch === "object" && !Array.isArray(value.patch) ? value.patch as Record<string, unknown> : {};
-  return {
+  const output: Record<string, unknown> = {
     operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : "",
     patch
   };
+  copyWorkspaceTargetInput(value, output);
+  return output;
 }
 
 function sanitizeWorkspaceChatTurnInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["sessionId", "idempotencyKey", "agentId", "backendId", "inputLocale", "outputLocale"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "idempotencyKey" ? 256 : key.includes("Locale") ? 32 : 128);
   }
@@ -487,13 +557,7 @@ function sanitizeWorkspaceAttachmentInput(input: unknown): Record<string, unknow
     expectedVersion: typeof value.expectedVersion === "number" && Number.isSafeInteger(value.expectedVersion) ? value.expectedVersion : -1,
     operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : ""
   };
-  const target = value.target && typeof value.target === "object" && !Array.isArray(value.target)
-    ? value.target as Record<string, unknown>
-    : undefined;
-  if (target && typeof target.connectionId === "string" && opaque(target.connectionId)
-    && typeof target.workspaceId === "string" && opaque(target.workspaceId)) {
-    output.target = { connectionId: target.connectionId.slice(0, 128), workspaceId: target.workspaceId.slice(0, 128) };
-  }
+  copyWorkspaceTargetInput(value, output);
   return output;
 }
 
@@ -525,6 +589,7 @@ function sanitizeWorkspaceRealtimeNotice(input: unknown): { type: string; worksp
 function sanitizeWorkspaceRoomWorkListInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   copyRoomWorkId(value, output, "roomId");
   copyRoomWorkId(value, output, "cursor", 512);
   if (typeof value.status === "string" && /^(?:queued|running|waiting|completed|failed|stopping|cancelled|outcome_unknown)$/.test(value.status)) output.status = value.status;
@@ -535,6 +600,7 @@ function sanitizeWorkspaceRoomWorkListInput(input: unknown): Record<string, unkn
 function sanitizeWorkspaceRoomWorkViewInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   copyRoomWorkId(value, output, "roomId");
   copyRoomWorkId(value, output, "workId");
   return output;
@@ -543,29 +609,34 @@ function sanitizeWorkspaceRoomWorkViewInput(input: unknown): Record<string, unkn
 function sanitizeWorkspaceRoomWorkCreateInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   copyRoomWorkId(value, output, "roomId");
   copyRoomWorkId(value, output, "agentId");
   copyRoomWorkString(value, output, "instruction", 1_000_000);
   copyRoomWorkString(value, output, "operationId", 256);
   copyRoomWorkAttachments(value, output);
+  if (value.resourceRefs !== undefined) output.resourceRefs = sanitizeWorkspaceRoomWorkResourceRefs(value.resourceRefs);
   return output;
 }
 
 function sanitizeWorkspaceRoomWorkReplyInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId", "assigneeId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "instruction", 1_000_000);
   copyRoomWorkString(value, output, "operationId", 256);
   copyRoomWorkString(value, output, "reason", 2_000);
   copyRoomWorkAttachments(value, output);
   copyRoomWorkVersions(value, output);
+  if (value.resourceRefs !== undefined) output.resourceRefs = sanitizeWorkspaceRoomWorkResourceRefs(value.resourceRefs);
   return output;
 }
 
 function sanitizeWorkspaceRoomWorkCommentCreateInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "body", 100_000);
   copyRoomWorkString(value, output, "operationId", 256);
@@ -577,6 +648,7 @@ function sanitizeWorkspaceRoomWorkCommentCreateInput(input: unknown): Record<str
 function sanitizeWorkspaceRoomWorkCommentApplyInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId", "commentId", "assigneeId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "operationId", 256);
   copyRoomWorkVersions(value, output);
@@ -587,6 +659,7 @@ function sanitizeWorkspaceRoomWorkCommentApplyInput(input: unknown): Record<stri
 function sanitizeWorkspaceRoomWorkCommentReactionInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId", "commentId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "operationId", 256);
   if (value.reaction === undefined || value.reaction === "like") output.reaction = "like";
@@ -598,6 +671,7 @@ function sanitizeWorkspaceRoomWorkCommentReactionInput(input: unknown): Record<s
 function sanitizeWorkspaceRoomWorkControlInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "reason", 2_000);
   copyRoomWorkString(value, output, "operationId", 256);
@@ -614,6 +688,7 @@ function sanitizeWorkspaceRoomWorkAssigneeStopInput(input: unknown): Record<stri
 function sanitizeWorkspaceRoomWorkReassignInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId", "assigneeId", "agentId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "operationId", 256);
   copyRoomWorkVersions(value, output);
@@ -623,6 +698,7 @@ function sanitizeWorkspaceRoomWorkReassignInput(input: unknown): Record<string, 
 function sanitizeWorkspaceRoomWorkDelegateInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "workId", "assigneeId", "agentId"]) copyRoomWorkId(value, output, key);
   copyRoomWorkString(value, output, "instruction", 1_000_000);
   copyRoomWorkString(value, output, "operationId", 256);
@@ -649,6 +725,7 @@ function sanitizeWorkspaceAgentDmInput(input: unknown): Record<string, unknown> 
 function sanitizeWorkspaceEventsInput(input: unknown): Record<string, unknown> {
   const value = plainObject(input);
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   copyRoomWorkId(value, output, "roomId");
   copyRoomWorkString(value, output, "afterCursor", 512);
   if (typeof value.limit === "number" && Number.isSafeInteger(value.limit)) output.limit = value.limit;
@@ -696,8 +773,7 @@ function sanitizeWorkspaceRoomOperation(input: unknown): Record<string, unknown>
     if (typeof value[key] === "number" && Number.isSafeInteger(value[key])) output[key] = value[key];
   }
   if (typeof value.defaultAgentVersion === "number" && Number.isSafeInteger(value.defaultAgentVersion)) output.defaultAgentVersion = value.defaultAgentVersion;
-  const target = sanitizeWorkspaceTargetInput(value.target);
-  if (target?.connectionId && target.workspaceId) output.target = target;
+  copyWorkspaceTargetInput(value, output);
   const permission = sanitizeWorkspaceRoomAgentPermission(value.agentPermission);
   if (permission) output.agentPermission = permission;
   const newAgent = sanitizeWorkspaceRoomNewAgent(value.newAgent);
@@ -763,6 +839,7 @@ function sanitizeWorkspaceLearningOperation(input: unknown): Record<string, unkn
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["scopeKind", "roomId", "operationId", "engineId", "model", "secretRef"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "model" ? 512 : 128);
   }
@@ -775,10 +852,29 @@ function sanitizeWorkspaceLearningOperation(input: unknown): Record<string, unkn
   return output;
 }
 
+function sanitizeWorkspaceRoomMemberListInput(input: unknown): Record<string, unknown> {
+  if (typeof input === "string") return { roomId: input.slice(0, 128) };
+  const value = plainObject(input);
+  const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
+  copyRoomWorkId(value, output, "roomId");
+  return output;
+}
+
+function sanitizeWorkspaceLearningSettingsReadInput(input: unknown): Record<string, unknown> {
+  if (typeof input === "string") return { roomId: input.slice(0, 128) };
+  const value = plainObject(input);
+  const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
+  copyRoomWorkId(value, output, "roomId");
+  return output;
+}
+
 function sanitizeWorkspaceCompletionOperation(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["scopeKind", "roomId", "kind", "resourceId", "operationId", "knowledgeKind", "expectedVersion"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 128);
     if (key === "expectedVersion" && typeof value[key] === "number" && Number.isSafeInteger(value[key])) output[key] = value[key];
@@ -799,6 +895,7 @@ function sanitizeWorkspaceWikiOperation(input: unknown): Record<string, unknown>
   const output: Record<string, unknown> = {};
   if (!input || typeof input !== "object" || Array.isArray(input)) return output;
   const value = input as Record<string, unknown>;
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "wikiId", "operationId", "contentLocale", "knowledgeKind", "state"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "state" ? 16 : 128);
   }
@@ -814,6 +911,7 @@ function sanitizeWorkspaceCollectionOperation(input: unknown): Record<string, un
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "collectionId", "recordId", "patchId", "operationId"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }
@@ -829,6 +927,7 @@ function sanitizeWorkspaceAutomationOperation(input: unknown): Record<string, un
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "jobId", "operationId", "kind", "state", "connectionId", "nextRunAt"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "nextRunAt" ? 80 : 160);
   }
@@ -847,13 +946,15 @@ function sanitizeWorkspaceArtifactOperation(input: unknown): Record<string, unkn
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
-  for (const key of ["roomId", "artifactId", "operationId", "kind", "locale"]) {
+  copyWorkspaceTargetInput(value, output);
+  for (const key of ["roomId", "artifactId", "revisionId", "baseRevisionId", "operationId", "kind", "locale", "mimeType", "encoding"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }
-  for (const key of ["title", "content"]) {
-    if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "content" ? 20_000_000 : 20_000);
-    else if (key === "content" && value[key] && typeof value[key] === "object") output[key] = value[key];
-  }
+  if (typeof value.title === "string") output.title = value.title.slice(0, 20_000);
+  if (typeof value.content === "string") output.content = value.content.slice(0, 50_000_000);
+  else if (value.content instanceof Uint8Array) output.content = Array.from(value.content.slice(0, 50_000_000));
+  else if (Array.isArray(value.content) && value.content.length <= 50_000_000 && value.content.every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255)) output.content = value.content;
+  else if (value.content && typeof value.content === "object") output.content = value.content;
   if (Array.isArray(value.sourceLocales)) output.sourceLocales = value.sourceLocales.filter((item): item is string => typeof item === "string").slice(0, 20);
   if (value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata)) output.metadata = value.metadata;
   if (value.operation && typeof value.operation === "object" && !Array.isArray(value.operation)) output.operation = value.operation;
@@ -864,6 +965,7 @@ function sanitizeWorkspaceMemoryOperation(input: unknown): Record<string, unknow
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTargetInput(value, output);
   for (const key of ["roomId", "memoryId", "operationId"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }

@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const supportedLocales = new Set(["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"]);
 
@@ -6,6 +8,7 @@ type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string
 export type WorkspaceChatSessionRequest = {
   roomId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: {
     room_id: string;
     title?: string;
@@ -18,6 +21,7 @@ export type WorkspaceChatSessionRequest = {
 export type WorkspaceChatTurnRequest = {
   sessionId: string;
   idempotencyKey: string;
+  target?: WorkspaceTargetRequest;
   body: {
     content: string;
     agent_id?: string;
@@ -29,20 +33,24 @@ export type WorkspaceChatTurnRequest = {
   };
 };
 
-export function workspaceChatSessionIdRequest(input: unknown): string {
-  return requiredOpaque(object(input), "sessionId");
+export function workspaceChatSessionIdRequest(input: unknown): { sessionId: string; target?: WorkspaceTargetRequest } {
+  const value = object(input);
+  const target = workspaceTargetRequest(value.target);
+  return { sessionId: requiredOpaque(value, "sessionId"), ...(target ? { target } : {}) };
 }
 
 export function workspaceChatSessionRequest(input: unknown): WorkspaceChatSessionRequest {
   const value = object(input);
   const roomId = requiredOpaque(value, "roomId");
   const operationId = requiredOpaque(value, "operationId");
+  const target = workspaceTargetRequest(value.target);
   const title = optionalText(value, "title", 240);
   const uiLocale = optionalLocale(value, "uiLocale");
   const outputLocale = optionalLocale(value, "outputLocale");
   return {
     roomId,
     operationId,
+    ...(target ? { target } : {}),
     body: {
       room_id: roomId,
       ...(title ? { title } : {}),
@@ -56,6 +64,7 @@ export function workspaceChatTurnRequest(input: unknown): WorkspaceChatTurnReque
   const value = object(input);
   const sessionId = requiredOpaque(value, "sessionId");
   const idempotencyKey = requiredOpaque(value, "idempotencyKey");
+  const target = workspaceTargetRequest(value.target);
   const content = requiredText(value, "content", 200_000);
   const agentId = optionalOpaque(value, "agentId");
   const backendId = optionalOpaque(value, "backendId");
@@ -67,6 +76,7 @@ export function workspaceChatTurnRequest(input: unknown): WorkspaceChatTurnReque
   return {
     sessionId,
     idempotencyKey,
+    ...(target ? { target } : {}),
     body: {
       content,
       ...(agentId ? { agent_id: agentId } : {}),

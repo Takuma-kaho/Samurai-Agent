@@ -181,6 +181,8 @@ export interface PostgresRuntimeSearchResult {
   title: string;
   summary: string;
   session_id?: string;
+  /** A public Room Work target resolved from the server-side runtime binding. */
+  work_id?: string;
 }
 
 export interface PostgresRuntimeSessionInput {
@@ -398,6 +400,63 @@ interface RuntimeToolOperationSpec {
   proposedEffect: string;
 }
 
+interface RuntimeExecutableToolSpec extends RuntimeToolOperationSpec {
+  providerToolNames: readonly string[];
+  requiredResourceKinds: readonly string[];
+  unavailableSummary: string;
+  completedSummary: string;
+  defaultChangeType: import("@samurai-agent/core-schemas").WorkspaceChangeType;
+}
+
+/**
+ * The Provider receives only these explicit capabilities.  This independent
+ * Runtime whitelist is intentional: a Domain contract alone is not execution
+ * authority.  Each entry is implemented by the Host tool port and verified
+ * again after execution before the Runtime settles its operation.
+ */
+const runtimeExecutableToolSpecs: readonly RuntimeExecutableToolSpec[] = [
+  {
+    operation: "artifact.create",
+    capabilityId: "artifact.create",
+    providerToolNames: ["create_artifact", "samurai.artifact.create", "mcp__samurai__artifact_create"],
+    proposedEffect: "Create a local workspace artifact draft.",
+    requiredResourceKinds: ["artifact"],
+    unavailableSummary: "Artifact creation is unavailable because the Host tool port is not configured.",
+    completedSummary: "Artifact creation was already completed for this tool call.",
+    defaultChangeType: "artifact_created"
+  },
+  {
+    operation: "artifact.revise",
+    capabilityId: "artifact.revise",
+    providerToolNames: ["revise_artifact", "artifact.revise", "samurai.artifact.revise", "mcp__samurai__artifact_revise"],
+    proposedEffect: "Create an immutable Artifact revision and update its current pointer.",
+    requiredResourceKinds: ["artifact", "artifact_revision"],
+    unavailableSummary: "Artifact revision is unavailable because the Host tool port is not configured.",
+    completedSummary: "Artifact revision was already completed for this tool call.",
+    defaultChangeType: "artifact_created"
+  },
+  {
+    operation: "generated_surface.create",
+    capabilityId: "generated_surface.create",
+    providerToolNames: ["create_generated_surface", "generated_surface.create", "samurai.generated_surface.create", "mcp__samurai__generated_surface_create"],
+    proposedEffect: "Validate and persist a versioned Generated Surface bundle.",
+    requiredResourceKinds: ["generated_surface", "generated_surface_revision"],
+    unavailableSummary: "Generated Surface creation is unavailable because the Host tool port is not configured.",
+    completedSummary: "Generated Surface creation was already completed for this tool call.",
+    defaultChangeType: "other"
+  },
+  {
+    operation: "generated_surface.revise",
+    capabilityId: "generated_surface.revise",
+    providerToolNames: ["generated_surface.revise", "samurai.generated_surface.revise", "mcp__samurai__generated_surface_revise"],
+    proposedEffect: "Create a new immutable Generated Surface revision.",
+    requiredResourceKinds: ["generated_surface", "generated_surface_revision"],
+    unavailableSummary: "Generated Surface revision is unavailable because the Host tool port is not configured.",
+    completedSummary: "Generated Surface revision was already completed for this tool call.",
+    defaultChangeType: "other"
+  }
+];
+
 interface RuntimeRunRow {
   workspace_id: string;
   id: string;
@@ -436,6 +495,7 @@ interface RuntimeMessageRow {
   output_locale: string;
   envelope: unknown;
   created_at: Date | string;
+  work_id?: string | null;
 }
 
 interface RuntimeSessionRow {
@@ -448,6 +508,7 @@ interface RuntimeSessionRow {
   output_locale: string;
   created_at: Date | string;
   updated_at: Date | string;
+  work_id?: string | null;
 }
 
 interface RuntimeActivityRow {
@@ -1296,17 +1357,43 @@ export class PostgresRuntimeChat {
       const pattern = `%${normalizedQuery}%`;
       const [sessions, messages, artifacts] = await Promise.all([
         sql.query<RuntimeSessionRow>(
-          `SELECT workspace_id, id, session_key, room_id, title, ui_locale, output_locale, created_at, updated_at
-           FROM workspace_runtime_sessions
-           WHERE workspace_id = $1 AND room_id = $2 AND (title ILIKE $3 OR session_key ILIKE $3)
-           ORDER BY updated_at DESC, id DESC LIMIT 50`,
+          `SELECT session.workspace_id, session.id, session.session_key, session.room_id, session.title,
+                  session.ui_locale, session.output_locale, session.created_at, session.updated_at,
+                  COALESCE(legacy.work_id, runtime_work.work_id) AS work_id
+           FROM workspace_runtime_sessions AS session
+           LEFT JOIN workspace_human_work_legacy_sessions AS legacy
+             ON legacy.workspace_id = session.workspace_id AND legacy.legacy_session_id = session.id
+           LEFT JOIN LATERAL (
+             SELECT runtime_run.metadata -> 'runtime_binding' ->> 'work_id' AS work_id
+             FROM workspace_runtime_runs AS runtime_run
+             WHERE runtime_run.workspace_id = session.workspace_id
+               AND runtime_run.session_id = session.id
+               AND runtime_run.room_id = session.room_id
+               AND jsonb_typeof(runtime_run.metadata -> 'runtime_binding') = 'object'
+             ORDER BY runtime_run.updated_at DESC, runtime_run.id DESC
+             LIMIT 1
+           ) AS runtime_work ON TRUE
+           WHERE session.workspace_id = $1 AND session.room_id = $2 AND (session.title ILIKE $3 OR session.session_key ILIKE $3)
+           ORDER BY session.updated_at DESC, session.id DESC LIMIT 50`,
           [this.workspaceId, normalizedRoomId, pattern]
         ),
         sql.query<RuntimeMessageRow>(
-          `SELECT message.*
-           FROM workspace_runtime_messages message
+          `SELECT message.*, COALESCE(legacy.work_id, runtime_work.work_id) AS work_id
+           FROM workspace_runtime_messages AS message
            JOIN workspace_runtime_sessions session
              ON session.workspace_id = message.workspace_id AND session.id = message.session_id
+           LEFT JOIN workspace_human_work_legacy_sessions AS legacy
+             ON legacy.workspace_id = session.workspace_id AND legacy.legacy_session_id = session.id
+           LEFT JOIN LATERAL (
+             SELECT runtime_run.metadata -> 'runtime_binding' ->> 'work_id' AS work_id
+             FROM workspace_runtime_runs AS runtime_run
+             WHERE runtime_run.workspace_id = session.workspace_id
+               AND runtime_run.session_id = session.id
+               AND runtime_run.room_id = session.room_id
+               AND jsonb_typeof(runtime_run.metadata -> 'runtime_binding') = 'object'
+             ORDER BY runtime_run.updated_at DESC, runtime_run.id DESC
+             LIMIT 1
+           ) AS runtime_work ON TRUE
            WHERE message.workspace_id = $1 AND session.room_id = $2 AND message.content ILIKE $3
            ORDER BY message.created_at DESC, message.id DESC LIMIT 100`,
           [this.workspaceId, normalizedRoomId, pattern]
@@ -1324,14 +1411,16 @@ export class PostgresRuntimeChat {
           kind: "session",
           id: row.id,
           title: row.title,
-          summary: row.title
+          summary: row.title,
+          ...(row.work_id ? { work_id: row.work_id } : {})
         })),
         ...messages.rows.map((row): PostgresRuntimeSearchResult => ({
           kind: "message",
           id: row.id,
           title: row.content.slice(0, 120),
           summary: row.content.slice(0, 240),
-          session_id: row.session_id
+          session_id: row.session_id,
+          ...(row.work_id ? { work_id: row.work_id } : {})
         })),
         ...artifacts.rows.map((row): PostgresRuntimeSearchResult => {
           const payload = jsonRecord(row.payload);
@@ -2242,9 +2331,9 @@ export class PostgresRuntimeChat {
   }
 
   /**
-   * Provider tool calls enter the Runtime as events.  Only the canonical
-   * artifact command is executable in this adapter. Every other provider tool
-   * fails closed so an unknown tool can never cross the Workspace boundary or
+   * Provider tool calls enter the Runtime as events. Only the explicit
+   * Runtime whitelist below is executable. Every other provider tool fails
+   * closed so an unknown capability can never cross the Workspace boundary or
    * make its parent Run look successful.
    */
   private async executeToolCall(input: {
@@ -2259,13 +2348,15 @@ export class PostgresRuntimeChat {
     const providerToolName = stringPayload(started.payload.provider_tool_name);
     const actionId = stringPayload(started.payload.action_id);
     const capabilityId = stringPayload(started.payload.capability_id);
-    const isArtifactCreate = providerToolName === "create_artifact" || actionId === "artifact.create";
     const isRoomWorkDelegation = capabilityId === "subagent_delegate"
       || actionId === "room.work.assignee.delegate"
       || providerToolName === "subagent_delegate"
       || providerToolName === "samurai.room.work.assignee.delegate"
       || providerToolName === "mcp__samurai__room_work_assignee_delegate";
-    if (!isArtifactCreate && !isRoomWorkDelegation) {
+    const executableSpec = isRoomWorkDelegation
+      ? undefined
+      : runtimeExecutableToolSpec(providerToolName, actionId);
+    if (!executableSpec && !isRoomWorkDelegation) {
       return {
         status: "failed",
         providerToolName: providerToolName ?? "unknown_tool",
@@ -2276,13 +2367,14 @@ export class PostgresRuntimeChat {
       };
     }
     if (!this.toolExecution || !input.runInput) {
+      const unavailableSummary = isRoomWorkDelegation
+        ? "Room-work delegation is unavailable because the Host tool port is not configured."
+        : executableSpec!.unavailableSummary;
       return {
         status: "failed",
-        providerToolName: providerToolName ?? "create_artifact",
-        actionId: actionId ?? (isRoomWorkDelegation ? "room.work.assignee.delegate" : "artifact.create"),
-        summary: isRoomWorkDelegation
-          ? "Room-work delegation is unavailable because the Host tool port is not configured."
-          : "Artifact creation is unavailable because the Host tool port is not configured.",
+        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : executableSpec!.providerToolNames[0]),
+        actionId: actionId ?? (isRoomWorkDelegation ? "room.work.assignee.delegate" : executableSpec!.operation),
+        summary: unavailableSummary,
         reason: "runtime_tool_execution_unavailable",
         errorCode: "runtime_tool_execution_unavailable"
       };
@@ -2302,9 +2394,9 @@ export class PostgresRuntimeChat {
     const executionEvent = isRoomWorkDelegation
       ? sanitizeDelegationToolEvent(event)
       : event;
-    const operationSpec = isRoomWorkDelegation
+    const operationSpec: RuntimeToolOperationSpec = isRoomWorkDelegation
       ? { operation: "room.work.assignee.delegate", capabilityId: "subagent_delegate", proposedEffect: "Create one bounded child Room-work assignment." }
-      : { operation: "artifact.create", capabilityId: "artifact.create", proposedEffect: "Create a local workspace artifact draft." };
+      : executableSpec!;
     let operation: OperationRecord | undefined;
     let trustedRoomWorkBinding: PostgresRuntimeTrustedRoomWorkBinding | undefined;
     try {
@@ -2320,11 +2412,11 @@ export class PostgresRuntimeChat {
         const replayedRefs = ResourceRefSchema.array().parse([operation.result_ref]);
         return {
           status: "completed",
-          providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : "create_artifact"),
+          providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : executableSpec!.providerToolNames[0]),
           actionId: actionId ?? operationSpec.operation,
           operationId: operation.id,
           resourceRefs: replayedRefs,
-          summary: isRoomWorkDelegation ? "Room-work delegation was already completed for this tool call." : "Artifact creation was already completed for this tool call.",
+          summary: isRoomWorkDelegation ? "Room-work delegation was already completed for this tool call." : executableSpec!.completedSummary,
           output: { replayed: true, resource_ref: operation.result_ref }
         };
       }
@@ -2345,24 +2437,28 @@ export class PostgresRuntimeChat {
         operation
       });
       const resourceRefs = uniqueResourceRefs(ResourceRefSchema.array().max(32).parse(result.resourceRefs));
-      const artifactRef = resourceRefs.find((ref) => ref.kind === "artifact");
-      if (isArtifactCreate && !artifactRef) throw new WorkspaceServerError("runtime_tool_result_artifact_missing", 500);
+      const primaryResource = isRoomWorkDelegation
+        ? undefined
+        : resourceRefs.find((ref) => ref.kind === executableSpec!.requiredResourceKinds[0]);
+      if (!isRoomWorkDelegation && executableSpec!.requiredResourceKinds.some((kind) => !resourceRefs.some((ref) => ref.kind === kind))) {
+        throw new WorkspaceServerError("runtime_tool_result_resource_missing", 500, { operation: executableSpec!.operation });
+      }
       if (isRoomWorkDelegation && !resourceRefs.some((ref) => ref.kind === "room_work_assignee")) {
         throw new WorkspaceServerError("runtime_tool_result_assignment_missing", 500);
       }
-      const canonicalResourceRefs = uniqueResourceRefs([...(artifactRef ? [artifactRef] : []), ...resourceRefs]);
+      const canonicalResourceRefs = uniqueResourceRefs([...(primaryResource ? [primaryResource] : []), ...resourceRefs]);
       const evidence = await this.settleToolExecution({
         admission: input.admission,
         operation,
         status: "completed",
         summary: result.summary,
         resourceRefs: canonicalResourceRefs,
-        changeType: result.changeType ?? (isRoomWorkDelegation ? "other" : "artifact_created")
+        changeType: result.changeType ?? (isRoomWorkDelegation ? "other" : executableSpec!.defaultChangeType)
       });
       const refs = [...canonicalResourceRefs, evidence.activityRef, ...(evidence.changeRef ? [evidence.changeRef] : [])];
       return {
         status: "completed",
-        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : "create_artifact"),
+        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : executableSpec!.providerToolNames[0]),
         actionId: actionId ?? operationSpec.operation,
         operationId: operation.id,
         resourceRefs: refs,
@@ -2390,7 +2486,7 @@ export class PostgresRuntimeChat {
       }
       return {
         status: "failed",
-        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : "create_artifact"),
+        providerToolName: providerToolName ?? (isRoomWorkDelegation ? "subagent_delegate" : executableSpec!.providerToolNames[0]),
         actionId: actionId ?? operationSpec.operation,
         ...(operation ? { operationId: operation.id } : {}),
         summary,
@@ -3602,6 +3698,25 @@ function runtimeOperationId(runId: string): string {
 
 function runtimeToolOperationId(runId: string, toolCallId: string): string {
   return `operation:${runId}:tool:${stableHash(toolCallId).slice(0, 40)}`;
+}
+
+/** Resolve the provider identity and the Domain operation as one immutable
+ * pair. Supplying a valid operation alongside an unrelated provider name is
+ * still rejected; downstream ingress must see the same capability identity. */
+function runtimeExecutableToolSpec(
+  providerToolName: string | undefined,
+  actionId: string | undefined
+): RuntimeExecutableToolSpec | undefined {
+  const providerMatch = providerToolName === undefined
+    ? undefined
+    : runtimeExecutableToolSpecs.find((spec) => spec.providerToolNames.includes(providerToolName));
+  const actionMatch = actionId === undefined
+    ? undefined
+    : runtimeExecutableToolSpecs.find((spec) => spec.operation === actionId);
+  if ((providerToolName !== undefined && !providerMatch) || (actionId !== undefined && !actionMatch)) return undefined;
+  if (!providerMatch && !actionMatch) return undefined;
+  if (providerMatch && actionMatch && providerMatch.operation !== actionMatch.operation) return undefined;
+  return providerMatch ?? actionMatch;
 }
 
 function runtimeToolChangeId(runId: string, operationId: string, resourceId: string): string {

@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 type SettingsPatch = Record<string, unknown>;
 
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -20,6 +22,7 @@ const patchKeys = new Set([
 
 export function workspaceSettingsPatchRequest(input: unknown): {
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: SettingsPatch;
 } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_settings_request_invalid");
@@ -37,7 +40,8 @@ export function workspaceSettingsPatchRequest(input: unknown): {
     if (key === "learning_budget_window_days" && (typeof candidate !== "number" || !Number.isInteger(candidate))) throw new Error("learning_budget_window_days_invalid");
     if (key === "learning_enabled" && typeof candidate !== "boolean") throw new Error("learning_enabled_invalid");
   }
-  return { operationId: value.operationId, body: patch };
+  const target = workspaceTargetRequest(value.target);
+  return { operationId: value.operationId, ...(target ? { target } : {}), body: patch };
 }
 
 export function workspaceSettingsPatchJson(input: SettingsPatch): Record<string, unknown> {

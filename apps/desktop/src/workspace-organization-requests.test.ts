@@ -20,11 +20,13 @@ import {
 
 describe("Desktop Organization request boundary", () => {
   it("keeps Organization list/create and Workspace navigation under the account route prefix", () => {
+    const target = { connectionId: "connection_a", workspaceId: "workspace_a" };
     expect(workspaceOrganizationListRequest()).toMatchObject({
       method: "GET",
       path: "/api/organizations",
       workspaceScoped: false
     });
+    expect(workspaceOrganizationListRequest({ target })).toMatchObject({ target });
     expect(workspaceOrganizationCreateRequest({ name: "Team", operationId: "organization_create_1" })).toMatchObject({
       method: "POST",
       path: "/api/organizations",
@@ -168,6 +170,7 @@ describe("Desktop Organization request boundary", () => {
     expect(() => workspaceOrganizationInvitationAcceptRequest({ token: "", operationId: "accept_1" })).toThrow("invitation_token_invalid");
     expect(() => workspaceOrganizationInvitationCreateRequest({ organizationId: "organization_team", role: "guest", operationId: "invite_1", workspaceGrants: [{ workspaceId: "workspace_team", role: "bad" }] })).toThrow("workspace_grant_role_invalid");
     expect(() => workspaceEvidenceRequest({ workspaceId: "workspace_team", roomId: "room team" })).toThrow("roomId_invalid");
+    expect(() => workspaceOrganizationCreateRequest({ name: "Team", operationId: "organization_create_1", target: { connectionId: "", workspaceId: "workspace_a" } })).toThrow("workspace_target_invalid");
   });
 
   it("keeps evidence reads to the selected Workspace and its Room projection", () => {
