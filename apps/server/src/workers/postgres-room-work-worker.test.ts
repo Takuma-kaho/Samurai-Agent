@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PostgresRuntimeCommandService } from "../adapters/runtime/postgres-runtime-chat";
+import type { ArtifactRecord } from "@samurai-agent/core-schemas";
 import type { WorkspaceRequestContext, WorkspaceServerStore } from "@samurai-agent/workspace-server";
-import { PostgresRoomWorkWorker } from "./postgres-room-work-worker";
+import { PostgresRoomWorkWorker, roomWorkCompletionResourceRefs } from "./postgres-room-work-worker";
 
 const context: WorkspaceRequestContext = {
   workspaceId: "workspace_one",
@@ -11,7 +12,26 @@ const context: WorkspaceRequestContext = {
 
 function runtimeFake(status: "completed" | "outcome_unknown" = "completed", result: Record<string, unknown> = {}) {
   const createSession = vi.fn(async (_input?: Record<string, unknown>) => ({ id: "session_internal_only" }));
-  const runChatTurn = vi.fn(async (_input?: Record<string, unknown>) => ({ backendRun: { id: "run_one", status, output_summary: status === "completed" ? "done" : null }, ...result }));
+  const runChatTurn = vi.fn(async (_input?: Record<string, unknown>) => ({
+    session: { id: "session_internal_only" },
+    messages: [],
+    messagePresentations: [],
+    backendRun: { id: "run_one", status, output_summary: status === "completed" ? "done" : null },
+    backendEvents: [],
+    workspaceChanges: [],
+    operations: [],
+    policyDecisions: [],
+    artifacts: [],
+    memories: [],
+    approvalRequests: [],
+    auditRecords: [],
+    rollbackPoints: [],
+    activity: [],
+    reflectionRuns: [],
+    reflectionSuggestions: [],
+    toolRuns: [],
+    ...result
+  }));
   const runDomainCommand = vi.fn(async (command: Record<string, any>) => {
     if (command.operationId === "session.create") {
       return createSession({
@@ -36,6 +56,16 @@ function runtimeFake(status: "completed" | "outcome_unknown" = "completed", resu
   return runtime as unknown as PostgresRuntimeCommandService;
 }
 
+function completionEvidence(resourceRefs: Record<string, unknown>[] = [], runStatus = "completed") {
+  return {
+    readRoomWorkCompletionEvidence: vi.fn(async (_context: unknown, { runId }: { runId: string }) => ({
+      runId,
+      runStatus,
+      resourceRefs
+    }))
+  };
+}
+
 function reservation() {
   return {
     work_id: "work_one",
@@ -55,14 +85,14 @@ function reservation() {
 describe("PostgresRoomWorkWorker", () => {
   it("persists only server Runtime artifact and Generated Surface refs for a completed Work", async () => {
     const refs = [
-      { kind: "artifact", id: "artifact_work_one", uri: "artifacts/artifact_work_one/revisions/1.md", label: "Work artifact" },
-      { kind: "artifact_revision", id: "artifact_revision_work_one", uri: "artifacts/artifact_work_one/revisions/1.md", version: "2026-09-09T00:00:00.000Z", label: "Work artifact r1" },
+      { kind: "artifact", id: "artifact_work_one", uri: "artifacts/artifact_work_one", label: "Work artifact" },
+      { kind: "artifact_revision", id: "artifact_revision_work_one", uri: "artifacts/artifact_work_one/revisions/1.md", parent_id: "artifact_work_one", version: "2026-09-09T00:00:00.000Z", label: "Work artifact r1" },
       { kind: "generated_surface", id: "surface_work_one", uri: "surfaces/surface_work_one", label: "Work surface" },
-      { kind: "generated_surface_revision", id: "surface_revision_work_one", uri: "surfaces/surface_work_one/revisions/1.html", label: "Work surface r1" }
+      { kind: "generated_surface_revision", id: "surface_revision_work_one", uri: "surfaces/surface_work_one/revisions/1.html", parent_id: "surface_work_one", label: "Work surface r1" }
     ];
     const settle = vi.fn(async () => undefined);
     const claim = vi.fn().mockResolvedValueOnce(reservation()).mockResolvedValueOnce(undefined);
-    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence(refs) } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake("completed", {
       // This is intentionally not a server evidence source and must never be
       // copied into Assignment result JSON.
@@ -83,12 +113,43 @@ describe("PostgresRoomWorkWorker", () => {
     expect(settle.mock.calls[0]?.[1]).not.toMatchObject({ result: expect.objectContaining({ resource_refs: expect.arrayContaining([{ id: "model_forged" }]) }) });
   });
 
+  it("accepts a server Artifact whose persisted revision ref is enriched with its logical parent", () => {
+    const artifact: ArtifactRecord = {
+      id: "artifact_from_runtime",
+      title: "Runtime artifact",
+      kind: "markdown",
+      locale: "ja",
+      source_locales: ["ja"],
+      file_ref: {
+        kind: "artifact_revision",
+        id: "artifact_revision_from_runtime",
+        uri: "artifacts/artifact_from_runtime/revisions/1.md",
+        version: "1"
+      },
+      metadata: { source_run_id: "run_one", source_work_id: "work_one" },
+      source_operation_id: "operation_one",
+      created_by: "agent_one",
+      created_at: "2026-09-09T00:00:00.000Z",
+      updated_at: "2026-09-09T00:00:00.000Z"
+    };
+
+    expect(roomWorkCompletionResourceRefs({
+      backendEvents: [],
+      workspaceChanges: [],
+      operations: [],
+      artifacts: [artifact]
+    }, "run_one", "work_one", "room_one")).toEqual([
+      { kind: "artifact", id: artifact.id, uri: "artifacts/artifact_from_runtime", label: artifact.title },
+      { ...artifact.file_ref, parent_id: artifact.id }
+    ]);
+  });
+
   it("claims a Room assignment, creates the internal Session, and settles the same generation", async () => {
     const settle = vi.fn(async () => undefined);
     const claim = vi.fn()
       .mockResolvedValueOnce(reservation())
       .mockResolvedValueOnce(undefined);
-    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence() } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
     const worker = new PostgresRoomWorkWorker({
       store,
@@ -159,6 +220,9 @@ describe("PostgresRoomWorkWorker", () => {
       runId: "run_one",
       status: "completed"
     }));
+    expect(settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      result: expect.objectContaining({ resource_refs: [] })
+    }));
   });
 
   it("reconciles a recovered terminal Runtime Run without launching it again", async () => {
@@ -175,7 +239,8 @@ describe("PostgresRoomWorkWorker", () => {
         ...reservation(),
         current_run_id: "run_recovered"
       }),
-      settleRoomWorkAssignment: settle
+      settleRoomWorkAssignment: settle,
+      ...completionEvidence()
     } as unknown as WorkspaceServerStore;
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
 
@@ -195,6 +260,80 @@ describe("PostgresRoomWorkWorker", () => {
     }));
   });
 
+  it("uses the same persisted logical Artifact and immutable revision refs after a create-revise recovery", async () => {
+    const refs = [
+      { kind: "artifact", id: "artifact_same_run", uri: "artifacts/artifact_same_run", label: "Artifact" },
+      { kind: "artifact_revision", id: "artifact_revision_one", uri: "artifacts/artifact_same_run/revisions/1.md", parent_id: "artifact_same_run", version: "v1", label: "Artifact r1" },
+      { kind: "artifact_revision", id: "artifact_revision_two", uri: "artifacts/artifact_same_run/revisions/2.md", parent_id: "artifact_same_run", version: "v2", label: "Artifact r2" }
+    ];
+    const normalSettle = vi.fn(async () => undefined);
+    const normalEvidence = completionEvidence(refs);
+    const normalStore = {
+      claimRoomWorkReservation: vi.fn().mockResolvedValueOnce(reservation()),
+      settleRoomWorkAssignment: normalSettle,
+      ...normalEvidence
+    } as unknown as WorkspaceServerStore;
+    const normalRuntime = runtimeFake("completed", {
+      backendEvents: [{ run_id: "run_one", resource_refs: [
+        { kind: "artifact", id: "artifact_same_run", uri: "artifacts/artifact_same_run/revisions/1.md" },
+        refs[1],
+        { kind: "artifact", id: "artifact_same_run", uri: "artifacts/artifact_same_run/revisions/2.md" },
+        refs[2]
+      ] }],
+      workspaceChanges: [],
+      operations: [],
+      artifacts: []
+    });
+    await new PostgresRoomWorkWorker({ store: normalStore, runtimeFor: () => normalRuntime }).runTick(context, {
+      workerId: "worker_one",
+      maxRuns: 1,
+      signal: new AbortController().signal
+    });
+
+    const recoverySettle = vi.fn(async () => undefined);
+    const recoveryEvidence = completionEvidence(refs);
+    const recoveryRuntime = {
+      getBackendRun: vi.fn(async (runId: string) => ({ id: runId, status: "completed", output_summary: "recovered" })),
+      runDomainCommand: vi.fn()
+    } as unknown as PostgresRuntimeCommandService;
+    const recoveryStore = {
+      claimRoomWorkReservation: vi.fn().mockResolvedValueOnce({ ...reservation(), current_run_id: "run_one" }),
+      settleRoomWorkAssignment: recoverySettle,
+      ...recoveryEvidence
+    } as unknown as WorkspaceServerStore;
+    await new PostgresRoomWorkWorker({ store: recoveryStore, runtimeFor: () => recoveryRuntime }).runTick(context, {
+      workerId: "worker_one",
+      maxRuns: 1,
+      signal: new AbortController().signal
+    });
+
+    expect(normalSettle.mock.calls[0]?.[1]).toMatchObject({ result: { resource_refs: refs } });
+    expect(recoverySettle.mock.calls[0]?.[1]).toMatchObject({ result: { resource_refs: refs } });
+    expect(recoveryRuntime.runDomainCommand).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a missing mandatory RunChatTurnResult array as an empty successful result", async () => {
+    const settle = vi.fn(async () => undefined);
+    const evidence = completionEvidence();
+    const store = {
+      claimRoomWorkReservation: vi.fn().mockResolvedValueOnce(reservation()),
+      settleRoomWorkAssignment: settle,
+      ...evidence
+    } as unknown as WorkspaceServerStore;
+    const runtime = runtimeFake("completed", { toolRuns: undefined });
+    const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
+
+    const result = await worker.runTick(context, { workerId: "worker_one", maxRuns: 1, signal: new AbortController().signal });
+
+    expect(result).toEqual({ claimed: 1, completed: 0, outcomeUnknown: 0 });
+    expect(evidence.readRoomWorkCompletionEvidence).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      status: "failed",
+      runId: "run_one",
+      errorCode: "room_work_result_contract_invalid"
+    }));
+  });
+
   it("keeps a recovered non-terminal Runtime Run outcome_unknown and does not relaunch", async () => {
     const settle = vi.fn(async () => undefined);
     const getBackendRun = vi.fn(async (runId: string) => ({ id: runId, status: "running", output_summary: null }));
@@ -205,7 +344,8 @@ describe("PostgresRoomWorkWorker", () => {
         ...reservation(),
         current_run_id: "run_still_running"
       }),
-      settleRoomWorkAssignment: settle
+      settleRoomWorkAssignment: settle,
+      ...completionEvidence([], "running")
     } as unknown as WorkspaceServerStore;
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
 
@@ -226,7 +366,7 @@ describe("PostgresRoomWorkWorker", () => {
   it("reuses the parent assignment's internal Session for a continuation", async () => {
     const settle = vi.fn(async () => undefined);
     const claim = vi.fn().mockResolvedValueOnce({ ...reservation(), session_id: "session_parent" });
-    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence() } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
     const worker = new PostgresRoomWorkWorker({
       store,
@@ -250,7 +390,7 @@ describe("PostgresRoomWorkWorker", () => {
       ...reservation(),
       attachments: [{ kind: "file", id: "a".repeat(64), uri: "notes/brief.md", version: "1" }]
     });
-    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence() } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
 
@@ -341,7 +481,7 @@ describe("PostgresRoomWorkWorker", () => {
       // boundary, even when an old Store row still contains one.
       resume_backend_session_id: "untrusted-provider-session"
     });
-    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence() } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
 
@@ -391,7 +531,7 @@ describe("PostgresRoomWorkWorker", () => {
         }
       }
     });
-    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle } as unknown as WorkspaceServerStore;
+    const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence() } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
 
@@ -412,7 +552,8 @@ describe("PostgresRoomWorkWorker", () => {
       claimRoomWorkReservation: vi.fn()
         .mockResolvedValueOnce(reservation())
         .mockResolvedValueOnce(undefined),
-      settleRoomWorkAssignment: settle
+      settleRoomWorkAssignment: settle,
+      ...completionEvidence()
     } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake("outcome_unknown");
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });
@@ -507,7 +648,8 @@ describe("PostgresRoomWorkWorker", () => {
     const settle = vi.fn(async () => { throw settlementError; });
     const store = {
       claimRoomWorkReservation: vi.fn().mockResolvedValueOnce(reservation()),
-      settleRoomWorkAssignment: settle
+      settleRoomWorkAssignment: settle,
+      ...completionEvidence()
     } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
     const worker = new PostgresRoomWorkWorker({ store, runtimeFor: () => runtime });

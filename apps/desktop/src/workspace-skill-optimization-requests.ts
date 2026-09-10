@@ -1,18 +1,22 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 type JsonValue = null | string | boolean | number | JsonValue[] | { [key: string]: JsonValue };
 
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export function workspaceSkillOptimizationListRequest(input: unknown): { skillId?: string; roomId?: string; limit?: number } {
+export function workspaceSkillOptimizationListRequest(input: unknown): { skillId?: string; roomId?: string; limit?: number; target?: WorkspaceTargetRequest } {
   const value = object(input);
   const skillId = optionalOpaque(value, "skillId");
   const roomId = optionalOpaque(value, "roomId");
   const limit = value.limit === undefined ? undefined : integer(value.limit, 1, 500, "limit");
-  return { ...(skillId ? { skillId } : {}), ...(roomId ? { roomId } : {}), ...(limit === undefined ? {} : { limit }) };
+  const target = workspaceTargetRequest(value.target);
+  return { ...(skillId ? { skillId } : {}), ...(roomId ? { roomId } : {}), ...(limit === undefined ? {} : { limit }), ...(target ? { target } : {}) };
 }
 
-export function workspaceSkillOptimizationIdRequest(input: unknown): { runId: string } {
+export function workspaceSkillOptimizationIdRequest(input: unknown): { runId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { runId: requiredOpaque(value, "runId") };
+  const target = workspaceTargetRequest(value.target);
+  return { runId: requiredOpaque(value, "runId"), ...(target ? { target } : {}) };
 }
 
 export function workspaceSkillOptimizationStartRequest(input: unknown): {
@@ -22,15 +26,18 @@ export function workspaceSkillOptimizationStartRequest(input: unknown): {
   goldenExamples?: JsonValue[];
   syntheticExamples?: JsonValue[];
   operationId: string;
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   return {
     skillId: requiredOpaque(value, "skillId"),
     ...(optionalOpaque(value, "roomId") ? { roomId: optionalOpaque(value, "roomId") } : {}),
     ...(optionalText(value, "objective", 10_000) ? { objective: optionalText(value, "objective", 10_000) } : {}),
     ...(value.goldenExamples === undefined ? {} : { goldenExamples: jsonArray(value.goldenExamples, "goldenExamples") }),
     ...(value.syntheticExamples === undefined ? {} : { syntheticExamples: jsonArray(value.syntheticExamples, "syntheticExamples") }),
-    operationId: requiredOpaque(value, "operationId")
+    operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {})
   };
 }
 
@@ -41,17 +48,20 @@ export function workspaceSkillOptimizationActionRequest(input: unknown): {
   promotionId?: string;
   snapshotId?: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
   const action = value.action;
   if (action !== "cancel" && action !== "promote" && action !== "reject" && action !== "rollback") throw new Error("skill_optimization_action_invalid");
+  const target = workspaceTargetRequest(value.target);
   return {
     runId: requiredOpaque(value, "runId"),
     action,
     ...(optionalOpaque(value, "candidateId") ? { candidateId: optionalOpaque(value, "candidateId") } : {}),
     ...(optionalOpaque(value, "promotionId") ? { promotionId: optionalOpaque(value, "promotionId") } : {}),
     ...(optionalOpaque(value, "snapshotId") ? { snapshotId: optionalOpaque(value, "snapshotId") } : {}),
-    operationId: requiredOpaque(value, "operationId")
+    operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {})
   };
 }
 

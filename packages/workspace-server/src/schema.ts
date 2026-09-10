@@ -21576,6 +21576,155 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "REVOKE EXECUTE ON FUNCTION samurai_capture_human_work_runtime_run_link() FROM PUBLIC"
     ]
   },
+  {
+    // v128 closes the Bundle restore gap left by the original human-work
+    // importer: resource_refs were added later and the compatibility RPC
+    // intentionally ignored unknown JSON fields. Validate the reference
+    // against the already imported Completion snapshot, then restore it in
+    // the same import transaction so a failed relation can never look like a
+    // partially successful import.
+    version: 128,
+    name: "workspace_server_human_work_resource_refs_bundle_import",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_validate_human_work_resource_refs(
+        target_workspace_id TEXT,
+        target_room_id TEXT,
+        target_resource_refs JSONB
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE ref_row JSONB;
+      DECLARE resource_row workspace_completion_resources%ROWTYPE;
+      DECLARE version_row workspace_completion_resource_versions%ROWTYPE;
+      DECLARE normalized_resource_refs JSONB := COALESCE(target_resource_refs, '[]'::JSONB);
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR jsonb_typeof(normalized_resource_refs) <> 'array'
+          OR jsonb_array_length(normalized_resource_refs) > 32 THEN
+          RAISE EXCEPTION 'workspace_bundle_human_work_resource_reference_invalid';
+        END IF;
+
+        FOR ref_row IN
+          SELECT value FROM jsonb_array_elements(normalized_resource_refs) AS item(value)
+        LOOP
+          IF jsonb_typeof(ref_row) <> 'object'
+            OR ref_row ->> 'kind' NOT IN ('knowledge', 'skill')
+            OR ref_row ->> 'id' !~ '^[a-z][a-z0-9_:-]{0,127}$'
+            OR ref_row ->> 'uri' IS NULL
+            OR btrim(ref_row ->> 'uri') = ''
+            OR length(ref_row ->> 'uri') > 4096
+            OR ref_row ? 'version' AND (
+              jsonb_typeof(ref_row -> 'version') <> 'string'
+              OR ref_row ->> 'version' !~ '^[1-9][0-9]*$'
+            )
+            OR ref_row ? 'label' AND (
+              jsonb_typeof(ref_row -> 'label') <> 'string'
+              OR btrim(ref_row ->> 'label') = ''
+              OR length(ref_row ->> 'label') > 4096
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM jsonb_object_keys(ref_row) AS key(name)
+              WHERE key.name NOT IN ('kind', 'id', 'uri', 'version', 'label')
+            ) THEN
+            RAISE EXCEPTION 'workspace_bundle_human_work_resource_reference_invalid';
+          END IF;
+
+          SELECT resource.* INTO resource_row
+          FROM workspace_completion_resources AS resource
+          WHERE resource.workspace_id = target_workspace_id
+            AND resource.id = ref_row ->> 'id'
+            AND resource.resource_kind = ref_row ->> 'kind'
+            AND resource.lifecycle_state <> 'archived';
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'workspace_bundle_human_work_resource_reference_not_found';
+          END IF;
+          IF resource_row.scope_kind <> 'workspace'
+            AND (resource_row.scope_kind <> 'room' OR resource_row.room_id IS DISTINCT FROM target_room_id) THEN
+            RAISE EXCEPTION 'workspace_bundle_human_work_resource_reference_scope_invalid';
+          END IF;
+
+          IF ref_row ? 'version' THEN
+            SELECT version.* INTO version_row
+            FROM workspace_completion_resource_versions AS version
+            WHERE version.workspace_id = target_workspace_id
+              AND version.resource_id = resource_row.id
+              AND version.version::TEXT = ref_row ->> 'version';
+          ELSE
+            SELECT version.* INTO version_row
+            FROM workspace_completion_resource_versions AS version
+            WHERE version.workspace_id = target_workspace_id
+              AND version.resource_id = resource_row.id
+              AND version.version = COALESCE(resource_row.current_confirmed_version, resource_row.current_provisional_version);
+          END IF;
+          IF NOT FOUND
+            OR version_row.lifecycle_state = 'archived'
+            OR version_row.file_path IS DISTINCT FROM ref_row ->> 'uri'
+            OR (ref_row ? 'label' AND resource_row.title IS DISTINCT FROM ref_row ->> 'label') THEN
+            RAISE EXCEPTION 'workspace_bundle_human_work_resource_reference_invalid';
+          END IF;
+        END LOOP;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_import_workspace_human_work_v2(
+        target_workspace_id TEXT,
+        target_works JSONB,
+        target_assignments JSONB,
+        target_instructions JSONB,
+        target_comments JSONB,
+        target_reactions JSONB,
+        target_controls JSONB,
+        target_reservations JSONB
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE work_row RECORD;
+      DECLARE instruction_row RECORD;
+      BEGIN
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(target_workspace_id)
+          OR jsonb_typeof(COALESCE(target_works, '[]'::JSONB)) <> 'array'
+          OR jsonb_typeof(COALESCE(target_assignments, '[]'::JSONB)) <> 'array'
+          OR jsonb_typeof(COALESCE(target_instructions, '[]'::JSONB)) <> 'array'
+          OR jsonb_typeof(COALESCE(target_comments, '[]'::JSONB)) <> 'array'
+          OR jsonb_typeof(COALESCE(target_reactions, '[]'::JSONB)) <> 'array'
+          OR jsonb_typeof(COALESCE(target_controls, '[]'::JSONB)) <> 'array'
+          OR jsonb_typeof(COALESCE(target_reservations, '[]'::JSONB)) <> 'array' THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+
+        FOR work_row IN
+          SELECT room_id, resource_refs
+          FROM jsonb_to_recordset(COALESCE(target_works, '[]'::JSONB)) AS item(room_id TEXT, resource_refs JSONB)
+        LOOP
+          PERFORM samurai_validate_human_work_resource_refs(target_workspace_id, work_row.room_id, work_row.resource_refs);
+        END LOOP;
+        FOR instruction_row IN
+          SELECT room_id, resource_refs
+          FROM jsonb_to_recordset(COALESCE(target_instructions, '[]'::JSONB)) AS item(room_id TEXT, resource_refs JSONB)
+        LOOP
+          PERFORM samurai_validate_human_work_resource_refs(target_workspace_id, instruction_row.room_id, instruction_row.resource_refs);
+        END LOOP;
+
+        PERFORM samurai_import_workspace_human_work(
+          target_workspace_id, target_works, target_assignments, target_instructions,
+          target_comments, target_reactions, target_controls, target_reservations
+        );
+
+        UPDATE workspace_human_works AS target
+        SET resource_refs = COALESCE(source.resource_refs, '[]'::JSONB)
+        FROM jsonb_to_recordset(COALESCE(target_works, '[]'::JSONB)) AS source(id TEXT, resource_refs JSONB)
+        WHERE target.workspace_id = target_workspace_id
+          AND target.id = source.id;
+        UPDATE workspace_human_work_instructions AS target
+        SET resource_refs = COALESCE(source.resource_refs, '[]'::JSONB)
+        FROM jsonb_to_recordset(COALESCE(target_instructions, '[]'::JSONB)) AS source(id TEXT, resource_refs JSONB)
+        WHERE target.workspace_id = target_workspace_id
+          AND target.id = source.id;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_validate_human_work_resource_refs(TEXT, TEXT, JSONB) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_human_work_v2(TEXT, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB) FROM PUBLIC"
+    ]
+  },
 ];
 
 function workspaceGatewayRlsStatements(): string[] {
@@ -22195,6 +22344,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_create_room(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, BIGINT, TEXT)",
     "samurai_import_workspace_room_v2(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ)",
     "samurai_import_workspace_human_work(TEXT, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB)",
+    "samurai_import_workspace_human_work_v2(TEXT, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB)",
     "samurai_bind_human_work_legacy_session(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_import_workspace_human_work_legacy_sessions(TEXT, JSONB)",
     "samurai_set_room_default_agent(TEXT, TEXT, TEXT, BIGINT)",

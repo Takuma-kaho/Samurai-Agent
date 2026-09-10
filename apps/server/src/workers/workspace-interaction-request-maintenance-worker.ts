@@ -1,5 +1,6 @@
 import {
   WorkspaceInteractionRequestService,
+  type WorkspaceInteractionRequestAcceptedRecovery,
   type WorkspaceInteractionRequestMaintenanceResult,
   type WorkspaceRequestContext,
   type WorkspaceServerStore
@@ -14,6 +15,13 @@ export interface WorkspaceInteractionRequestMaintenanceWorkerOptions {
    * acknowledged. The callback may be retried with the same operation ID.
    */
   onReconciled(context: WorkspaceRequestContext, result: WorkspaceInteractionRequestMaintenanceResult): Promise<void>;
+  /**
+   * Re-authorizes and processes a recovery candidate through the existing
+   * workflow. The candidate may be accepted-before-claim or a stale Generated
+   * Surface claim whose durable target result must be inspected before any
+   * terminal transition. The callback owns all execution decisions.
+   */
+  recoverAcceptedInteraction?(context: WorkspaceRequestContext, candidate: WorkspaceInteractionRequestAcceptedRecovery): Promise<void>;
 }
 
 /**
@@ -60,6 +68,18 @@ export class WorkspaceInteractionRequestMaintenanceWorker implements WorkspaceIn
           }
         );
         delivered += 1;
+        remaining -= 1;
+      }
+
+      if (!this.options.recoverAcceptedInteraction || input.signal.aborted || remaining <= 0) continue;
+      const accepted = await this.options.interactionRequests.listAcceptedForRecovery(context, {
+        roomId: room.id,
+        limit: remaining
+      });
+      for (const candidate of accepted) {
+        if (input.signal.aborted || remaining <= 0) break;
+        await this.options.recoverAcceptedInteraction(context, candidate);
+        reconciled += 1;
         remaining -= 1;
       }
     }

@@ -22,4 +22,20 @@ describe("Desktop Chat run control boundary", () => {
     expect(workspaceChatReconnectRequest({ connectionId: "connection_1", privateKey: "must-not-cross" })).toEqual({ connectionId: "connection_1" });
     expect(() => workspaceChatRunControlRequest({ runId: "run_1", operationId: "bad id" }, "cancel")).toThrow("operationId_invalid");
   });
+
+  it("carries run control target separately from the operation body", () => {
+    const request = workspaceChatRunControlRequest({
+      runId: "run_1",
+      operationId: "stop_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    }, "cancel");
+
+    expect(request).toMatchObject({
+      runId: "run_1",
+      operationId: "stop_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" },
+      body: {}
+    });
+    expect(request.body).not.toHaveProperty("target");
+  });
 });

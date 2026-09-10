@@ -5,12 +5,15 @@ import type { DesktopWorkspaceConnectionState } from "../lib/api";
 import {
   NativeInteractionRequestCard,
   NativeInteractionRequests,
+  captureNativeInteractionDraftSnapshot,
   createNativeInteractionBusyGate,
   interactionInputFields,
   interactionInputSchemaSupported,
   interactionRequestCanCancel,
   interactionRequestCanRespond,
   interactionRequestInputValues,
+  nativeInteractionDraftAfterResponse,
+  nativeInteractionDraftIsDirty,
   nativeInteractionErrorMessage,
   nativeInteractionRequestOperations,
   type NativeInteractionRequest,
@@ -36,7 +39,7 @@ const request: NativeInteractionRequest = {
   targetLabel: "Artifact: report",
   actionTarget: { artifact_id: "artifact-1", revision_id: "revision-2" },
   expiresAt: "2026-09-08T12:00:00.000Z",
-  options: [{ id: "publish-now", label: "公開を許可", description: "Serverに公開操作を依頼します。" }, { id: "keep-private", label: "拒否" }]
+  options: [{ id: "publish-now", label: "公開を許可", decision: "approve", description: "Serverに公開操作を依頼します。" }, { id: "keep-private", label: "拒否", decision: "deny" }]
 };
 
 function connectionState(workspaceId = target.workspaceId): DesktopWorkspaceConnectionState {
@@ -60,10 +63,10 @@ function acceptedRequest(): NativeInteractionRequest {
 
 describe("NativeInteractionRequests", () => {
   it("uses the persisted option id and rejects forged or ambiguous options", () => {
-    expect(interactionRequestCanRespond(request, { id: "forged", label: "公開を許可" })).toBe(false);
+    expect(interactionRequestCanRespond(request, { id: "forged", label: "公開を許可", decision: "approve" })).toBe(false);
     expect(interactionRequestCanRespond(request, request.options[0]!)).toBe(true);
     expect(interactionRequestCanRespond({ ...request, status: "accepted" }, request.options[0]!)).toBe(false);
-    expect(interactionRequestCanRespond({ ...request, options: [{ id: "same", label: "A" }, { id: "same", label: "B" }] }, { id: "same", label: "A" })).toBe(false);
+    expect(interactionRequestCanRespond({ ...request, options: [{ id: "same", label: "A", decision: "approve" }, { id: "same", label: "B", decision: "deny" }] }, { id: "same", label: "A", decision: "approve" })).toBe(false);
   });
 
   it("only allows cancel while the Server request is pending", () => {
@@ -188,6 +191,37 @@ describe("NativeInteractionRequests", () => {
       values: { reason: "運用", count: 3, enabled: false }
     });
     expect(interactionRequestInputValues(inputRequest, { reason: "", count: "3" }).error).toContain("理由");
+  });
+
+  it("keeps an Interaction draft across a failed save and only clears the submitted snapshot", () => {
+    const inputRequest: NativeInteractionRequest = {
+      ...request,
+      kind: "backend_input",
+      inputFields: [{ id: "reason", label: "理由", type: "text", required: true }],
+      options: [{ id: "submit", label: "送信", decision: "submit_input" }, { id: "deny", label: "拒否", decision: "deny" }]
+    };
+    expect(nativeInteractionDraftIsDirty(inputRequest, {})).toBe(false);
+    expect(nativeInteractionDraftIsDirty(inputRequest, { reason: "保存前" })).toBe(true);
+    expect(nativeInteractionDraftIsDirty(inputRequest, { reason: "" })).toBe(false);
+
+    const snapshot = captureNativeInteractionDraftSnapshot(inputRequest.id, { reason: "保存前" });
+    expect(nativeInteractionDraftAfterResponse({ reason: "保存前" }, snapshot)).toBeUndefined();
+    expect(nativeInteractionDraftAfterResponse({ reason: "保存中に追加" }, snapshot)).toEqual({ reason: "保存中に追加" });
+    expect(nativeInteractionDraftAfterResponse({ reason: "保存前" }, snapshot, false)).toEqual({ reason: "保存前" });
+  });
+
+  it("keeps deny independent from the input draft", () => {
+    const inputRequest: NativeInteractionRequest = {
+      ...request,
+      kind: "backend_input",
+      inputFields: [{ id: "reason", label: "理由", type: "text", required: true }],
+      options: [{ id: "deny", label: "拒否", decision: "deny" }]
+    };
+    expect(interactionRequestCanRespond(inputRequest, inputRequest.options[0]!)).toBe(true);
+    expect(interactionRequestInputValues(inputRequest, { reason: "入力値" })).toEqual({
+      supported: true,
+      values: { reason: "入力値" }
+    });
   });
 
   it("does not enable a backend action for an unsupported schema", () => {

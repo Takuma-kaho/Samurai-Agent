@@ -3,9 +3,11 @@
   "test_id": "D01",
   "command": "pnpm core:test:presentation",
   "status": "passed",
-  "commit_sha": "77d409cbfa9fc6d7591e144878a5c0aee735fc10",
+  "commit_sha": "2cbf2b2d81caeb535df3eae264dd3712144de084",
   "worktree_clean": true,
-  "source_sha256": "9b64a17605a9f268c7f7cd47833fc4124d3d1c7e40c387fe81ef471684bde7a0",
+  "source_sha256": "99a82811f3766d8a9b238f8672d96ed3667baf1fa62a49bb224b583994a8cb63",
+  "source_graph_sha256": "88d0a32ab279a903915634b9f13cf151da5d1bfcc6abd64cbf9ce7690db4e2dc",
+  "contract_versions_sha256": "d9c967c821aa68c3dc592dc59e5622ad6d72f17d7c2964e49c2ebeb59d6592af",
   "source_files": [
     "packages/runtime/src/presentation/planner.ts",
     "scripts/fixtures/presentation-planner.ts",
@@ -13,8 +15,8 @@
     "scripts/verify-presentation-planner.mjs"
   ],
   "source_read_errors": [],
-  "started_at": "2026-07-13T08:14:11.553Z",
-  "completed_at": "2026-07-13T08:14:11.582Z",
+  "started_at": "2026-09-09T23:26:49.300Z",
+  "completed_at": "2026-09-09T23:26:49.327Z",
   "assertions": [
     {
       "name": "Fixed benchmark prompt count",

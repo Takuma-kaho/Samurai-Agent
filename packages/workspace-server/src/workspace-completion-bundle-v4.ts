@@ -733,6 +733,7 @@ export class WorkspaceBundleV4Service {
         const select = table === "workspace_human_work_instructions"
           ? `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body,
                     samurai_project_human_work_attachment_refs(workspace_id, room_id, attachment_refs) AS attachment_refs,
+                    resource_refs,
                     source_kind, source_comment_id, source_comment_version, state, created_by, created_at
              FROM ${table} WHERE workspace_id = $1`
           : table === "workspace_human_work_comments"
@@ -1394,6 +1395,7 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
       ? await readJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`))
       : [];
   }
+  await assertPortableCompletionFileRelations(root, rows);
   // Old v95/v96 exports may carry a parent reply continuation with the
   // post-v107 default `normal` origin.  Apply the same strict compatibility
   // projection used by restore before validating the graph; forged or
@@ -1507,12 +1509,175 @@ async function readCompletionBundleRows(root: string, workspaceId: string): Prom
   for (const [table, filename] of workspaceHumanWorkAllFiles) {
     rows[table] = await readOptionalJsonl(resolveBundlePath(root, `${completionDirectory}/${filename}`));
   }
+  await assertPortableCompletionFileRelations(root, rows);
+  attachLegacyCompletionFileBatches(rows, workspaceId);
   normalizeLegacyParentContinuationOrigins(rows);
   // Keep the import path defensive even if a future caller bypasses the
   // public verifier. The source row `session_ref` remains untouched; only
   // provider-shaped identifiers in Runtime metadata/payload are rejected.
   assertPortableRuntimeHistory(rows, workspaceId);
   return rows;
+}
+
+/** The DB row points at the body, while the batch entry and the Bundle file
+ * prove that the body actually arrived. Check all three before a restore can
+ * insert metadata; otherwise a mismatched hash would look like a successful
+ * import until the next read. */
+async function assertPortableCompletionFileRelations(
+  root: string,
+  rows: Record<string, Record<string, unknown>[]>
+): Promise<void> {
+  const headers = new Map<string, Record<string, unknown>>();
+  for (const header of rows.workspace_completion_file_batches ?? []) {
+    const id = stringValue(header.id, "workspace_bundle_v4_batch_invalid");
+    if (headers.has(id)) throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+    if (header.status !== "renamed" && header.status !== "rolled_back") {
+      throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+    }
+    try {
+      batchScopeFromPortableHeader(header);
+    } catch {
+      throw new WorkspaceServerError("workspace_bundle_v4_batch_scope_invalid", 400);
+    }
+    headers.set(id, header);
+  }
+
+  const entries = new Map<string, { sha256: string; size: number }>();
+  for (const entry of rows.workspace_completion_file_batch_entries ?? []) {
+    const batchId = stringValue(entry.batch_id, "workspace_bundle_v4_batch_invalid");
+    const header = headers.get(batchId);
+    if (!header) throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+    const relative = assertSafeRelativePath(stringValue(entry.path, "workspace_bundle_v4_file_path_invalid"));
+    const sha256 = stringValue(entry.sha256, "workspace_bundle_v4_file_hash_invalid");
+    if (!/^[a-f0-9]{64}$/.test(sha256)) throw new WorkspaceServerError("workspace_bundle_v4_file_hash_invalid", 400);
+    const size = nonNegativeIntegerValue(entry.size, "workspace_bundle_v4_file_size_invalid");
+    const key = `${batchId}\u0000${relative}`;
+    const previous = entries.get(key);
+    if (previous && (previous.sha256 !== sha256 || previous.size !== size)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_batch_entry_conflict", 400);
+    }
+    entries.set(key, { sha256, size });
+  }
+
+  for (const [table, fields] of [
+    ["workspace_completion_resource_versions", { path: "file_path", hash: "content_hash", size: "content_size" }],
+    ["workspace_completion_workspace_documents", { path: "file_path", hash: "content_hash", size: "content_size" }],
+    ["workspace_completion_skill_files", { path: "file_path", hash: "content_hash", size: "content_size" }]
+  ] as const) {
+    for (const row of rows[table] ?? []) {
+      const relative = assertSafeRelativePath(stringValue(row[fields.path], "workspace_bundle_v4_file_path_invalid"));
+      const sha256 = stringValue(row[fields.hash], "workspace_bundle_v4_file_hash_invalid");
+      if (!/^[a-f0-9]{64}$/.test(sha256)) throw new WorkspaceServerError("workspace_bundle_v4_file_hash_invalid", 400);
+      const size = nonNegativeIntegerValue(row[fields.size], "workspace_bundle_v4_file_size_invalid");
+      if (row.file_batch_id !== undefined && row.file_batch_id !== null) {
+        const batchId = stringValue(row.file_batch_id, "workspace_bundle_v4_batch_invalid");
+        const header = headers.get(batchId);
+        if (!header || header.status !== "renamed") throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+        const entry = entries.get(`${batchId}\u0000${relative}`);
+        if (!entry || entry.sha256 !== sha256 || entry.size !== size) {
+          throw new WorkspaceServerError("workspace_bundle_v4_file_metadata_mismatch", 400, { table, path: relative });
+        }
+      }
+      let content: Buffer;
+      try {
+        content = await readFile(resolveBundlePath(root, `${completionDirectory}/files/${relative}`));
+      } catch {
+        throw new WorkspaceServerError("workspace_bundle_v4_file_missing", 400, { path: relative });
+      }
+      if (content.byteLength !== size || hashBytes(content) !== sha256) {
+        throw new WorkspaceServerError("workspace_bundle_v4_file_metadata_mismatch", 400, { table, path: relative });
+      }
+    }
+  }
+}
+
+/** Resource versions created before file batches were introduced still have
+ * a valid file_path/content_hash but no ledger pointer. Give those legacy
+ * rows a deterministic import-only batch so their already verified bodies are
+ * restored through the same DB-then-files recovery protocol. */
+function attachLegacyCompletionFileBatches(
+  rows: Record<string, Record<string, unknown>[]>,
+  sourceWorkspaceId: string
+): void {
+  const resources = new Map<string, Record<string, unknown>>();
+  for (const resource of rows.workspace_completion_resources ?? []) {
+    if (typeof resource.id === "string") resources.set(resource.id, resource);
+  }
+  const headers = rows.workspace_completion_file_batches ?? (rows.workspace_completion_file_batches = []);
+  const entries = rows.workspace_completion_file_batch_entries ?? (rows.workspace_completion_file_batch_entries = []);
+  const headerIds = new Set(headers.map((header) => typeof header.id === "string" ? header.id : ""));
+  type LegacyCompletionBatchHeader = Record<string, unknown> & {
+    id: string;
+    scope_kind: "workspace" | "room";
+    room_id: string | null;
+    status: "renamed";
+    created_at: string;
+    updated_at: string;
+  };
+  const byScope = new Map<string, LegacyCompletionBatchHeader>();
+  const entryByKey = new Map(entries.map((entry) => [`${String(entry.batch_id)}\u0000${String(entry.path)}`, entry]));
+  const timestamp = new Date().toISOString();
+
+  const scopeForResource = (resourceId: unknown): { kind: "workspace" | "room"; roomId?: string } => {
+    const resource = typeof resourceId === "string" ? resources.get(resourceId) : undefined;
+    if (!resource || (resource.scope_kind !== "workspace" && resource.scope_kind !== "room")) {
+      throw new WorkspaceServerError("workspace_bundle_v4_file_scope_invalid", 400);
+    }
+    if (resource.scope_kind === "workspace") return { kind: "workspace" };
+    if (typeof resource.room_id !== "string" || !resource.room_id) {
+      throw new WorkspaceServerError("workspace_bundle_v4_file_scope_invalid", 400);
+    }
+    return { kind: "room", roomId: resource.room_id };
+  };
+
+  const attach = (
+    row: Record<string, unknown>,
+    scope: { kind: "workspace" | "room"; roomId?: string }
+  ): void => {
+    if (row.file_batch_id !== undefined && row.file_batch_id !== null) return;
+    const relative = assertSafeRelativePath(stringValue(row.file_path, "workspace_bundle_v4_file_path_invalid"));
+    const sha256 = stringValue(row.content_hash, "workspace_bundle_v4_file_hash_invalid");
+    if (!/^[a-f0-9]{64}$/.test(sha256)) throw new WorkspaceServerError("workspace_bundle_v4_file_hash_invalid", 400);
+    const scopeKey = scope.kind === "workspace" ? "workspace" : `room:${scope.roomId}`;
+    let header = byScope.get(scopeKey);
+    if (!header) {
+      const id = completionId("bundle_legacy_file_batch", sourceWorkspaceId, scopeKey);
+      if (headerIds.has(id)) throw new WorkspaceServerError("workspace_bundle_v4_batch_id_conflict", 400);
+      header = {
+        id,
+        scope_kind: scope.kind,
+        room_id: scope.roomId ?? null,
+        status: "renamed",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      byScope.set(scopeKey, header);
+      headerIds.add(id);
+      headers.push(header);
+    }
+    const key = `${header.id}\u0000${relative}`;
+    const previous = entryByKey.get(key);
+    const size = nonNegativeIntegerValue(row.content_size, "workspace_bundle_v4_file_size_invalid");
+    if (previous && (previous.sha256 !== sha256 || String(previous.size) !== String(size))) {
+      throw new WorkspaceServerError("workspace_bundle_v4_batch_entry_conflict", 400);
+    }
+    if (!previous) {
+      const entry = { workspace_id: sourceWorkspaceId, batch_id: header.id, path: relative, sha256, size };
+      entries.push(entry);
+      entryByKey.set(key, entry);
+    }
+    row.file_batch_id = header.id;
+  };
+
+  for (const row of rows.workspace_completion_resource_versions ?? []) {
+    if (row.file_batch_id === undefined || row.file_batch_id === null) attach(row, scopeForResource(row.resource_id));
+  }
+  for (const row of rows.workspace_completion_workspace_documents ?? []) {
+    if (row.file_batch_id === undefined || row.file_batch_id === null) attach(row, { kind: "workspace" });
+  }
+  for (const row of rows.workspace_completion_skill_files ?? []) {
+    if (row.file_batch_id === undefined || row.file_batch_id === null) attach(row, scopeForResource(row.resource_id));
+  }
 }
 
 /**
@@ -1586,7 +1751,7 @@ async function importWorkspaceHumanWorkRows(
   if (!hasRows) return;
   const json = (table: (typeof workspaceHumanWorkFiles)[number][0]): string => canonicalJson(rows[table] ?? []);
   await sql.query(
-    `SELECT samurai_import_workspace_human_work(
+    `SELECT samurai_import_workspace_human_work_v2(
        $1, $2::JSONB, $3::JSONB, $4::JSONB, $5::JSONB, $6::JSONB, $7::JSONB, $8::JSONB
      )`,
     [
@@ -2038,6 +2203,11 @@ const humanAssignmentStatuses = new Set(["queued", "ready", "running", "waiting"
 
 function humanWorkRelationError(): never {
   throw new WorkspaceServerError("workspace_bundle_v4_human_work_relation_invalid", 400);
+}
+
+function humanWorkResourceReferenceError(kind: "invalid" | "not_found" | "scope_invalid"): never {
+  const status = kind === "not_found" ? 404 : kind === "scope_invalid" ? 409 : 400;
+  throw new WorkspaceServerError(`workspace_bundle_v4_human_work_resource_reference_${kind}`, status);
 }
 
 function humanWorkId(value: unknown): string {
@@ -2531,6 +2701,60 @@ async function assertPortableHumanWorkRelations(
     portableFiles.set(filePath, { roomId, version, sha256 });
   }
 
+  const completionResources = new Map<string, Record<string, unknown>>();
+  for (const resource of rows.workspace_completion_resources ?? []) {
+    humanWorkWorkspaceId(resource, workspaceId);
+    if (typeof resource.id !== "string" || !/^[a-z][a-z0-9_:-]{0,127}$/.test(resource.id)
+      || (resource.resource_kind !== "knowledge" && resource.resource_kind !== "skill" && resource.resource_kind !== "policy")
+      || completionResources.has(resource.id)) {
+      humanWorkResourceReferenceError("invalid");
+    }
+    completionResources.set(resource.id, resource);
+  }
+  const completionResourceVersions = new Map<string, Record<string, unknown>>();
+  for (const version of rows.workspace_completion_resource_versions ?? []) {
+    humanWorkWorkspaceId(version, workspaceId);
+    const resourceId = typeof version.resource_id === "string" ? version.resource_id : "";
+    const versionNumber = numberValue(version.version);
+    if (!resourceId || versionNumber === undefined || completionResourceVersions.has(`${resourceId}\u0000${versionNumber}`)) {
+      humanWorkResourceReferenceError("invalid");
+    }
+    completionResourceVersions.set(`${resourceId}\u0000${versionNumber}`, version);
+  }
+
+  const assertPortableHumanWorkResourceRefs = (value: unknown, roomId: string): void => {
+    const entries = value === undefined || value === null ? [] : humanWorkArray(value);
+    if (entries.length > 32) humanWorkResourceReferenceError("invalid");
+    for (const entry of entries) {
+      const ref = humanWorkObject(entry);
+      const keys = Object.keys(ref);
+      if (keys.some((key) => !["kind", "id", "uri", "version", "label"].includes(key))
+        || (ref.kind !== "knowledge" && ref.kind !== "skill")
+        || typeof ref.id !== "string" || !/^[a-z][a-z0-9_:-]{0,127}$/.test(ref.id)
+        || typeof ref.uri !== "string" || ref.uri.length === 0 || ref.uri.length > 4_096 || ref.uri.includes("\u0000")
+        || ref.version !== undefined && (typeof ref.version !== "string" || !/^[1-9][0-9]*$/.test(ref.version))
+        || ref.label !== undefined && (typeof ref.label !== "string" || ref.label.length === 0 || ref.label.length > 4_096 || ref.label.includes("\u0000"))) {
+        humanWorkResourceReferenceError("invalid");
+      }
+      const resource = completionResources.get(ref.id);
+      if (!resource || resource.resource_kind !== ref.kind || resource.lifecycle_state === "archived") {
+        humanWorkResourceReferenceError("not_found");
+      }
+      if (resource.scope_kind !== "workspace"
+        && (resource.scope_kind !== "room" || resource.room_id !== roomId)) {
+        humanWorkResourceReferenceError("scope_invalid");
+      }
+      const currentVersion = numberValue(resource.current_confirmed_version ?? resource.current_provisional_version);
+      const versionKey = `${ref.id}\u0000${ref.version ?? currentVersion ?? ""}`;
+      const resourceVersion = completionResourceVersions.get(versionKey);
+      if (!resourceVersion || resourceVersion.lifecycle_state === "archived"
+        || resourceVersion.file_path !== ref.uri
+        || ref.label !== undefined && resource.title !== ref.label) {
+        humanWorkResourceReferenceError("invalid");
+      }
+    }
+  };
+
   const assertPortableAttachmentRefs = async (value: unknown, roomId: string): Promise<void> => {
     const entries = humanWorkArray(value);
     if (entries.length > 32) humanWorkRelationError();
@@ -2587,6 +2811,7 @@ async function assertPortableHumanWorkRelations(
     }
     humanWorkTimestamp(work.created_at);
     humanWorkTimestamp(work.updated_at);
+    assertPortableHumanWorkResourceRefs(work.resource_refs, roomId);
     workById.set(workId, work);
     workOperationIds.add(operationId);
   }
@@ -2722,6 +2947,7 @@ async function assertPortableHumanWorkRelations(
       humanWorkRelationError();
     }
     humanWorkTimestamp(instruction.created_at);
+    assertPortableHumanWorkResourceRefs(instruction.resource_refs, roomId);
     await assertPortableAttachmentRefs(attachmentRefs, roomId);
     instructionById.set(instructionId, instruction);
     instructionVersions.add(key);
@@ -3205,6 +3431,12 @@ function nullableTimestampValue(value: unknown, code: string): string | null {
 function integerValue(value: unknown, code: string): number {
   const result = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
   if (!Number.isSafeInteger(result) || result < 1) throw new WorkspaceServerError(code, 400);
+  return result;
+}
+
+function nonNegativeIntegerValue(value: unknown, code: string): number {
+  const result = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(result) || result < 0) throw new WorkspaceServerError(code, 400);
   return result;
 }
 

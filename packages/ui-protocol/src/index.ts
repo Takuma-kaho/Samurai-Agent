@@ -889,6 +889,98 @@ export interface SurfaceOperationResultEnvelope<TResult = unknown> {
   result: TResult;
 }
 
+/**
+ * Messages exchanged with a sandboxed Generated Surface document.
+ *
+ * The frame owns only request_id. operation_id is assigned by the parent and
+ * forwarded as the Server operation/idempotency key; latest is a
+ * parent-authorized snapshot rather than a frame-provided target.
+ */
+export const generatedSurfaceFrameMessageTypes = [
+  "samurai.generated_surface.ready",
+  "samurai.generated_surface.action",
+  "samurai.generated_surface.action.result",
+  "samurai.generated_surface.action.error"
+] as const;
+
+export type GeneratedSurfaceFrameMessageType = (typeof generatedSurfaceFrameMessageTypes)[number];
+
+const generatedSurfaceFrameIdentityShape = {
+  surface_id: z.string().trim().min(1).max(256),
+  revision_id: z.string().trim().min(1).max(256)
+};
+
+export const GeneratedSurfaceFrameReadySchema = z.object({
+  type: z.literal("samurai.generated_surface.ready"),
+  ...generatedSurfaceFrameIdentityShape
+}).strict();
+
+export const GeneratedSurfaceFrameActionRequestSchema = z.object({
+  type: z.literal("samurai.generated_surface.action"),
+  request_id: z.string().trim().min(1).max(256),
+  ...generatedSurfaceFrameIdentityShape,
+  action_id: z.string().trim().min(1).max(256),
+  payload: z.record(jsonValueSchema).default({})
+}).strict();
+
+export const GeneratedSurfaceFrameLatestDataSchema = z.object({
+  surface: jsonValueSchema.optional(),
+  artifact: jsonValueSchema.optional(),
+  data: jsonValueSchema.optional()
+}).strict();
+
+const generatedSurfaceFrameActionResultIdentityShape = {
+  type: z.literal("samurai.generated_surface.action.result"),
+  request_id: z.string().trim().min(1).max(256),
+  operation_id: z.string().trim().min(1).max(256),
+  ...generatedSurfaceFrameIdentityShape,
+  latest: GeneratedSurfaceFrameLatestDataSchema.optional()
+};
+
+export const GeneratedSurfaceFrameActionResultSchema = z.discriminatedUnion("status", [
+  z.object({
+    ...generatedSurfaceFrameActionResultIdentityShape,
+    status: z.literal("accepted"),
+    saved: z.literal(false)
+  }).strict(),
+  z.object({
+    ...generatedSurfaceFrameActionResultIdentityShape,
+    status: z.literal("completed"),
+    saved: z.literal(true),
+    result: jsonValueSchema
+  }).strict()
+]);
+
+export const GeneratedSurfaceFrameActionErrorSchema = z.object({
+  type: z.literal("samurai.generated_surface.action.error"),
+  request_id: z.string().trim().min(1).max(256),
+  operation_id: z.string().trim().min(1).max(256),
+  ...generatedSurfaceFrameIdentityShape,
+  status: z.literal("failed"),
+  error: z.object({
+    code: z.string().trim().min(1).max(256),
+    message: z.string().trim().min(1).max(2048),
+    retryable: z.boolean()
+  }).strict()
+}).strict();
+
+// The result schema is itself discriminated by status, so the outer envelope
+// uses a regular union; Zod's discriminated-union builder cannot nest that
+// object union as one of its direct options.
+export const GeneratedSurfaceFrameMessageSchema = z.union([
+  GeneratedSurfaceFrameReadySchema,
+  GeneratedSurfaceFrameActionRequestSchema,
+  GeneratedSurfaceFrameActionResultSchema,
+  GeneratedSurfaceFrameActionErrorSchema
+]);
+
+export type GeneratedSurfaceFrameReady = z.infer<typeof GeneratedSurfaceFrameReadySchema>;
+export type GeneratedSurfaceFrameActionRequest = z.infer<typeof GeneratedSurfaceFrameActionRequestSchema>;
+export type GeneratedSurfaceFrameLatestData = z.infer<typeof GeneratedSurfaceFrameLatestDataSchema>;
+export type GeneratedSurfaceFrameActionResult = z.infer<typeof GeneratedSurfaceFrameActionResultSchema>;
+export type GeneratedSurfaceFrameActionError = z.infer<typeof GeneratedSurfaceFrameActionErrorSchema>;
+export type GeneratedSurfaceFrameMessage = z.infer<typeof GeneratedSurfaceFrameMessageSchema>;
+
 export const SurfaceOperationDispatchPlanSchema = z.object({
   operation_id: z.string().min(1),
   operation_kind: z.enum(surfaceOperationKinds),

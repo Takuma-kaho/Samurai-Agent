@@ -6,17 +6,25 @@ import type {
   DesktopWorkspaceConnectionState,
   WorkspaceCompletionResourceView
 } from "../lib/api";
-import NativeKnowledgeTools from "./NativeKnowledgeTools";
+import NativeKnowledgeTools, { nativeKnowledgeResourceCanBeUsedInWork } from "./NativeKnowledgeTools";
 import {
   activeDesktopTargetFromConnectionState,
   automationJobMatchesNativeKnowledgeToolsTarget,
+  collectCompletionResourcePages,
   isNativeKnowledgeResourceKind,
+  nativeKnowledgeDraftAfterMutation,
+  nativeKnowledgeDraftMatchesSnapshot,
+  nativeKnowledgeResourceForOpen,
+  nativeRoomSearchResultCanOpen,
+  nativeRoomSearchResultOpenHint,
   nativeKnowledgeToolsErrorMessage,
   nativeKnowledgeToolsTargetKey,
   resourceMatchesNativeKnowledgeToolsTarget,
   withNativeKnowledgeToolsTarget,
   type NativeKnowledgeToolsBridge,
-  type NativeKnowledgeToolsTarget
+  type NativeKnowledgeToolsTarget,
+  type NativeKnowledgeToolsDraft,
+  type NativeRoomSearchResult
 } from "./use-native-knowledge-tools";
 
 const target: NativeKnowledgeToolsTarget = {
@@ -77,6 +85,21 @@ function automationJob(overrides: Partial<AutomationJobRecord> = {}): Automation
 }
 
 describe("NativeKnowledgeTools target boundary", () => {
+  it("drains every completion resource page and rejects a cyclic cursor", async () => {
+    const fetchPage = vi.fn()
+      .mockResolvedValueOnce({ resources: [resource({ id: "knowledge-1" })], next_cursor: "page-2" })
+      .mockResolvedValueOnce({ resources: [resource({ id: "knowledge-2" })] });
+    await expect(collectCompletionResourcePages(fetchPage)).resolves.toEqual([
+      resource({ id: "knowledge-1" }),
+      resource({ id: "knowledge-2" })
+    ]);
+    expect(fetchPage).toHaveBeenNthCalledWith(1, undefined);
+    expect(fetchPage).toHaveBeenNthCalledWith(2, "page-2");
+
+    await expect(collectCompletionResourcePages(vi.fn()
+      .mockResolvedValue({ resources: [], next_cursor: "same-page" }))).rejects.toThrow("cursor_repeated");
+  });
+
   it("keeps the connection, Workspace, and Room in the panel identity", () => {
     expect(nativeKnowledgeToolsTargetKey(target)).toBe("connection-a\nworkspace-a\nroom-a");
     expect(resourceMatchesNativeKnowledgeToolsTarget(resource(), target)).toBe(true);
@@ -123,6 +146,54 @@ describe("NativeKnowledgeTools target boundary", () => {
       connections: [{ id: "connection-a", workspaceId: "workspace-a" } as DesktopWorkspaceConnectionState["connections"][number]]
     })).toEqual({ connectionId: "connection-a", workspaceId: "workspace-a" });
   });
+
+  it("fails closed for archived, disabled, stale, and unknown Skill states", () => {
+    expect(nativeKnowledgeResourceCanBeUsedInWork({ kind: "skill", lifecycleState: "active" })).toBe(true);
+    expect(nativeKnowledgeResourceCanBeUsedInWork({ kind: "skill", lifecycleState: "archived" })).toBe(false);
+    expect(nativeKnowledgeResourceCanBeUsedInWork({ kind: "skill", lifecycleState: "disabled" })).toBe(false);
+    expect(nativeKnowledgeResourceCanBeUsedInWork({ kind: "skill", lifecycleState: "stale" })).toBe(false);
+    expect(nativeKnowledgeResourceCanBeUsedInWork({ kind: "policy", lifecycleState: "active" })).toBe(false);
+  });
+
+  it("keeps a Knowledge edit made while saving and advances only its optimistic base version", () => {
+    const submitted: NativeKnowledgeToolsDraft = {
+      resourceId: "knowledge-a",
+      kind: "knowledge",
+      scopeKind: "room",
+      roomId: target.roomId,
+      title: "保存前",
+      content: "最初の本文",
+      reason: "最初の理由",
+      expectedVersion: 3,
+      dirty: true
+    };
+    expect(nativeKnowledgeDraftMatchesSnapshot({ ...submitted, dirty: false }, submitted)).toBe(true);
+    const newer = { ...submitted, content: "保存中に追加した本文", dirty: true };
+    expect(nativeKnowledgeDraftMatchesSnapshot(newer, submitted)).toBe(false);
+    expect(nativeKnowledgeDraftAfterMutation(newer, submitted, resource({ version: 4 }))).toEqual({
+      ...newer,
+      expectedVersion: 4,
+      dirty: true
+    });
+    expect(nativeKnowledgeDraftAfterMutation(submitted, submitted, resource({ version: 4 }))).toBeUndefined();
+  });
+
+  it("prefers the just-created Knowledge response when an older list has the same ID", () => {
+    const listed = resource({ id: "knowledge-new", title: "一覧の古い表示", version: 3 });
+    const created = resource({ id: "knowledge-new", title: "作成直後の表示", version: 4 });
+    expect(nativeKnowledgeResourceForOpen([listed], created.id, created)).toBe(created);
+    expect(nativeKnowledgeResourceForOpen([listed], listed.id)).toBe(listed);
+  });
+
+  it("does not offer a Session or Message without work_id as openable", () => {
+    const session: NativeRoomSearchResult = { key: "session:session-a", kind: "session", id: "session-a", title: "履歴", summary: "抜粋" };
+    const message: NativeRoomSearchResult = { key: "message:message-a", kind: "message", id: "message-a", title: "メッセージ", summary: "抜粋" };
+    expect(nativeRoomSearchResultCanOpen(session, true)).toBe(false);
+    expect(nativeRoomSearchResultCanOpen(message, true)).toBe(false);
+    expect(nativeRoomSearchResultOpenHint(session, true)).toContain("work_id");
+    expect(nativeRoomSearchResultCanOpen({ ...session, work_id: "work-a" }, true)).toBe(true);
+    expect(nativeRoomSearchResultCanOpen({ ...message, work_id: "work-a" }, true)).toBe(true);
+  });
 });
 
 describe("NativeKnowledgeTools panel", () => {
@@ -148,6 +219,15 @@ describe("NativeKnowledgeTools panel", () => {
     expect(markup).not.toContain("session_id");
     expect(markup).not.toContain("今すぐ実行");
     expect(markup).not.toContain("automationを作成");
+  });
+
+  it("exposes Knowledge creation from the management surface", () => {
+    const markup = renderToStaticMarkup(createElement(NativeKnowledgeTools, {
+      target,
+      bridge: {} as NativeKnowledgeToolsBridge
+    }));
+    expect(markup).toContain("Knowledgeを作成");
+    expect(markup).toContain("確認できる資源");
   });
 
   it("explains conflict and permission failures without discarding the draft", () => {

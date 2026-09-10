@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceServerError } from "@samurai-agent/workspace-server";
-import { publicOperationResult, resolveRoomWorkResourceRefs, roomWorkInstructionForPublicInput } from "./domain-api-v1";
+import { assertBackendInputDeliveryEvidence, publicOperationResult, resolveRoomWorkResourceRefs, roomWorkInstructionForPublicInput } from "./domain-api-v1";
 
 describe("Domain API v1 Room Work resource refs", () => {
   it("passes only the public selector to Completion and returns its canonical ref", async () => {
@@ -196,5 +196,29 @@ describe("Domain API v1 Room Work resource refs", () => {
         assignees: [{ ...base.work.assignees[0], result: { resource_refs: [{ kind: "artifact_revision", id: "artifact_revision_orphan", uri: "artifacts/artifact_orphan/revisions/1.md" }] } }]
       }
     })).toThrowError("room_work_resource_reference_invalid");
+  });
+
+  it("requires a new input-delivery event and rejects a replayed terminal Run", () => {
+    const event = {
+      id: "event-input-new",
+      run_id: "run-input",
+      event_type: "backend_native_input_submitted" as const,
+      attempt_no: 1
+    };
+    expect(() => assertBackendInputDeliveryEvidence({
+      runId: "run-input",
+      replayed: false,
+      run: { id: "run-input", status: "running", phase: "backend_starting", current_attempt: 1 },
+      beforeEventIds: new Set<string>(),
+      events: [event]
+    })).not.toThrow();
+
+    expect(() => assertBackendInputDeliveryEvidence({
+      runId: "run-input",
+      replayed: true,
+      run: { id: "run-input", status: "completed", phase: "settled", current_attempt: 1 },
+      beforeEventIds: new Set([event.id]),
+      events: [{ ...event, id: "event-input-existing" }]
+    })).toThrowError("workspace_interaction_backend_input_delivery_unverified");
   });
 });

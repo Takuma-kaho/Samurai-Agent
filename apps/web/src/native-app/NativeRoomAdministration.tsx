@@ -1,11 +1,16 @@
 import { useId } from "react";
 import type { FormEvent } from "react";
-import { useNativeRoomAdministration, WORKSPACE_ROOT_VALUE, type NativeRoomAdministrationRole, type UseNativeRoomAdministrationOptions } from "./use-native-room-administration";
+import { useNativeRoomAdministration, WORKSPACE_ROOT_VALUE, type NativeRoomAdministrationDraftState, type NativeRoomAdministrationRole, type UseNativeRoomAdministrationOptions } from "./use-native-room-administration";
 import type { NativeRoom } from "./types";
+import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
+import { useNativeDraftNavigation, type NativeDraftNavigationController } from "./use-native-draft-navigation";
 
 export interface NativeRoomAdministrationProps extends UseNativeRoomAdministrationOptions {
   /** Returns to the Room without replacing the Room Work draft. */
   onClose?: () => void;
+  /** Parent navigation guard receives this panel's draft and saving state. */
+  onDraftStateChange?: (state: NativeRoomAdministrationDraftState) => void;
+  onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
 }
 
 const roleLabels: Record<NativeRoomAdministrationRole, string> = {
@@ -68,6 +73,22 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
   const canEdit = Boolean(normalRoom && admin.roomCanManage && admin.target && admin.currentRoomId);
   const movePreview = admin.movePreview;
   const memberPreview = admin.memberPreview;
+  const draftNavigation = useNativeDraftNavigation({
+    scopeKey: "room-administration\n" + admin.contextKey,
+    label: "Room管理",
+    dirty: admin.draftDirty,
+    saving: admin.saving,
+    canSave: false,
+    saveUnavailableMessage: "Room管理の入力は各操作の確認後に個別保存されます。移動前の一括保存には対応していません。",
+    discard: admin.discardDraft,
+    onControllerChange: props.onDraftNavigationControllerChange
+  });
+  const requestClose = () => {
+    if (props.onClose) draftNavigation.requestNavigation(props.onClose);
+  };
+  const selectRoom = (room: NativeRoom) => {
+    if (props.onSelectRoom) draftNavigation.requestNavigation(() => props.onSelectRoom?.(room));
+  };
 
   return (
     <section className="native-room-administration" aria-labelledby={`${id}-title`}>
@@ -122,8 +143,9 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
             <p role="alert">現在のRoomとWorkspace targetを確認してください。</p>
           )}
         </div>
-        {props.onClose ? <button className="native-room-administration__close" type="button" onClick={props.onClose} aria-label="Room管理を閉じる">×</button> : null}
+        {props.onClose ? <button className="native-room-administration__close" type="button" onClick={requestClose} aria-label="Room管理を閉じる">×</button> : null}
       </header>
+      <NativeDraftNavigationPrompt controller={draftNavigation} />
 
       {admin.actionError ? <p className="native-room-administration__error" role="alert">Server: {admin.actionError}</p> : null}
 
@@ -148,7 +170,7 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
                     type="button"
                     aria-current={room.id === admin.currentRoomId ? "true" : undefined}
                     style={{ paddingLeft: `${0.65 + depth * 1.15}rem` }}
-                    onClick={() => void props.onSelectRoom?.(room)}
+                    onClick={() => selectRoom(room)}
                   >
                     {room.name}
                   </button>

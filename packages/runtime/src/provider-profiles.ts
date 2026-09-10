@@ -183,6 +183,22 @@ function authHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+/**
+ * Provider-facing contract for rendering the result of a Surface action.
+ *
+ * This is shared by the stable system prompt and the tool description so that
+ * every provider receives the same receive-only bridge semantics and lifecycle
+ * states. The host installs the bridge after bundle.script starts, which is why
+ * the CustomEvent form is the safest registration example for generated code.
+ */
+const generatedSurfaceProviderInstruction = [
+  "The generated Surface runs in a sandboxed iframe, so every state-changing Surface must include a visible status or result region inside that iframe (for example, a div with role=status and aria-live=polite); showing JSON only in the parent chat is not sufficient.",
+  "In bundle.script, receive the parent-authorized result through the public bridge: preferably register window.addEventListener(\"samurai.generated_surface.action.result\", handler) and window.addEventListener(\"samurai.generated_surface.action.error\", handler), or assign window.samuraiGeneratedSurface.onActionResult after window.samuraiGeneratedSurface exists.",
+  "The callback argument or CustomEvent detail is the result envelope. For samurai.generated_surface.action.result, treat status=\"accepted\" with saved=false as pending and never as a completed save; treat status=\"completed\" with saved=true as the only successful save, then render its result and any parent-authorized latest.data, latest.artifact, or latest.surface snapshot.",
+  "For samurai.generated_surface.action.error, render error.message and the retryable state in the iframe, preserve the user's input, and offer a retry only when retryable is true. Update existing DOM nodes with safe DOM APIs such as textContent; do not reload or recreate the iframe just to display an action result, invent bridge fields, or claim success from the original button click.",
+  "The result bridge is receive-only. Send a declared action only from an explicit event listener through window.dispatchSamuraiAction(actionId, payload); never use the result bridge, window.parent.postMessage, a form submission, an external URL, network API, or browser storage as a sending or persistence mechanism."
+].join(" ");
+
 function stablePrompt(locale: SupportedLocale): string {
   return [
     "You are Samurai Agent, a GUI-first personal agent workspace assistant.",
@@ -190,7 +206,8 @@ function stablePrompt(locale: SupportedLocale): string {
     "Normal conversation must be plain natural language content, not JSON.",
     "Use tools only for state-changing or boundary-crossing intents.",
     "Use create_artifact only when the user asks to create a durable local artifact or draft.",
-    "Use create_generated_surface only when the user asks for an independent or custom HTML/UI surface. Its bundle.html must not contain script or style tags, inline event handlers, external URLs, or network/storage APIs: put CSS in bundle.css and JavaScript in bundle.script. To trigger a declared action, have the event handler call window.dispatchSamuraiAction(actionId, payload); do not invent bridge APIs or call window.parent.postMessage directly. The saved bundle and its actions remain subject to the current Runtime and Workspace boundaries.",
+    "Use create_generated_surface only when the user asks for an independent or custom HTML/UI surface. Its bundle.html must not contain script or style tags, form elements, inline event handlers, external URLs, or network/storage APIs: put CSS in bundle.css and JavaScript in bundle.script. Use a non-form container with explicit button event listeners for input controls. To trigger a declared action, have the event handler call window.dispatchSamuraiAction(actionId, payload); do not invent bridge APIs or call window.parent.postMessage directly. The saved bundle and its actions remain subject to the current Runtime and Workspace boundaries.",
+    generatedSurfaceProviderInstruction,
     "Use subagent_delegate only when a bounded child assignment is needed for a specialist Agent already permitted in this Room. The tool receives only the target Agent, instruction, optional Server-issued attachments, and optional dependency assignment IDs; Room, Work, parent assignment, requester, and generation are server-bound.",
     "Use request_external_send when the user asks to send, publish, post, or otherwise affect an external channel.",
     "Use remember_topic only when the user explicitly asks you to remember a preference or reusable fact.",
@@ -543,7 +560,10 @@ function toolDefinitions(availableTools?: readonly string[]) {
     },
     {
       name: "create_generated_surface",
-      description: "Generate and save an isolated HTML Surface for the Workspace Canvas. Put markup only in bundle.html, CSS only in bundle.css, and JavaScript only in bundle.script; never embed script or style tags, inline event handlers, external URLs, or network/storage APIs in the bundle. Trigger only declared actions with window.dispatchSamuraiAction(actionId, payload), never with an invented bridge API or window.parent.postMessage.",
+      description: [
+        "Generate and save an isolated HTML Surface for the Workspace Canvas. Put markup only in bundle.html, CSS only in bundle.css, and JavaScript only in bundle.script; never embed script or style tags, form elements, inline event handlers, external URLs, or network/storage APIs in the bundle. Use a non-form container with explicit button event listeners for input controls. Trigger only declared actions with window.dispatchSamuraiAction(actionId, payload), never with an invented bridge API or window.parent.postMessage.",
+        generatedSurfaceProviderInstruction
+      ].join(" "),
       parameters: generatedSurfaceCreateParameters
     },
     {

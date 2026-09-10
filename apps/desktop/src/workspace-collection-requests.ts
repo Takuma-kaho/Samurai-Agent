@@ -1,8 +1,11 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export function workspaceCollectionRoomRequest(input: unknown): { roomId: string } {
+export function workspaceCollectionRoomRequest(input: unknown): { roomId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { roomId: requiredOpaque(value, "roomId") };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), ...(target ? { target } : {}) };
 }
 
 export function workspaceCollectionSchemaSaveRequest(input: unknown): {
@@ -10,34 +13,41 @@ export function workspaceCollectionSchemaSaveRequest(input: unknown): {
   operationId: string;
   expectedVersion?: number;
   schema: Record<string, unknown>;
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
   const schema = requiredJsonObject(value, "schema");
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId: requiredOpaque(value, "roomId"),
     operationId: requiredOpaque(value, "operationId"),
     ...(value.expectedVersion === undefined ? {} : { expectedVersion: requiredInteger(value, "expectedVersion", 0) }),
+    ...(target ? { target } : {}),
     schema
   };
 }
 
-export function workspaceCollectionIdRequest(input: unknown): { roomId: string; collectionId: string } {
+export function workspaceCollectionIdRequest(input: unknown): { roomId: string; collectionId: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { roomId: requiredOpaque(value, "roomId"), collectionId: requiredOpaque(value, "collectionId") };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), collectionId: requiredOpaque(value, "collectionId"), ...(target ? { target } : {}) };
 }
 
 export function workspaceCollectionRecordCreateRequest(input: unknown): {
   roomId: string;
   collectionId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { room_id: string; record_id: string; data: Record<string, unknown> };
 } {
   const value = object(input);
   const roomId = requiredOpaque(value, "roomId");
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId,
     collectionId: requiredOpaque(value, "collectionId"),
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: { room_id: roomId, record_id: requiredOpaque(value, "recordId"), data: requiredJsonObject(value, "data") }
   };
 }
@@ -47,16 +57,19 @@ export function workspaceCollectionRecordPatchRequest(input: unknown): {
   collectionId: string;
   recordId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { room_id: string; patch_id?: string; changes: Record<string, unknown>; expected_version?: number };
 } {
   const value = object(input);
   const roomId = requiredOpaque(value, "roomId");
   const patchId = optionalOpaque(value, "patchId");
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId,
     collectionId: requiredOpaque(value, "collectionId"),
     recordId: requiredOpaque(value, "recordId"),
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: {
       room_id: roomId,
       ...(patchId ? { patch_id: patchId } : {}),
@@ -71,15 +84,18 @@ export function workspaceCollectionRecordDeleteRequest(input: unknown): {
   collectionId: string;
   recordId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { room_id: string; expected_version: number };
 } {
   const value = object(input);
   const roomId = requiredOpaque(value, "roomId");
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId,
     collectionId: requiredOpaque(value, "collectionId"),
     recordId: requiredOpaque(value, "recordId"),
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: { room_id: roomId, expected_version: requiredInteger(value, "expectedVersion", 1) }
   };
 }
@@ -87,10 +103,12 @@ export function workspaceCollectionRecordDeleteRequest(input: unknown): {
 export function workspaceCollectionSurfaceOperationRequest(input: unknown): {
   roomId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { room_id: string; operation: Record<string, unknown> };
 } {
   const value = object(input);
   const roomId = requiredOpaque(value, "roomId");
+  const target = workspaceTargetRequest(value.target);
   const operation = requiredJsonObject(value, "operation");
   const operationId = requiredOpaque(operation, "id");
   const kind = operation.kind;
@@ -118,7 +136,7 @@ export function workspaceCollectionSurfaceOperationRequest(input: unknown): {
     if (operation.record_id !== undefined) requiredOpaque(operation, "record_id");
     if (operation.payload !== undefined) requiredJsonObject(operation, "payload");
   }
-  return { roomId, operationId, body: { room_id: roomId, operation } };
+  return { roomId, operationId, ...(target ? { target } : {}), body: { room_id: roomId, operation } };
 }
 
 function object(input: unknown): Record<string, unknown> {

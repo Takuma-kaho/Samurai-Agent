@@ -32,6 +32,12 @@ export interface BrowserWorkspaceRequestInput {
   body?: unknown;
 }
 
+export interface BrowserWorkspaceBinaryResponse {
+  bytes: number[];
+  mimeType?: string;
+  encoding?: string;
+}
+
 export interface BrowserWorkspaceRealtimeEvent {
   type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
   workspaceId: string;
@@ -177,7 +183,7 @@ export function subscribeBrowserWorkspaceRealtime(
   };
 }
 
-export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspaceRequestInput): Promise<T> {
+async function signedBrowserWorkspaceFetch(input: BrowserWorkspaceRequestInput): Promise<Response> {
   const connection = input.connectionId
     ? (await loadStoredConnections()).find((item) => item.id === input.connectionId)
     : await loadStoredConnection();
@@ -221,6 +227,29 @@ export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspa
     },
     ...(input.method === "GET" ? {} : { body: JSON.stringify(body) })
   });
+  if (!response.ok) {
+    const text = await response.text();
+    let responseBody: unknown = undefined;
+    if (text) {
+      try {
+        responseBody = JSON.parse(text);
+      } catch {
+        responseBody = undefined;
+      }
+    }
+    const errorValue = responseBody && typeof responseBody === "object" ? (responseBody as { error?: unknown }).error : undefined;
+    const code = typeof errorValue === "string"
+      ? errorValue
+      : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
+        ? (errorValue as { code: string }).code
+        : "workspace_server_request_failed";
+    throw new Error(`${code}:${response.status}`);
+  }
+  return response;
+}
+
+export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspaceRequestInput): Promise<T> {
+  const response = await signedBrowserWorkspaceFetch(input);
   const text = await response.text();
   let responseBody: unknown = undefined;
   if (text) {
@@ -230,16 +259,23 @@ export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspa
       responseBody = { error: "workspace_server_response_invalid" };
     }
   }
-  if (!response.ok) {
-    const errorValue = responseBody && typeof responseBody === "object" ? (responseBody as { error?: unknown }).error : undefined;
-    const code = typeof errorValue === "string"
-      ? errorValue
-      : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
-        ? (errorValue as { code: string }).code
-        : "workspace_server_request_failed";
-    throw new Error(`${code}:${response.status}`);
-  }
   return responseBody as T;
+}
+
+/** Fetch an authenticated artifact payload without forcing binary data through
+ * JSON. The raw endpoint remains behind the same signed request and target
+ * snapshot as every other Browser bridge call. */
+export async function browserWorkspaceBinaryRequest(input: BrowserWorkspaceRequestInput): Promise<BrowserWorkspaceBinaryResponse> {
+  const response = await signedBrowserWorkspaceFetch(input);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > 50_000_000) throw new Error("workspace_server_response_too_large");
+  const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim();
+  const encoding = response.headers.get("x-content-encoding") ?? undefined;
+  return {
+    bytes: Array.from(bytes),
+    ...(mimeType ? { mimeType } : {}),
+    ...(encoding ? { encoding } : {})
+  };
 }
 
 export async function browserWorkspaceHealth(connectionId?: string): Promise<unknown> {

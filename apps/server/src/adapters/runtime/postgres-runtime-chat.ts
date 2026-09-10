@@ -181,6 +181,8 @@ export interface PostgresRuntimeSearchResult {
   title: string;
   summary: string;
   session_id?: string;
+  /** A public Room Work target resolved from the server-side runtime binding. */
+  work_id?: string;
 }
 
 export interface PostgresRuntimeSessionInput {
@@ -493,6 +495,7 @@ interface RuntimeMessageRow {
   output_locale: string;
   envelope: unknown;
   created_at: Date | string;
+  work_id?: string | null;
 }
 
 interface RuntimeSessionRow {
@@ -505,6 +508,7 @@ interface RuntimeSessionRow {
   output_locale: string;
   created_at: Date | string;
   updated_at: Date | string;
+  work_id?: string | null;
 }
 
 interface RuntimeActivityRow {
@@ -1353,17 +1357,43 @@ export class PostgresRuntimeChat {
       const pattern = `%${normalizedQuery}%`;
       const [sessions, messages, artifacts] = await Promise.all([
         sql.query<RuntimeSessionRow>(
-          `SELECT workspace_id, id, session_key, room_id, title, ui_locale, output_locale, created_at, updated_at
-           FROM workspace_runtime_sessions
-           WHERE workspace_id = $1 AND room_id = $2 AND (title ILIKE $3 OR session_key ILIKE $3)
-           ORDER BY updated_at DESC, id DESC LIMIT 50`,
+          `SELECT session.workspace_id, session.id, session.session_key, session.room_id, session.title,
+                  session.ui_locale, session.output_locale, session.created_at, session.updated_at,
+                  COALESCE(legacy.work_id, runtime_work.work_id) AS work_id
+           FROM workspace_runtime_sessions AS session
+           LEFT JOIN workspace_human_work_legacy_sessions AS legacy
+             ON legacy.workspace_id = session.workspace_id AND legacy.legacy_session_id = session.id
+           LEFT JOIN LATERAL (
+             SELECT runtime_run.metadata -> 'runtime_binding' ->> 'work_id' AS work_id
+             FROM workspace_runtime_runs AS runtime_run
+             WHERE runtime_run.workspace_id = session.workspace_id
+               AND runtime_run.session_id = session.id
+               AND runtime_run.room_id = session.room_id
+               AND jsonb_typeof(runtime_run.metadata -> 'runtime_binding') = 'object'
+             ORDER BY runtime_run.updated_at DESC, runtime_run.id DESC
+             LIMIT 1
+           ) AS runtime_work ON TRUE
+           WHERE session.workspace_id = $1 AND session.room_id = $2 AND (session.title ILIKE $3 OR session.session_key ILIKE $3)
+           ORDER BY session.updated_at DESC, session.id DESC LIMIT 50`,
           [this.workspaceId, normalizedRoomId, pattern]
         ),
         sql.query<RuntimeMessageRow>(
-          `SELECT message.*
-           FROM workspace_runtime_messages message
+          `SELECT message.*, COALESCE(legacy.work_id, runtime_work.work_id) AS work_id
+           FROM workspace_runtime_messages AS message
            JOIN workspace_runtime_sessions session
              ON session.workspace_id = message.workspace_id AND session.id = message.session_id
+           LEFT JOIN workspace_human_work_legacy_sessions AS legacy
+             ON legacy.workspace_id = session.workspace_id AND legacy.legacy_session_id = session.id
+           LEFT JOIN LATERAL (
+             SELECT runtime_run.metadata -> 'runtime_binding' ->> 'work_id' AS work_id
+             FROM workspace_runtime_runs AS runtime_run
+             WHERE runtime_run.workspace_id = session.workspace_id
+               AND runtime_run.session_id = session.id
+               AND runtime_run.room_id = session.room_id
+               AND jsonb_typeof(runtime_run.metadata -> 'runtime_binding') = 'object'
+             ORDER BY runtime_run.updated_at DESC, runtime_run.id DESC
+             LIMIT 1
+           ) AS runtime_work ON TRUE
            WHERE message.workspace_id = $1 AND session.room_id = $2 AND message.content ILIKE $3
            ORDER BY message.created_at DESC, message.id DESC LIMIT 100`,
           [this.workspaceId, normalizedRoomId, pattern]
@@ -1381,14 +1411,16 @@ export class PostgresRuntimeChat {
           kind: "session",
           id: row.id,
           title: row.title,
-          summary: row.title
+          summary: row.title,
+          ...(row.work_id ? { work_id: row.work_id } : {})
         })),
         ...messages.rows.map((row): PostgresRuntimeSearchResult => ({
           kind: "message",
           id: row.id,
           title: row.content.slice(0, 120),
           summary: row.content.slice(0, 240),
-          session_id: row.session_id
+          session_id: row.session_id,
+          ...(row.work_id ? { work_id: row.work_id } : {})
         })),
         ...artifacts.rows.map((row): PostgresRuntimeSearchResult => {
           const payload = jsonRecord(row.payload);

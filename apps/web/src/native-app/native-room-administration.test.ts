@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import NativeRoomAdministration from "./NativeRoomAdministration";
 import {
+  captureNativeRoomAdministrationDraftSnapshot,
   nativeRoomAdministrationCreateInput,
+  nativeRoomAdministrationDraftIsDirty,
+  nativeRoomAdministrationDraftSnapshotHasNewerChanges,
   nativeRoomAdministrationErrorMessage,
   nativeRoomAdministrationMemberInput,
   nativeRoomAdministrationMoveInput
@@ -76,6 +79,34 @@ describe("NativeRoomAdministration", () => {
   it("Serverのmembership失敗コードをそのまま表示できる", () => {
     expect(nativeRoomAdministrationErrorMessage({ body: { error: "last_owner_required" } }, "fallback")).toBe("last_owner_required");
     expect(nativeRoomAdministrationErrorMessage(new Error("conflict"), "fallback")).toBe("conflict");
+  });
+
+  it("Room管理の送信snapshotより後の入力をdraftとして保持する", () => {
+    const cleanDraft = {
+      createName: "",
+      moveParentId: undefined,
+      memberAccountId: "",
+      memberRole: "member" as const,
+      memberState: "active" as const
+    };
+    expect(nativeRoomAdministrationDraftIsDirty(cleanDraft, false)).toBe(false);
+    expect(nativeRoomAdministrationDraftIsDirty(cleanDraft, true)).toBe(true);
+
+    const draft = {
+      createName: "子Room",
+      moveParentId: "room-destination",
+      memberAccountId: "account-b",
+      memberRole: "admin" as const,
+      memberState: "active" as const
+    };
+    const snapshot = captureNativeRoomAdministrationDraftSnapshot("room-context", draft);
+
+    expect(nativeRoomAdministrationDraftIsDirty(draft, false)).toBe(true);
+    expect(nativeRoomAdministrationDraftSnapshotHasNewerChanges(snapshot, "room-context", draft, "create")).toBe(false);
+    expect(nativeRoomAdministrationDraftSnapshotHasNewerChanges(snapshot, "room-context", { ...draft, createName: "別の子Room" }, "create")).toBe(true);
+    expect(nativeRoomAdministrationDraftSnapshotHasNewerChanges(snapshot, "room-context", { ...draft, moveParentId: undefined }, "move")).toBe(true);
+    expect(nativeRoomAdministrationDraftSnapshotHasNewerChanges(snapshot, "room-context", { ...draft, memberRole: "owner" }, "member")).toBe(true);
+    expect(nativeRoomAdministrationDraftSnapshotHasNewerChanges(snapshot, "other-room-context", draft, "member")).toBe(true);
   });
 
   it("通常RoomではR13の補助パネルを表示し、R15の偽ボタンを表示しない", () => {

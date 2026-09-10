@@ -82,6 +82,42 @@ describe("NativeCollectionSurface", () => {
     expect(markup).toContain("disabled=\"\"");
   });
 
+  it("keeps the active draft buffer editable while a save is pending", () => {
+    const markup = renderSurface({
+      saving: true,
+      newDraft: { title: "保存中も入力" }
+    });
+
+    expect(markup).not.toContain("<fieldset disabled=\"\">");
+    expect(markup).not.toMatch(/data-field-type=\"string\"[^>]*disabled/);
+    expect(markup).toContain("保存中も入力");
+  });
+
+  it("uses server row IDs for controls and rejects records without a stable ID", () => {
+    const spec = collectionSpec();
+    const data = spec.props.data as Record<string, JsonValue>;
+    const records = data.records as JsonValue[];
+    const markup = renderSurface({
+      spec: {
+        ...spec,
+        props: {
+          ...spec.props,
+          data: {
+            ...data,
+            records: [...records, { id: "movie_zero", title: "ゼロ", rating: 0, favorite: false }, { title: "IDなし" }]
+          }
+        }
+      }
+    });
+
+    expect(markup).toContain("movie_1-title");
+    expect(markup).toContain("movie_2-title");
+    expect(markup).toContain("movie_zero-title");
+    expect(markup).toContain('value="0"');
+    expect(markup).not.toContain("IDなし");
+    expect(markup).not.toContain("row-0-title");
+  });
+
   it("keeps local browsing available but disables writes and declared actions without Room capabilities", () => {
     const markup = renderSurface({ canEdit: false, canExecute: false });
 

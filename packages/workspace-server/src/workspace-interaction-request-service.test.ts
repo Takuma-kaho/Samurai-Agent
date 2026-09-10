@@ -4,6 +4,7 @@ import { WorkspaceServerError } from "./errors";
 import {
   WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
   WorkspaceInteractionRequestService,
+  workspaceInteractionExecutionOperationId,
   type WorkspaceInteractionRequestRecordStore,
   type WorkspaceInteractionRequestRespondInput
 } from "./workspace-interaction-request-service";
@@ -293,6 +294,10 @@ describe("WorkspaceInteractionRequestService", () => {
     expect(retried.request.execution).toMatchObject({ status: "executing", startedAt: "2026-09-08T00:00:00.000Z" });
     expect(retried.request).not.toHaveProperty("outcome.input");
     expect(retried.executionInput).toEqual({ answer: "secret answer" });
+    await expect(restarted.assertExecutionClaim(contextFor("operation-claim-reauthorize"), {
+      roomId: "room-claim", requestId: created.request.id, expectedVersion: retried.request.version,
+      ownerId: winningOwnerId, executionOperationId: winningExecutionOperationId
+    })).resolves.toMatchObject({ status: "executing", version: 3 });
 
     const settled = await restarted.settleExecution(contextFor("operation-claim-settle"), {
       roomId: "room-claim", requestId: created.request.id, expectedVersion: 3,
@@ -311,6 +316,171 @@ describe("WorkspaceInteractionRequestService", () => {
       ownerId: winningOwnerId, executionOperationId: winningExecutionOperationId, status: "completed", summary: "Runtime resumed"
     });
     expect(settleReplay.replayed).toBe(true);
+  });
+
+  it("exposes an unclaimed accepted request with the same stable execution operation after a restart", async () => {
+    const clock = mutableClock("2026-09-08T00:00:00.000Z");
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock });
+    const created = await service.create(contextFor("operation-accepted-recovery-create"), {
+      roomId: "room-accepted-recovery",
+      kind: "approval",
+      surfaceId: "surface-accepted-recovery",
+      revisionId: "revision-accepted-recovery",
+      actionTarget: { kind: "generated_surface_action", surface_id: "surface-accepted-recovery", action_id: "publish" },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    const accepted = await service.respond(contextFor("operation-accepted-recovery-response"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: created.request.version,
+      optionId: "approve"
+    });
+
+    const restarted = new WorkspaceInteractionRequestService(store, { clock });
+    const candidates = await restarted.listAcceptedForRecovery(contextFor("operation-accepted-recovery-scan"), {
+      roomId: created.request.roomId,
+      limit: 10
+    });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      request: { id: created.request.id, status: "accepted", version: accepted.request.version },
+      executionOperationId: workspaceInteractionExecutionOperationId("workspace-a", created.request.id, "initial")
+    });
+
+    const claim = await restarted.claimExecution(contextFor("operation-accepted-recovery-claim"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: candidates[0]!.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: candidates[0]!.executionOperationId
+    });
+    expect(claim.replayed).toBe(false);
+    expect(claim.request.status).toBe("executing");
+    await expect(restarted.listAcceptedForRecovery(contextFor("operation-accepted-recovery-rescan"), {
+      roomId: created.request.roomId,
+      limit: 10
+    })).resolves.toEqual([]);
+  });
+
+  it("returns a claim to accepted after a retryable admission failure and replays the release", async () => {
+    const clock = mutableClock("2026-09-08T00:00:00.000Z");
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock });
+    const created = await service.create(contextFor("operation-release-create"), {
+      roomId: "room-release",
+      kind: "approval",
+      surfaceId: "surface-release",
+      revisionId: "revision-release",
+      actionTarget: { kind: "generated_surface_action", surface_id: "surface-release", action_id: "publish" },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    const accepted = await service.respond(contextFor("operation-release-response"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: created.request.version,
+      optionId: "approve"
+    });
+    const claimed = await service.claimExecution(contextFor("operation-release-claim"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: accepted.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-release"
+    });
+
+    const released = await service.releaseExecutionClaim(contextFor("operation-release-release"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: claimed.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-release"
+    });
+    expect(released).toMatchObject({ replayed: false, request: { status: "accepted", version: 4 } });
+
+    const releaseReplay = await service.releaseExecutionClaim(contextFor("operation-release-release"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: claimed.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-release"
+    });
+    expect(releaseReplay).toMatchObject({ replayed: true, request: { status: "accepted", version: 4 } });
+
+    const retryClaim = await service.claimExecution(contextFor("operation-release-retry"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: released.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-release"
+    });
+    expect(retryClaim).toMatchObject({ replayed: false, request: { status: "executing", version: 5 } });
+  });
+
+  it("scans beyond the first storage page when recovering accepted requests", async () => {
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock: mutableClock("2026-09-08T00:00:00.000Z") });
+    for (let index = 0; index < 501; index += 1) {
+      const created = await service.create(contextFor(`operation-accepted-page-${index}`), {
+        roomId: "room-accepted-page",
+        kind: "approval",
+        surfaceId: "surface-accepted-page",
+        revisionId: "revision-accepted-page",
+        actionTarget: { kind: "generated_surface_action", surface_id: "surface-accepted-page", action_id: "publish" },
+        options: [{ id: "approve", label: "許可", decision: "approve" }]
+      });
+      await service.respond(contextFor(`operation-accepted-page-response-${index}`), {
+        roomId: created.request.roomId,
+        requestId: created.request.id,
+        expectedVersion: created.request.version,
+        optionId: "approve"
+      });
+    }
+
+    const candidates = await service.listAcceptedForRecovery(contextFor("operation-accepted-page-scan"), {
+      roomId: "room-accepted-page",
+      limit: 501
+    });
+
+    expect(candidates).toHaveLength(501);
+    expect(store.listOffsets).toEqual([0, 500]);
+  });
+
+  it("filters pending requests before applying pagination", async () => {
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock: mutableClock("2026-09-08T00:00:00.000Z") });
+    await service.create(contextFor("operation-pending-before-resolved"), {
+      roomId: "room-pending-page",
+      kind: "approval",
+      surfaceId: "surface-pending-page",
+      actionTarget: { kind: "generated_surface_action", surface_id: "surface-pending-page", action_id: "publish" },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    for (let index = 0; index < 501; index += 1) {
+      const created = await service.create(contextFor(`operation-resolved-page-${index}`), {
+        roomId: "room-pending-page",
+        kind: "approval",
+        surfaceId: "surface-resolved-page",
+        actionTarget: { kind: "generated_surface_action", surface_id: "surface-resolved-page", action_id: "publish" },
+        options: [{ id: "approve", label: "許可", decision: "approve" }]
+      });
+      await service.respond(contextFor(`operation-resolved-page-response-${index}`), {
+        roomId: created.request.roomId,
+        requestId: created.request.id,
+        expectedVersion: created.request.version,
+        optionId: "approve"
+      });
+    }
+
+    const requests = await service.list(contextFor("operation-pending-page-list"), {
+      roomId: "room-pending-page",
+      includeResolved: false,
+      limit: 100
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.actionTarget).toMatchObject({ surface_id: "surface-pending-page" });
+    expect(store.listOffsets).toEqual([0, 500]);
   });
 
   it("requires explicit stale recovery and records failed execution", async () => {
@@ -374,7 +544,7 @@ describe("WorkspaceInteractionRequestService", () => {
       roomId: "room-maintenance",
       kind: "approval",
       surfaceId: "surface-maintenance",
-      actionTarget: { kind: "generated_surface_action", surface_id: "surface-maintenance", action_id: "publish" },
+      actionTarget: { kind: "generic_approval_target", id: "target-maintenance" },
       options: [{ id: "approve", label: "許可", decision: "approve" }]
     });
     const accepted = await service.respond(contextFor("operation-maintenance-accept"), {
@@ -444,6 +614,271 @@ describe("WorkspaceInteractionRequestService", () => {
     })).resolves.toEqual([]);
   });
 
+  it("leaves a stale Generated Surface claim for result-aware recovery instead of failing it blindly", async () => {
+    const clock = mutableClock("2026-09-08T00:00:00.000Z");
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    const created = await service.create(contextFor("operation-surface-recovery-create"), {
+      roomId: "room-surface-recovery",
+      kind: "approval",
+      surfaceId: "surface-surface-recovery",
+      revisionId: "revision-surface-recovery",
+      actionTarget: {
+        kind: "generated_surface_action",
+        room_id: "room-surface-recovery",
+        surface_id: "surface-surface-recovery",
+        revision_id: "revision-surface-recovery",
+        action_id: "publish",
+        command_id: "artifact.create",
+        payload: {}
+      },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    const accepted = await service.respond(contextFor("operation-surface-recovery-response"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: created.request.version,
+      optionId: "approve"
+    });
+    const claimed = await service.claimExecution(contextFor("operation-surface-recovery-claim"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: accepted.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-surface-before-stop"
+    });
+    clock.set("2026-09-08T00:00:02.000Z");
+
+    await expect(service.reconcileRoom(contextFor("operation-surface-recovery-reconcile"), {
+      roomId: created.request.roomId,
+      limit: 10
+    })).resolves.toEqual([]);
+
+    const candidates = await service.listAcceptedForRecovery(contextFor("operation-surface-recovery-scan"), {
+      roomId: created.request.roomId,
+      limit: 10
+    });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      request: { id: created.request.id, status: "executing", version: claimed.request.version },
+      executionOperationId: "execution-surface-before-stop"
+    });
+    expect(await service.get(contextFor("operation-surface-recovery-read"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id
+    })).toMatchObject({ status: "executing", version: claimed.request.version });
+  });
+
+  it("preserves the first durable target-result lookup candidate across repeated recovery after restart", async () => {
+    const clock = mutableClock("2026-09-08T00:00:00.000Z");
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    const created = await service.create(contextFor("operation-provenance-create"), {
+      roomId: "room-provenance",
+      kind: "approval",
+      surfaceId: "surface-provenance",
+      revisionId: "revision-provenance",
+      actionTarget: { kind: "generated_surface_action", surface_id: "surface-provenance", action_id: "publish" },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    const accepted = await service.respond(contextFor("operation-provenance-response"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: created.request.version,
+      optionId: "approve"
+    });
+    const initial = await service.claimExecution(contextFor("operation-provenance-claim"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: accepted.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-provenance-initial"
+    });
+    expect(initial.executionTargetResultLookup).toEqual({
+      operationIds: ["execution-provenance-initial"]
+    });
+    expect(initial.request).not.toHaveProperty("executionTargetResultLookup");
+
+    clock.set("2026-09-08T00:00:02.000Z");
+    const firstRecovery = await service.recoverExecution(contextFor("operation-provenance-recovery-1"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: initial.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-provenance-recovery-1"
+    });
+    expect(firstRecovery.executionTargetResultLookup).toEqual({
+      operationIds: ["execution-provenance-initial", "execution-provenance-recovery-1"]
+    });
+
+    clock.set("2026-09-08T00:00:04.000Z");
+    const restarted = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    const secondRecovery = await restarted.recoverExecution(contextFor("operation-provenance-recovery-2"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: firstRecovery.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-provenance-recovery-2"
+    });
+
+    expect(secondRecovery.executionTargetResultLookup).toEqual({
+      operationIds: [
+        "execution-provenance-initial",
+        "execution-provenance-recovery-1",
+        "execution-provenance-recovery-2"
+      ]
+    });
+    expect(secondRecovery.request).not.toHaveProperty("executionTargetResultLookup");
+    await expect(restarted.getExecutionTargetResultLookup(contextFor("operation-provenance-internal-read"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id
+    })).resolves.toEqual({
+      operationIds: [
+        "execution-provenance-initial",
+        "execution-provenance-recovery-1",
+        "execution-provenance-recovery-2"
+      ]
+    });
+    const persisted = await store.getRecord(contextFor("operation-provenance-read"), {
+      roomId: created.request.roomId,
+      recordType: WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
+      id: created.request.id
+    });
+    expect(persisted.payload).toMatchObject({
+      execution: {
+        target_result_lookup_operation_ids: [
+          "execution-provenance-initial",
+          "execution-provenance-recovery-1",
+          "execution-provenance-recovery-2"
+        ]
+      }
+    });
+  });
+
+  it("derives durable target-result provenance from a legacy execution record", async () => {
+    const clock = mutableClock("2026-09-08T00:00:00.000Z");
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    const created = await service.create(contextFor("operation-legacy-provenance-create"), {
+      roomId: "room-legacy-provenance",
+      kind: "approval",
+      surfaceId: "surface-legacy-provenance",
+      actionTarget: { kind: "generated_surface_action", surface_id: "surface-legacy-provenance", action_id: "publish" },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    const accepted = await service.respond(contextFor("operation-legacy-provenance-response"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: created.request.version,
+      optionId: "approve"
+    });
+    const claimed = await service.claimExecution(contextFor("operation-legacy-provenance-claim"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: accepted.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-legacy-initial"
+    });
+    store.omitTargetResultLookupOperationIds(created.request.id);
+
+    const restarted = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    const replayed = await restarted.claimExecution(contextFor("operation-legacy-provenance-replay"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: claimed.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-legacy-initial"
+    });
+    expect(replayed.executionTargetResultLookup).toEqual({
+      operationIds: ["execution-legacy-initial"]
+    });
+
+    clock.set("2026-09-08T00:00:02.000Z");
+    const recovered = await restarted.recoverExecution(contextFor("operation-legacy-provenance-recovery"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: claimed.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-legacy-recovery"
+    });
+    expect(recovered.executionTargetResultLookup).toEqual({
+      operationIds: ["execution-legacy-initial", "execution-legacy-recovery"]
+    });
+  });
+
+  it("fails closed instead of truncating bounded target-result provenance", async () => {
+    const clock = mutableClock("2026-09-08T00:00:00.000Z");
+    const store = new MemoryInteractionRecordStore();
+    const service = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    const created = await service.create(contextFor("operation-provenance-limit-create"), {
+      roomId: "room-provenance-limit",
+      kind: "approval",
+      surfaceId: "surface-provenance-limit",
+      actionTarget: { kind: "generated_surface_action", surface_id: "surface-provenance-limit", action_id: "publish" },
+      options: [{ id: "approve", label: "許可", decision: "approve" }]
+    });
+    const accepted = await service.respond(contextFor("operation-provenance-limit-response"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: created.request.version,
+      optionId: "approve"
+    });
+    const claimed = await service.claimExecution(contextFor("operation-provenance-limit-claim"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: accepted.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-provenance-limit-current"
+    });
+    store.setTargetResultLookupOperationIds(created.request.id, [
+      ...Array.from({ length: 31 }, (_, index) => `execution-provenance-limit-${index}`),
+      "execution-provenance-limit-current"
+    ]);
+    clock.set("2026-09-08T00:00:02.000Z");
+
+    await expect(service.recoverExecution(contextFor("operation-provenance-limit-recovery"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: claimed.request.version,
+      ownerId: "workspace-server-interaction-executor",
+      executionOperationId: "execution-provenance-limit-next"
+    })).rejects.toMatchObject({
+      code: "workspace_interaction_execution_provenance_limit_exceeded",
+      status: 409
+    });
+
+    const terminal = await service.failStaleExecution(contextFor("operation-provenance-limit-terminal"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id,
+      expectedVersion: claimed.request.version,
+      executionOperationId: claimed.claim.executionOperationId,
+      errorCode: "workspace_interaction_execution_provenance_limit_exceeded"
+    });
+    expect(terminal).toMatchObject({
+      replayed: false,
+      request: {
+        status: "failed",
+        execution: {
+          status: "failed",
+          errorCode: "workspace_interaction_execution_provenance_limit_exceeded"
+        }
+      }
+    });
+
+    const restarted = new WorkspaceInteractionRequestService(store, { clock, executionLeaseMs: 1_000 });
+    await expect(restarted.get(contextFor("operation-provenance-limit-terminal-read"), {
+      roomId: created.request.roomId,
+      requestId: created.request.id
+    })).resolves.toMatchObject({
+      status: "failed",
+      execution: { errorCode: "workspace_interaction_execution_provenance_limit_exceeded" }
+    });
+    await expect(restarted.listAcceptedForRecovery(contextFor("operation-provenance-limit-terminal-scan"), {
+      roomId: created.request.roomId,
+      limit: 10
+    })).resolves.toEqual([]);
+  });
+
   it("rejects execution claims for expired and cancelled requests", async () => {
     const clock = mutableClock("2026-09-08T00:00:00.000Z");
     const store = new MemoryInteractionRecordStore();
@@ -497,6 +932,7 @@ function mutableClock(initial: string): (() => Date) & { set(value: string): voi
 class MemoryInteractionRecordStore implements WorkspaceInteractionRequestRecordStore {
   private readonly records = new Map<string, WorkspaceRecord>();
   private readonly operations = new Map<string, { requestHash: string; result: PutRecordResult }>();
+  readonly listOffsets: number[] = [];
   executionCount = 0;
   resumeCount = 0;
 
@@ -506,11 +942,13 @@ class MemoryInteractionRecordStore implements WorkspaceInteractionRequestRecordS
     return cloneRecord(record);
   }
 
-  async listRecords(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; recordType?: string; limit?: number }): Promise<WorkspaceRecord[]> {
+  async listRecords(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; recordType?: string; limit?: number; offset?: number }): Promise<WorkspaceRecord[]> {
+    this.listOffsets.push(input.offset ?? 0);
+    const limit = Math.min(input.limit ?? 100, 500);
     return [...this.records.values()]
       .filter((record) => record.workspaceId === context.workspaceId && record.roomId === input.roomId && (!input.recordType || record.recordType === input.recordType))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, input.limit ?? 100)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))
+      .slice(input.offset ?? 0, (input.offset ?? 0) + limit)
       .map(cloneRecord);
   }
 
@@ -548,6 +986,33 @@ class MemoryInteractionRecordStore implements WorkspaceInteractionRequestRecordS
     };
     this.operations.set(operationKey, { requestHash, result: cloneResult(result) });
     return result;
+  }
+
+  omitTargetResultLookupOperationIds(requestId: string): void {
+    this.updateExecutionPayload(requestId, (execution) => {
+      delete execution.target_result_lookup_operation_ids;
+    });
+  }
+
+  setTargetResultLookupOperationIds(requestId: string, operationIds: string[]): void {
+    this.updateExecutionPayload(requestId, (execution) => {
+      execution.target_result_lookup_operation_ids = [...operationIds];
+    });
+  }
+
+  private updateExecutionPayload(requestId: string, update: (execution: Record<string, unknown>) => void): void {
+    const key = this.key("workspace-a", WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE, requestId);
+    const record = this.records.get(key);
+    if (!record || !record.payload.execution || typeof record.payload.execution !== "object" || Array.isArray(record.payload.execution)) {
+      throw new Error("expected an execution payload");
+    }
+    const payload = structuredClone(record.payload) as Record<string, unknown>;
+    const execution = payload.execution;
+    if (!execution || typeof execution !== "object" || Array.isArray(execution)) {
+      throw new Error("expected an execution payload");
+    }
+    update(execution as Record<string, unknown>);
+    this.records.set(key, { ...record, payload });
   }
 
   private key(workspaceId: string, recordType: string, id: string): string {

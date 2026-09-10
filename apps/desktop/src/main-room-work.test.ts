@@ -14,7 +14,7 @@ describe("Desktop Room work and Agent bridge", () => {
     const roomWorkSource = mainSource.slice(start, end);
 
     expect(roomWorkSource).toContain('context: { room_id: roomId }');
-    expect(roomWorkSource).toContain("captureActiveWorkspaceSnapshot");
+    expect(roomWorkSource).toContain("captureWorkspaceTargetSnapshot");
     expect(roomWorkSource).toContain("assertActiveWorkspaceSnapshot");
     expect(roomWorkSource).not.toMatch(/session(?:_id|Id)/i);
     expect(roomWorkSource).not.toMatch(/credential|password|privateKey/i);
@@ -42,7 +42,7 @@ describe("Desktop Room work and Agent bridge", () => {
     expect(mainSource).not.toContain('"/agent-backends"');
     expect(preloadSource).toContain('listWorkspaceAgentBackends: async (input: unknown) => sanitizeWorkspaceAgentBackendList(await ipcRenderer.invoke("samurai:workspace-server:agent-backends:list-target", sanitizeWorkspaceAgentTargetInput(input)))');
     const start = mainSource.indexOf("function sanitizeWorkspaceAgentBackendListPayload");
-    const end = mainSource.indexOf("function assertWorkspaceAgentTarget", start);
+    const end = mainSource.indexOf("/** Explicit agent.view/editor projection", start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const sanitizerSource = mainSource.slice(start, end);
@@ -66,7 +66,7 @@ describe("Desktop Room work and Agent bridge", () => {
     const source = mainSource.slice(defaultStart, eventsStart);
     expect(source).toContain("workspaceRoomDefaultAgentRequest");
     expect(source).toContain("workspaceAgentDmRequest");
-    expect(source).toContain("assertWorkspaceAgentTarget");
+    expect(source).toContain("captureWorkspaceTargetSnapshot");
     expect(source).toContain("snapshotWorkspaceDomainApiClient");
     expect(source).toContain("assertAgentDmResponseScope");
     expect(mainSource).toContain('record.kind !== "agent_dm"');
@@ -79,7 +79,7 @@ describe("Desktop Room work and Agent bridge", () => {
     expect(delegateStart).toBeGreaterThanOrEqual(0);
     expect(defaultStart).toBeGreaterThan(delegateStart);
     const source = mainSource.slice(delegateStart, defaultStart);
-    expect(source).toContain("captureActiveWorkspaceSnapshot");
+    expect(source).toContain("captureWorkspaceTargetSnapshot");
     expect(source).toContain("snapshotWorkspaceDomainApiClient");
     expect(source).toContain("assertActiveWorkspaceSnapshot");
     expect(source).toContain('context: { room_id: roomId }');

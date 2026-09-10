@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
 import path from "node:path";
 import { Server as SocketServer } from "socket.io";
-import { ClientEventRecordSchema, ResourceRefSchema, WorkspaceFileResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type JsonValue, type ResourceRef, type SupportedLocale } from "@samurai-agent/core-schemas";
+import { ClientEventRecordSchema, ResourceRefSchema, WorkspaceFileResourceRefSchema, createId, nowIso, supportedLocales, type ArtifactContentEncoding, type ArtifactRecord, type BackendEventRecord, type BackendRunRecord, type ClientEventRecord, type CollectionRecord, type CollectionSchema, type GatewayMcpConfigRecord, type GeneratedSurfaceDefinition, type GeneratedSurfaceRevisionRecord, type JsonValue, type ResourceRef, type SupportedLocale } from "@samurai-agent/core-schemas";
 import { builtinSurfaceRendererRegistryEntries } from "@samurai-agent/ui-protocol";
 import { domainCommandInputSources, listActionCatalogEntries, listDomainCommandEntries, listDomainQueryEntries, pluginManifests, type DomainCommandInputSource } from "@samurai-agent/action-catalog";
 import { proposalCapabilityManifest } from "@samurai-agent/capability-registry";
@@ -23,6 +23,7 @@ import {
   WorkspaceServerError,
   WorkspaceFileStore,
   WorkspaceServerStore,
+  WORKSPACE_BUNDLE_MAX_ENTRY_BYTES,
   WorkspaceLearningRunner,
   WorkspaceInteractionRequestService,
   createInternalWorkspaceMaintenanceCaller,
@@ -68,6 +69,8 @@ import {
   publicWorkspaceOrganizationAssociationResult,
   publicWorkspaceTransferStatus,
   executeOrganizationBundleRestoreCompatibility,
+  createWorkspaceInteractionRequestNotificationPort,
+  createWorkspaceInteractionRequestWorkflow,
   type OrganizationApiRequestContext
 } from "./domain-api-v1";
 import { WorkspaceWorkerSupervisor } from "../workers/workspace-worker-supervisor";
@@ -246,7 +249,8 @@ export async function createWorkspaceServerHttp(
   const generatedSurfaces = new PostgresGeneratedSurface(
     commands,
     files,
-    createPostgresGeneratedSurfaceTargetCommand({ commands, collections, artifacts })
+    createPostgresGeneratedSurfaceTargetCommand({ commands, collections, artifacts }),
+    { assertRoomWritable: (context, roomId) => store.assertRoomWritable(context, roomId) }
   );
   const clientEvents = new PostgresRuntimeClientEvents(core.database, store);
   const externalIngress = new PostgresExternalAppIngressFactory({
@@ -377,6 +381,23 @@ export async function createWorkspaceServerHttp(
       });
     }
   });
+  const runtimeForContext = (context: WorkspaceRequestContext) => postgresRuntimeCommands(
+    core.database,
+    config,
+    backendRegistry,
+    context,
+    io,
+    store,
+    knowledgeMemory,
+    (event) => recordPostgresChatCompletionActivity(commands, context, event),
+    createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context)
+  );
+  const interactionWorkflow = createWorkspaceInteractionRequestWorkflow({
+    authorization: store,
+    interactionRequests,
+    generatedSurfaces,
+    notifications: createWorkspaceInteractionRequestNotificationPort({ io, store, commands, realtimeGate })
+  });
   const roomWorkWorker = new PostgresRoomWorkWorker({
     store,
     runtimeFor: (context, operationId) => postgresRuntimeCommands(
@@ -410,6 +431,9 @@ export async function createWorkspaceServerHttp(
             correlationId: result.eventOperationId
           }
         );
+      },
+      recoverAcceptedInteraction: async (context, candidate) => {
+        await interactionWorkflow.executeAccepted(context, candidate.request, runtimeForContext, candidate.executionOperationId);
       }
     }),
     roomWorkWorker,
@@ -514,6 +538,12 @@ export async function createWorkspaceServerHttp(
     organizationContext: (req, organizationId, options) => organizationRequestContext(req, organizationId, options),
     requestId: (req) => authenticated(req).requestId,
     backendRegistry,
+    completion,
+    runtimeSettings,
+    learning,
+    learningRunner,
+    automation,
+    interactionWorkflow,
     runtimeFor: (req) => {
       const context = operationContext(req);
       return postgresRuntimeCommands(
@@ -1808,13 +1838,18 @@ export async function createWorkspaceServerHttp(
   app.post("/api/workspaces/:workspaceId/artifacts", authenticateWorkspace, asyncRoute(async (req, res) => {
     const body = objectBody(req.body);
     const context = operationContext(req);
+    const kind = body.kind === undefined ? undefined : artifactKindField(body, "kind");
+    const mimeType = body.mime_type === undefined ? undefined : stringField(body, "mime_type");
+    const encoding = body.encoding === undefined ? undefined : artifactEncodingField(body, "encoding");
     const result = await artifacts.create(context, {
       roomId: stringField(body, "room_id"),
       title: stringField(body, "title"),
-      content: artifactContentField(body, "content"),
-      ...(body.kind === undefined ? {} : { kind: artifactKindField(body, "kind") }),
+      content: artifactContentTransportField(body, kind, mimeType, encoding),
+      ...(kind === undefined ? {} : { kind }),
       ...(body.locale === undefined ? {} : { locale: supportedLocaleField(body, "locale") }),
       ...(body.source_locales === undefined ? {} : { sourceLocales: supportedLocaleArrayField(body, "source_locales") }),
+      ...(mimeType === undefined ? {} : { mimeType }),
+      ...(encoding === undefined ? {} : { encoding }),
       ...(body.metadata === undefined ? {} : { metadata: jsonObjectField(body, "metadata") })
     });
     if (!result.replayed) await emitAuthorizedRoomWorkspaceEvent(io, store, { workspaceId: context.workspaceId, roomId: stringField(body, "room_id"), kind: "artifact.created" });
@@ -1906,26 +1941,12 @@ export async function createWorkspaceServerHttp(
       ...(optionalStringField(body, "message_id") ? { message_id: optionalStringField(body, "message_id") } : {}),
       action_payload: actionPayload
     };
-    const prepared = await generatedSurfaces.prepareAction(context, input);
-    if (prepared.action.requires_confirmation) {
-      const created = await interactionRequests.create(context, {
-        roomId: prepared.target.room_id,
-        kind: "approval",
-        surfaceId: prepared.target.surface_id,
-        revisionId: prepared.target.revision_id,
-        actionTarget: prepared.target as unknown as Record<string, JsonValue>,
-        title: `${prepared.surface.title}: ${prepared.action.label}`,
-        summary: "このSurface操作は、現在の対象版とRoom権限を再確認してから実行されます。",
-        options: [
-          { id: "approve", label: "実行を許可", decision: "approve" },
-          { id: "deny", label: "実行しない", decision: "deny" }
-        ]
-      });
-      res.status(created.replayed ? 200 : 202).json({ status: "approval_required", request: created.request, replayed: created.replayed });
+    const submitted = await interactionWorkflow.submitGeneratedSurfaceAction(context, input);
+    if (submitted.kind === "approval_required") {
+      res.status(submitted.replayed ? 200 : 202).json({ status: "approval_required", request: submitted.request, replayed: submitted.replayed });
       return;
     }
-    const result = await generatedSurfaces.runAction(context, input);
-    res.status(201).json(result);
+    res.status(submitted.replayed ? 200 : 201).json({ ...submitted.result, replayed: submitted.replayed });
   }));
 
   app.post("/api/workspaces/:workspaceId/generated-surfaces/:surfaceId/state", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -3019,10 +3040,13 @@ export async function createWorkspaceServerHttp(
     if (!roomId) throw new WorkspaceServerError("workspace_records_room_id_required", 400);
     const recordType = queryString(req, "record_type");
     if (recordType && internalWorkspaceRecordTypes.has(recordType)) throw new WorkspaceServerError("workspace_record_not_found", 404);
+    const limit = queryNumber(req, "limit");
+    const offset = queryNumber(req, "offset");
     const records = await store.listRecords(workspaceContext(req), {
       roomId,
       ...(recordType ? { recordType } : {}),
-      ...(queryNumber(req, "limit") ? { limit: queryNumber(req, "limit") } : {})
+      ...(limit === undefined ? {} : { limit }),
+      ...(offset === undefined ? {} : { offset })
     });
     res.json({ records });
   }));
@@ -4042,7 +4066,7 @@ export function createPostgresRuntimeToolExecutionPort(
           const created = await artifacts.create(runtimeContext, {
             roomId,
             title: payload.title,
-            content: payload.content,
+            content: runtimeArtifactContent(payload.content),
             ...(payload.kind ? { kind: payload.kind } : {}),
             ...(payload.input_locale ? { sourceLocales: [payload.input_locale] } : {}),
             ...(payload.output_locale ? { locale: payload.output_locale } : {}),
@@ -4068,7 +4092,7 @@ export function createPostgresRuntimeToolExecutionPort(
           const revised = await artifacts.revise(runtimeContext, {
             roomId,
             artifactId: payload.artifact_id,
-            content: Array.isArray(payload.content) ? Uint8Array.from(payload.content) : payload.content,
+            content: runtimeArtifactRevisionContent(payload.content),
             ...(payload.base_revision_id ? { baseRevisionId: payload.base_revision_id } : {}),
             ...(payload.expected_revision ? { expectedRevision: payload.expected_revision } : {}),
             editorSource: "provider",
@@ -4210,10 +4234,45 @@ function parseRuntimeToolInput<T extends RuntimeProviderToolOperation>(
   input: Record<string, JsonValue>
 ): ReturnType<typeof parseDomainOperationInput<T>> {
   try {
-    return parseDomainOperationInput(operation, input) as ReturnType<typeof parseDomainOperationInput<T>>;
-  } catch {
+    const normalized = normalizeRuntimeArtifactInput(operation, input);
+    return parseDomainOperationInput(operation, normalized) as ReturnType<typeof parseDomainOperationInput<T>>;
+  } catch (error) {
+    if (error instanceof WorkspaceServerError && error.code !== "runtime_tool_input_invalid") throw error;
     throw new WorkspaceServerError("runtime_tool_input_invalid", 400, { operation });
   }
+}
+
+function normalizeRuntimeArtifactInput<T extends RuntimeProviderToolOperation>(operation: T, input: Record<string, JsonValue>): Record<string, JsonValue> {
+  if (operation !== "artifact.create" && operation !== "artifact.revise") return input;
+  const kind = typeof input.kind === "string" ? input.kind as ArtifactRecord["kind"] : undefined;
+  const mimeType = typeof input.mime_type === "string" ? input.mime_type : undefined;
+  const encoding = typeof input.encoding === "string" && (input.encoding === "utf8" || input.encoding === "binary")
+    ? input.encoding
+    : undefined;
+  if (Object.prototype.hasOwnProperty.call(input, "content_base64")) {
+    if (input.content !== undefined) throw new WorkspaceServerError("artifact_content_transport_conflict", 400);
+    if (encoding === "utf8" || !artifactBinaryTransportRequested(kind, mimeType, encoding)) {
+      throw new WorkspaceServerError("artifact_binary_content_metadata_required", 400);
+    }
+    const bytes = decodeArtifactBase64(input.content_base64, "content_base64");
+    const { content_base64: _contentBase64, ...rest } = input;
+    return { ...rest, content: Array.from(bytes), encoding: "binary" };
+  }
+  if (isByteArray(input.content) && artifactBinaryTransportRequested(kind, mimeType, encoding)) {
+    throw new WorkspaceServerError("artifact_binary_content_transport_required", 400);
+  }
+  return input;
+}
+
+function runtimeArtifactContent(value: unknown): string | Uint8Array | Record<string, JsonValue> | JsonValue[] {
+  if (isByteArray(value)) return Uint8Array.from(value);
+  return value as string | Uint8Array | Record<string, JsonValue> | JsonValue[];
+}
+
+function runtimeArtifactRevisionContent(value: unknown): string | Uint8Array {
+  if (typeof value === "string") return value;
+  if (isByteArray(value)) return Uint8Array.from(value);
+  throw new WorkspaceServerError("runtime_tool_input_invalid", 400, { operation: "artifact.revise" });
 }
 
 function generatedSurfaceToolResult(
@@ -4711,6 +4770,32 @@ function artifactKindField(body: Record<string, unknown>, key: string): Artifact
   return value as ArtifactRecord["kind"];
 }
 
+function artifactEncodingField(body: Record<string, unknown>, key: string): ArtifactContentEncoding {
+  const value = stringField(body, key);
+  if (value !== "utf8" && value !== "binary") throw new WorkspaceServerError(`${key}_invalid`, 400);
+  return value;
+}
+
+function artifactContentTransportField(
+  body: Record<string, unknown>,
+  kind: ArtifactRecord["kind"] | undefined,
+  mimeType: string | undefined,
+  encoding: ArtifactContentEncoding | undefined
+): string | Uint8Array | Record<string, JsonValue> | JsonValue[] {
+  if (body.content_base64 !== undefined) {
+    if (body.content !== undefined) throw new WorkspaceServerError("artifact_content_transport_conflict", 400);
+    if (!artifactBinaryTransportRequested(kind, mimeType, encoding)) {
+      throw new WorkspaceServerError("artifact_binary_content_metadata_required", 400);
+    }
+    return decodeArtifactBase64(body.content_base64, "content_base64");
+  }
+  const value = artifactContentField(body, "content");
+  if (artifactBinaryTransportRequested(kind, mimeType, encoding) && isByteArray(value)) {
+    throw new WorkspaceServerError("artifact_binary_content_transport_required", 400);
+  }
+  return value;
+}
+
 function artifactContentField(body: Record<string, unknown>, key: string): string | Record<string, JsonValue> | JsonValue[] {
   const value = body[key];
   if (typeof value === "string") return value;
@@ -4720,6 +4805,33 @@ function artifactContentField(body: Record<string, unknown>, key: string): strin
   }
   if (value && typeof value === "object" && isJsonObject(value)) return value as Record<string, JsonValue>;
   throw new WorkspaceServerError(`${key}_invalid`, 400);
+}
+
+function artifactBinaryTransportRequested(
+  kind: ArtifactRecord["kind"] | undefined,
+  mimeType: string | undefined,
+  encoding: ArtifactContentEncoding | undefined
+): boolean {
+  if (encoding === "binary" || kind === "pdf" || kind === "image") return true;
+  if (!mimeType) return false;
+  if (mimeType === "application/pdf" || mimeType === "application/octet-stream" || mimeType.startsWith("image/")) return true;
+  return mimeType.startsWith("application/") && !/[+]?(?:json|xml)$/.test(mimeType) && !["application/javascript", "application/sql"].includes(mimeType);
+}
+
+function isByteArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "number" && Number.isInteger(entry) && entry >= 0 && entry <= 255);
+}
+
+function decodeArtifactBase64(value: unknown, key: string): Uint8Array {
+  if (typeof value !== "string" || !value || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new WorkspaceServerError(`${key}_invalid`, 400);
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) throw new WorkspaceServerError(`${key}_invalid`, 400);
+  if (bytes.byteLength > WORKSPACE_BUNDLE_MAX_ENTRY_BYTES) {
+    throw new WorkspaceServerError("artifact_content_too_large", 413, { max_bytes: WORKSPACE_BUNDLE_MAX_ENTRY_BYTES });
+  }
+  return new Uint8Array(bytes);
 }
 
 function supportedLocaleArrayField(body: Record<string, unknown>, key: string): SupportedLocale[] {
@@ -5421,7 +5533,7 @@ function generatedSurfaceJsonValueField(body: Record<string, unknown>, key: stri
 function generatedSurfaceDocument(bundle: { html: string; css?: string; script?: string }, actions: Array<{ id: string }> = [], assets: Array<{ path: string; content_base64: string; mime_type: string }> = []): string {
   const bridge = JSON.stringify({ actions: actions.map((action) => action.id) }).replace(/</g, "\\u003c");
   const html = inlineGeneratedSurfaceAssets(bundle.html, assets);
-  const css = (bundle.css ?? "").replace(/<\/style/gi, "<\\/style");
+  const css = inlineGeneratedSurfaceAssets(bundle.css ?? "", assets).replace(/<\/style/gi, "<\\/style");
   const script = (bundle.script ?? "").replace(/<\/script/gi, "<\\/script");
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${generatedSurfaceCsp}"><style>${css}</style></head><body>${html}<script>${script}</script><script>window.samuraiGeneratedSurface=${bridge};window.dispatchSamuraiAction=function(actionId,payload){window.parent.postMessage({type:"samurai.generated_surface.action",action_id:actionId,payload:payload||{}},"*")};</script></body></html>`;
 }

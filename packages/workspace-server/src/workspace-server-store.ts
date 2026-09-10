@@ -483,6 +483,21 @@ export interface SettleRoomWorkAssignmentInput {
   now?: string;
 }
 
+export interface ReadRoomWorkCompletionEvidenceInput {
+  workId: string;
+  assignmentId: string;
+  roomId: string;
+  runId: string;
+}
+
+export interface RoomWorkCompletionEvidence {
+  runId: string;
+  runStatus: string;
+  outputSummary?: string | null;
+  /** Canonical refs rebuilt from the persisted Run evidence and Workspace records. */
+  resourceRefs: RoomWorkResultResourceRef[];
+}
+
 export interface UpsertWorkspaceConnectionDescriptorInput {
   id?: string;
   agentId?: string;
@@ -3194,6 +3209,165 @@ export class WorkspaceServerStore {
     return result.value;
   }
 
+  /**
+   * Reconstruct the completion result from the immutable Server projections
+   * of one admitted Run. This is deliberately shared by the normal and
+   * lease-recovery paths; neither path accepts a Runtime/Provider ref as the
+   * canonical URI or current Artifact pointer.
+   */
+  async readRoomWorkCompletionEvidence(
+    context: WorkspaceRequestContext,
+    input: ReadRoomWorkCompletionEvidenceInput
+  ): Promise<RoomWorkCompletionEvidence> {
+    assertOpaqueId(input.workId, "room_work_completion_work_id_invalid");
+    assertOpaqueId(input.assignmentId, "room_work_completion_assignment_id_invalid");
+    assertOpaqueId(input.roomId, "room_work_completion_room_id_invalid");
+    assertOpaqueId(input.runId, "room_work_completion_run_id_invalid");
+    return this.database.withContext(context, async (sql) => {
+      const assignment = (await sql.query<{
+        workspace_id: string;
+        work_id: string;
+        room_id: string;
+        current_run_id: string | null;
+      }>(
+        `SELECT workspace_id, work_id, room_id, current_run_id
+         FROM workspace_human_work_assignments
+         WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, input.assignmentId]
+      )).rows[0];
+      if (!assignment) throw new WorkspaceServerError("room_work_completion_assignment_not_found", 404);
+      if (assignment.workspace_id !== context.workspaceId
+        || assignment.work_id !== input.workId
+        || assignment.room_id !== input.roomId
+        || assignment.current_run_id !== input.runId) {
+        throw new WorkspaceServerError("room_work_completion_evidence_binding_invalid", 409);
+      }
+
+      const run = (await sql.query<{
+        id: string;
+        room_id: string | null;
+        status: string;
+        output_summary: string | null;
+        metadata: unknown;
+      }>(
+        `SELECT id, room_id, status, output_summary, metadata
+         FROM workspace_runtime_runs
+         WHERE workspace_id = $1 AND id = $2`,
+        [context.workspaceId, input.runId]
+      )).rows[0];
+      if (!run) throw new WorkspaceServerError("room_work_completion_run_not_found", 404);
+      if (run.id !== input.runId || run.room_id !== input.roomId) {
+        throw new WorkspaceServerError("room_work_completion_evidence_binding_invalid", 409);
+      }
+      const binding = runtimeBindingObject(jsonObjectOrEmpty(run.metadata).runtime_binding);
+      if (!binding
+        || nonEmptyText(binding.workspace_id) !== context.workspaceId
+        || nonEmptyText(binding.room_id) !== input.roomId
+        || nonEmptyText(binding.work_id) !== input.workId
+        || nonEmptyText(binding.assignee_id) !== input.assignmentId) {
+        throw new WorkspaceServerError("room_work_completion_evidence_binding_invalid", 409);
+      }
+
+      const identities: RoomWorkResultIdentity[] = [];
+      const eventRows = (await sql.query<{ resource_refs: unknown }>(
+        `SELECT resource_refs
+         FROM workspace_runtime_events
+         WHERE workspace_id = $1 AND run_id = $2
+         ORDER BY sequence, id`,
+        [context.workspaceId, input.runId]
+      )).rows;
+      for (const event of eventRows) {
+        for (const candidate of requiredRoomWorkJsonArray(event.resource_refs)) {
+          appendRoomWorkResultIdentity(identities, candidate);
+        }
+      }
+
+      const changeRows = (await sql.query<{
+        resource_ref: unknown;
+        domain_operation_id: string | null;
+        legacy_operation_id: string | null;
+      }>(
+        `SELECT resource_ref, domain_operation_id, legacy_operation_id
+         FROM workspace_runtime_changes
+         WHERE workspace_id = $1 AND run_id = $2 AND room_id = $3
+         ORDER BY created_at, id`,
+        [context.workspaceId, input.runId, input.roomId]
+      )).rows;
+      const operationIds: string[] = [];
+      for (const change of changeRows) {
+        appendRoomWorkResultIdentity(identities, requiredRoomWorkJsonValue(change.resource_ref));
+        for (const operationId of [change.domain_operation_id, change.legacy_operation_id]) {
+          if (operationId && !operationIds.includes(operationId)) operationIds.push(operationId);
+        }
+      }
+
+      const operationRows = (await sql.query<{ payload: unknown }>(
+        `SELECT payload
+         FROM workspace_runtime_operations
+         WHERE workspace_id = $1
+           AND (id = ANY($2::TEXT[]) OR payload ->> 'run_id' = $3)
+           AND (room_id = $4 OR room_id IS NULL)
+         ORDER BY created_at, id`,
+        [context.workspaceId, operationIds, input.runId, input.roomId]
+      )).rows;
+      for (const operation of operationRows) {
+        const payload = requiredRoomWorkJsonObject(operation.payload);
+        const operationRunId = nonEmptyText(payload.run_id);
+        if (operationRunId && operationRunId !== input.runId) continue;
+        if (Object.prototype.hasOwnProperty.call(payload, "result_ref")) {
+          appendRoomWorkResultIdentity(identities, payload.result_ref);
+        }
+        for (const key of ["resource_ref", "resource_refs", "result_refs", "target_resource_refs"] as const) {
+          if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+          const value = payload[key];
+          if (key === "resource_ref") {
+            appendRoomWorkResultIdentity(identities, value);
+          } else {
+            for (const candidate of requiredRoomWorkJsonArray(value)) {
+              appendRoomWorkResultIdentity(identities, candidate);
+            }
+          }
+        }
+      }
+
+      // Generated Surface revisions persist their producer Run and operation
+      // provenance in the immutable record, while the public Operation ref
+      // intentionally remains the logical Surface identity. Include only
+      // revisions proven by this Run; never infer them from the later current
+      // pointer.
+      const revisionRows = (await sql.query<RoomWorkResultRecordRow>(
+        `SELECT record_type, room_id, id, payload
+         FROM workspace_records
+         WHERE workspace_id = $1 AND room_id = $2
+           AND record_type IN ('artifact_revision', 'generated_surface_revision')
+         ORDER BY version, id`,
+        [context.workspaceId, input.roomId]
+      )).rows;
+      for (const revision of revisionRows) {
+        const payload = requiredRoomWorkJsonObject(revision.payload);
+        const producerRunId = nonEmptyText(payload.producer_run_id);
+        const domainOperationId = nonEmptyText(payload.domain_operation_id);
+        if (producerRunId !== input.runId && (!domainOperationId || !operationIds.includes(domainOperationId))) continue;
+        const kind = revision.record_type === "artifact_revision"
+          ? "artifact_revision"
+          : revision.record_type === "generated_surface_revision" ? "generated_surface_revision" : undefined;
+        if (!kind) continue;
+        appendRoomWorkResultIdentity(identities, {
+          kind,
+          id: revision.id,
+          uri: `${kind === "artifact_revision" ? "artifacts" : "surfaces"}/${revision.id}`
+        });
+      }
+
+      return {
+        runId: run.id,
+        runStatus: run.status,
+        ...(run.output_summary ? { outputSummary: run.output_summary } : {}),
+        resourceRefs: await resolveRoomWorkResultIdentities(sql, context.workspaceId, input.roomId, identities)
+      };
+    });
+  }
+
   async completeRoomWorkReservation(context: WorkspaceRequestContext, input: SettleRoomWorkAssignmentInput): Promise<Record<string, unknown>> {
     return this.settleRoomWorkAssignment(context, input);
   }
@@ -4113,10 +4287,11 @@ export class WorkspaceServerStore {
    * separately designed explicit operation; they cannot happen because a
    * caller omitted a Room ID.
    */
-  async listRecords(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; recordType?: string; limit?: number }): Promise<WorkspaceRecord[]> {
+  async listRecords(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; recordType?: string; limit?: number; offset?: number }): Promise<WorkspaceRecord[]> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     if (input.recordType) assertRecordType(input.recordType);
     const limit = boundedLimit(input.limit);
+    const offset = boundedOffset(input.offset);
     return this.database.withContext(context, async (sql) => {
       const result = await sql.query<RecordRow>(
         `SELECT workspace_id, room_id, record_type, id, version, payload, content_hash, created_at, updated_at
@@ -4125,9 +4300,9 @@ export class WorkspaceServerStore {
            AND room_id = $2
            AND ($3::TEXT IS NOT NULL OR record_type <> 'artifact_transaction')
            AND ($3::TEXT IS NULL OR record_type = $3)
-         ORDER BY updated_at DESC
-         LIMIT $4`,
-        [context.workspaceId, input.roomId, input.recordType ?? null, limit]
+         ORDER BY updated_at DESC, id DESC
+         LIMIT $4 OFFSET $5`,
+        [context.workspaceId, input.roomId, input.recordType ?? null, limit, offset]
       );
       return result.rows.map(recordFromRow);
     });
@@ -6660,6 +6835,163 @@ interface RoomWorkResultRecordRow {
   payload: unknown;
 }
 
+interface RoomWorkResultIdentity {
+  kind: RoomWorkResultResourceRef["kind"];
+  id: string;
+}
+
+const roomWorkResultResourceKinds = new Set<RoomWorkResultResourceRef["kind"]>([
+  "artifact",
+  "artifact_revision",
+  "generated_surface",
+  "generated_surface_revision"
+]);
+
+function requiredRoomWorkJsonValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    try { return JSON.parse(value) as unknown; } catch {
+      throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+    }
+  }
+  return value;
+}
+
+function requiredRoomWorkJsonArray(value: unknown): unknown[] {
+  const parsed = requiredRoomWorkJsonValue(value);
+  if (!Array.isArray(parsed)) throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+  return parsed;
+}
+
+function requiredRoomWorkJsonObject(value: unknown): WorkspaceRecordPayload {
+  const parsed = requiredRoomWorkJsonValue(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+  }
+  return parsed as WorkspaceRecordPayload;
+}
+
+function appendRoomWorkResultIdentity(target: RoomWorkResultIdentity[], value: unknown): void {
+  const parsed = ResourceRefSchema.safeParse(requiredRoomWorkJsonValue(value));
+  if (!parsed.success) throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+  if (!roomWorkResultResourceKinds.has(parsed.data.kind as RoomWorkResultResourceRef["kind"])) return;
+  const identity = { kind: parsed.data.kind as RoomWorkResultResourceRef["kind"], id: parsed.data.id };
+  if (!target.some((candidate) => candidate.kind === identity.kind && candidate.id === identity.id)) {
+    target.push(identity);
+  }
+}
+
+/**
+ * Resolve only identities proven by the Run journal. Logical resources and
+ * immutable revisions are emitted as separate refs. In particular, the
+ * mutable Artifact `file_ref`/current pointer is never emitted as the
+ * logical Artifact ref and is not used to replace a revision proven by this
+ * Run.
+ */
+async function resolveRoomWorkResultIdentities(
+  sql: WorkspaceSql,
+  workspaceId: string,
+  roomId: string,
+  identities: readonly RoomWorkResultIdentity[]
+): Promise<RoomWorkResultResourceRef[]> {
+  const recordCache = new Map<string, RoomWorkResultRecordRow>();
+  const read = async (recordType: string, id: string): Promise<RoomWorkResultRecordRow> => {
+    const key = `${recordType}|${id}`;
+    const cached = recordCache.get(key);
+    if (cached) return cached;
+    const row = await readRoomWorkResultRecord(sql, workspaceId, recordType, id, roomId);
+    recordCache.set(key, row);
+    return row;
+  };
+  const refs: RoomWorkResultResourceRef[] = [];
+  const seen = new Set<string>();
+  const add = (ref: RoomWorkResultResourceRef): void => {
+    const key = `${ref.kind}|${ref.id}|${ref.uri}|${ref.version ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    refs.push(ref);
+  };
+
+  const artifactLogicalRef = async (artifactId: string): Promise<RoomWorkResultResourceRef> => {
+    const row = await read("artifact", artifactId);
+    const payload = requiredRoomWorkJsonObject(row.payload);
+    const currentRef = canonicalResourceRef(payload.file_ref, "room_work_completion_evidence_invalid");
+    const title = resultRecordText(payload.title);
+    if (row.id !== artifactId || currentRef.kind !== "artifact_revision" || !title) {
+      throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+    }
+    return RoomWorkResultResourceRefSchema.parse({
+      kind: "artifact",
+      id: row.id,
+      uri: `artifacts/${row.id}`,
+      label: title
+    });
+  };
+
+  const surfaceLogicalRef = async (surfaceId: string): Promise<RoomWorkResultResourceRef> => {
+    const row = await read("generated_surface", surfaceId);
+    const title = resultRecordText(requiredRoomWorkJsonObject(row.payload).title);
+    if (row.id !== surfaceId || !title) throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+    return RoomWorkResultResourceRefSchema.parse({
+      kind: "generated_surface",
+      id: row.id,
+      uri: `surfaces/${row.id}`,
+      label: title
+    });
+  };
+
+  for (const identity of identities) {
+    if (identity.kind === "artifact") {
+      add(await artifactLogicalRef(identity.id));
+      continue;
+    }
+    if (identity.kind === "artifact_revision") {
+      const row = await read("artifact_revision", identity.id);
+      const payload = requiredRoomWorkJsonObject(row.payload);
+      const fileRef = canonicalResourceRef(payload.file_ref, "room_work_completion_evidence_invalid");
+      const artifactId = resultRecordText(payload.artifact_id);
+      if (row.id !== identity.id || fileRef.kind !== "artifact_revision" || fileRef.id !== row.id || !artifactId) {
+        throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+      }
+      add(await artifactLogicalRef(artifactId));
+      add(RoomWorkResultResourceRefSchema.parse({
+        kind: "artifact_revision",
+        id: row.id,
+        uri: fileRef.uri,
+        parent_id: artifactId,
+        ...(fileRef.version ? { version: fileRef.version } : {}),
+        ...(fileRef.label ? { label: fileRef.label } : {})
+      }));
+      continue;
+    }
+    if (identity.kind === "generated_surface") {
+      add(await surfaceLogicalRef(identity.id));
+      continue;
+    }
+    const row = await read("generated_surface_revision", identity.id);
+    const payload = requiredRoomWorkJsonObject(row.payload);
+    const htmlRef = canonicalResourceRef(payload.html_ref, "room_work_completion_evidence_invalid");
+    const surfaceId = resultRecordText(payload.surface_id);
+    const revision = typeof payload.revision === "number" && Number.isSafeInteger(payload.revision)
+      ? payload.revision
+      : typeof payload.revision === "string" && /^[1-9][0-9]*$/.test(payload.revision) ? Number(payload.revision) : undefined;
+    if (row.id !== identity.id || htmlRef.kind !== "generated_surface_html" || !surfaceId || revision === undefined) {
+      throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+    }
+    add(await surfaceLogicalRef(surfaceId));
+    const surfaceRow = await read("generated_surface", surfaceId);
+    const title = resultRecordText(requiredRoomWorkJsonObject(surfaceRow.payload).title);
+    if (!title) throw new WorkspaceServerError("room_work_completion_evidence_invalid", 500);
+    add(RoomWorkResultResourceRefSchema.parse({
+      kind: "generated_surface_revision",
+      id: row.id,
+      uri: htmlRef.uri,
+      parent_id: surfaceId,
+      label: `${title} r${revision}`
+    }));
+  }
+  return refs;
+}
+
 /**
  * Rebuild completion refs from the durable Workspace records.  Runtime event
  * refs are the source of candidate identities, but the record's Room, URI,
@@ -6675,22 +7007,23 @@ async function resolveRoomWorkResultResourceRefs(
   const seen = new Set<string>();
   for (const ref of refs) {
     // Runtime supplies only an identity candidate. Parent linkage is derived
-    // from the durable record below, never accepted from a caller.
-    if (ref.parent_id !== undefined) throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
+    // from the durable record below; a pre-resolved internal ref is accepted
+    // only when its supplied parent matches that derived linkage.
     const row = await readRoomWorkResultRecord(sql, workspaceId, ref.kind, ref.id, roomId);
     const payload = jsonObjectOrEmpty(row.payload);
     let canonical: RoomWorkResultResourceRef;
+    let artifactCurrentPointer: ResourceRef | undefined;
     if (ref.kind === "artifact") {
       const fileRef = canonicalResourceRef(payload.file_ref, "room_work_resource_reference_invalid");
       const title = resultRecordText(payload.title);
       if (row.id !== ref.id || fileRef.kind !== "artifact_revision" || !title) {
         throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
       }
+      artifactCurrentPointer = fileRef;
       canonical = RoomWorkResultResourceRefSchema.parse({
         kind: "artifact",
         id: row.id,
-        uri: fileRef.uri,
-        ...(fileRef.version ? { version: fileRef.version } : {}),
+        uri: `artifacts/${row.id}`,
         label: title
       });
     } else if (ref.kind === "artifact_revision") {
@@ -6737,10 +7070,17 @@ async function resolveRoomWorkResultResourceRefs(
         label: `${title} r${revision}`
       });
     }
-    if ((ref.version !== undefined && ref.version !== canonical.version)
+    const uriMatches = ref.uri === canonical.uri
+      || (ref.kind === "artifact"
+        && artifactCurrentPointer !== undefined
+        && ref.uri === artifactCurrentPointer.uri);
+    const versionMatches = ref.kind === "artifact" && artifactCurrentPointer !== undefined && ref.uri === artifactCurrentPointer.uri
+      ? (ref.version === undefined || ref.version === artifactCurrentPointer.version)
+      : ref.version === undefined || ref.version === canonical.version;
+    if ((!uriMatches)
+      || !versionMatches
       || (ref.label !== undefined && ref.label !== canonical.label)
-      || ref.parent_id !== undefined
-      || ref.uri !== canonical.uri) {
+      || (ref.parent_id !== undefined && ref.parent_id !== canonical.parent_id)) {
       throw new WorkspaceServerError("room_work_resource_reference_invalid", 500);
     }
     const key = `${canonical.kind}|${canonical.id}|${canonical.uri}|${canonical.version ?? ""}`;
@@ -6985,6 +7325,14 @@ function boundedLimit(value: number | undefined): number {
   const limit = value ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new WorkspaceServerError("workspace_query_limit_invalid", 400);
   return limit;
+}
+
+function boundedOffset(value: number | undefined): number {
+  const offset = value ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000) {
+    throw new WorkspaceServerError("workspace_query_offset_invalid", 400);
+  }
+  return offset;
 }
 
 function normalizeSearchText(value: string): string {

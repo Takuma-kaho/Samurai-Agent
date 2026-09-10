@@ -19,11 +19,29 @@ export interface WorkspaceRoomNewAgentRequest {
 export interface WorkspaceRoomTargetRequest {
   connectionId: string;
   workspaceId: string;
+  roomId?: string;
+  selectionGeneration?: number;
 }
 
 export interface WorkspaceAgentTargetRequest {
   connectionId: string;
   workspaceId: string;
+  roomId?: string;
+  selectionGeneration?: number;
+}
+
+/**
+ * Target carried across the preload/IPC request boundary.  The target is
+ * optional for compatibility with older callers, but when present it must be
+ * complete; Main rejects it if it no longer matches the active snapshot.
+ */
+export interface WorkspaceTargetRequest {
+  connectionId: string;
+  workspaceId: string;
+  /** Optional Room scope for requests whose body carries a Room ID. */
+  roomId?: string;
+  /** Renderer generation captured with the navigation target. */
+  selectionGeneration?: number;
 }
 
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -259,11 +277,14 @@ export function workspaceRoomCreateRequest(input: unknown): {
 
 export function workspaceRoomMovePreviewRequest(input: unknown): {
   roomId: string;
+  target?: WorkspaceTargetRequest;
   body: { parent_room_id: string | null };
 } {
   const value = roomRequestObject(input);
+  const target = optionalWorkspaceTarget(value.target);
   return {
     roomId: requiredWorkspaceOpaqueField(value, "roomId"),
+    ...(target ? { target } : {}),
     body: { parent_room_id: nullableOpaqueField(value, "parentRoomId") }
   };
 }
@@ -271,12 +292,15 @@ export function workspaceRoomMovePreviewRequest(input: unknown): {
 export function workspaceRoomMoveRequest(input: unknown): {
   roomId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { parent_room_id: string | null; expected_room_version: number; expected_workspace_version: number };
 } {
   const value = roomRequestObject(input);
+  const target = optionalWorkspaceTarget(value.target);
   return {
     roomId: requiredWorkspaceOpaqueField(value, "roomId"),
     operationId: requiredOperationId(value),
+    ...(target ? { target } : {}),
     body: {
       parent_room_id: nullableOpaqueField(value, "parentRoomId"),
       expected_room_version: requiredVersion(value, "expectedRoomVersion", 1),
@@ -288,12 +312,15 @@ export function workspaceRoomMoveRequest(input: unknown): {
 export function workspaceRoomMemberPreviewRequest(input: unknown): {
   roomId: string;
   accountId: string;
+  target?: WorkspaceTargetRequest;
   body: { role: WorkspaceMemberRole; state: WorkspaceMemberState };
 } {
   const value = roomRequestObject(input);
+  const target = optionalWorkspaceTarget(value.target);
   return {
     roomId: requiredWorkspaceOpaqueField(value, "roomId"),
     accountId: requiredWorkspaceOpaqueField(value, "accountId"),
+    ...(target ? { target } : {}),
     body: { role: memberRole(value), state: memberState(value) }
   };
 }
@@ -302,19 +329,33 @@ export function workspaceRoomMemberRequest(input: unknown): {
   roomId: string;
   accountId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { role: WorkspaceMemberRole; state: WorkspaceMemberState; expected_version: number };
 } {
   const value = roomRequestObject(input);
+  const target = optionalWorkspaceTarget(value.target);
   return {
     roomId: requiredWorkspaceOpaqueField(value, "roomId"),
     accountId: requiredWorkspaceOpaqueField(value, "accountId"),
     operationId: requiredOperationId(value),
+    ...(target ? { target } : {}),
     body: {
       role: memberRole(value),
       state: memberState(value),
       expected_version: requiredVersion(value, "expectedVersion", 0)
     }
   };
+}
+
+/** Keep the legacy string form while allowing the target-aware object form. */
+export function workspaceRoomMemberListRequest(input: unknown): { roomId: string; target?: WorkspaceTargetRequest } {
+  if (typeof input === "string") {
+    if (!opaqueIdPattern.test(input)) throw new Error("roomId_invalid");
+    return { roomId: input };
+  }
+  const value = roomRequestObject(input);
+  const target = optionalWorkspaceTarget(value.target);
+  return { roomId: requiredWorkspaceOpaqueField(value, "roomId"), ...(target ? { target } : {}) };
 }
 
 function roomRequestObject(input: unknown): Record<string, unknown> {
@@ -329,7 +370,7 @@ function optionalOpaqueField(input: Record<string, unknown>, key: string): strin
   return value;
 }
 
-function optionalWorkspaceTarget(input: unknown): WorkspaceRoomTargetRequest | undefined {
+export function workspaceTargetRequest(input: unknown): WorkspaceTargetRequest | undefined {
   if (input === undefined || input === null) return undefined;
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_target_invalid");
   const value = input as Record<string, unknown>;
@@ -339,7 +380,25 @@ function optionalWorkspaceTarget(input: unknown): WorkspaceRoomTargetRequest | u
     || typeof workspaceId !== "string" || !opaqueIdPattern.test(workspaceId)) {
     throw new Error("workspace_target_invalid");
   }
-  return { connectionId, workspaceId };
+  const roomId = value.roomId;
+  if (roomId !== undefined && (typeof roomId !== "string" || !opaqueIdPattern.test(roomId))) {
+    throw new Error("workspace_target_invalid");
+  }
+  const selectionGeneration = value.selectionGeneration;
+  if (selectionGeneration !== undefined
+    && (typeof selectionGeneration !== "number" || !Number.isSafeInteger(selectionGeneration) || selectionGeneration < 0)) {
+    throw new Error("workspace_target_invalid");
+  }
+  return {
+    connectionId,
+    workspaceId,
+    ...(roomId === undefined ? {} : { roomId }),
+    ...(selectionGeneration === undefined ? {} : { selectionGeneration })
+  };
+}
+
+function optionalWorkspaceTarget(input: unknown): WorkspaceRoomTargetRequest | undefined {
+  return workspaceTargetRequest(input);
 }
 
 function optionalVersionField(input: Record<string, unknown>, key: string): number | undefined {

@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const knowledgeKinds = new Set(["fact", "decision", "explanation", "experience_rule"]);
 const supportedLocales = new Set(["en", "ja", "zh", "ko", "es", "pt-BR", "fr", "de"]);
@@ -11,47 +13,62 @@ export type WorkspaceCompletionResourceKind = "knowledge" | "skill";
 export function workspaceCompletionResourceListRequest(input: unknown): WorkspaceCompletionScope & {
   kind?: WorkspaceCompletionResourceKind;
   includeArchived?: boolean;
+  cursor?: string;
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
   const scope = scopeRequest(value);
   const kind = value.kind === undefined ? undefined : resourceKind(value.kind);
+  const target = workspaceTargetRequest(value.target);
   return {
     ...scope,
     ...(kind ? { kind } : {}),
-    ...(value.includeArchived === true ? { includeArchived: true } : {})
+    ...(value.includeArchived === true ? { includeArchived: true } : {}),
+    ...(value.cursor === undefined ? {} : { cursor: requiredOpaque(value, "cursor") }),
+    ...(target ? { target } : {})
   };
 }
 
-export function workspaceCompletionResourceIdRequest(input: unknown): string {
-  return requiredOpaque(object(input), "resourceId");
+export function workspaceCompletionResourceIdRequest(input: unknown): { resourceId: string; target?: WorkspaceTargetRequest } {
+  const value = object(input);
+  const target = workspaceTargetRequest(value.target);
+  return { resourceId: requiredOpaque(value, "resourceId"), ...(target ? { target } : {}) };
 }
 
-export function workspaceCompletionSearchRequest(input: unknown): { roomId: string; query: string; limit?: number } {
+export function workspaceCompletionSearchRequest(input: unknown): { roomId: string; query: string; limit?: number; cursor?: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId: requiredOpaque(value, "roomId"),
     query: requiredText(value, "query", 2_000),
-    ...(value.limit === undefined ? {} : { limit: requiredInteger(value, "limit", 1, 100) })
+    ...(value.limit === undefined ? {} : { limit: requiredInteger(value, "limit", 1, 100) }),
+    ...(value.cursor === undefined ? {} : { cursor: requiredOpaque(value, "cursor") }),
+    ...(target ? { target } : {})
   };
 }
 
-export function workspaceWikiListRequest(input: unknown): { roomId: string; includeArchived: boolean } {
+export function workspaceWikiListRequest(input: unknown): { roomId: string; includeArchived: boolean; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { roomId: requiredOpaque(value, "roomId"), includeArchived: value.includeArchived === true };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), includeArchived: value.includeArchived === true, ...(target ? { target } : {}) };
 }
 
-export function workspaceWikiQueryRequest(input: unknown): { roomId: string; query?: string } {
+export function workspaceWikiQueryRequest(input: unknown): { roomId: string; query?: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
   const query = optionalText(value, "query", 2_000);
-  return { roomId: requiredOpaque(value, "roomId"), ...(query ? { query } : {}) };
+  const target = workspaceTargetRequest(value.target);
+  return { roomId: requiredOpaque(value, "roomId"), ...(query ? { query } : {}), ...(target ? { target } : {}) };
 }
 
-export function workspaceWikiIdRequest(input: unknown): string {
-  return requiredOpaque(object(input), "wikiId");
+export function workspaceWikiIdRequest(input: unknown): { wikiId: string; target?: WorkspaceTargetRequest } {
+  const value = object(input);
+  const target = workspaceTargetRequest(value.target);
+  return { wikiId: requiredOpaque(value, "wikiId"), ...(target ? { target } : {}) };
 }
 
 export function workspaceWikiCreateRequest(input: unknown): {
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { room_id: string; title: string; content: string; slug?: string; tags?: string[]; content_locale?: string; knowledge_kind?: "fact" | "decision" | "explanation" | "experience_rule"; reason: string };
 } {
   const value = object(input);
@@ -62,8 +79,10 @@ export function workspaceWikiCreateRequest(input: unknown): {
   const tags = optionalStringArray(value, "tags");
   const locale = optionalLocale(value, "contentLocale");
   const knowledgeKind = value.knowledgeKind === undefined ? undefined : requiredKnowledgeKind(value.knowledgeKind);
+  const target = workspaceTargetRequest(value.target);
   return {
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: {
       room_id: roomId, title, content,
       ...(slug ? { slug } : {}), ...(tags ? { tags } : {}), ...(locale ? { content_locale: locale } : {}),
@@ -75,6 +94,7 @@ export function workspaceWikiCreateRequest(input: unknown): {
 export function workspaceWikiPatchRequest(input: unknown): {
   wikiId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { title?: string; content?: string; tags?: string[]; content_locale?: string; reason: string };
 } {
   const value = object(input);
@@ -83,19 +103,22 @@ export function workspaceWikiPatchRequest(input: unknown): {
   const tags = optionalStringArray(value, "tags");
   const locale = optionalLocale(value, "contentLocale");
   if (!title && !content && !tags && !locale) throw new Error("wiki_patch_empty");
+  const target = workspaceTargetRequest(value.target);
   return {
-    wikiId: requiredOpaque(value, "wikiId"), operationId: requiredOpaque(value, "operationId"),
+    wikiId: requiredOpaque(value, "wikiId"), operationId: requiredOpaque(value, "operationId"), ...(target ? { target } : {}),
     body: { ...(title ? { title } : {}), ...(content ? { content } : {}), ...(tags ? { tags } : {}), ...(locale ? { content_locale: locale } : {}), reason: requiredText(value, "reason", 4_000) }
   };
 }
 
-export function workspaceWikiStateRequest(input: unknown): { wikiId: string; operationId: string; reason: string } {
+export function workspaceWikiStateRequest(input: unknown): { wikiId: string; operationId: string; reason: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
-  return { wikiId: requiredOpaque(value, "wikiId"), operationId: requiredOpaque(value, "operationId"), reason: requiredText(value, "reason", 4_000) };
+  const target = workspaceTargetRequest(value.target);
+  return { wikiId: requiredOpaque(value, "wikiId"), operationId: requiredOpaque(value, "operationId"), reason: requiredText(value, "reason", 4_000), ...(target ? { target } : {}) };
 }
 
 export function workspaceCompletionResourceCreateRequest(input: unknown): {
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: {
     scope_kind: "workspace" | "room";
     room_id?: string;
@@ -111,8 +134,10 @@ export function workspaceCompletionResourceCreateRequest(input: unknown): {
   const scope = scopeRequest(value);
   const kind = resourceKind(value.kind);
   const knowledgeKind = kind === "knowledge" ? requiredKnowledgeKind(value.knowledgeKind) : undefined;
+  const target = workspaceTargetRequest(value.target);
   return {
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: {
       scope_kind: scope.scopeKind,
       ...(scope.scopeKind === "room" ? { room_id: scope.roomId } : {}),
@@ -129,12 +154,16 @@ export function workspaceCompletionResourceCreateRequest(input: unknown): {
 export function workspaceCompletionResourceUpdateRequest(input: unknown): {
   resourceId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: ReturnType<typeof workspaceCompletionResourceCreateRequest>["body"] & { expected_version: number };
 } {
   const created = workspaceCompletionResourceCreateRequest(input);
+  const id = workspaceCompletionResourceIdRequest(input);
+  const target = created.target ?? id.target;
   return {
-    resourceId: workspaceCompletionResourceIdRequest(input),
+    resourceId: id.resourceId,
     operationId: created.operationId,
+    ...(target ? { target } : {}),
     body: { ...created.body, expected_version: requiredInteger(object(input), "expectedVersion", 1, Number.MAX_SAFE_INTEGER) }
   };
 }
@@ -142,12 +171,15 @@ export function workspaceCompletionResourceUpdateRequest(input: unknown): {
 export function workspaceCompletionResourceStateRequest(input: unknown, action: "fixed" | "archive"): {
   resourceId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: { fixed?: boolean; archived?: boolean; expected_version: number; reason: string };
 } {
   const value = object(input);
+  const id = workspaceCompletionResourceIdRequest(value);
   return {
-    resourceId: workspaceCompletionResourceIdRequest(value),
+    resourceId: id.resourceId,
     operationId: requiredOpaque(value, "operationId"),
+    ...(id.target ? { target: id.target } : {}),
     body: {
       ...(action === "fixed" ? { fixed: requiredBoolean(value, "fixed") } : { archived: requiredBoolean(value, "archived") }),
       expected_version: requiredInteger(value, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),

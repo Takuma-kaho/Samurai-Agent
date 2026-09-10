@@ -1,5 +1,6 @@
 import {
   browserWorkspaceHealth,
+  browserWorkspaceBinaryRequest,
   browserWorkspaceRequest,
   createBrowserWorkspaceConnectionState,
   loadBrowserWorkspaceConnection,
@@ -10,6 +11,7 @@ import {
   subscribeBrowserWorkspaceRealtime
 } from "./workspace-browser-auth";
 import { DomainApiClient, PublicAgentBackendRecordSchema, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
+import { beginActiveWorkspaceRoomSelection, currentActiveWorkspaceRoomId, isCurrentActiveWorkspaceRoomSelection } from "./workspace-navigation-state";
 import type {
   AgentBackendAvailability,
   ArtifactDetail,
@@ -45,6 +47,7 @@ import type {
   DesktopWorkspacePublicEvent,
   DesktopWorkspacePublicEventPage,
   DesktopWorkspaceInteractionMutationResult,
+  DesktopWorkspaceInteractionResult,
   DesktopWorkspaceInteractionRequest,
   DesktopWorkspaceServerStatus,
   DomainCommandInputSource,
@@ -86,9 +89,17 @@ import {
 } from "@samurai-agent/core-schemas";
 import type { SurfaceOperation, SurfaceOperationResultEnvelope } from "@samurai-agent/ui-protocol";
 import type { AutomationRunSummary } from "./api";
-import type { NativeRoomCreateInput } from "../native-app/types";
+import type { NativeRoomCreateInput, NativeWorkspaceTarget } from "../native-app/types";
 
 type DesktopBridge = NonNullable<Window["samuraiDesktop"]>;
+type BrowserWorkspaceTargetRef = NativeWorkspaceTarget;
+type BrowserWorkspaceSnapshot = {
+  id: string;
+  workspaceId: string;
+  roomId?: string;
+  selectionGeneration?: number;
+};
+const browserWorkspaceOpaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 type RoomWorkReassignInput = {
   roomId: string;
   workId: string;
@@ -97,6 +108,7 @@ type RoomWorkReassignInput = {
   expectedVersion?: number;
   expectedGeneration?: number;
   operationId: string;
+  target?: BrowserWorkspaceTargetRef;
 };
 
 type RoomWorkDelegateInput = {
@@ -110,11 +122,45 @@ type RoomWorkDelegateInput = {
   expectedVersion?: number;
   expectedGeneration?: number;
   operationId: string;
+  target?: BrowserWorkspaceTargetRef;
 };
 
 type RoomWorkDelegateBridge = {
   delegateWorkspaceRoomWorkAssignee: (input: RoomWorkDelegateInput) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed: boolean }>;
 };
+
+/** Durable operation evidence used to recover a logical UI retry after restart. */
+export const workspaceOperationHistoryRecordTypes = [
+  "interaction_request",
+  "domain_operation",
+  "generated_surface_action_result",
+  "generated_surface_operation_result",
+  "surface_interaction",
+  "collection_record",
+  "collection_patch"
+] as const;
+
+export type WorkspaceOperationHistoryRecordType = (typeof workspaceOperationHistoryRecordTypes)[number];
+
+export interface WorkspaceOperationHistoryRecord {
+  workspaceId: string;
+  roomId: string;
+  recordType: WorkspaceOperationHistoryRecordType;
+  id: string;
+  version: number;
+  payload: Record<string, JsonValue>;
+  contentHash?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface WorkspaceOperationHistoryBridge {
+  listWorkspaceOperationHistory?: (input: {
+    roomId: string;
+    recordType: WorkspaceOperationHistoryRecordType;
+    target?: NativeWorkspaceTarget;
+  }) => Promise<{ records: WorkspaceOperationHistoryRecord[] }>;
+}
 
 /**
  * Browser counterpart of the Desktop Workspace bridge.
@@ -124,8 +170,8 @@ type RoomWorkDelegateBridge = {
  * remains a CryptoKey in IndexedDB and the server still performs all Room/RLS
  * checks.
  */
-export function createBrowserWorkspaceBridge(): DesktopBridge {
-  const bridge: DesktopBridge & RoomWorkDelegateBridge = {
+export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegateBridge & WorkspaceOperationHistoryBridge {
+  const bridge: DesktopBridge & RoomWorkDelegateBridge & WorkspaceOperationHistoryBridge = {
     listWorkspaceConnections: async () => browserConnectionState(),
     listWorkspaceDirectory: listBrowserWorkspaceDirectory,
     listWorkspaceAccountWorkspaces: async (input) => listBrowserWorkspaceDirectory(input?.connectionId),
@@ -138,7 +184,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
         name: input.name
       }
     }),
-    exportWorkspaceBundle: (input) => workspaceRequest(
+    exportWorkspaceBundle: (input) => workspaceInputRequest(
+      input,
       "POST",
       "/bundle/export",
       input.expectedWorkspaceVersion === undefined ? {} : { expected_workspace_version: input.expectedWorkspaceVersion },
@@ -170,46 +217,54 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       await selectBrowserWorkspaceCandidate(target);
       return browserConnectionState();
     },
+    selectRoomCandidate: async (input) => {
+      const roomId = requirePublicId(input.roomId, "roomId");
+      const selectionGeneration = beginActiveWorkspaceRoomSelection(roomId);
+      const target = input.target;
+      const workspaceTarget = target
+        ? {
+          connectionId: target.connectionId,
+          workspaceId: target.workspaceId,
+          ...(target.roomId === undefined ? {} : { roomId: target.roomId }),
+          ...(target.selectionGeneration === undefined ? {} : { selectionGeneration: target.selectionGeneration })
+        }
+        : undefined;
+      await captureBrowserWorkspaceSnapshot(workspaceTarget);
+      if (!isCurrentActiveWorkspaceRoomSelection(selectionGeneration)) throw new Error("room_navigation_changed");
+      return browserConnectionState();
+    },
     registerWorkspaceServerAccount: (displayName) => registerBrowserWorkspaceAccount(displayName),
     getWorkspaceServerStatus: browserWorkspaceServerStatus,
-    getWorkspaceSettings: () => workspaceRequest<SettingsRecord>("GET", "/settings"),
-    patchWorkspaceSettings: (input) => workspaceRequest("PATCH", "/settings", input.patch, input.operationId),
+    getWorkspaceSettings: (input?: unknown) => workspaceV1InputRequest<SettingsRecord>(input, "GET", "/settings"),
+    patchWorkspaceSettings: (input) => workspaceV1InputRequest(input, "PATCH", "/settings", input.patch, input.operationId),
     listWorkspaceAgents: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input?.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(connection.workspaceId, "agent.list", { context: {}, input: {} });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "agent.list", { context: {}, input: {} });
       await assertBrowserWorkspaceSnapshot(snapshot);
-      return { agents: toDesktopWorkspaceAgentList(response.result, connection.workspaceId) };
+      return { agents: toDesktopWorkspaceAgentList(response.result, snapshot.workspaceId) };
     },
     viewWorkspaceAgent: async (input) => {
       const agentId = requirePublicId(input.agentId, "agentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(connection.workspaceId, "agent.view", { context: {}, input: { id: agentId } });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "agent.view", { context: {}, input: { id: agentId } });
       await assertBrowserWorkspaceSnapshot(snapshot);
-      const agent = toDesktopWorkspaceAgentDetail(response.result, connection.workspaceId);
+      const agent = toDesktopWorkspaceAgentDetail(response.result, snapshot.workspaceId);
       if (agent.id !== agentId) throw new Error("workspace_agent_response_scope_invalid");
       return agent;
     },
     createWorkspaceAgent: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "agent.create", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "agent.create", {
         context: {},
         input: { name: input.name, role: input.role, instructions: input.instructions, backend_id: input.backendId, enabled: input.enabled }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
       await assertBrowserWorkspaceSnapshot(snapshot);
-      return { ...toDesktopWorkspaceAgentDetail(response.result, connection.workspaceId), replayed: response.replayed };
+      return { ...toDesktopWorkspaceAgentDetail(response.result, snapshot.workspaceId), replayed: response.replayed };
     },
     patchWorkspaceAgent: async (input) => {
       const agentId = requirePublicId(input.agentId, "agentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "agent.patch", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "agent.patch", {
         context: {},
         input: {
           id: agentId,
@@ -221,41 +276,35 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
       await assertBrowserWorkspaceSnapshot(snapshot);
-      const agent = toDesktopWorkspaceAgentDetail(response.result, connection.workspaceId);
+      const agent = toDesktopWorkspaceAgentDetail(response.result, snapshot.workspaceId);
       if (agent.id !== agentId) throw new Error("workspace_agent_response_scope_invalid");
       return { ...agent, replayed: response.replayed };
     },
     bindWorkspaceAgentBackend: async (input) => {
       const agentId = requirePublicId(input.agentId, "agentId");
       const backendId = requirePublicId(input.backendId, "backendId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "agent.backend.bind", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "agent.backend.bind", {
         context: {},
         input: { id: agentId, backend_id: backendId, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }) }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
       await assertBrowserWorkspaceSnapshot(snapshot);
-      const agent = toDesktopWorkspaceAgentDetail(response.result, connection.workspaceId);
+      const agent = toDesktopWorkspaceAgentDetail(response.result, snapshot.workspaceId);
       if (agent.id !== agentId) throw new Error("workspace_agent_response_scope_invalid");
       return { ...agent, replayed: response.replayed };
     },
     listWorkspaceRoomAgentMembers: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(connection.workspaceId, "room.member.list", { context: { room_id: roomId }, input: {} });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "room.member.list", { context: { room_id: roomId }, input: {} });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return toDesktopWorkspaceRoomAgentMemberList(response.result, roomId);
     },
     setWorkspaceRoomAgentPermission: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
       const agentId = requirePublicId(input.agentId, "agentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "room.agent.permission.set", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.agent.permission.set", {
         context: { room_id: roomId },
         input: { agent_id: agentId, can_view: input.canView, can_edit: input.canEdit, can_execute: input.canExecute }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
@@ -267,10 +316,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     removeWorkspaceRoomAgent: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
       const agentId = requirePublicId(input.agentId, "agentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "room.agent.remove", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.agent.remove", {
         context: { room_id: roomId },
         input: { agent_id: agentId }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
@@ -279,16 +326,16 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       if (permission.agentId !== agentId) throw new Error("workspace_room_agent_response_scope_invalid");
       return { ...permission, replayed: response.replayed };
     },
-    listWorkspaceRooms: async () => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeQuery<PublicRoomRecord[]>(connection.workspaceId, "room.list", { context: {}, input: {} });
-      await assertBrowserWorkspaceSnapshot(connection);
+    listWorkspaceRooms: async (input?: unknown) => {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<PublicRoomRecord[]>(snapshot.workspaceId, "room.list", { context: {}, input: {} });
+      await assertBrowserWorkspaceSnapshot(snapshot);
       return { rooms: response.result.map(toDesktopWorkspaceRoom) };
     },
     listWorkspaceRoomWorks: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeQuery<unknown>(connection.workspaceId, "room.work.list", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "room.work.list", {
         context: { room_id: roomId },
         input: {
           ...(input.status ? { status: input.status } : {}),
@@ -296,18 +343,18 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.limit === undefined ? {} : { limit: input.limit })
         }
       });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       return toDesktopRoomWorkList(response.result, roomId);
     },
     getWorkspaceRoomWork: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
       const workId = requirePublicId(input.workId, "workId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeQuery<unknown>(connection.workspaceId, "room.work.view", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "room.work.view", {
         context: { room_id: roomId },
         input: { work_id: workId }
       });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const work = toDesktopRoomWorkView(response.result);
       assertRoomWorkScope(work, roomId, workId);
       return work;
@@ -316,8 +363,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const roomId = requirePublicId(input.roomId, "roomId");
       const attachments = strictRoomWorkAttachments(input.attachments);
       const resourceRefs = strictRoomWorkResourceRefs(input.resourceRefs);
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.create", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.create", {
         context: { room_id: roomId },
         input: {
           ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
@@ -326,7 +373,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.agentId ? { agent_id: input.agentId } : {})
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const work = toDesktopRoomWork(response.result);
       assertRoomWorkScope(work, roomId);
       return withReplayed(work, response.replayed);
@@ -336,8 +383,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const workId = requirePublicId(input.workId, "workId");
       const attachments = strictRoomWorkAttachments(input.attachments);
       const resourceRefs = strictRoomWorkResourceRefs(input.resourceRefs);
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.reply", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.reply", {
         context: { room_id: roomId },
         input: {
           work_id: workId,
@@ -349,7 +396,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const instruction = toDesktopRoomWorkInstruction(response.result);
       assertRoomWorkScope(instruction, roomId, workId);
       return withReplayed(instruction, response.replayed);
@@ -358,8 +405,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const roomId = requirePublicId(input.roomId, "roomId");
       const workId = requirePublicId(input.workId, "workId");
       const attachments = strictRoomWorkAttachments(input.attachments);
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.comment.create", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.comment.create", {
         context: { room_id: roomId },
         input: {
           work_id: workId,
@@ -368,7 +415,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion })
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const comment = toDesktopRoomWorkComment(response.result);
       assertRoomWorkScope(comment, roomId, workId);
       return withReplayed(comment, response.replayed);
@@ -377,8 +424,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const roomId = requirePublicId(input.roomId, "roomId");
       const workId = requirePublicId(input.workId, "workId");
       const commentId = requirePublicId(input.commentId, "commentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.comment.apply", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.comment.apply", {
         context: { room_id: roomId },
         input: {
           work_id: workId,
@@ -389,7 +436,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const instruction = toDesktopRoomWorkInstruction(response.result);
       assertRoomWorkScope(instruction, roomId, workId);
       return withReplayed(instruction, response.replayed);
@@ -398,8 +445,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const roomId = requirePublicId(input.roomId, "roomId");
       const workId = requirePublicId(input.workId, "workId");
       const commentId = requirePublicId(input.commentId, "commentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.comment.reaction.set", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.comment.reaction.set", {
         context: { room_id: roomId },
         input: {
           work_id: workId,
@@ -409,7 +456,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion })
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const reaction = toDesktopRoomWorkReaction(response.result);
       assertRoomWorkScope(reaction, roomId, workId);
       if (reaction.commentId !== commentId) throw new Error("room_work_reaction_scope_invalid");
@@ -418,8 +465,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     stopWorkspaceRoomWork: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
       const workId = requirePublicId(input.workId, "workId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.stop", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.stop", {
         context: { room_id: roomId },
         input: {
           work_id: workId,
@@ -428,7 +475,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const control = toDesktopRoomWorkControl(response.result);
       assertRoomWorkScope(control, roomId, workId);
       return withReplayed(control, response.replayed);
@@ -437,8 +484,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const roomId = requirePublicId(input.roomId, "roomId");
       const workId = requirePublicId(input.workId, "workId");
       const assigneeId = requirePublicId(input.assigneeId, "assigneeId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.assignee.stop", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.assignee.stop", {
         context: { room_id: roomId },
         input: {
           work_id: workId,
@@ -448,7 +495,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       const control = toDesktopRoomWorkControl(response.result);
       assertRoomWorkScope(control, roomId, workId);
       if (control.assigneeId !== assigneeId) throw new Error("room_work_control_scope_invalid");
@@ -460,10 +507,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     setWorkspaceRoomDefaultAgent: async (input) => {
       const roomId = requirePublicId(input.roomId, "roomId");
       const agentId = requirePublicId(input.agentId, "agentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "room.default_agent.set", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.default_agent.set", {
         context: { room_id: roomId },
         input: {
           agent_id: agentId,
@@ -477,10 +522,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
     },
     openWorkspaceAgentDm: async (input) => {
       const agentId = requirePublicId(input.agentId, "agentId");
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(connection.workspaceId, "agent.dm.open", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "agent.dm.open", {
         context: {},
         input: { agent_id: agentId }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
@@ -490,31 +533,31 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return withReplayed(dm, response.replayed);
     },
     listWorkspaceEvents: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const page = await browserDomainApiClient.listEvents(connection.workspaceId, {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const page = await browserSnapshotDomainApiClient(snapshot).listEvents(snapshot.workspaceId, {
         ...(input.roomId ? { roomId: requirePublicId(input.roomId, "roomId") } : {}),
         ...(input.afterCursor ? { afterCursor: input.afterCursor } : {}),
         ...(input.limit === undefined ? {} : { limit: input.limit })
       });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       return toDesktopPublicEventPage(page, input.roomId);
     },
     listWorkspaceAgentBackends: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      assertBrowserAgentTarget(connection, input?.target);
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(connection.workspaceId, "agent.backend.list", { context: {}, input: {} });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "agent.backend.list", { context: {}, input: {} });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return toDesktopWorkspaceAgentBackendList(response.result);
     },
     getWorkspaceSurfaceContract: (source) => {
-      const query = source ? `?source=${encodeURIComponent(source)}` : "";
-      return workspaceRequest<SurfaceContractPayload>("GET", `/surface/contract${query}`);
+      const value = source && typeof source === "object" && !Array.isArray(source) ? source as Record<string, unknown> : undefined;
+      const sourceValue = typeof source === "string" ? source : typeof value?.source === "string" ? value.source : undefined;
+      const query = sourceValue ? `?source=${encodeURIComponent(sourceValue)}` : "";
+      return workspaceRequest<SurfaceContractPayload>("GET", `/surface/contract${query}`, undefined, undefined, undefined, browserTargetFromInput(value));
     },
-    listWorkspaceChatSessions: () => workspaceRequest<SessionRecord[]>("GET", "/chat/sessions"),
+    listWorkspaceChatSessions: (input?: unknown) => workspaceRequest<SessionRecord[]>("GET", "/chat/sessions", undefined, undefined, undefined, browserTargetFromInput(input)),
     createWorkspaceChatSession: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<SessionRecord>(connection.workspaceId, "session.create", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<SessionRecord>(snapshot.workspaceId, "session.create", {
         context: { room_id: input.roomId },
         input: {
           ...(input.title ? { title: input.title } : {}),
@@ -522,12 +565,13 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.outputLocale ? { output_locale: input.outputLocale } : {})
         }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
+      await assertBrowserWorkspaceSnapshot(snapshot);
       return response.result;
     },
-    getWorkspaceChatSession: (input) => workspaceRequest<SessionDetail>("GET", `/chat/sessions/${encodeURIComponent(input.sessionId)}`),
+    getWorkspaceChatSession: (input) => workspaceRequest<SessionDetail>("GET", `/chat/sessions/${encodeURIComponent(input.sessionId)}`, undefined, undefined, undefined, browserTargetFromInput(input)),
     sendWorkspaceChatMessage: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const response = await browserDomainApiClient.executeOperation<ChatTurnResult>(connection.workspaceId, "chat.turn.run", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ChatTurnResult>(snapshot.workspaceId, "chat.turn.run", {
         context: { session_id: input.sessionId },
         input: {
           content: input.content,
@@ -538,18 +582,14 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           ...(input.attachments?.length ? { attachments: input.attachments } : {})
         }
       }, { operationId: input.idempotencyKey, idempotencyKey: input.idempotencyKey });
+      await assertBrowserWorkspaceSnapshot(snapshot);
       return response.result;
     },
     writeWorkspaceAttachment: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      if (input.target && (input.target.connectionId !== connection.id || input.target.workspaceId !== connection.workspaceId)) {
-        throw new Error("workspace_navigation_changed");
-      }
-      const result = await browserWorkspaceRequest<unknown>({
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const result = await browserSnapshotWorkspaceRequest<unknown>(snapshot, {
         method: "PUT",
-        connectionId: connection.id,
-        path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}/files/${workspaceAttachmentPath(input.path)}`,
-        workspaceScoped: true,
+        path: `/api/workspaces/${encodeURIComponent(snapshot.workspaceId)}/files/${workspaceAttachmentPath(input.path)}`,
         operationId: input.operationId,
         body: {
           room_id: input.roomId,
@@ -557,32 +597,34 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           expected_version: input.expectedVersion
         }
       });
-      await assertBrowserWorkspaceSnapshot(connection);
+      await assertBrowserWorkspaceSnapshot(snapshot);
       return sanitizeWorkspaceAttachmentUploadResult(result);
     },
-    searchWorkspace: (input) => workspaceRequest<SearchResult[]>("GET", `/chat/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}`),
-    listWorkspaceBackendRuns: (input) => workspaceRequest<BackendRunRecord[]>("GET", `/chat/runs${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
-    getWorkspaceBackendRun: (input) => workspaceRequest<BackendRunRecord>("GET", `/chat/runs/${encodeURIComponent(input.runId)}`),
-    listWorkspaceBackendEvents: (input) => workspaceRequest<BackendEventRecord[]>("GET", `/chat/runs/${encodeURIComponent(input.runId)}/events`),
-    cancelWorkspaceBackendRun: (input) => workspaceRequest<BackendRunRecord>("POST", `/chat/runs/${encodeURIComponent(input.runId)}/cancel`, {}, input.operationId),
-    retryWorkspaceBackendRun: (input) => workspaceRequest<ChatSurfaceOperationResult>("POST", `/chat/runs/${encodeURIComponent(input.runId)}/retry`, {}, input.operationId),
-    listWorkspaceChanges: (input) => workspaceRequest("GET", `/chat/changes${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
-    listWorkspaceActivity: (input) => workspaceRequest<ActivityInboxItem[]>("GET", `/chat/activity?room_id=${encodeURIComponent(input.roomId)}`),
-    getWorkspaceAudit: async () => {
-      const body = await workspaceRequest<{ entries?: AuditPayload["workspaceEntries"] }>("GET", "/audit");
+    searchWorkspace: (input) => workspaceInputRequest<SearchResult[]>(input, "GET", `/chat/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}`),
+    listWorkspaceBackendRuns: (input) => workspaceInputRequest<BackendRunRecord[]>(input, "GET", `/chat/runs${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
+    getWorkspaceBackendRun: (input) => workspaceInputRequest<BackendRunRecord>(input, "GET", `/chat/runs/${encodeURIComponent(input.runId)}`),
+    listWorkspaceBackendEvents: (input) => workspaceInputRequest<BackendEventRecord[]>(input, "GET", `/chat/runs/${encodeURIComponent(input.runId)}/events`),
+    cancelWorkspaceBackendRun: (input) => workspaceInputRequest<BackendRunRecord>(input, "POST", `/chat/runs/${encodeURIComponent(input.runId)}/cancel`, {}, input.operationId),
+    retryWorkspaceBackendRun: (input) => workspaceInputRequest<ChatSurfaceOperationResult>(input, "POST", `/chat/runs/${encodeURIComponent(input.runId)}/retry`, {}, input.operationId),
+    listWorkspaceChanges: (input) => workspaceInputRequest(input, "GET", `/chat/changes${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
+    listWorkspaceActivity: (input) => workspaceInputRequest<ActivityInboxItem[]>(input, "GET", `/chat/activity?room_id=${encodeURIComponent(input.roomId)}`),
+    getWorkspaceAudit: async (input?: unknown) => {
+      const body = await workspaceInputRequest<{ entries?: AuditPayload["workspaceEntries"] }>(input, "GET", "/audit");
       if (!Array.isArray(body.entries)) throw new Error("workspace_audit_response_invalid");
       return { auditRecords: [], operations: [], policyDecisions: [], approvalRequests: [], rollbackPoints: [], workspaceEntries: body.entries } satisfies AuditPayload;
     },
     listWorkspaceCompletionResources: (input) => {
       const query = new URLSearchParams();
+      query.set("scope_kind", input.scopeKind);
       if (input.scopeKind === "room") query.set("room_id", input.roomId ?? "");
       if (input.kind) query.set("kind", input.kind);
       if (input.includeArchived) query.set("include_archived", "true");
-      return workspaceRequest<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>("GET", `/completion/resources?${query.toString()}`);
+      if (input.cursor) query.set("cursor", input.cursor);
+      return workspaceV1InputRequest<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>(input, "GET", `/completion/resources?${query.toString()}`);
     },
-    getWorkspaceCompletionResource: (input) => workspaceRequest<WorkspaceCompletionResourceDetail>("GET", `/completion/resources/${encodeURIComponent(input.resourceId)}`),
-    getWorkspaceCompletionResourceBody: (input) => workspaceRequest<WorkspaceCompletionResourceBody>("GET", `/completion/resources/${encodeURIComponent(input.resourceId)}/body`),
-    createWorkspaceCompletionResource: (input) => workspaceRequest("POST", "/completion/resources", {
+    getWorkspaceCompletionResource: (input) => workspaceV1InputRequest<WorkspaceCompletionResourceDetail>(input, "GET", `/completion/resources/${encodeURIComponent(input.resourceId)}`),
+    getWorkspaceCompletionResourceBody: (input) => workspaceV1InputRequest<WorkspaceCompletionResourceBody>(input, "GET", `/completion/resources/${encodeURIComponent(input.resourceId)}/body`),
+    createWorkspaceCompletionResource: (input) => workspaceV1InputRequest(input, "POST", "/completion/resources", {
       scope_kind: input.scopeKind,
       ...(input.roomId ? { room_id: input.roomId } : {}),
       kind: input.kind,
@@ -592,7 +634,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       ...(input.metadata ? { metadata: input.metadata } : {}),
       reason: input.reason
     }, input.operationId),
-    updateWorkspaceCompletionResource: (input) => workspaceRequest("PUT", `/completion/resources/${encodeURIComponent(input.resourceId)}`, {
+    updateWorkspaceCompletionResource: (input) => workspaceV1InputRequest(input, "PATCH", `/completion/resources/${encodeURIComponent(input.resourceId)}`, {
       scope_kind: input.scopeKind,
       ...(input.roomId ? { room_id: input.roomId } : {}),
       kind: input.kind,
@@ -603,26 +645,27 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       expected_version: input.expectedVersion,
       reason: input.reason
     }, input.operationId),
-    setWorkspaceCompletionResourceFixed: (input) => workspaceRequest("POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/fixed`, { fixed: input.fixed, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
-    archiveWorkspaceCompletionResource: (input) => workspaceRequest("POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/archive`, { archived: input.archived, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
-    searchWorkspaceCompletionKnowledge: (input) => workspaceRequest("GET", `/completion/knowledge/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}${input.limit === undefined ? "" : `&limit=${input.limit}`}`),
-    listWorkspaceCompletionSkills: (input) => workspaceRequest("GET", `/completion/skills?room_id=${encodeURIComponent(input.roomId)}`),
-    getWorkspaceCompletionSkill: (input) => workspaceRequest("GET", `/completion/skills/${encodeURIComponent(input.resourceId)}`),
+    setWorkspaceCompletionResourceFixed: (input) => workspaceV1InputRequest(input, "POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/fix`, { fixed: input.fixed, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
+    archiveWorkspaceCompletionResource: (input) => workspaceV1InputRequest(input, "POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/archive`, { archived: input.archived, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
+    searchWorkspaceCompletionKnowledge: (input) => workspaceV1InputRequest(input, "GET", `/completion/knowledge/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}${input.limit === undefined ? "" : `&limit=${input.limit}`}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`),
+    listWorkspaceCompletionSkills: (input) => workspaceV1InputRequest(input, "GET", `/completion/skills?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`),
+    getWorkspaceCompletionSkill: (input) => workspaceV1InputRequest(input, "GET", `/completion/skills/${encodeURIComponent(input.resourceId)}${input.version === undefined ? "" : `?version=${input.version}`}`),
     listWorkspaceSkillOptimizations: (input) => {
       const query = new URLSearchParams();
       if (input.skillId) query.set("skill_id", input.skillId);
       if (input.roomId) query.set("room_id", input.roomId);
       if (input.limit !== undefined) query.set("limit", String(input.limit));
-      return workspaceRequest<SkillOptimizationDetail["run"][]>("GET", `/skill-optimizations${query.size ? `?${query.toString()}` : ""}`);
+      return workspaceInputRequest<SkillOptimizationDetail["run"][]>(input, "GET", `/skill-optimizations${query.size ? `?${query.toString()}` : ""}`);
     },
-    getWorkspaceSkillOptimization: (input) => workspaceRequest<SkillOptimizationDetail>("GET", `/skill-optimizations/${encodeURIComponent(input.runId)}`),
-    startWorkspaceSkillOptimization: (input) => workspaceRequest("POST", `/skills/${encodeURIComponent(input.skillId)}/optimizations`, {
+    getWorkspaceSkillOptimization: (input) => workspaceInputRequest<SkillOptimizationDetail>(input, "GET", `/skill-optimizations/${encodeURIComponent(input.runId)}`),
+    startWorkspaceSkillOptimization: (input) => workspaceInputRequest(input, "POST", `/skills/${encodeURIComponent(input.skillId)}/optimizations`, {
       ...(input.roomId ? { room_id: input.roomId } : {}),
       ...(input.objective ? { objective: input.objective } : {}),
       ...(input.goldenExamples ? { golden_examples: input.goldenExamples } : {}),
       ...(input.syntheticExamples ? { synthetic_examples: input.syntheticExamples } : {})
     }, input.operationId),
-    runWorkspaceSkillOptimizationAction: (input) => workspaceRequest<Record<string, unknown>>(
+    runWorkspaceSkillOptimizationAction: (input) => workspaceInputRequest<Record<string, unknown>>(
+      input,
       "POST",
       `/skill-optimizations/${encodeURIComponent(input.runId)}/${input.action}`,
       {
@@ -632,9 +675,9 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       },
       input.operationId
     ),
-    listWorkspaceKnowledgeWiki: (input) => workspaceRequest("GET", `/knowledge-wiki?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}`),
-    getWorkspaceKnowledgeWiki: (input) => workspaceRequest<WorkspaceKnowledgeWikiPage>("GET", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}`),
-    createWorkspaceKnowledgeWiki: (input) => workspaceRequest("POST", "/knowledge-wiki/proposals", {
+    listWorkspaceKnowledgeWiki: (input) => workspaceInputRequest(input, "GET", `/knowledge-wiki?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}`),
+    getWorkspaceKnowledgeWiki: (input) => workspaceInputRequest<WorkspaceKnowledgeWikiPage>(input, "GET", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}`),
+    createWorkspaceKnowledgeWiki: (input) => workspaceInputRequest(input, "POST", "/knowledge-wiki/proposals", {
       room_id: input.roomId,
       title: input.title,
       content: input.content,
@@ -644,67 +687,106 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       ...(input.knowledgeKind ? { knowledge_kind: input.knowledgeKind } : {}),
       reason: input.reason
     }, input.operationId),
-    updateWorkspaceKnowledgeWiki: (input) => workspaceRequest("PATCH", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}`, {
+    updateWorkspaceKnowledgeWiki: (input) => workspaceInputRequest(input, "PATCH", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}`, {
       ...(input.title ? { title: input.title } : {}),
       ...(input.content !== undefined ? { content: input.content } : {}),
       ...(input.tags ? { tags: input.tags } : {}),
       ...(input.contentLocale ? { content_locale: input.contentLocale } : {}),
       reason: input.reason
     }, input.operationId),
-    setWorkspaceKnowledgeWikiState: (input) => workspaceRequest("POST", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}/${input.state === "accept" ? "accept" : input.state === "reject" ? "reject" : "archive"}`, { reason: input.reason }, input.operationId),
-    reindexWorkspaceKnowledgeWiki: (input) => workspaceRequest("POST", "/knowledge-wiki/reindex", { room_id: input.roomId }),
-    getWorkspaceKnowledgeWikiGraph: (input) => workspaceRequest("GET", `/knowledge-wiki/graph?room_id=${encodeURIComponent(input.roomId)}${input.query ? `&query=${encodeURIComponent(input.query)}` : ""}`),
-    getWorkspaceKnowledgeWikiLint: (input) => workspaceRequest("GET", `/knowledge-wiki/lint?room_id=${encodeURIComponent(input.roomId)}`),
-    getWorkspaceKnowledgeWikiBacklinks: (input) => workspaceRequest("GET", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}/backlinks?room_id=${encodeURIComponent(input.roomId)}`),
-    listWorkspaceKnowledgeMemory: (input) => workspaceRequest<{ memories: WorkspaceKnowledgeMemoryPage[] }>("GET", `/knowledge-memory?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}`),
-    getWorkspaceKnowledgeMemory: (input) => workspaceRequest<WorkspaceKnowledgeMemoryPage>("GET", `/knowledge-memory/${encodeURIComponent(input.memoryId)}`),
-    searchWorkspaceKnowledgeMemory: (input) => workspaceRequest("GET", `/knowledge-memory/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}${input.limit === undefined ? "" : `&limit=${input.limit}`}`),
-    archiveWorkspaceKnowledgeMemory: (input) => workspaceRequest("POST", `/knowledge-memory/${encodeURIComponent(input.memoryId)}/archive`, { reason: input.reason }, input.operationId),
-    listWorkspaceCollectionSchemas: (input) => workspaceRequest("GET", `/collections/schemas?room_id=${encodeURIComponent(input.roomId)}`),
-    getWorkspaceCollectionSchema: (input) => workspaceRequest("GET", `/collections/${encodeURIComponent(input.collectionId)}/schema?room_id=${encodeURIComponent(input.roomId)}`),
-    saveWorkspaceCollectionSchema: (input) => workspaceRequest("POST", "/collections/schemas", { room_id: input.roomId, schema: input.schema, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }) }, input.operationId),
-    listWorkspaceCollectionRecords: (input) => workspaceRequest("GET", `/collections/${encodeURIComponent(input.collectionId)}/records?room_id=${encodeURIComponent(input.roomId)}`),
-    createWorkspaceCollectionRecord: (input) => workspaceRequest("POST", `/collections/${encodeURIComponent(input.collectionId)}/records`, { room_id: input.roomId, record_id: input.recordId, data: input.data }, input.operationId),
-    patchWorkspaceCollectionRecord: (input) => workspaceRequest("POST", `/collections/${encodeURIComponent(input.collectionId)}/records/${encodeURIComponent(input.recordId)}/patches`, { room_id: input.roomId, ...(input.patchId ? { patch_id: input.patchId } : {}), changes: input.changes, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }) }, input.operationId),
-    deleteWorkspaceCollectionRecord: (input) => workspaceRequest("DELETE", `/collections/${encodeURIComponent(input.collectionId)}/records/${encodeURIComponent(input.recordId)}`, { room_id: input.roomId, expected_version: input.expectedVersion }, input.operationId),
-    listWorkspaceCollectionNotes: (input) => workspaceRequest("GET", `/collections/${encodeURIComponent(input.collectionId)}/notes?room_id=${encodeURIComponent(input.roomId)}`),
-    reindexWorkspaceCollections: (input) => workspaceRequest("POST", "/collections/reindex", { room_id: input.roomId }),
-    runWorkspaceCollectionSurfaceOperation: (input) => workspaceSurfaceRequest("/collections/surface/operations", input.roomId, input.operation),
+    setWorkspaceKnowledgeWikiState: (input) => workspaceInputRequest(input, "POST", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}/${input.state === "accept" ? "accept" : input.state === "reject" ? "reject" : "archive"}`, { reason: input.reason }, input.operationId),
+    reindexWorkspaceKnowledgeWiki: (input) => workspaceInputRequest(input, "POST", "/knowledge-wiki/reindex", { room_id: input.roomId }),
+    getWorkspaceKnowledgeWikiGraph: (input) => workspaceInputRequest(input, "GET", `/knowledge-wiki/graph?room_id=${encodeURIComponent(input.roomId)}${input.query ? `&query=${encodeURIComponent(input.query)}` : ""}`),
+    getWorkspaceKnowledgeWikiLint: (input) => workspaceInputRequest(input, "GET", `/knowledge-wiki/lint?room_id=${encodeURIComponent(input.roomId)}`),
+    getWorkspaceKnowledgeWikiBacklinks: (input) => workspaceInputRequest(input, "GET", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}/backlinks?room_id=${encodeURIComponent(input.roomId)}`),
+    listWorkspaceKnowledgeMemory: (input) => workspaceInputRequest<{ memories: WorkspaceKnowledgeMemoryPage[] }>(input, "GET", `/knowledge-memory?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}`),
+    getWorkspaceKnowledgeMemory: (input) => workspaceInputRequest<WorkspaceKnowledgeMemoryPage>(input, "GET", `/knowledge-memory/${encodeURIComponent(input.memoryId)}`),
+    searchWorkspaceKnowledgeMemory: (input) => workspaceInputRequest(input, "GET", `/knowledge-memory/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}${input.limit === undefined ? "" : `&limit=${input.limit}`}`),
+    archiveWorkspaceKnowledgeMemory: (input) => workspaceInputRequest(input, "POST", `/knowledge-memory/${encodeURIComponent(input.memoryId)}/archive`, { reason: input.reason }, input.operationId),
+    listWorkspaceCollectionSchemas: (input) => workspaceInputRequest(input, "GET", `/collections/schemas?room_id=${encodeURIComponent(input.roomId)}`),
+    getWorkspaceCollectionSchema: (input) => workspaceInputRequest(input, "GET", `/collections/${encodeURIComponent(input.collectionId)}/schema?room_id=${encodeURIComponent(input.roomId)}`),
+    saveWorkspaceCollectionSchema: (input) => workspaceInputRequest(input, "POST", "/collections/schemas", { room_id: input.roomId, schema: input.schema, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }) }, input.operationId),
+    listWorkspaceCollectionRecords: (input) => workspaceInputRequest(input, "GET", `/collections/${encodeURIComponent(input.collectionId)}/records?room_id=${encodeURIComponent(input.roomId)}`),
+    createWorkspaceCollectionRecord: (input) => workspaceInputRequest(input, "POST", `/collections/${encodeURIComponent(input.collectionId)}/records`, { room_id: input.roomId, record_id: input.recordId, data: input.data }, input.operationId),
+    patchWorkspaceCollectionRecord: (input) => workspaceInputRequest(input, "POST", `/collections/${encodeURIComponent(input.collectionId)}/records/${encodeURIComponent(input.recordId)}/patches`, { room_id: input.roomId, ...(input.patchId ? { patch_id: input.patchId } : {}), changes: input.changes, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }) }, input.operationId),
+    deleteWorkspaceCollectionRecord: (input) => workspaceInputRequest(input, "DELETE", `/collections/${encodeURIComponent(input.collectionId)}/records/${encodeURIComponent(input.recordId)}`, { room_id: input.roomId, expected_version: input.expectedVersion }, input.operationId),
+    listWorkspaceCollectionNotes: (input) => workspaceInputRequest(input, "GET", `/collections/${encodeURIComponent(input.collectionId)}/notes?room_id=${encodeURIComponent(input.roomId)}`),
+    reindexWorkspaceCollections: (input) => workspaceInputRequest(input, "POST", "/collections/reindex", { room_id: input.roomId }),
+    runWorkspaceCollectionSurfaceOperation: (input) => workspaceSurfaceRequest("/collections/surface/operations", input.roomId, input.operation, browserTargetFromInput(input)),
+    listWorkspaceOperationHistory: async (input) => {
+      const recordType = workspaceOperationHistoryRecordType(input.recordType);
+      const records: WorkspaceOperationHistoryRecord[] = [];
+      for (let offset = 0; ; ) {
+        const response = await workspaceInputRequest<unknown>(
+          input,
+          "GET",
+          `/records?room_id=${encodeURIComponent(input.roomId)}&record_type=${encodeURIComponent(recordType)}&limit=500&offset=${offset}`
+        );
+        const page = sanitizeWorkspaceOperationHistoryResponse(response, input, recordType).records;
+        records.push(...page);
+        if (page.length < 500) break;
+        offset += page.length;
+        if (offset > 100_000) throw new Error("workspace_operation_history_too_large");
+      }
+      return { records };
+    },
     listWorkspaceArtifacts: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<ArtifactRecord[]>(connection.workspaceId, "artifact.list", { context: { room_id: input.roomId }, input: {} });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<ArtifactRecord[]>(snapshot.workspaceId, "artifact.list", { context: { room_id: input.roomId }, input: {} });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return { artifacts: response.result };
     },
     getWorkspaceArtifact: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<ArtifactDetail>(connection.workspaceId, "artifact.view", { context: { room_id: input.roomId }, input: { id: input.artifactId } });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<ArtifactDetail>(snapshot.workspaceId, "artifact.view", { context: { room_id: input.roomId }, input: { id: input.artifactId } });
       await assertBrowserWorkspaceSnapshot(snapshot);
       if (response.result.artifact.id !== input.artifactId) throw new Error("workspace_artifact_response_scope_invalid");
-      return { ...response.result, auditRecords: [] };
+      if (response.result.encoding !== "binary") return { ...response.result, auditRecords: [] };
+      const content = await browserSnapshotWorkspaceBinaryRequest(snapshot, {
+        method: "GET",
+        path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/artifacts/${encodeURIComponent(input.artifactId)}/content?room_id=${encodeURIComponent(input.roomId)}`
+      });
+      await assertBrowserWorkspaceSnapshot(snapshot);
+      await assertBrowserArtifactBinaryMetadata(response.result, content);
+      return {
+        ...response.result,
+        content: "",
+        content_bytes: content.bytes,
+        ...(content.mimeType ? { mime_type: content.mimeType } : {}),
+        encoding: "binary",
+        auditRecords: []
+      };
     },
     listWorkspaceArtifactRevisions: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).listArtifactRevisions<{ revisions: ArtifactRevisionRecord[] }>(connection.workspaceId, input.roomId, input.artifactId);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).listArtifactRevisions<{ revisions: ArtifactRevisionRecord[] }>(snapshot.workspaceId, input.roomId, input.artifactId);
       await assertBrowserWorkspaceSnapshot(snapshot);
       if (!Array.isArray(response.revisions) || response.revisions.some((revision) => revision.artifact_id !== input.artifactId)) throw new Error("workspace_artifact_revision_response_scope_invalid");
       return response.revisions;
     },
     getWorkspaceArtifactRevision: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const detail = await browserSnapshotDomainApiClient(snapshot).getArtifactRevision<ArtifactRevisionDetail>(connection.workspaceId, input.roomId, input.artifactId, input.revisionId);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const detail = await browserSnapshotDomainApiClient(snapshot).getArtifactRevision<ArtifactRevisionDetail>(snapshot.workspaceId, input.roomId, input.artifactId, input.revisionId);
       await assertBrowserWorkspaceSnapshot(snapshot);
       if (detail.artifact.id !== input.artifactId || detail.revision.id !== input.revisionId || detail.revision.artifact_id !== input.artifactId) throw new Error("workspace_artifact_revision_response_scope_invalid");
-      return detail;
+      if (detail.encoding !== "binary") return detail;
+      const content = await browserSnapshotWorkspaceBinaryRequest(snapshot, {
+        method: "GET",
+        path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/artifacts/${encodeURIComponent(input.artifactId)}/content?room_id=${encodeURIComponent(input.roomId)}&revision_id=${encodeURIComponent(input.revisionId)}`
+      });
+      await assertBrowserWorkspaceSnapshot(snapshot);
+      await assertBrowserArtifactBinaryMetadata(detail, content);
+      return {
+        ...detail,
+        content: "",
+        content_bytes: content.bytes,
+        ...(content.mimeType ? { mime_type: content.mimeType } : {}),
+        encoding: "binary"
+      };
     },
     reviseWorkspaceArtifact: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ArtifactMutationResult>(connection.workspaceId, "artifact.revise", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ArtifactMutationResult>(snapshot.workspaceId, "artifact.revise", {
         context: { room_id: input.roomId },
         input: {
           artifact_id: input.artifactId,
@@ -721,9 +803,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return response.result;
     },
     restoreWorkspaceArtifactRevision: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ArtifactMutationResult>(connection.workspaceId, "artifact.restore_revision", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ArtifactMutationResult>(snapshot.workspaceId, "artifact.restore_revision", {
         context: { room_id: input.roomId },
         input: {
           artifact_id: input.artifactId,
@@ -738,9 +819,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return response.result;
     },
     createWorkspaceArtifact: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ArtifactMutationResult>(connection.workspaceId, "artifact.create", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ArtifactMutationResult>(snapshot.workspaceId, "artifact.create", {
         context: { room_id: input.roomId },
         input: {
           title: input.title,
@@ -757,39 +837,34 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return response.result;
     },
     runWorkspaceArtifactSurfaceOperation: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).runArtifactSurfaceOperation<SurfaceOperationResultEnvelope>(connection.workspaceId, input.roomId, toBridgeJson(input.operation), { operationId: input.operation.id, idempotencyKey: input.operation.id });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).runArtifactSurfaceOperation<SurfaceOperationResultEnvelope>(snapshot.workspaceId, input.roomId, toBridgeJson(input.operation), { operationId: input.operation.id, idempotencyKey: input.operation.id });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return response;
     },
     listWorkspaceGeneratedSurfaces: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).listGeneratedSurfaces<{ surfaces: import("@samurai-agent/core-schemas").GeneratedSurfaceDefinition[] }>(connection.workspaceId, input.roomId);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).listGeneratedSurfaces<{ surfaces: import("@samurai-agent/core-schemas").GeneratedSurfaceDefinition[] }>(snapshot.workspaceId, input.roomId);
       await assertBrowserWorkspaceSnapshot(snapshot);
       return response.surfaces;
     },
     getWorkspaceGeneratedSurface: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const detail = await browserSnapshotDomainApiClient(snapshot).getGeneratedSurface<GeneratedSurfaceDetail>(connection.workspaceId, input.roomId, input.surfaceId);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const detail = await browserSnapshotDomainApiClient(snapshot).getGeneratedSurface<GeneratedSurfaceDetail>(snapshot.workspaceId, input.roomId, input.surfaceId);
       await assertBrowserWorkspaceSnapshot(snapshot);
       if (detail.surface.id !== input.surfaceId) throw new Error("workspace_generated_surface_response_scope_invalid");
       return detail;
     },
     queryWorkspaceGeneratedSurface: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const detail = await browserSnapshotDomainApiClient(snapshot).getGeneratedSurface<GeneratedSurfaceDetail>(connection.workspaceId, input.roomId, input.surfaceId);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const detail = await browserSnapshotDomainApiClient(snapshot).getGeneratedSurface<GeneratedSurfaceDetail>(snapshot.workspaceId, input.roomId, input.surfaceId);
       await assertBrowserWorkspaceSnapshot(snapshot);
       if (detail.surface.id !== input.surfaceId) throw new Error("workspace_generated_surface_response_scope_invalid");
       return detail;
     },
     createWorkspaceGeneratedSurface: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<GeneratedSurfaceMutationResult>(connection.workspaceId, "generated_surface.create", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<GeneratedSurfaceMutationResult>(snapshot.workspaceId, "generated_surface.create", {
         context: { room_id: input.roomId },
         input: { bundle: toBridgeJson(input.bundle), request: toBridgeJson(input.request) }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
@@ -798,9 +873,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return response.result;
     },
     reviseWorkspaceGeneratedSurface: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<GeneratedSurfaceMutationResult>(connection.workspaceId, "generated_surface.revise", {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<GeneratedSurfaceMutationResult>(snapshot.workspaceId, "generated_surface.revise", {
         context: { room_id: input.roomId },
         input: { surface_id: input.surfaceId, bundle: toBridgeJson(input.bundle), request: toBridgeJson(input.request) }
       }, { operationId: input.operationId, idempotencyKey: input.operationId });
@@ -809,17 +883,15 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return response.result;
     },
     getWorkspaceGeneratedSurfaceBundle: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const bundle = await browserSnapshotDomainApiClient(snapshot).getGeneratedSurfaceBundle<GeneratedSurfaceBundleDetail>(connection.workspaceId, input.roomId, input.surfaceId, input.revisionId);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const bundle = await browserSnapshotDomainApiClient(snapshot).getGeneratedSurfaceBundle<GeneratedSurfaceBundleDetail>(snapshot.workspaceId, input.roomId, input.surfaceId, input.revisionId);
       await assertBrowserWorkspaceSnapshot(snapshot);
       if (bundle.surface.id !== input.surfaceId || bundle.revision.id !== input.revisionId) throw new Error("workspace_generated_surface_response_scope_invalid");
       return bundle;
     },
     runWorkspaceGeneratedSurfaceAction: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const result = await browserSnapshotDomainApiClient(snapshot).runGeneratedSurfaceAction<Record<string, unknown>>(connection.workspaceId, input.roomId, input.surfaceId, input.actionId, {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const result = await browserSnapshotDomainApiClient(snapshot).runGeneratedSurfaceAction<Record<string, unknown>>(snapshot.workspaceId, input.roomId, input.surfaceId, input.actionId, {
         ...(input.revisionId ? { revision_id: input.revisionId } : {}),
         ...(input.interactionId ? { interaction_id: input.interactionId } : {}),
         ...(input.messageId ? { message_id: input.messageId } : {}),
@@ -829,9 +901,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return result;
     },
     runWorkspaceGeneratedSurfaceState: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const result = await browserSnapshotDomainApiClient(snapshot).runGeneratedSurfaceState<import("@samurai-agent/core-schemas").GeneratedSurfaceDefinition>(connection.workspaceId, input.roomId, input.surfaceId, {
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const result = await browserSnapshotDomainApiClient(snapshot).runGeneratedSurfaceState<import("@samurai-agent/core-schemas").GeneratedSurfaceDefinition>(snapshot.workspaceId, input.roomId, input.surfaceId, {
         action: input.action,
         ...(input.interactionId ? { interaction_id: input.interactionId } : {}),
         ...(input.messageId ? { message_id: input.messageId } : {})
@@ -841,9 +912,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       return result;
     },
     exportWorkspaceGeneratedSurface: async (input) => {
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const result = await browserSnapshotDomainApiClient(snapshot).exportGeneratedSurface<GeneratedSurfaceExportPayload>(connection.workspaceId, input.roomId, input.surfaceId, { ...(input.revisionId ? { revision_id: input.revisionId } : {}), format: input.format });
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const result = await browserSnapshotDomainApiClient(snapshot).exportGeneratedSurface<GeneratedSurfaceExportPayload>(snapshot.workspaceId, input.roomId, input.surfaceId, { ...(input.revisionId ? { revision_id: input.revisionId } : {}), format: input.format });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return result;
     },
@@ -851,13 +921,33 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const value = interactionInputRecord(input);
       const roomId = interactionRequiredId(value.roomId, "roomId");
       const includeResolved = strictInteractionBoolean(value.includeResolved, "includeResolved", false);
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const requests: DesktopWorkspaceInteractionRequest[] = [];
+      for (let offset = 0; ; ) {
+        const response = await browserSnapshotWorkspaceRequest<unknown>(snapshot, {
+          method: "GET",
+          path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/interaction-requests?room_id=${encodeURIComponent(roomId)}&include_resolved=${includeResolved ? "true" : "false"}&limit=500&offset=${offset}`
+        });
+        const page = sanitizeBrowserInteractionListResponse(response, snapshot.workspaceId, roomId).requests;
+        requests.push(...page);
+        if (page.length < 500) break;
+        offset += page.length;
+        if (offset > 100_000) throw new Error("workspace_interaction_request_list_too_large");
+      }
+      return { requests };
+    },
+    getWorkspaceInteractionRequestResult: async (input) => {
+      const value = interactionInputRecord(input);
+      const roomId = interactionRequiredId(value.roomId, "roomId");
+      const requestId = interactionRequiredId(value.requestId, "requestId");
+      const operationId = interactionRequiredId(value.operationId, "operationId");
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
       const response = await browserSnapshotWorkspaceRequest<unknown>(snapshot, {
         method: "GET",
-        path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/interaction-requests?room_id=${encodeURIComponent(roomId)}&include_resolved=${includeResolved ? "true" : "false"}`
+        operationId,
+        path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/interaction-requests/${encodeURIComponent(requestId)}/result?room_id=${encodeURIComponent(roomId)}`
       });
-      return sanitizeBrowserInteractionListResponse(response, snapshot.workspaceId, roomId);
+      return sanitizeBrowserInteractionResultResponse(response, snapshot.workspaceId, roomId, requestId);
     },
     respondWorkspaceInteractionRequest: async (input) => {
       const value = interactionInputRecord(input);
@@ -867,8 +957,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const optionId = interactionRequiredId(value.optionId, "optionId");
       const operationId = interactionRequiredId(value.operationId, "operationId");
       const values = value.values === undefined ? undefined : strictInteractionJsonObject(value.values, "values", 256 * 1024);
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
       const response = await browserSnapshotWorkspaceRequest<unknown>(snapshot, {
         method: "POST",
         path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/interaction-requests/${encodeURIComponent(requestId)}/respond`,
@@ -889,8 +978,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       const requestId = interactionRequiredId(value.requestId, "requestId");
       const expectedVersion = strictInteractionVersion(value.expectedVersion, "expectedVersion");
       const operationId = interactionRequiredId(value.operationId, "operationId");
-      const connection = await requireBrowserWorkspaceConnection();
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
       const response = await browserSnapshotWorkspaceRequest<unknown>(snapshot, {
         method: "POST",
         path: `/api/v1/workspaces/${encodeURIComponent(snapshot.workspaceId)}/interaction-requests/${encodeURIComponent(requestId)}/cancel`,
@@ -900,8 +988,8 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       });
       return sanitizeBrowserInteractionMutationResponse(response, snapshot.workspaceId, roomId, requestId);
     },
-    listWorkspaceAutomationJobs: (input) => workspaceRequest("GET", `/automation/jobs${input.roomId ? `?room_id=${encodeURIComponent(input.roomId)}` : ""}`),
-    createWorkspaceAutomationJob: (input) => workspaceRequest("POST", "/automation/jobs", {
+    listWorkspaceAutomationJobs: (input) => workspaceV1InputRequest(input, "GET", `/automation/jobs${input.roomId ? `?room_id=${encodeURIComponent(input.roomId)}` : ""}`),
+    createWorkspaceAutomationJob: (input) => workspaceV1InputRequest(input, "POST", "/automation/jobs", {
       room_id: input.roomId,
       title: input.title,
       kind: input.kind,
@@ -914,32 +1002,20 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
       ...(input.connectionId ? { connection_id: input.connectionId } : {}),
       ...(input.sessionRef ? { session_ref: input.sessionRef } : {})
     }, input.operationId),
-    listWorkspaceAutomationRuns: (input) => workspaceRequest("GET", `/automation/runs${input.roomId ? `?room_id=${encodeURIComponent(input.roomId)}` : ""}`),
-    listWorkspaceAutomationJobRuns: (input) => workspaceRequest("GET", `/automation/jobs/${encodeURIComponent(input.jobId)}/runs`),
-    setWorkspaceAutomationManagement: (input) => workspaceRequest("POST", `/automation/jobs/${encodeURIComponent(input.jobId)}/management`, { state: input.state }, input.operationId),
-    runWorkspaceAutomationNow: (input) => workspaceRequest("POST", "/automation/run-now", { room_id: input.roomId, ...(input.kind ? { kind: input.kind } : {}) }, input.operationId),
-    listWorkspaceRoomMembers: (roomId) => workspaceRequest<{ members: DesktopWorkspaceRoomMembership[] }>("GET", `/rooms/${encodeURIComponent(roomId)}/members`),
+    listWorkspaceAutomationRuns: (input) => workspaceV1InputRequest(input, "GET", `/automation/runs${input.roomId ? `?room_id=${encodeURIComponent(input.roomId)}` : ""}`),
+    listWorkspaceAutomationJobRuns: (input) => workspaceV1InputRequest(input, "GET", `/automation/jobs/${encodeURIComponent(input.jobId)}/runs`),
+    setWorkspaceAutomationManagement: (input) => workspaceV1InputRequest(input, "POST", `/automation/jobs/${encodeURIComponent(input.jobId)}/management`, { state: input.state }, input.operationId),
+    runWorkspaceAutomationNow: (input) => workspaceV1InputRequest(input, "POST", "/automation/run-now", { room_id: input.roomId, ...(input.kind ? { kind: input.kind } : {}) }, input.operationId),
+    listWorkspaceRoomMembers: (input) => {
+      const raw = input as unknown;
+      const value = typeof raw === "string" ? { roomId: raw } : raw as { roomId: string };
+      return workspaceInputRequest<{ members: DesktopWorkspaceRoomMembership[] }>(value, "GET", `/rooms/${encodeURIComponent(value.roomId)}/members`);
+    },
     createWorkspaceRoom: async (input) => {
       const roomInput = input as unknown as NativeRoomCreateInput;
-      const connection = await requireBrowserWorkspaceConnection();
-      if (roomInput.target && (roomInput.target.connectionId !== connection.id || roomInput.target.workspaceId !== connection.workspaceId)) {
-        throw new Error("workspace_navigation_changed");
-      }
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(roomInput));
       if (roomInput.newAgent?.enabled === false) throw new Error("room_default_agent_enabled_required");
-      const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
-      const snapshotClient = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
-        await assertBrowserWorkspaceSnapshot(snapshot);
-        return browserWorkspaceRequest<T>({
-          method: request.method,
-          path: request.path,
-          connectionId: snapshot.id,
-          workspaceScoped: true,
-          ...(request.operationId ? { operationId: request.operationId } : {}),
-          ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
-          ...(request.body === undefined ? {} : { body: request.body })
-        });
-      });
-      const response = await snapshotClient.createRoom<PublicRoomRecord>(connection.workspaceId, {
+      const response = await browserSnapshotDomainApiClient(snapshot).createRoom<PublicRoomRecord>(snapshot.workspaceId, {
         name: roomInput.name,
         ...(roomInput.parentRoomId ? { parent_room_id: roomInput.parentRoomId } : {}),
         ...(roomInput.defaultAgentId ? { default_agent_id: roomInput.defaultAgentId } : {}),
@@ -968,20 +1044,24 @@ export function createBrowserWorkspaceBridge(): DesktopBridge {
           }
         } : {})
       }, { operationId: roomInput.operationId, idempotencyKey: roomInput.operationId });
-      await assertBrowserWorkspaceSnapshot(connection);
-      if (response.result.workspace_id !== connection.workspaceId) throw new Error("workspace_room_response_scope_invalid");
+      await assertBrowserWorkspaceSnapshot(snapshot);
+      if (response.result.workspace_id !== snapshot.workspaceId) throw new Error("workspace_room_response_scope_invalid");
       return {
         room: toDesktopWorkspaceRoom(response.result),
-        target: { connectionId: connection.id, workspaceId: connection.workspaceId },
+        target: { connectionId: snapshot.id, workspaceId: snapshot.workspaceId },
         replayed: response.replayed
       };
     },
-    previewWorkspaceRoomMove: (input) => workspaceRequest<{ preview: DesktopRoomMovePreview }>("POST", `/rooms/${encodeURIComponent(input.roomId)}/parent/preview`, { parent_room_id: input.parentRoomId }),
-    moveWorkspaceRoom: (input) => workspaceRequest("PUT", `/rooms/${encodeURIComponent(input.roomId)}/parent`, { parent_room_id: input.parentRoomId, expected_room_version: input.expectedRoomVersion, expected_workspace_version: input.expectedWorkspaceVersion }, input.operationId),
-    previewWorkspaceRoomMember: (input) => workspaceRequest<{ preview: DesktopRoomMemberPreview }>("POST", `/rooms/${encodeURIComponent(input.roomId)}/members/${encodeURIComponent(input.accountId)}/preview`, { role: input.role, state: input.state }),
-    setWorkspaceRoomMember: (input) => workspaceRequest("PUT", `/rooms/${encodeURIComponent(input.roomId)}/members/${encodeURIComponent(input.accountId)}`, { role: input.role, state: input.state, expected_version: input.expectedVersion }, input.operationId),
-    getWorkspaceLearningSettings: (roomId) => workspaceRequest<{ settings: DesktopWorkspaceLearningSettings; workspace_settings?: DesktopWorkspaceLearningSettings; room_settings?: DesktopWorkspaceLearningSettings }>("GET", `/learning/settings?room_id=${encodeURIComponent(roomId)}`),
-    updateWorkspaceLearningSettings: (input) => workspaceRequest("PUT", "/learning/settings", {
+    previewWorkspaceRoomMove: (input) => workspaceInputRequest<{ preview: DesktopRoomMovePreview }>(input, "POST", `/rooms/${encodeURIComponent(input.roomId)}/parent/preview`, { parent_room_id: input.parentRoomId }),
+    moveWorkspaceRoom: (input) => workspaceInputRequest(input, "PUT", `/rooms/${encodeURIComponent(input.roomId)}/parent`, { parent_room_id: input.parentRoomId, expected_room_version: input.expectedRoomVersion, expected_workspace_version: input.expectedWorkspaceVersion }, input.operationId),
+    previewWorkspaceRoomMember: (input) => workspaceInputRequest<{ preview: DesktopRoomMemberPreview }>(input, "POST", `/rooms/${encodeURIComponent(input.roomId)}/members/${encodeURIComponent(input.accountId)}/preview`, { role: input.role, state: input.state }),
+    setWorkspaceRoomMember: (input) => workspaceInputRequest(input, "PUT", `/rooms/${encodeURIComponent(input.roomId)}/members/${encodeURIComponent(input.accountId)}`, { role: input.role, state: input.state, expected_version: input.expectedVersion }, input.operationId),
+    getWorkspaceLearningSettings: (input) => {
+      const raw = input as unknown;
+      const value = typeof raw === "string" ? { roomId: raw } : raw as { roomId: string };
+      return workspaceV1InputRequest<{ settings: DesktopWorkspaceLearningSettings; workspace_settings?: DesktopWorkspaceLearningSettings; room_settings?: DesktopWorkspaceLearningSettings }>(value, "GET", `/learning/settings?room_id=${encodeURIComponent(value.roomId)}`);
+    },
+    updateWorkspaceLearningSettings: (input) => workspaceV1InputRequest(input, "PATCH", "/learning/settings", {
       scope_kind: input.scopeKind,
       ...(input.roomId ? { room_id: input.roomId } : {}),
       ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
@@ -1008,8 +1088,8 @@ async function reassignBrowserRoomWork(input: RoomWorkReassignInput): Promise<De
   const workId = requirePublicId(input.workId, "workId");
   const assigneeId = requirePublicId(input.assigneeId, "assigneeId");
   const agentId = requirePublicId(input.agentId, "agentId");
-  const connection = await requireBrowserWorkspaceConnection();
-  const response = await browserDomainApiClient.executeOperation<unknown>(connection.workspaceId, "room.work.assignee.reassign", {
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.assignee.reassign", {
     context: { room_id: roomId },
     input: {
       work_id: workId,
@@ -1019,7 +1099,7 @@ async function reassignBrowserRoomWork(input: RoomWorkReassignInput): Promise<De
       ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration })
     }
   }, { operationId: input.operationId, idempotencyKey: input.operationId });
-  await assertBrowserWorkspaceSnapshot(connection);
+  await assertBrowserWorkspaceSnapshot(snapshot);
   const assignee = toDesktopRoomWorkAssignee(response.result);
   assertRoomWorkScope(assignee, roomId, workId);
   if (assignee.id !== assigneeId || assignee.agentId !== agentId) throw new Error("room_work_assignee_scope_invalid");
@@ -1034,8 +1114,7 @@ async function delegateBrowserRoomWork(input: RoomWorkDelegateInput): Promise<De
   const instruction = input.instruction.trim();
   if (!instruction) throw new Error("room_work_instruction_required");
   const attachments = strictRoomWorkAttachments(input.attachments);
-  const connection = await requireBrowserWorkspaceConnection();
-  const snapshot = { id: connection.id, workspaceId: connection.workspaceId };
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
   const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "room.work.assignee.delegate", {
     context: { room_id: roomId },
     input: {
@@ -1149,9 +1228,16 @@ export function browserWorkspaceBridge(): DesktopBridge {
 async function browserConnectionState(): Promise<DesktopWorkspaceConnectionState> {
   const state = await createBrowserWorkspaceConnectionState();
   const active = state.connections.find((connection) => connection.id === state.activeConnectionId);
+  const activeRoomId = currentActiveWorkspaceRoomId();
   return {
     ...(state.activeConnectionId ? { activeConnectionId: state.activeConnectionId } : {}),
-    ...(active?.workspaceId ? { activeTarget: { connectionId: active.id, workspaceId: active.workspaceId } } : {}),
+    ...(active?.workspaceId ? {
+      activeTarget: {
+        connectionId: active.id,
+        workspaceId: active.workspaceId,
+        ...(activeRoomId ? { roomId: activeRoomId } : {})
+      }
+    } : {}),
     connections: state.connections.map(toDesktopConnection)
   };
 }
@@ -1281,19 +1367,22 @@ function browserErrorMessage(error: unknown): string {
 }
 
 type BrowserSnapshotWorkspaceRequestInput = {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   operationId?: string;
   idempotencyKey?: string;
   body?: unknown;
+  /** Explicit scope supplied by an adapter when the request body is opaque. */
+  requestRoomId?: string;
 };
 
 /** Fixed interaction-request transport; no generic signed request is exposed. */
 async function browserSnapshotWorkspaceRequest<T>(
-  snapshot: { id: string; workspaceId: string },
+  snapshot: BrowserWorkspaceSnapshot,
   input: BrowserSnapshotWorkspaceRequestInput
 ): Promise<T> {
   await assertBrowserWorkspaceSnapshot(snapshot);
+  assertBrowserWorkspaceRequestRoom(snapshot, input);
   const result = await browserWorkspaceRequest<T>({
     method: input.method,
     path: input.path,
@@ -1303,8 +1392,49 @@ async function browserSnapshotWorkspaceRequest<T>(
     ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     ...(input.body === undefined ? {} : { body: input.body })
   });
+  assertBrowserWorkspaceRequestRoom(snapshot, input);
   await assertBrowserWorkspaceSnapshot(snapshot);
   return result;
+}
+
+async function browserSnapshotWorkspaceBinaryRequest(
+  snapshot: BrowserWorkspaceSnapshot,
+  input: Pick<BrowserSnapshotWorkspaceRequestInput, "path"> & { method: "GET" }
+): ReturnType<typeof browserWorkspaceBinaryRequest> {
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  assertBrowserWorkspaceRequestRoom(snapshot, input);
+  const result = await browserWorkspaceBinaryRequest({
+    method: input.method,
+    path: input.path,
+    connectionId: snapshot.id,
+    workspaceScoped: true
+  });
+  assertBrowserWorkspaceRequestRoom(snapshot, input);
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return result;
+}
+
+async function assertBrowserArtifactBinaryMetadata(
+  value: { encoding?: string; mime_type?: string; revision?: { content_bytes?: number; content_hash?: string; mime_type?: string } },
+  content: { bytes: number[]; mimeType?: string; encoding?: string }
+): Promise<void> {
+  if (value.encoding !== "binary" || content.encoding !== "binary") {
+    throw new Error("workspace_artifact_binary_response_encoding_invalid");
+  }
+  const expectedMimeType = value.mime_type ?? value.revision?.mime_type;
+  if (!expectedMimeType || !content.mimeType || expectedMimeType.toLowerCase() !== content.mimeType.toLowerCase()) {
+    throw new Error("workspace_artifact_binary_response_mime_invalid");
+  }
+  if (value.revision?.content_bytes !== undefined && value.revision.content_bytes !== content.bytes.length) {
+    throw new Error("workspace_artifact_binary_response_size_invalid");
+  }
+  const expectedHash = value.revision?.content_hash;
+  if (!expectedHash || !/^[a-f0-9]{64}$/.test(expectedHash)) {
+    throw new Error("workspace_artifact_binary_response_hash_missing");
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(content.bytes)));
+  const actualHash = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (actualHash !== expectedHash) throw new Error("workspace_artifact_binary_response_hash_mismatch");
 }
 
 function sanitizeBrowserInteractionListResponse(
@@ -1335,6 +1465,21 @@ function sanitizeBrowserInteractionMutationResponse(
   return { request, ...(body.replayed === undefined ? {} : { replayed: body.replayed }) };
 }
 
+function sanitizeBrowserInteractionResultResponse(
+  value: unknown,
+  workspaceId: string,
+  roomId: string,
+  requestId: string
+): DesktopWorkspaceInteractionResult {
+  const body = publicRecord(value, "workspace_interaction_request_result");
+  const request = sanitizeBrowserInteractionRequest(body.request, workspaceId, roomId);
+  if (request.id !== requestId) throw new Error("workspace_interaction_request_result_scope_invalid");
+  const targetResult = body.target_result === undefined
+    ? undefined
+    : strictInteractionJsonValue(body.target_result, "target_result", 256 * 1024);
+  return { request, ...(targetResult === undefined ? {} : { targetResult }) };
+}
+
 function sanitizeBrowserInteractionRequest(
   value: unknown,
   workspaceId: string,
@@ -1354,6 +1499,7 @@ function sanitizeBrowserInteractionRequest(
     return {
       id: interactionRequiredId(interactionField(optionRecord, "id"), `options_${index}_id`),
       label: interactionRequiredText(interactionField(optionRecord, "label"), `options_${index}_label`, 2_000),
+      decision: interactionEnum(interactionField(optionRecord, "decision"), interactionDecisions, `options_${index}_decision`),
       ...(interactionOptionalText(interactionField(optionRecord, "description"), `options_${index}_description`, 20_000) ? { description: interactionOptionalText(interactionField(optionRecord, "description"), `options_${index}_description`, 20_000) } : {})
     };
   });
@@ -1550,6 +1696,22 @@ function strictInteractionJsonObject(value: unknown, field: string, maxBytes: nu
   }
 }
 
+function strictInteractionJsonValue(value: unknown, field: string, maxBytes: number): JsonValue {
+  if (!isInteractionJsonValue(value, 0, new WeakSet<object>())) throw new Error(`${field}_invalid`);
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value);
+  } catch {
+    throw new Error(`${field}_invalid`);
+  }
+  if (encoded.length > maxBytes) throw new Error(`${field}_invalid`);
+  try {
+    return JSON.parse(encoded) as JsonValue;
+  } catch {
+    throw new Error(`${field}_invalid`);
+  }
+}
+
 function isInteractionJsonObject(value: unknown): value is Record<string, JsonValue> {
   return isInteractionJsonObjectValue(value, 0, new WeakSet<object>());
 }
@@ -1575,48 +1737,58 @@ function isInteractionJsonValue(value: unknown, depth: number, seen: WeakSet<obj
 }
 
 async function workspaceRequest<T>(
-  method: string,
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+  suffix: string,
+  body?: unknown,
+  operationId?: string,
+  idempotencyKey?: string,
+  target?: BrowserWorkspaceTargetRef,
+  workspaceRoot: "/api/workspaces" | "/api/v1/workspaces" = "/api/workspaces",
+  requestRoomId?: string
+): Promise<T> {
+  const snapshot = await captureBrowserWorkspaceSnapshot(target);
+  return browserSnapshotWorkspaceRequest<T>(snapshot, {
+    method,
+    path: `${workspaceRoot}/${encodeURIComponent(snapshot.workspaceId)}${suffix}`,
+    ...(operationId ? { operationId } : {}),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    ...(body === undefined ? {} : { body }),
+    ...(requestRoomId === undefined ? {} : { requestRoomId })
+  });
+}
+
+async function workspaceInputRequest<T>(
+  input: unknown,
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   suffix: string,
   body?: unknown,
   operationId?: string,
   idempotencyKey?: string
 ): Promise<T> {
-  const connection = await loadBrowserWorkspaceConnection();
-  if (!connection) throw new Error("workspace_connection_required");
-  return browserWorkspaceRequest<T>({
-    method,
-    path: `/api/workspaces/${encodeURIComponent(connection.workspaceId)}${suffix}`,
-    workspaceScoped: true,
-    ...(operationId ? { operationId } : {}),
-    ...(idempotencyKey ? { idempotencyKey } : {}),
-    ...(body === undefined ? {} : { body })
-  });
+  return workspaceRequest<T>(method, suffix, body, operationId, idempotencyKey, browserTargetFromInput(input), "/api/workspaces", browserRequestRoomIdFromInput(input));
 }
 
-const browserDomainApiClient = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
-  return browserWorkspaceRequest<T>({
-    method: request.method,
-    path: request.path,
-    workspaceScoped: true,
-    ...(request.operationId ? { operationId: request.operationId } : {}),
-    ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
-    ...(request.body === undefined ? {} : { body: request.body })
-  });
-});
+async function workspaceV1InputRequest<T>(
+  input: unknown,
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+  suffix: string,
+  body?: unknown,
+  operationId?: string,
+  idempotencyKey?: string
+): Promise<T> {
+  return workspaceRequest<T>(method, suffix, body, operationId, idempotencyKey, browserTargetFromInput(input), "/api/v1/workspaces", browserRequestRoomIdFromInput(input));
+}
 
-function browserSnapshotDomainApiClient(snapshot: { id: string; workspaceId: string }): DomainApiClient {
+function browserSnapshotDomainApiClient(snapshot: BrowserWorkspaceSnapshot): DomainApiClient {
   return new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
     await assertBrowserWorkspaceSnapshot(snapshot);
-    const result = await browserWorkspaceRequest<T>({
+    const result = await browserSnapshotWorkspaceRequest<T>(snapshot, {
       method: request.method,
       path: request.path,
-      connectionId: snapshot.id,
-      workspaceScoped: true,
       ...(request.operationId ? { operationId: request.operationId } : {}),
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
       ...(request.body === undefined ? {} : { body: request.body })
     });
-    await assertBrowserWorkspaceSnapshot(snapshot);
     return result;
   });
 }
@@ -1627,17 +1799,134 @@ async function requireBrowserWorkspaceConnection(): Promise<NonNullable<Awaited<
   return connection;
 }
 
+function browserTargetFromInput(input: unknown): BrowserWorkspaceTargetRef | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  if (!("target" in value)) return undefined;
+  const target = value.target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) throw new Error("workspace_target_invalid");
+  const candidate = target as Record<string, unknown>;
+  if (typeof candidate.connectionId !== "string" || !browserWorkspaceOpaqueIdPattern.test(candidate.connectionId)
+    || typeof candidate.workspaceId !== "string" || !browserWorkspaceOpaqueIdPattern.test(candidate.workspaceId)) {
+    throw new Error("workspace_target_invalid");
+  }
+  const roomId = candidate.roomId;
+  const selectionGeneration = candidate.selectionGeneration;
+  if (roomId !== undefined && (typeof roomId !== "string" || !browserWorkspaceOpaqueIdPattern.test(roomId))) {
+    throw new Error("workspace_target_invalid");
+  }
+  if (selectionGeneration !== undefined && (typeof selectionGeneration !== "number" || !Number.isSafeInteger(selectionGeneration) || selectionGeneration < 0)) {
+    throw new Error("workspace_target_invalid");
+  }
+  const normalizedSelectionGeneration = selectionGeneration as number | undefined;
+  return {
+    connectionId: candidate.connectionId,
+    workspaceId: candidate.workspaceId,
+    ...(roomId === undefined ? {} : { roomId }),
+    ...(normalizedSelectionGeneration === undefined ? {} : { selectionGeneration: normalizedSelectionGeneration })
+  };
+}
+
+function browserRequestRoomIdFromInput(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  const candidate = value.roomId ?? value.room_id;
+  if (candidate === undefined || candidate === null || candidate === "") return undefined;
+  if (typeof candidate !== "string" || !browserWorkspaceOpaqueIdPattern.test(candidate)) {
+    throw new Error("workspace_request_room_invalid");
+  }
+  return candidate;
+}
+
+/**
+ * A Room-scoped request must agree with the renderer's current Room before it
+ * is signed.  This covers compatibility calls that do not carry a full
+ * target, while the Server remains the final authorization authority.
+ */
+function assertBrowserWorkspaceRequestRoom(
+  snapshot: BrowserWorkspaceSnapshot,
+  input: Pick<BrowserSnapshotWorkspaceRequestInput, "path" | "body" | "requestRoomId">
+): void {
+  const requestRoomIds = browserWorkspaceRequestRoomIds(input);
+  if (requestRoomIds.length > 1) throw new Error("workspace_request_room_ambiguous");
+  const requestRoomId = requestRoomIds[0];
+  if (!requestRoomId) return;
+  const activeRoomId = currentActiveWorkspaceRoomId();
+  if (activeRoomId !== undefined && activeRoomId !== requestRoomId) throw new Error("room_navigation_changed");
+  if (snapshot.roomId !== undefined && snapshot.roomId !== requestRoomId) throw new Error("room_navigation_changed");
+}
+
+function browserWorkspaceRequestRoomIds(input: Pick<BrowserSnapshotWorkspaceRequestInput, "path" | "body" | "requestRoomId">): string[] {
+  const roomIds = new Set<string>();
+  const add = (value: unknown): void => {
+    if (value === undefined || value === null || value === "") return;
+    if (typeof value !== "string" || !browserWorkspaceOpaqueIdPattern.test(value)) throw new Error("workspace_request_room_invalid");
+    roomIds.add(value);
+  };
+  add(input.requestRoomId);
+
+  const url = new URL(input.path, "https://workspace.invalid");
+  add(url.searchParams.get("room_id"));
+  const roomPath = /\/rooms\/([^/]+)/.exec(url.pathname)?.[1];
+  if (roomPath) {
+    try {
+      add(decodeURIComponent(roomPath));
+    } catch {
+      throw new Error("workspace_request_path_invalid");
+    }
+  }
+  browserCollectWorkspaceRequestRoomIds(input.body, roomIds, add, 0, new WeakSet<object>());
+  return [...roomIds];
+}
+
+function browserCollectWorkspaceRequestRoomIds(
+  value: unknown,
+  roomIds: Set<string>,
+  add: (value: unknown) => void,
+  depth: number,
+  seen: WeakSet<object>
+): void {
+  if (!value || typeof value !== "object" || depth > 3 || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) browserCollectWorkspaceRequestRoomIds(item, roomIds, add, depth + 1, seen);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  add(record.room_id);
+  add(record.roomId);
+  for (const key of ["context", "input", "request", "body"] as const) {
+    browserCollectWorkspaceRequestRoomIds(record[key], roomIds, add, depth + 1, seen);
+  }
+}
+
+async function captureBrowserWorkspaceSnapshot(target?: BrowserWorkspaceTargetRef): Promise<BrowserWorkspaceSnapshot> {
+  const connection = await requireBrowserWorkspaceConnection();
+  if (target && (target.connectionId !== connection.id || target.workspaceId !== connection.workspaceId)) {
+    throw new Error("workspace_navigation_changed");
+  }
+  const activeRoomId = currentActiveWorkspaceRoomId();
+  if (target?.roomId !== undefined && activeRoomId !== undefined && target.roomId !== activeRoomId) {
+    throw new Error("room_navigation_changed");
+  }
+  return {
+    id: connection.id,
+    workspaceId: connection.workspaceId,
+    ...(target?.roomId ?? activeRoomId ? { roomId: target?.roomId ?? activeRoomId } : {}),
+    ...(target?.selectionGeneration === undefined ? {} : { selectionGeneration: target.selectionGeneration })
+  };
+}
+
 /** Discard a response that completed after the active Workspace changed. */
-async function assertBrowserWorkspaceSnapshot(connection: { id: string; workspaceId: string }): Promise<void> {
+async function assertBrowserWorkspaceSnapshot(connection: BrowserWorkspaceSnapshot): Promise<void> {
   const current = await loadBrowserWorkspaceConnection();
   if (!current || current.id !== connection.id || current.workspaceId !== connection.workspaceId) {
     throw new Error("workspace_navigation_changed");
   }
-}
-
-function assertBrowserAgentTarget(connection: { id: string; workspaceId: string }, target?: { connectionId: string; workspaceId: string }): void {
-  if (!target) return;
-  if (target.connectionId !== connection.id || target.workspaceId !== connection.workspaceId) throw new Error("workspace_navigation_changed");
+  const activeRoomId = currentActiveWorkspaceRoomId();
+  if (connection.roomId !== undefined && activeRoomId !== undefined && connection.roomId !== activeRoomId) {
+    throw new Error("room_navigation_changed");
+  }
 }
 
 function toDesktopWorkspaceRoom(room: PublicRoomRecord): DesktopWorkspaceRoom {
@@ -1766,6 +2055,51 @@ function requirePublicId(value: unknown, field: string): string {
 function publicRecord(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${field}_response_invalid`);
   return value as Record<string, unknown>;
+}
+
+function workspaceOperationHistoryRecordType(value: unknown): WorkspaceOperationHistoryRecordType {
+  if (typeof value !== "string" || !workspaceOperationHistoryRecordTypes.includes(value as WorkspaceOperationHistoryRecordType)) {
+    throw new Error("workspace_operation_history_record_type_invalid");
+  }
+  return value as WorkspaceOperationHistoryRecordType;
+}
+
+function sanitizeWorkspaceOperationHistoryResponse(
+  value: unknown,
+  input: { roomId: string; target?: NativeWorkspaceTarget },
+  recordType: WorkspaceOperationHistoryRecordType
+): { records: WorkspaceOperationHistoryRecord[] } {
+  const body = publicRecord(value, "workspace_operation_history");
+  const rows = publicArray(body, "records", "workspace_operation_history");
+  return {
+    records: rows.map((value, index) => {
+      const field = `workspace_operation_history_${index}`;
+      const record = publicRecord(value, field);
+      const workspaceId = publicString(record, "workspaceId", field);
+      const roomId = publicString(record, "roomId", field);
+      const actualRecordType = workspaceOperationHistoryRecordType(record.recordType);
+      const id = publicString(record, "id", field);
+      const version = publicNumber(record, "version", field);
+      const payload = record.payload;
+      if (!isInteractionJsonObject(payload)
+        || roomId !== input.roomId
+        || actualRecordType !== recordType
+        || (input.target?.workspaceId !== undefined && workspaceId !== input.target.workspaceId)) {
+        throw new Error("workspace_operation_history_response_scope_invalid");
+      }
+      return {
+        workspaceId,
+        roomId,
+        recordType: actualRecordType,
+        id,
+        version,
+        payload,
+        ...(optionalPublicString(record, "contentHash") ? { contentHash: record.contentHash as string } : {}),
+        ...(optionalPublicString(record, "createdAt") ? { createdAt: record.createdAt as string } : {}),
+        ...(optionalPublicString(record, "updatedAt") ? { updatedAt: record.updatedAt as string } : {})
+      };
+    })
+  };
 }
 
 function publicString(record: Record<string, unknown>, key: string, field = key): string {
@@ -2122,6 +2456,11 @@ function toDesktopPublicEventPage(value: unknown, roomId?: string): DesktopWorks
   };
 }
 
-async function workspaceSurfaceRequest<T = unknown>(suffix: string, roomId: string, operation: SurfaceOperation): Promise<SurfaceOperationResultEnvelope<T>> {
-  return workspaceRequest<SurfaceOperationResultEnvelope<T>>("POST", suffix, { room_id: roomId, operation }, operation.id);
+async function workspaceSurfaceRequest<T = unknown>(
+  suffix: string,
+  roomId: string,
+  operation: SurfaceOperation,
+  target?: BrowserWorkspaceTargetRef
+): Promise<SurfaceOperationResultEnvelope<T>> {
+  return workspaceRequest<SurfaceOperationResultEnvelope<T>>("POST", suffix, { room_id: roomId, operation }, operation.id, operation.id, target);
 }

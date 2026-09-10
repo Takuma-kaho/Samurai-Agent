@@ -8,9 +8,26 @@ import {
   sanitizeWorkspaceGeneratedSurfaceMutationInput,
   sanitizeWorkspaceInteractionRequestCancelInput,
   sanitizeWorkspaceInteractionRequestListInput,
+  sanitizeWorkspaceInteractionRequestResultInput,
   sanitizeWorkspaceInteractionRequestRespondInput,
+  sanitizeWorkspaceOperationHistoryInput,
   sanitizeWorkspaceRoomWorkResourceRefs
 } from "./preload-sanitizers";
+
+describe("Desktop preload operation-history sanitation", () => {
+  it("keeps only the Room, selector, and target", () => {
+    expect(sanitizeWorkspaceOperationHistoryInput({
+      roomId: "room_product",
+      recordType: "domain_operation",
+      secret: "nope",
+      target: { connectionId: "connection_local", workspaceId: "workspace_product", roomId: "room_product" }
+    })).toEqual({
+      roomId: "room_product",
+      recordType: "domain_operation",
+      target: { connectionId: "connection_local", workspaceId: "workspace_product", roomId: "room_product" }
+    });
+  });
+});
 
 describe("Desktop preload chat-session sanitation", () => {
   it("preserves opaque Room IDs and UUID operation IDs", () => {
@@ -77,6 +94,29 @@ describe("Desktop preload chat-session sanitation", () => {
       artifactId: "artifact_1",
       operationId: "artifact_revise_1",
       content: ""
+    });
+
+    expect(sanitizeWorkspaceArtifactRevisionInput({
+      roomId: "room_1",
+      artifactId: "artifact_1",
+      operationId: "artifact_target_1",
+      content: "更新",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    })).toMatchObject({
+      roomId: "room_1",
+      artifactId: "artifact_1",
+      operationId: "artifact_target_1",
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    });
+
+    expect(sanitizeWorkspaceArtifactRevisionInput({
+      roomId: "room_1",
+      artifactId: "artifact_1",
+      operationId: "artifact_target_room",
+      content: "更新",
+      target: { connectionId: "server_a", workspaceId: "workspace_a", roomId: "room_1", selectionGeneration: 4 }
+    })).toMatchObject({
+      target: { connectionId: "server_a", workspaceId: "workspace_a", roomId: "room_1", selectionGeneration: 4 }
     });
   });
 
@@ -175,5 +215,21 @@ describe("Desktop preload durable Interaction Request sanitation", () => {
       operationId: "op_1",
       values
     })).toThrow("workspace_interaction_request_values_invalid");
+  });
+
+  it("keeps the exact Room/request selector for a durable result read", () => {
+    expect(sanitizeWorkspaceInteractionRequestResultInput({
+      roomId: " room_1 ",
+      requestId: "interaction_1",
+      operationId: "surface_operation_1",
+      workspaceId: "must-not-cross",
+      privateKey: "must-not-cross",
+      target: { connectionId: "connection_1", workspaceId: "workspace_1", roomId: "room_1" }
+    })).toEqual({
+      roomId: "room_1",
+      requestId: "interaction_1",
+      operationId: "surface_operation_1",
+      target: { connectionId: "connection_1", workspaceId: "workspace_1", roomId: "room_1" }
+    });
   });
 });

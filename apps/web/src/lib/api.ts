@@ -41,6 +41,7 @@ import type {
   SurfaceRendererCapabilities
 } from "@samurai-agent/ui-protocol";
 import { browserWorkspaceBridge } from "./workspace-browser-bridge";
+import { updateActiveWorkspaceRoomId, currentActiveWorkspaceRoomId } from "./workspace-navigation-state";
 
 export interface SessionDetail {
   session: SessionRecord;
@@ -140,7 +141,8 @@ export interface GeneratedSurfaceBundleDetail {
     html: string;
     css?: string;
     script?: string;
-    assets?: Array<{ path: string; content_base64: string; mime_type: string }>;
+    /** The Server always returns the complete asset set for this revision. */
+    assets: Array<{ path: string; content_base64: string; mime_type: string }>;
   };
   csp: string;
 }
@@ -192,6 +194,7 @@ export type DesktopWorkspaceInteractionStatus =
 export interface DesktopWorkspaceInteractionOption {
   id: string;
   label: string;
+  decision: "approve" | "deny" | "submit_input";
   description?: string;
 }
 
@@ -259,6 +262,16 @@ export interface DesktopWorkspaceInteractionRequest {
 export interface DesktopWorkspaceInteractionMutationResult {
   request: DesktopWorkspaceInteractionRequest;
   replayed?: boolean;
+}
+
+/**
+ * Read-only completion projection for an approval-backed Generated Surface
+ * action. The result is resolved by the Server from its durable interaction
+ * record; the renderer never supplies or replays the target itself.
+ */
+export interface DesktopWorkspaceInteractionResult {
+  request: DesktopWorkspaceInteractionRequest;
+  targetResult?: JsonValue;
 }
 
 export interface SkillOptimizationDetail {
@@ -371,6 +384,8 @@ export interface SearchResult {
   title: string;
   summary: string;
   session_id?: string;
+  /** Server-resolved Room Work target for legacy Session/message hits. */
+  work_id?: string;
   operation_id?: string;
 }
 
@@ -496,6 +511,10 @@ export interface DesktopWorkspaceConnection {
 export interface DesktopWorkspaceTarget {
   connectionId: string;
   workspaceId: string;
+  /** Optional Room scope used to reject stale Room operations. */
+  roomId?: string;
+  /** Optional navigation generation from Desktop Main. */
+  selectionGeneration?: number;
 }
 
 export type DesktopWorkspaceConnectionAvailability = "unknown" | "connected" | "reconnecting" | "offline";
@@ -999,6 +1018,7 @@ declare global {
        */
       selectWorkspaceCandidate?: (input: string | DesktopWorkspaceTarget) => Promise<DesktopWorkspaceConnectionState | unknown>;
       selectWorkspaceTarget?: (target: DesktopWorkspaceTarget) => Promise<DesktopWorkspaceConnectionState | unknown>;
+      selectRoomCandidate?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceConnectionState | unknown>;
       importActiveWorkspaceIdentityFromClipboard?: () => Promise<DesktopWorkspaceConnectionState>;
       registerWorkspaceServerAccount?: (displayName?: string) => Promise<unknown>;
       getWorkspaceServerStatus?: (target?: Partial<DesktopWorkspaceTarget>) => Promise<DesktopWorkspaceServerStatus | unknown>;
@@ -1036,9 +1056,9 @@ declare global {
       moveOrganizationWorkspace?: (input: Record<string, unknown>) => Promise<unknown>;
       exportOrganizationWorkspaceBundle?: (input: Record<string, unknown>) => Promise<unknown>;
       restoreOrganizationBundle?: (input: Record<string, unknown>) => Promise<unknown>;
-      getWorkspaceSettings?: () => Promise<SettingsRecord>;
-      patchWorkspaceSettings?: (input: { patch: Partial<Omit<SettingsRecord, "updated_at">>; operationId: string }) => Promise<{ settings: SettingsRecord; replayed?: boolean }>;
-      listWorkspaceRooms?: () => Promise<{ rooms: DesktopWorkspaceRoom[] }>;
+      getWorkspaceSettings?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<SettingsRecord>;
+      patchWorkspaceSettings?: (input: { patch: Partial<Omit<SettingsRecord, "updated_at">>; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ settings: SettingsRecord; replayed?: boolean }>;
+      listWorkspaceRooms?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<{ rooms: DesktopWorkspaceRoom[] }>;
       /** Authorized minimal Agent directory; instructions and credentials never cross this seam. */
       listWorkspaceAgents?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<{ agents: DesktopWorkspaceAgent[] }>;
       viewWorkspaceAgent?: (input: { agentId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgent>;
@@ -1049,26 +1069,26 @@ declare global {
       setWorkspaceRoomAgentPermission?: (input: { roomId: string; agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomAgentMember & { replayed?: boolean }>;
       removeWorkspaceRoomAgent?: (input: { roomId: string; agentId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomAgentMember & { replayed?: boolean }>;
       /** Room work API: the renderer carries Room/Work IDs, never Session IDs. */
-      listWorkspaceRoomWorks?: (input: { roomId: string; status?: DesktopWorkspaceRoomWorkStatus; cursor?: string; limit?: number }) => Promise<DesktopWorkspaceRoomWorkListResult>;
-      getWorkspaceRoomWork?: (input: { roomId: string; workId: string }) => Promise<DesktopWorkspaceRoomWorkView>;
-      createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; agentId?: string; operationId: string }) => Promise<DesktopWorkspaceRoomWork & { replayed?: boolean }>;
-      replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
-      createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkComment & { replayed?: boolean }>;
-      applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; assigneeId?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
-      reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction?: "like"; enabled?: boolean; expectedVersion?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkReaction & { replayed?: boolean }>;
-      stopWorkspaceRoomWork?: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>;
-      stopWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>;
-      reassignWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>;
+      listWorkspaceRoomWorks?: (input: { roomId: string; status?: DesktopWorkspaceRoomWorkStatus; cursor?: string; limit?: number; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkListResult>;
+      getWorkspaceRoomWork?: (input: { roomId: string; workId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkView>;
+      createWorkspaceRoomWork?: (input: { roomId: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; agentId?: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWork & { replayed?: boolean }>;
+      replyWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId?: string; instruction?: string; attachments?: ResourceRef[]; resourceRefs?: DesktopWorkspaceRoomWorkResourceRefInput[]; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
+      createWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; body?: string; attachments?: ResourceRef[]; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkComment & { replayed?: boolean }>;
+      applyWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; commentVersion: number; assigneeId?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkInstruction & { replayed?: boolean }>;
+      reactWorkspaceRoomWorkComment?: (input: { roomId: string; workId: string; commentId: string; reaction?: "like"; enabled?: boolean; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkReaction & { replayed?: boolean }>;
+      stopWorkspaceRoomWork?: (input: { roomId: string; workId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>;
+      stopWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; reason?: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkControl & { replayed?: boolean }>;
+      reassignWorkspaceRoomWork?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>;
       /** Name used by the Native Room work adapter. */
-      reassignWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string }) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>;
+      reassignWorkspaceRoomWorkAssignee?: (input: { roomId: string; workId: string; assigneeId: string; agentId: string; expectedVersion?: number; expectedGeneration?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed?: boolean }>;
       setWorkspaceRoomDefaultAgent?: (input: { roomId: string; agentId: string; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceRoomDefaultAgent & { replayed?: boolean }>;
       openWorkspaceAgentDm?: (input: { agentId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceAgentDm & { replayed?: boolean }>;
-      listWorkspaceEvents?: (input: { roomId?: string; afterCursor?: string; limit?: number }) => Promise<DesktopWorkspacePublicEventPage>;
+      listWorkspaceEvents?: (input: { roomId?: string; afterCursor?: string; limit?: number; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspacePublicEventPage>;
       listWorkspaceAgentBackends?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<AgentBackendAvailability[]>;
       getWorkspaceSurfaceContract?: (source?: DomainCommandInputSource) => Promise<SurfaceContractPayload>;
-      listWorkspaceChatSessions?: () => Promise<SessionRecord[]>;
-      createWorkspaceChatSession?: (input: { roomId: string; title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale; operationId: string }) => Promise<SessionRecord>;
-      getWorkspaceChatSession?: (input: { sessionId: string }) => Promise<SessionDetail>;
+      listWorkspaceChatSessions?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<SessionRecord[]>;
+      createWorkspaceChatSession?: (input: { roomId: string; title?: string; uiLocale?: SupportedLocale; outputLocale?: SupportedLocale; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<SessionRecord>;
+      getWorkspaceChatSession?: (input: { sessionId: string; target?: DesktopWorkspaceTarget }) => Promise<SessionDetail>;
       sendWorkspaceChatMessage?: (input: {
         sessionId: string;
         content: string;
@@ -1078,6 +1098,7 @@ declare global {
         backendId?: string;
         metadata?: Record<string, JsonValue>;
         attachments?: ResourceRef[];
+        target?: DesktopWorkspaceTarget;
       }) => Promise<ChatTurnResult | ChatSurfaceOperationResult>;
       writeWorkspaceAttachment?: (input: {
         roomId: string;
@@ -1087,9 +1108,9 @@ declare global {
         operationId: string;
         target?: DesktopWorkspaceTarget;
       }) => Promise<WorkspaceAttachmentUploadResult>;
-      listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
-      getWorkspaceCompletionResource?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceDetail>;
-      getWorkspaceCompletionResourceBody?: (input: { resourceId: string }) => Promise<WorkspaceCompletionResourceBody>;
+      listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean; cursor?: string; target?: DesktopWorkspaceTarget }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
+      getWorkspaceCompletionResource?: (input: { resourceId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceDetail>;
+      getWorkspaceCompletionResourceBody?: (input: { resourceId: string; version?: number; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceBody>;
       createWorkspaceCompletionResource?: (input: {
         scopeKind: "workspace" | "room";
         roomId?: string;
@@ -1100,6 +1121,7 @@ declare global {
         metadata?: Record<string, JsonValue>;
         reason: string;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
       updateWorkspaceCompletionResource?: (input: {
         resourceId: string;
@@ -1113,60 +1135,77 @@ declare global {
         reason: string;
         expectedVersion: number;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
-      setWorkspaceCompletionResourceFixed?: (input: { resourceId: string; fixed: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
-      archiveWorkspaceCompletionResource?: (input: { resourceId: string; archived: boolean; expectedVersion: number; reason: string; operationId: string }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
-      searchWorkspaceCompletionKnowledge?: (input: { roomId: string; query: string; limit?: number }) => Promise<{ resources: Array<WorkspaceCompletionResourceView & { rank?: number }>; next_cursor?: string }>;
-      listWorkspaceCompletionSkills?: (input: { roomId: string }) => Promise<{ skills: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
-      getWorkspaceCompletionSkill?: (input: { resourceId: string }) => Promise<{ resource: WorkspaceCompletionResourceView; version: WorkspaceCompletionResourceDetail["current_version"]; content: string; support_files?: Array<Record<string, JsonValue>> }>;
-      listWorkspaceSkillOptimizations?: (input: { skillId?: string; roomId?: string; limit?: number }) => Promise<SkillOptimizationRun[]>;
-      getWorkspaceSkillOptimization?: (input: { runId: string }) => Promise<SkillOptimizationDetail>;
-      startWorkspaceSkillOptimization?: (input: { skillId: string; roomId?: string; objective?: string; goldenExamples?: JsonValue[]; syntheticExamples?: JsonValue[]; operationId: string }) => Promise<{ run: SkillOptimizationRun; dataset: SkillOptimizationDataset; objective: ObjectiveRecord; work_item: WorkItemRecord }>;
-      runWorkspaceSkillOptimizationAction?: (input: { runId: string; action: "cancel" | "promote" | "reject" | "rollback"; candidateId?: string; promotionId?: string; snapshotId?: string; operationId: string }) => Promise<Record<string, unknown>>;
-      listWorkspaceKnowledgeWiki?: (input: { roomId: string; includeArchived?: boolean }) => Promise<{ pages: WorkspaceKnowledgeWikiPage[] }>;
-      getWorkspaceKnowledgeWiki?: (input: { wikiId: string }) => Promise<WorkspaceKnowledgeWikiPage>;
-      createWorkspaceKnowledgeWiki?: (input: { roomId: string; title: string; content: string; slug?: string; tags?: string[]; contentLocale?: SupportedLocale; knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule"; reason: string; operationId: string }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
-      updateWorkspaceKnowledgeWiki?: (input: { wikiId: string; title?: string; content?: string; tags?: string[]; contentLocale?: SupportedLocale; reason: string; operationId: string }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
-      setWorkspaceKnowledgeWikiState?: (input: { wikiId: string; state: "accept" | "reject" | "archive"; reason: string; operationId: string }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
-      reindexWorkspaceKnowledgeWiki?: (input: { roomId: string }) => Promise<{ active: number; total: number; links: number }>;
-      getWorkspaceKnowledgeWikiGraph?: (input: { roomId: string; query?: string }) => Promise<Record<string, unknown>>;
-      getWorkspaceKnowledgeWikiLint?: (input: { roomId: string }) => Promise<Record<string, unknown>>;
-      getWorkspaceKnowledgeWikiBacklinks?: (input: { roomId: string; wikiId: string }) => Promise<Array<{ from_wiki_id: string; label: string }>>;
-      listWorkspaceKnowledgeMemory?: (input: { roomId: string; includeArchived?: boolean }) => Promise<{ memories: WorkspaceKnowledgeMemoryPage[] }>;
-      getWorkspaceKnowledgeMemory?: (input: { memoryId: string }) => Promise<WorkspaceKnowledgeMemoryPage>;
-      searchWorkspaceKnowledgeMemory?: (input: { roomId: string; query: string; limit?: number }) => Promise<{ memories: Array<WorkspaceKnowledgeMemoryPage & { rank?: number }> }>;
-      archiveWorkspaceKnowledgeMemory?: (input: { memoryId: string; reason: string; operationId: string }) => Promise<WorkspaceKnowledgeMemoryArchivePayload>;
-      listWorkspaceCollectionSchemas?: (input: { roomId: string }) => Promise<{ schemas: Array<CollectionSchema & { file_path: string; resource_version: number; room_id: string }> }>;
-      getWorkspaceCollectionSchema?: (input: { roomId: string; collectionId: string }) => Promise<{ schema: CollectionSchema & { file_path: string; resource_version: number; room_id: string } }>;
-      saveWorkspaceCollectionSchema?: (input: { roomId: string; schema: CollectionSchema; expectedVersion?: number; operationId: string }) => Promise<{ schema: CollectionSchema & { file_path: string; resource_version: number; room_id: string }; replayed?: boolean }>;
-      listWorkspaceCollectionRecords?: (input: { roomId: string; collectionId: string }) => Promise<{ records: Array<CollectionRecord & { file_path: string }> }>;
-      createWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; data: Record<string, JsonValue>; operationId: string }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
-      patchWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; patchId?: string; changes: Record<string, JsonValue>; expectedVersion?: number; operationId: string }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
-      deleteWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; expectedVersion: number; operationId: string }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
-      listWorkspaceCollectionNotes?: (input: { roomId: string; collectionId: string }) => Promise<{ notes: Array<{ file_path: string; content: string; collection_id: string; role: "context_only" }> }>;
-      reindexWorkspaceCollections?: (input: { roomId: string }) => Promise<Record<string, unknown>>;
-      runWorkspaceCollectionSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
-      listWorkspaceArtifacts?: (input: { roomId: string }) => Promise<{ artifacts: ArtifactRecord[] }>;
-      getWorkspaceArtifact?: (input: { roomId: string; artifactId: string }) => Promise<ArtifactDetail>;
-      createWorkspaceArtifact?: (input: { roomId: string; title: string; content: string | Uint8Array | Record<string, JsonValue> | JsonValue[]; kind?: ArtifactRecord["kind"]; locale?: SupportedLocale; sourceLocales?: SupportedLocale[]; metadata?: Record<string, JsonValue>; mimeType?: string; encoding?: "utf8" | "binary"; operationId: string }) => Promise<ArtifactMutationResult>;
-      runWorkspaceArtifactSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation }) => Promise<SurfaceOperationResultEnvelope>;
-      listWorkspaceArtifactRevisions?: (input: { roomId: string; artifactId: string }) => Promise<ArtifactRevisionRecord[]>;
-      getWorkspaceArtifactRevision?: (input: { roomId: string; artifactId: string; revisionId: string }) => Promise<ArtifactRevisionDetail>;
-      reviseWorkspaceArtifact?: (input: { roomId: string; artifactId: string; content: string | Uint8Array; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; mimeType?: string; encoding?: "utf8" | "binary"; operationId: string }) => Promise<ArtifactMutationResult>;
-      restoreWorkspaceArtifactRevision?: (input: { roomId: string; artifactId: string; revisionId: string; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; operationId: string }) => Promise<ArtifactMutationResult>;
-      listWorkspaceGeneratedSurfaces?: (input: { roomId: string }) => Promise<GeneratedSurfaceDefinition[]>;
-      getWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string }) => Promise<GeneratedSurfaceDetail>;
-      queryWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string }) => Promise<GeneratedSurfaceDetail>;
-      getWorkspaceGeneratedSurfaceBundle?: (input: { roomId: string; surfaceId: string; revisionId: string }) => Promise<GeneratedSurfaceBundleDetail>;
-      createWorkspaceGeneratedSurface?: (input: { roomId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId: string }) => Promise<GeneratedSurfaceMutationResult>;
-      reviseWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId: string }) => Promise<GeneratedSurfaceMutationResult>;
-      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; actionPayload?: Record<string, JsonValue>; operationId: string }) => Promise<Record<string, unknown>>;
-      runWorkspaceGeneratedSurfaceState?: (input: { roomId: string; surfaceId: string; action: "pin" | "unpin" | "archive"; interactionId?: string; messageId?: string; operationId: string }) => Promise<GeneratedSurfaceDefinition>;
-      exportWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; revisionId?: string; format: "html" | "zip" }) => Promise<GeneratedSurfaceExportPayload>;
-      listWorkspaceInteractionRequests?: (input: { roomId: string; includeResolved?: boolean }) => Promise<{ requests: DesktopWorkspaceInteractionRequest[] }>;
-      respondWorkspaceInteractionRequest?: (input: { roomId: string; requestId: string; expectedVersion: number; optionId: string; values?: Record<string, JsonValue>; operationId: string }) => Promise<DesktopWorkspaceInteractionMutationResult>;
-      cancelWorkspaceInteractionRequest?: (input: { roomId: string; requestId: string; expectedVersion: number; operationId: string }) => Promise<DesktopWorkspaceInteractionMutationResult>;
-      listWorkspaceAutomationJobs?: (input: { roomId?: string }) => Promise<{ jobs: AutomationJobRecord[] }>;
+      setWorkspaceCompletionResourceFixed?: (input: { resourceId: string; fixed: boolean; expectedVersion: number; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      archiveWorkspaceCompletionResource?: (input: { resourceId: string; archived: boolean; expectedVersion: number; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      searchWorkspaceCompletionKnowledge?: (input: { roomId: string; query: string; limit?: number; cursor?: string; target?: DesktopWorkspaceTarget }) => Promise<{ resources: Array<WorkspaceCompletionResourceView & { rank?: number }>; next_cursor?: string }>;
+      listWorkspaceCompletionSkills?: (input: { roomId: string; cursor?: string; includeArchived?: boolean; target?: DesktopWorkspaceTarget }) => Promise<{ skills: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
+      getWorkspaceCompletionSkill?: (input: { resourceId: string; version?: number; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; version: WorkspaceCompletionResourceDetail["current_version"]; content: string; support_files?: Array<Record<string, JsonValue>> }>;
+      listWorkspaceSkillOptimizations?: (input: { skillId?: string; roomId?: string; limit?: number; target?: DesktopWorkspaceTarget }) => Promise<SkillOptimizationRun[]>;
+      getWorkspaceSkillOptimization?: (input: { runId: string; target?: DesktopWorkspaceTarget }) => Promise<SkillOptimizationDetail>;
+      startWorkspaceSkillOptimization?: (input: { skillId: string; roomId?: string; objective?: string; goldenExamples?: JsonValue[]; syntheticExamples?: JsonValue[]; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ run: SkillOptimizationRun; dataset: SkillOptimizationDataset; objective: ObjectiveRecord; work_item: WorkItemRecord }>;
+      runWorkspaceSkillOptimizationAction?: (input: { runId: string; action: "cancel" | "promote" | "reject" | "rollback"; candidateId?: string; promotionId?: string; snapshotId?: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<Record<string, unknown>>;
+      listWorkspaceKnowledgeWiki?: (input: { roomId: string; includeArchived?: boolean; target?: DesktopWorkspaceTarget }) => Promise<{ pages: WorkspaceKnowledgeWikiPage[] }>;
+      getWorkspaceKnowledgeWiki?: (input: { wikiId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceKnowledgeWikiPage>;
+      createWorkspaceKnowledgeWiki?: (input: { roomId: string; title: string; content: string; slug?: string; tags?: string[]; contentLocale?: SupportedLocale; knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule"; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
+      updateWorkspaceKnowledgeWiki?: (input: { wikiId: string; title?: string; content?: string; tags?: string[]; contentLocale?: SupportedLocale; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
+      setWorkspaceKnowledgeWikiState?: (input: { wikiId: string; state: "accept" | "reject" | "archive"; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ wiki: WorkspaceKnowledgeWikiPage; replayed?: boolean }>;
+      reindexWorkspaceKnowledgeWiki?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<{ active: number; total: number; links: number }>;
+      getWorkspaceKnowledgeWikiGraph?: (input: { roomId: string; query?: string; target?: DesktopWorkspaceTarget }) => Promise<Record<string, unknown>>;
+      getWorkspaceKnowledgeWikiLint?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<Record<string, unknown>>;
+      getWorkspaceKnowledgeWikiBacklinks?: (input: { roomId: string; wikiId: string; target?: DesktopWorkspaceTarget }) => Promise<Array<{ from_wiki_id: string; label: string }>>;
+      listWorkspaceKnowledgeMemory?: (input: { roomId: string; includeArchived?: boolean; target?: DesktopWorkspaceTarget }) => Promise<{ memories: WorkspaceKnowledgeMemoryPage[] }>;
+      getWorkspaceKnowledgeMemory?: (input: { memoryId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceKnowledgeMemoryPage>;
+      searchWorkspaceKnowledgeMemory?: (input: { roomId: string; query: string; limit?: number; target?: DesktopWorkspaceTarget }) => Promise<{ memories: Array<WorkspaceKnowledgeMemoryPage & { rank?: number }> }>;
+      archiveWorkspaceKnowledgeMemory?: (input: { memoryId: string; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceKnowledgeMemoryArchivePayload>;
+      listWorkspaceCollectionSchemas?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<{ schemas: Array<CollectionSchema & { file_path: string; resource_version: number; room_id: string }> }>;
+      getWorkspaceCollectionSchema?: (input: { roomId: string; collectionId: string; target?: DesktopWorkspaceTarget }) => Promise<{ schema: CollectionSchema & { file_path: string; resource_version: number; room_id: string } }>;
+      saveWorkspaceCollectionSchema?: (input: { roomId: string; schema: CollectionSchema; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ schema: CollectionSchema & { file_path: string; resource_version: number; room_id: string }; replayed?: boolean }>;
+      listWorkspaceCollectionRecords?: (input: { roomId: string; collectionId: string; target?: DesktopWorkspaceTarget }) => Promise<{ records: Array<CollectionRecord & { file_path: string }> }>;
+      createWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; data: Record<string, JsonValue>; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
+      patchWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; patchId?: string; changes: Record<string, JsonValue>; expectedVersion?: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
+      deleteWorkspaceCollectionRecord?: (input: { roomId: string; collectionId: string; recordId: string; expectedVersion: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ record: CollectionRecord & { file_path: string }; replayed?: boolean }>;
+      listWorkspaceCollectionNotes?: (input: { roomId: string; collectionId: string; target?: DesktopWorkspaceTarget }) => Promise<{ notes: Array<{ file_path: string; content: string; collection_id: string; role: "context_only" }> }>;
+      reindexWorkspaceCollections?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<Record<string, unknown>>;
+      runWorkspaceCollectionSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation; target?: DesktopWorkspaceTarget }) => Promise<SurfaceOperationResultEnvelope>;
+      listWorkspaceArtifacts?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<{ artifacts: ArtifactRecord[] }>;
+      getWorkspaceArtifact?: (input: { roomId: string; artifactId: string; target?: DesktopWorkspaceTarget }) => Promise<ArtifactDetail>;
+      createWorkspaceArtifact?: (input: { roomId: string; title: string; content: string | Uint8Array | Record<string, JsonValue> | JsonValue[]; kind?: ArtifactRecord["kind"]; locale?: SupportedLocale; sourceLocales?: SupportedLocale[]; metadata?: Record<string, JsonValue>; mimeType?: string; encoding?: "utf8" | "binary"; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<ArtifactMutationResult>;
+      runWorkspaceArtifactSurfaceOperation?: (input: { roomId: string; operation: SurfaceOperation; target?: DesktopWorkspaceTarget }) => Promise<SurfaceOperationResultEnvelope>;
+      listWorkspaceArtifactRevisions?: (input: { roomId: string; artifactId: string; target?: DesktopWorkspaceTarget }) => Promise<ArtifactRevisionRecord[]>;
+      getWorkspaceArtifactRevision?: (input: { roomId: string; artifactId: string; revisionId: string; target?: DesktopWorkspaceTarget }) => Promise<ArtifactRevisionDetail>;
+      reviseWorkspaceArtifact?: (input: { roomId: string; artifactId: string; content: string | Uint8Array; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; mimeType?: string; encoding?: "utf8" | "binary"; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<ArtifactMutationResult>;
+      restoreWorkspaceArtifactRevision?: (input: { roomId: string; artifactId: string; revisionId: string; baseRevisionId?: string; expectedRevision?: number; changeSummary?: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<ArtifactMutationResult>;
+      listWorkspaceGeneratedSurfaces?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceDefinition[]>;
+      getWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceDetail>;
+      queryWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceDetail>;
+      getWorkspaceGeneratedSurfaceBundle?: (input: { roomId: string; surfaceId: string; revisionId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceBundleDetail>;
+      createWorkspaceGeneratedSurface?: (input: { roomId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceMutationResult>;
+      reviseWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; bundle: GeneratedSurfaceWriteBundle; request: GeneratedSurfaceWriteRequest; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceMutationResult>;
+      runWorkspaceGeneratedSurfaceAction?: (input: { roomId: string; surfaceId: string; actionId: string; revisionId?: string; interactionId?: string; messageId?: string; actionPayload?: Record<string, JsonValue>; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<Record<string, unknown>>;
+      runWorkspaceGeneratedSurfaceState?: (input: { roomId: string; surfaceId: string; action: "pin" | "unpin" | "archive"; interactionId?: string; messageId?: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceDefinition>;
+      exportWorkspaceGeneratedSurface?: (input: { roomId: string; surfaceId: string; revisionId?: string; format: "html" | "zip"; target?: DesktopWorkspaceTarget }) => Promise<GeneratedSurfaceExportPayload>;
+      listWorkspaceInteractionRequests?: (input: { roomId: string; includeResolved?: boolean; target?: DesktopWorkspaceTarget }) => Promise<{ requests: DesktopWorkspaceInteractionRequest[] }>;
+      getWorkspaceInteractionRequestResult?: (input: { roomId: string; requestId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceInteractionResult>;
+      listWorkspaceOperationHistory?: (input: {
+        roomId: string;
+        recordType: "interaction_request" | "domain_operation" | "generated_surface_action_result" | "generated_surface_operation_result" | "surface_interaction" | "collection_record" | "collection_patch";
+        target?: DesktopWorkspaceTarget;
+      }) => Promise<{ records: Array<{
+        workspaceId: string;
+        roomId: string;
+        recordType: "interaction_request" | "domain_operation" | "generated_surface_action_result" | "generated_surface_operation_result" | "surface_interaction" | "collection_record" | "collection_patch";
+        id: string;
+        version: number;
+        payload: Record<string, JsonValue>;
+        contentHash?: string;
+        createdAt?: string;
+        updatedAt?: string;
+      }> }>;
+      respondWorkspaceInteractionRequest?: (input: { roomId: string; requestId: string; expectedVersion: number; optionId: string; values?: Record<string, JsonValue>; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceInteractionMutationResult>;
+      cancelWorkspaceInteractionRequest?: (input: { roomId: string; requestId: string; expectedVersion: number; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<DesktopWorkspaceInteractionMutationResult>;
+      listWorkspaceAutomationJobs?: (input: { roomId?: string; target?: DesktopWorkspaceTarget }) => Promise<{ jobs: AutomationJobRecord[] }>;
       createWorkspaceAutomationJob?: (input: {
         roomId: string;
         title: string;
@@ -1180,21 +1219,24 @@ declare global {
         connectionId?: string;
         sessionRef?: Record<string, JsonValue>;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
-      listWorkspaceAutomationRuns?: (input: { roomId?: string }) => Promise<{ runs: AutomationRunSummary[] }>;
-      listWorkspaceAutomationJobRuns?: (input: { jobId: string }) => Promise<{ runs: AutomationRunSummary[] }>;
-      setWorkspaceAutomationManagement?: (input: { jobId: string; state: "allowed" | "manager_stopped"; operationId: string }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
-      runWorkspaceAutomationNow?: (input: { roomId: string; kind?: string; operationId: string }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
-      listWorkspaceRoomMembers?: (roomId: string) => Promise<{ members: DesktopWorkspaceRoomMembership[] }>;
+      listWorkspaceAutomationRuns?: (input: { roomId?: string; target?: DesktopWorkspaceTarget }) => Promise<{ runs: AutomationRunSummary[] }>;
+      listWorkspaceAutomationJobRuns?: (input: { jobId: string; target?: DesktopWorkspaceTarget }) => Promise<{ runs: AutomationRunSummary[] }>;
+      setWorkspaceAutomationManagement?: (input: { jobId: string; state: "allowed" | "manager_stopped"; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
+      runWorkspaceAutomationNow?: (input: { roomId: string; kind?: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ job: AutomationJobRecord; replayed?: boolean }>;
+      listWorkspaceRoomMembers?: (roomId: string, target?: DesktopWorkspaceTarget) => Promise<{ members: DesktopWorkspaceRoomMembership[] }>;
       createWorkspaceRoom?: (input: {
         name: string;
         parentRoomId?: string;
         expectedWorkspaceVersion: number;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ room: DesktopWorkspaceRoom; replayed?: boolean }>;
       previewWorkspaceRoomMove?: (input: {
         roomId: string;
         parentRoomId: string | null;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ preview: DesktopRoomMovePreview }>;
       moveWorkspaceRoom?: (input: {
         roomId: string;
@@ -1202,12 +1244,14 @@ declare global {
         expectedRoomVersion: number;
         expectedWorkspaceVersion: number;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ room: DesktopWorkspaceRoom; affected_room_ids: string[]; replayed?: boolean }>;
       previewWorkspaceRoomMember?: (input: {
         roomId: string;
         accountId: string;
         role: "owner" | "admin" | "member" | "guest";
         state: "active" | "revoked";
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ preview: DesktopRoomMemberPreview }>;
       setWorkspaceRoomMember?: (input: {
         roomId: string;
@@ -1216,8 +1260,9 @@ declare global {
         state: "active" | "revoked";
         expectedVersion: number;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ member: DesktopWorkspaceRoomMembership; affected_room_ids: string[]; replayed?: boolean }>;
-      getWorkspaceLearningSettings?: (roomId: string) => Promise<{
+      getWorkspaceLearningSettings?: (input: string | { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<{
         settings: DesktopWorkspaceLearningSettings;
         workspace_settings?: DesktopWorkspaceLearningSettings;
         room_settings?: DesktopWorkspaceLearningSettings;
@@ -1239,16 +1284,17 @@ declare global {
         removeOverride?: boolean;
         expectedVersion?: number;
         operationId: string;
+        target?: DesktopWorkspaceTarget;
       }) => Promise<{ settings: DesktopWorkspaceLearningSettings; replayed?: boolean }>;
-      searchWorkspace?: (input: { roomId: string; query: string }) => Promise<SearchResult[]>;
-      getWorkspaceAudit?: () => Promise<AuditPayload>;
-      listWorkspaceActivity?: (input: { roomId: string }) => Promise<ActivityInboxItem[]>;
-      listWorkspaceBackendRuns?: (input: { sessionId?: string }) => Promise<BackendRunRecord[]>;
-      getWorkspaceBackendRun?: (input: { runId: string }) => Promise<BackendRunRecord>;
-      listWorkspaceBackendEvents?: (input: { runId: string }) => Promise<BackendEventRecord[]>;
-      cancelWorkspaceBackendRun?: (input: { runId: string; operationId: string }) => Promise<BackendRunRecord>;
-      retryWorkspaceBackendRun?: (input: { runId: string; operationId: string }) => Promise<ChatSurfaceOperationResult>;
-      listWorkspaceChanges?: (input: { sessionId?: string }) => Promise<WorkspaceChangeRecord[]>;
+      searchWorkspace?: (input: { roomId: string; query: string; target?: DesktopWorkspaceTarget }) => Promise<SearchResult[]>;
+      getWorkspaceAudit?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<AuditPayload>;
+      listWorkspaceActivity?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<ActivityInboxItem[]>;
+      listWorkspaceBackendRuns?: (input: { sessionId?: string; target?: DesktopWorkspaceTarget }) => Promise<BackendRunRecord[]>;
+      getWorkspaceBackendRun?: (input: { runId: string; target?: DesktopWorkspaceTarget }) => Promise<BackendRunRecord>;
+      listWorkspaceBackendEvents?: (input: { runId: string; target?: DesktopWorkspaceTarget }) => Promise<BackendEventRecord[]>;
+      cancelWorkspaceBackendRun?: (input: { runId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<BackendRunRecord>;
+      retryWorkspaceBackendRun?: (input: { runId: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<ChatSurfaceOperationResult>;
+      listWorkspaceChanges?: (input: { sessionId?: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceChangeRecord[]>;
       onWorkspaceServerEvent?: (listener: (event: DesktopWorkspaceRealtimeEvent | undefined) => void) => () => void;
     };
   }
@@ -1265,6 +1311,17 @@ let activeWorkspaceRoomId: string | undefined;
  * never accepts a Room from an arbitrary URL or renderer payload. */
 export function setActiveWorkspaceRoomId(roomId: string | undefined): void {
   activeWorkspaceRoomId = roomId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(roomId) ? roomId : undefined;
+  updateActiveWorkspaceRoomId(activeWorkspaceRoomId);
+}
+
+/**
+ * Returns the Room selected by the authenticated Workspace surface.  Browser
+ * bridge calls use this value as a second scope check because browser
+ * storage tracks the connection and Workspace, while Room selection lives in
+ * the renderer.
+ */
+export function getActiveWorkspaceRoomId(): string | undefined {
+  return currentActiveWorkspaceRoomId() ?? activeWorkspaceRoomId;
 }
 
 function activeWorkspaceBridge(): NonNullable<Window["samuraiDesktop"]> | undefined {

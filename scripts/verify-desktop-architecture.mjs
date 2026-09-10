@@ -118,7 +118,21 @@ function checkGatewayExternalClientBoundary() {
   const adapterTest = read("apps/server/src/adapters/runtime/postgres-gateway.test.ts");
   const required = [[schema, "gatewayChannels"], [schema, "gatewayBoundarySources"], [gateway, "cronMemoryReviewGatewayContext"], [server, "gateway.inbound.route"], [server, "gateway_inbound"], [runtime, "async handleGatewayInbound"], [runtime, "routeGatewayInbound"], [runtime, "saveInbound: (record)"], [domain, "executeInbound"], [adapterTest, "RLS Context"]];
   const missing = required.filter(([content, snippet]) => !content.includes(snippet)).map(([, snippet]) => snippet);
-  const forbidden = ["BrowserWindow", "desktopCapturer", "globalShortcut", "Notification", "from \"electron\"", "from 'electron'"].filter((snippet) => server.includes(snippet) || gateway.includes(snippet));
+  // Event projection ports may legitimately use the word "Notification";
+  // reject Electron's OS-boundary symbols/imports instead of that generic
+  // domain term. This keeps the boundary gate strict without coupling it to
+  // an unrelated application-service name.
+  const forbidden = [
+    "BrowserWindow",
+    "desktopCapturer",
+    "globalShortcut",
+    "Notification.isSupported()",
+    "new Notification(",
+    "from \"electron\"",
+    "from 'electron'",
+    "require(\"electron\")",
+    "require('electron')"
+  ].filter((snippet) => server.includes(snippet) || gateway.includes(snippet));
   const good = missing.length === 0 && forbidden.length === 0;
   return result("gateway-external-client-boundary", good, good ? "external clients enter through Gateway and PostgreSQL-backed Runtime" : `missing=${missing.join(", ") || "none"} forbidden=${forbidden.join(", ") || "none"}`);
 }

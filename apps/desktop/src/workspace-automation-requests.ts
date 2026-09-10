@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const automationKinds = new Set([
   "memory_review",
@@ -18,20 +20,24 @@ export type WorkspaceAutomationKind =
   | "custom_instruction"
   | "resource_translation";
 
-export function workspaceAutomationListRequest(input: unknown): { roomId?: string } {
+export function workspaceAutomationListRequest(input: unknown): { roomId?: string; target?: WorkspaceTargetRequest } {
   const value = object(input);
   const roomId = optionalOpaque(value, "roomId");
-  return roomId ? { roomId } : {};
+  const target = workspaceTargetRequest(value.target);
+  return { ...(roomId ? { roomId } : {}), ...(target ? { target } : {}) };
 }
 
 export function workspaceAutomationJobCreateRequest(input: unknown): {
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: Record<string, unknown>;
 } {
   const value = object(input);
   const kind = requiredKind(value.kind);
+  const target = workspaceTargetRequest(value.target);
   return {
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: {
       room_id: requiredOpaque(value, "roomId"),
       title: requiredText(value, "title", 200),
@@ -52,14 +58,17 @@ export function workspaceAutomationManagementRequest(input: unknown): {
   jobId: string;
   operationId: string;
   state: "allowed" | "manager_stopped";
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
   const state = value.state === "allowed" || value.state === "manager_stopped" ? value.state : undefined;
   if (!state) throw new Error("automation_management_state_invalid");
+  const target = workspaceTargetRequest(value.target);
   return {
     jobId: requiredOpaque(value, "jobId"),
     operationId: requiredOpaque(value, "operationId"),
-    state
+    state,
+    ...(target ? { target } : {})
   };
 }
 
@@ -67,17 +76,22 @@ export function workspaceAutomationRunNowRequest(input: unknown): {
   roomId: string;
   operationId: string;
   kind: WorkspaceAutomationKind;
+  target?: WorkspaceTargetRequest;
 } {
   const value = object(input);
+  const target = workspaceTargetRequest(value.target);
   return {
     roomId: requiredOpaque(value, "roomId"),
     operationId: requiredOpaque(value, "operationId"),
-    kind: requiredKind(value.kind ?? "memory_review")
+    kind: requiredKind(value.kind ?? "memory_review"),
+    ...(target ? { target } : {})
   };
 }
 
-export function workspaceAutomationJobIdRequest(input: unknown): string {
-  return requiredOpaque(object(input), "jobId");
+export function workspaceAutomationJobIdRequest(input: unknown): { jobId: string; target?: WorkspaceTargetRequest } {
+  const value = object(input);
+  const target = workspaceTargetRequest(value.target);
+  return { jobId: requiredOpaque(value, "jobId"), ...(target ? { target } : {}) };
 }
 
 function object(input: unknown): Record<string, unknown> {

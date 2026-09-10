@@ -56,13 +56,97 @@ export interface NativeKnowledgeToolsDraft {
   dirty: boolean;
 }
 
+/**
+ * Returns whether the resource draft still represents the exact values which
+ * were submitted by a mutation. The dirty flag is intentionally excluded:
+ * React can keep that flag true while the submitted values are unchanged, and
+ * the values themselves are the source of truth for deciding whether a
+ * concurrent edit must be preserved.
+ */
+export function nativeKnowledgeDraftMatchesSnapshot(
+  current: NativeKnowledgeToolsDraft | undefined,
+  submitted: NativeKnowledgeToolsDraft
+): boolean {
+  if (!current) return false;
+  return current.resourceId === submitted.resourceId
+    && current.kind === submitted.kind
+    && current.scopeKind === submitted.scopeKind
+    && current.roomId === submitted.roomId
+    && current.title === submitted.title
+    && current.content === submitted.content
+    && current.reason === submitted.reason
+    && current.expectedVersion === submitted.expectedVersion;
+}
+
+/**
+ * Resolves the local draft after a successful Knowledge mutation. The values
+ * that were submitted may be cleared, but a newer local edit must receive the
+ * returned version and remain dirty for the next explicit save.
+ */
+export function nativeKnowledgeDraftAfterMutation(
+  current: NativeKnowledgeToolsDraft | undefined,
+  submitted: NativeKnowledgeToolsDraft,
+  savedResource: Pick<WorkspaceCompletionResourceView, "version">
+): NativeKnowledgeToolsDraft | undefined {
+  if (!current || nativeKnowledgeDraftMatchesSnapshot(current, submitted)) return undefined;
+  return {
+    ...current,
+    expectedVersion: savedResource.version,
+    dirty: true
+  };
+}
+
+export interface NativeKnowledgeToolsCreateDraft {
+  kind: "knowledge" | "skill";
+  scopeKind: NativeKnowledgeResourceScope;
+  roomId?: string;
+  knowledgeKind: "fact" | "decision" | "explanation" | "experience_rule";
+  title: string;
+  content: string;
+  reason: string;
+  dirty: boolean;
+}
+
 export interface NativeRoomSearchResult {
   key: string;
   kind: SearchResult["kind"] | "knowledge";
+  id: string;
   title: string;
   summary: string;
+  session_id?: string;
+  work_id?: string;
+  operation_id?: string;
   resource?: WorkspaceCompletionResourceView;
   rank?: number;
+}
+
+/** A mutation response is authoritative when a just-created resource is opened. */
+export function nativeKnowledgeResourceForOpen(
+  resources: readonly WorkspaceCompletionResourceView[],
+  resourceId: string,
+  resourceOverride?: WorkspaceCompletionResourceView
+): WorkspaceCompletionResourceView | undefined {
+  return resourceOverride ?? resources.find((resource) => resource.id === resourceId);
+}
+
+/** Search hits are openable only when the client has an exact navigation ref. */
+export function nativeRoomSearchResultCanOpen(result: NativeRoomSearchResult, hasHostHandler: boolean): boolean {
+  if (result.resource) return true;
+  if (!hasHostHandler) return false;
+  if (result.kind === "artifact") return Boolean(result.id);
+  if (result.kind === "session" || result.kind === "message") return Boolean(result.work_id);
+  return false;
+}
+
+/** Describes the truthful fallback when a search hit cannot be opened. */
+export function nativeRoomSearchResultOpenHint(result: NativeRoomSearchResult, hasHostHandler: boolean): string {
+  if (result.kind === "session" || result.kind === "message") {
+    if (!result.work_id) return "仕事の参照（work_id）がないため開けません。検索結果のタイトルと概要を確認してください。";
+    if (!hasHostHandler) return "現在の画面に仕事を開く入口がありません。";
+  }
+  if (result.kind === "audit") return "監査履歴を開く入口がありません。";
+  if (!hasHostHandler) return "現在の画面に開く入口がありません。";
+  return "この検索結果を開く入口がありません。";
 }
 
 export interface NativeLearningSettingsSnapshot {
@@ -110,8 +194,16 @@ export interface NativeKnowledgeToolsState {
   resourceLoading: boolean;
   resourceError: string | null;
   draft?: NativeKnowledgeToolsDraft;
+  createDraft?: NativeKnowledgeToolsCreateDraft;
+  createBusy: boolean;
   resourceBusy: "save" | "fixed" | "archive" | null;
   openResource: (resourceId: string) => Promise<void>;
+  startCreateResource: () => boolean;
+  updateCreateDraft: (patch: Partial<Pick<NativeKnowledgeToolsCreateDraft, "kind" | "scopeKind" | "roomId" | "knowledgeKind" | "title" | "content" | "reason">>) => void;
+  cancelCreate: () => void;
+  createResource: () => Promise<boolean>;
+  requestResourceLeave: () => boolean;
+  discardUnsavedChanges: () => void;
   updateDraft: (patch: Partial<Pick<NativeKnowledgeToolsDraft, "title" | "content" | "reason">>) => void;
   cancelDraft: () => void;
   saveResource: () => Promise<boolean>;
@@ -134,6 +226,10 @@ export interface NativeKnowledgeToolsState {
   settingsLoading: boolean;
   settingsError: string | null;
   settingsBusy: "language" | "learning" | "override" | null;
+  hasUnsavedChanges: boolean;
+  saving: boolean;
+  settingsLanguageDirty: boolean;
+  settingsLearningDirty: boolean;
   settingsCanEdit: boolean;
   updateSettingsDraft: (patch: Partial<NativeKnowledgeToolsSettingsDraft>) => void;
   reloadSettings: () => Promise<void>;
@@ -271,6 +367,47 @@ function fallbackResourceVersion(resource: WorkspaceCompletionResourceView): Wor
   };
 }
 
+type CompletionResourcePage<T extends WorkspaceCompletionResourceView = WorkspaceCompletionResourceView> = {
+  resources: T[];
+  next_cursor?: string;
+};
+
+const maxCompletionResourcePages = 100;
+
+/**
+ * Completion endpoints are cursor based. The management surface deliberately
+ * drains the cursor so a resource which is outside the first server page is
+ * still reachable, while rejecting malformed/cyclic pagination instead of
+ * silently presenting an incomplete catalog.
+ */
+export async function collectCompletionResourcePages<T extends WorkspaceCompletionResourceView = WorkspaceCompletionResourceView>(
+  fetchPage: (cursor?: string) => Promise<CompletionResourcePage<T>>
+): Promise<T[]> {
+  const resources: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageNumber = 0; pageNumber < maxCompletionResourcePages; pageNumber += 1) {
+    const page = await fetchPage(cursor);
+    if (!page || !Array.isArray(page.resources)) throw new Error("workspace_completion_resource_page_invalid");
+    resources.push(...page.resources);
+    const nextCursor = typeof page.next_cursor === "string" && page.next_cursor.length > 0
+      ? page.next_cursor
+      : undefined;
+    if (!nextCursor) return resources;
+    if (seenCursors.has(nextCursor)) throw new Error("workspace_completion_resource_cursor_repeated");
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  throw new Error("workspace_completion_resource_page_limit_exceeded");
+}
+
+function stableNativeKnowledgeJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested) => {
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) return nested;
+    return Object.fromEntries(Object.entries(nested).sort(([left], [right]) => left.localeCompare(right)));
+  });
+}
+
 function resourceDetailFromResponses(
   requestedId: string,
   view: WorkspaceCompletionResourceView,
@@ -334,6 +471,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
   const [resourceLoading, setResourceLoading] = useState(false);
   const [resourceError, setResourceError] = useState<string | null>(null);
   const [draft, setDraft] = useState<NativeKnowledgeToolsDraft>();
+  const [createDraft, setCreateDraft] = useState<NativeKnowledgeToolsCreateDraft>();
+  const [createBusy, setCreateBusy] = useState(false);
   const [resourceBusy, setResourceBusy] = useState<NativeKnowledgeToolsState["resourceBusy"]>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -360,6 +499,14 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
   const searchGeneration = useRef(0);
   const settingsGeneration = useRef(0);
   const automationGeneration = useRef(0);
+  const resourceMutationOperationIds = useRef(new Map<string, { fingerprint: string; operationId: string }>());
+  const createOperationRef = useRef<{ fingerprint: string; operationId: string } | undefined>(undefined);
+  const draftRef = useRef<NativeKnowledgeToolsDraft | undefined>(undefined);
+  const createDraftRef = useRef<NativeKnowledgeToolsCreateDraft | undefined>(undefined);
+  const selectedResourceIdRef = useRef<string | undefined>(undefined);
+  draftRef.current = draft;
+  createDraftRef.current = createDraft;
+  selectedResourceIdRef.current = selectedResourceId;
 
   const allResources = useMemo(
     () => [...roomResources, ...workspaceResources, ...skills],
@@ -370,6 +517,31 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     return targetKeyRef.current === capturedTargetKey
       && nativeKnowledgeToolsTargetKey(targetRef.current) === capturedTargetKey;
   }, []);
+
+  const discardUnsavedChanges = useCallback((): void => {
+    draftRef.current = undefined;
+    createDraftRef.current = undefined;
+    setDraft(undefined);
+    setCreateDraft(undefined);
+    setSettingsDraft(undefined);
+    setSettingsLanguageDirty(false);
+    setSettingsLearningDirty(false);
+    setResourceError(null);
+  }, []);
+
+  const requestResourceLeave = useCallback((): boolean => {
+    const hasDirtyDraft = Boolean(draftRef.current?.dirty || createDraftRef.current?.dirty || settingsLanguageDirty || settingsLearningDirty);
+    if (!hasDirtyDraft) return true;
+    const shouldDiscard = typeof window !== "undefined" && typeof window.confirm === "function"
+      ? window.confirm("未保存の下書きを破棄して、この画面を離れますか？")
+      : false;
+    if (!shouldDiscard) {
+      setResourceError("未保存の下書きを保持しています。保存または取消を選んでください。");
+      return false;
+    }
+    discardUnsavedChanges();
+    return true;
+  }, [discardUnsavedChanges, settingsLanguageDirty, settingsLearningDirty]);
 
   const reloadResources = useCallback(async (): Promise<void> => {
     const capturedTarget = cloneTarget(targetRef.current);
@@ -390,35 +562,35 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     setResourcesLoading(true);
     setResourcesError(null);
     try {
-      const [roomResponse, workspaceResponse, skillResponse] = await Promise.all([
-        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceCompletionResources!({
-          scopeKind: "room",
-          roomId: capturedTarget.roomId,
-          kind: "knowledge",
-          includeArchived: true
-        })),
-        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceCompletionResources!({
-          scopeKind: "workspace",
-          kind: "knowledge",
-          includeArchived: true
-        })),
-        bridge.listWorkspaceCompletionSkills
-          ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceCompletionSkills!({ roomId: capturedTarget.roomId }))
-          : Promise.resolve({ skills: [] as WorkspaceCompletionResourceView[] })
+      const listResources = (input: { scopeKind: "room" | "workspace"; kind: "knowledge" | "skill" }) => collectCompletionResourcePages(
+        (cursor) => withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceCompletionResources!({
+          ...input,
+          ...(input.scopeKind === "room" ? { roomId: capturedTarget.roomId } : {}),
+          includeArchived: true,
+          ...(cursor ? { cursor } : {}),
+          target: capturedTarget
+        }))
+      );
+      const [roomKnowledge, workspaceKnowledge, roomSkills, workspaceSkills] = await Promise.all([
+        listResources({ scopeKind: "room", kind: "knowledge" }),
+        listResources({ scopeKind: "workspace", kind: "knowledge" }),
+        listResources({ scopeKind: "room", kind: "skill" }),
+        listResources({ scopeKind: "workspace", kind: "skill" })
       ]);
       if (generation !== resourceGeneration.current || !isCurrent(capturedTargetKey)) return;
-      const room = roomResponse.resources.filter((resource) => resource.kind === "knowledge"
+      const room = roomKnowledge.filter((resource) => resource.kind === "knowledge"
         && resource.scope.kind === "room"
         && resource.scope.roomId === capturedTarget.roomId
         && resource.workspaceId === capturedTarget.workspaceId);
-      const workspace = workspaceResponse.resources.filter((resource) => resource.kind === "knowledge"
+      const workspace = workspaceKnowledge.filter((resource) => resource.kind === "knowledge"
         && resource.scope.kind === "workspace"
         && resource.workspaceId === capturedTarget.workspaceId);
-      const listedSkills = skillResponse.skills.filter((resource) => (resource.kind === "skill" || resource.kind === "knowledge")
-        && resourceMatchesNativeKnowledgeToolsTarget(resource, capturedTarget));
+      const listedSkills = [...roomSkills, ...workspaceSkills]
+        .filter((resource) => resource.kind === "skill" && resourceMatchesNativeKnowledgeToolsTarget(resource, capturedTarget));
+      const uniqueSkills = [...new Map(listedSkills.map((resource) => [resource.id, resource])).values()];
       setRoomResources(room);
       setWorkspaceResources(workspace);
-      setSkills(listedSkills.filter((resource) => resource.kind === "skill"));
+      setSkills(uniqueSkills);
     } catch (error) {
       if (generation === resourceGeneration.current && isCurrent(capturedTargetKey)) {
         setResourcesError(nativeKnowledgeToolsErrorMessage(error));
@@ -428,10 +600,11 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     }
   }, [getBridge, isCurrent]);
 
-  const openResource = useCallback(async (resourceId: string): Promise<void> => {
+  const openResource = useCallback(async (resourceId: string, resourceOverride?: WorkspaceCompletionResourceView): Promise<void> => {
     const capturedTarget = cloneTarget(targetRef.current);
     const capturedTargetKey = targetKeyRef.current;
-    const listed = allResources.find((resource) => resource.id === resourceId);
+    const listed = nativeKnowledgeResourceForOpen(allResources, resourceId, resourceOverride);
+    if (selectedResourceIdRef.current !== resourceId && !requestResourceLeave()) return;
     const generation = ++detailGeneration.current;
     if (!capturedTarget || !listed) {
       setResourceError("この資源は現在のRoomから開けません。");
@@ -442,26 +615,28 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       setResourceError("Knowledge本文の既存bridgeが利用できないため、読み取り専用で表示できません。");
       return;
     }
+    selectedResourceIdRef.current = resourceId;
     setSelectedResourceId(resourceId);
     setSelectedResource(undefined);
+    draftRef.current = undefined;
     setDraft(undefined);
     setResourceLoading(true);
     setResourceError(null);
     try {
       const [detail, body] = await Promise.all([
         bridge.getWorkspaceCompletionResource
-          ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceCompletionResource!({ resourceId }))
+          ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceCompletionResource!({ resourceId, target: capturedTarget }))
           : Promise.resolve(undefined),
         listed.kind === "skill" && bridge.getWorkspaceCompletionSkill
           ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, async () => {
-            const result = await bridge.getWorkspaceCompletionSkill!({ resourceId });
+            const result = await bridge.getWorkspaceCompletionSkill!({ resourceId, target: capturedTarget });
             return {
               resource: result.resource,
               version: result.version,
               content: result.content
             } satisfies Pick<NativeKnowledgeResourceDetail, "resource" | "version" | "content">;
           })
-          : withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceCompletionResourceBody!({ resourceId }))
+          : withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceCompletionResourceBody!({ resourceId, target: capturedTarget }))
       ]);
       if (generation !== detailGeneration.current || !isCurrent(capturedTargetKey)) return;
       const resolved = resourceDetailFromResponses(
@@ -489,22 +664,28 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     } finally {
       if (generation === detailGeneration.current && isCurrent(capturedTargetKey)) setResourceLoading(false);
     }
-  }, [allResources, getBridge, isCurrent]);
+  }, [allResources, getBridge, isCurrent, requestResourceLeave]);
 
   const updateDraft = useCallback((patch: Partial<Pick<NativeKnowledgeToolsDraft, "title" | "content" | "reason">>): void => {
-    setDraft((current) => current ? { ...current, ...patch, dirty: true } : current);
+    const current = draftRef.current;
+    const next = current ? { ...current, ...patch, dirty: true } : current;
+    draftRef.current = next;
+    setDraft(next);
   }, []);
 
   const cancelDraft = useCallback((): void => {
     if (!selectedResource) return;
-    setDraft((current) => current ? {
+    const current = draftRef.current;
+    const next = current ? {
       ...current,
       title: selectedResource.resource.title,
       content: selectedResource.content,
       reason: "",
       expectedVersion: resourceVersion(selectedResource),
       dirty: false
-    } : current);
+    } : current;
+    draftRef.current = next;
+    setDraft(next);
     setResourceError(null);
   }, [selectedResource]);
 
@@ -518,6 +699,143 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     }
     return response.resource;
   }, []);
+
+  const resourceMutationOperationId = useCallback((
+    key: string,
+    fingerprint: string
+  ): string => {
+    const current = resourceMutationOperationIds.current.get(key);
+    if (current?.fingerprint === fingerprint) return current.operationId;
+    const operationId = createIdempotencyKey();
+    resourceMutationOperationIds.current.set(key, { fingerprint, operationId });
+    return operationId;
+  }, []);
+
+  const clearResourceMutationOperationId = useCallback((key: string): void => {
+    resourceMutationOperationIds.current.delete(key);
+  }, []);
+
+  const finishResourceMutation = useCallback((input: {
+    operationKey: string;
+    submittedDraft: NativeKnowledgeToolsDraft;
+    savedResource: WorkspaceCompletionResourceView;
+  }): boolean => {
+    clearResourceMutationOperationId(input.operationKey);
+    const nextDraft = nativeKnowledgeDraftAfterMutation(draftRef.current, input.submittedDraft, input.savedResource);
+    if (!nextDraft) {
+      draftRef.current = undefined;
+      setDraft(undefined);
+      return false;
+    }
+    // The submitted values are persisted, but a newer local edit must remain
+    // editable. Advance only its optimistic base version; the next save will
+    // receive a fresh operation ID for the newer fingerprint.
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    setResourceError("保存中に追加された下書きを保持しています。内容を確認して、もう一度保存してください。");
+    return true;
+  }, [clearResourceMutationOperationId]);
+
+  const startCreateResource = useCallback((): boolean => {
+    const capturedTarget = cloneTarget(targetRef.current);
+    if (!capturedTarget) {
+      setResourceError("WorkspaceとRoomを選択してからKnowledgeを作成してください。");
+      return false;
+    }
+    if (!requestResourceLeave()) return false;
+    setSelectedResourceId(undefined);
+    setSelectedResource(undefined);
+    setResourceError(null);
+    const nextDraft: NativeKnowledgeToolsCreateDraft = {
+      kind: "knowledge",
+      scopeKind: "room",
+      roomId: capturedTarget.roomId,
+      knowledgeKind: "fact",
+      title: "",
+      content: "",
+      reason: "",
+      dirty: false
+    };
+    createDraftRef.current = nextDraft;
+    setCreateDraft(nextDraft);
+    return true;
+  }, [requestResourceLeave]);
+
+  const updateCreateDraft = useCallback((patch: Partial<Pick<NativeKnowledgeToolsCreateDraft, "kind" | "scopeKind" | "roomId" | "knowledgeKind" | "title" | "content" | "reason">>): void => {
+    const current = createDraftRef.current;
+    const next = current ? { ...current, ...patch, dirty: true } : current;
+    createDraftRef.current = next;
+    setCreateDraft(next);
+  }, []);
+
+  const cancelCreate = useCallback((): void => {
+    createDraftRef.current = undefined;
+    setCreateDraft(undefined);
+    setResourceError(null);
+    createOperationRef.current = undefined;
+  }, []);
+
+  const createResource = useCallback(async (): Promise<boolean> => {
+    const capturedTarget = cloneTarget(targetRef.current);
+    const capturedTargetKey = targetKeyRef.current;
+    const currentDraft = createDraft;
+    const bridge = getBridge();
+    if (!capturedTarget || !currentDraft || !bridge?.createWorkspaceCompletionResource) {
+      setResourceError("Knowledgeを作成できる既存bridgeが利用できません。下書きは保持されています。");
+      return false;
+    }
+    if (!currentDraft.title.trim() || !currentDraft.content.trim() || !currentDraft.reason.trim()) {
+      setResourceError("タイトル、本文、作成理由を入力してください。下書きは保持されています。");
+      return false;
+    }
+    if (currentDraft.scopeKind === "room" && currentDraft.roomId !== capturedTarget.roomId) {
+      setResourceError("作成対象のRoomが切り替わりました。下書きを確認してください。");
+      return false;
+    }
+    const fingerprint = stableNativeKnowledgeJson({
+      target: capturedTargetKey,
+      kind: currentDraft.kind,
+      scopeKind: currentDraft.scopeKind,
+      roomId: currentDraft.roomId,
+      knowledgeKind: currentDraft.knowledgeKind,
+      title: currentDraft.title,
+      content: currentDraft.content,
+      reason: currentDraft.reason
+    });
+    const operationId = createOperationRef.current?.fingerprint === fingerprint
+      ? createOperationRef.current.operationId
+      : createIdempotencyKey();
+    createOperationRef.current = { fingerprint, operationId };
+    setCreateBusy(true);
+    setResourceError(null);
+    try {
+      const response = await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.createWorkspaceCompletionResource!({
+        scopeKind: currentDraft.scopeKind,
+        ...(currentDraft.scopeKind === "room" ? { roomId: capturedTarget.roomId } : {}),
+        kind: currentDraft.kind,
+        knowledgeKind: currentDraft.knowledgeKind,
+        title: currentDraft.title.trim(),
+        content: currentDraft.content,
+        reason: currentDraft.reason.trim(),
+        operationId,
+        target: capturedTarget
+      }));
+      const createdResource = validateResourceMutationResponse(response, response.resource.id, capturedTarget);
+      if (!isCurrent(capturedTargetKey)) return false;
+      createDraftRef.current = undefined;
+      setCreateDraft(undefined);
+      createOperationRef.current = undefined;
+      await reloadResources();
+      if (!isCurrent(capturedTargetKey)) return false;
+      await openResource(createdResource.id, createdResource);
+      return true;
+    } catch (error) {
+      if (isCurrent(capturedTargetKey)) setResourceError(nativeKnowledgeToolsErrorMessage(error));
+      return false;
+    } finally {
+      if (isCurrent(capturedTargetKey)) setCreateBusy(false);
+    }
+  }, [createDraft, getBridge, isCurrent, openResource, reloadResources, validateResourceMutationResponse]);
 
   const saveResource = useCallback(async (): Promise<boolean> => {
     const capturedTarget = cloneTarget(targetRef.current);
@@ -538,6 +856,15 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       return false;
     }
     const generation = detailGeneration.current;
+    const operationKey = `resource:${capturedTargetKey}:${currentDraft.resourceId}:save`;
+    const operationId = resourceMutationOperationId(operationKey, stableNativeKnowledgeJson({
+      resourceId: currentDraft.resourceId,
+      expectedVersion: currentDraft.expectedVersion,
+      title: currentDraft.title,
+      content: currentDraft.content,
+      reason: currentDraft.reason,
+      kind: resourceKind
+    }));
     setResourceBusy("save");
     setResourceError(null);
     try {
@@ -550,12 +877,14 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
         content: currentDraft.content,
         reason: currentDraft.reason.trim(),
         expectedVersion: currentDraft.expectedVersion,
-        operationId: createIdempotencyKey()
+        operationId,
+        target: capturedTarget
       }));
-      validateResourceMutationResponse(response, currentDraft.resourceId, capturedTarget);
+      const savedResource = validateResourceMutationResponse(response, currentDraft.resourceId, capturedTarget);
       if (!isCurrent(capturedTargetKey) || generation !== detailGeneration.current) return false;
-      setDraft(undefined);
+      const hasNewerDraft = finishResourceMutation({ operationKey, submittedDraft: currentDraft, savedResource });
       await reloadResources();
+      if (hasNewerDraft) return true;
       await openResource(currentDraft.resourceId);
       return true;
     } catch (error) {
@@ -564,7 +893,7 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     } finally {
       if (isCurrent(capturedTargetKey)) setResourceBusy(null);
     }
-  }, [draft, getBridge, isCurrent, openResource, reloadResources, selectedResource, validateResourceMutationResponse]);
+  }, [draft, finishResourceMutation, getBridge, isCurrent, openResource, reloadResources, resourceMutationOperationId, selectedResource, validateResourceMutationResponse]);
 
   const toggleFixed = useCallback(async (): Promise<boolean> => {
     const capturedTarget = cloneTarget(targetRef.current);
@@ -576,20 +905,41 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       return false;
     }
     const generation = detailGeneration.current;
+    const fixed = current.resource.aiProtection !== "fixed";
+    const operationKey = `resource:${capturedTargetKey}:${current.resource.id}:fixed`;
+    const operationId = resourceMutationOperationId(operationKey, stableNativeKnowledgeJson({
+      resourceId: current.resource.id,
+      expectedVersion: resourceVersion(current),
+      fixed,
+      reason: draft?.reason.trim() || "人が確認して固定状態を変更"
+    }));
     setResourceBusy("fixed");
     setResourceError(null);
     try {
       const response = await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.setWorkspaceCompletionResourceFixed!({
         resourceId: current.resource.id,
-        fixed: current.resource.aiProtection !== "fixed",
+        fixed,
         expectedVersion: resourceVersion(current),
         reason: draft?.reason.trim() || "人が確認して固定状態を変更",
-        operationId: createIdempotencyKey()
+        operationId,
+        target: capturedTarget
       }));
-      validateResourceMutationResponse(response, current.resource.id, capturedTarget);
+      const savedResource = validateResourceMutationResponse(response, current.resource.id, capturedTarget);
       if (!isCurrent(capturedTargetKey) || generation !== detailGeneration.current) return false;
-      setDraft(undefined);
+      const submittedDraft = draft ?? {
+        resourceId: current.resource.id,
+        kind: "knowledge" as const,
+        scopeKind: current.resource.scope.kind,
+        ...(current.resource.scope.kind === "room" ? { roomId: capturedTarget.roomId } : {}),
+        title: current.resource.title,
+        content: current.content,
+        reason: "人が確認して固定状態を変更",
+        expectedVersion: resourceVersion(current),
+        dirty: false
+      };
+      const hasNewerDraft = finishResourceMutation({ operationKey, submittedDraft, savedResource });
       await reloadResources();
+      if (hasNewerDraft) return true;
       await openResource(current.resource.id);
       return true;
     } catch (error) {
@@ -598,7 +948,7 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     } finally {
       if (isCurrent(capturedTargetKey)) setResourceBusy(null);
     }
-  }, [draft?.reason, getBridge, isCurrent, openResource, reloadResources, selectedResource, validateResourceMutationResponse]);
+  }, [draft, finishResourceMutation, getBridge, isCurrent, openResource, reloadResources, resourceMutationOperationId, selectedResource, validateResourceMutationResponse]);
 
   const toggleArchived = useCallback(async (): Promise<boolean> => {
     const capturedTarget = cloneTarget(targetRef.current);
@@ -610,20 +960,41 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       return false;
     }
     const generation = detailGeneration.current;
+    const archived = current.resource.lifecycleState !== "archived";
+    const operationKey = `resource:${capturedTargetKey}:${current.resource.id}:archive`;
+    const operationId = resourceMutationOperationId(operationKey, stableNativeKnowledgeJson({
+      resourceId: current.resource.id,
+      expectedVersion: resourceVersion(current),
+      archived,
+      reason: draft?.reason.trim() || "人が確認して保管状態を変更"
+    }));
     setResourceBusy("archive");
     setResourceError(null);
     try {
       const response = await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.archiveWorkspaceCompletionResource!({
         resourceId: current.resource.id,
-        archived: current.resource.lifecycleState !== "archived",
+        archived,
         expectedVersion: resourceVersion(current),
         reason: draft?.reason.trim() || "人が確認して保管状態を変更",
-        operationId: createIdempotencyKey()
+        operationId,
+        target: capturedTarget
       }));
-      validateResourceMutationResponse(response, current.resource.id, capturedTarget);
+      const savedResource = validateResourceMutationResponse(response, current.resource.id, capturedTarget);
       if (!isCurrent(capturedTargetKey) || generation !== detailGeneration.current) return false;
-      setDraft(undefined);
+      const submittedDraft = draft ?? {
+        resourceId: current.resource.id,
+        kind: current.resource.kind === "skill" ? "skill" as const : "knowledge" as const,
+        scopeKind: current.resource.scope.kind,
+        ...(current.resource.scope.kind === "room" ? { roomId: capturedTarget.roomId } : {}),
+        title: current.resource.title,
+        content: current.content,
+        reason: "人が確認して保管状態を変更",
+        expectedVersion: resourceVersion(current),
+        dirty: false
+      };
+      const hasNewerDraft = finishResourceMutation({ operationKey, submittedDraft, savedResource });
       await reloadResources();
+      if (hasNewerDraft) return true;
       await openResource(current.resource.id);
       return true;
     } catch (error) {
@@ -632,7 +1003,7 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     } finally {
       if (isCurrent(capturedTargetKey)) setResourceBusy(null);
     }
-  }, [draft?.reason, getBridge, isCurrent, openResource, reloadResources, selectedResource, validateResourceMutationResponse]);
+  }, [draft, finishResourceMutation, getBridge, isCurrent, openResource, reloadResources, resourceMutationOperationId, selectedResource, validateResourceMutationResponse]);
 
   const runSearch = useCallback(async (): Promise<void> => {
     const capturedTarget = cloneTarget(targetRef.current);
@@ -654,19 +1025,26 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     try {
       const [roomResponse, knowledgeResponse] = await Promise.all([
         bridge.searchWorkspace
-          ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.searchWorkspace!({ roomId: capturedTarget.roomId, query }))
+          ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.searchWorkspace!({ roomId: capturedTarget.roomId, query, target: capturedTarget }))
           : Promise.resolve([] as SearchResult[]),
         bridge.searchWorkspaceCompletionKnowledge
-          ? withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.searchWorkspaceCompletionKnowledge!({ roomId: capturedTarget.roomId, query, limit: 30 }))
-          : Promise.resolve({ resources: [] as Array<WorkspaceCompletionResourceView & { rank?: number }> })
+          ? collectCompletionResourcePages((cursor) => withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.searchWorkspaceCompletionKnowledge!({
+            roomId: capturedTarget.roomId,
+            query,
+            limit: 30,
+            ...(cursor ? { cursor } : {}),
+            target: capturedTarget
+          })))
+          : Promise.resolve([] as Array<WorkspaceCompletionResourceView & { rank?: number }>)
       ]);
       if (generation !== searchGeneration.current || !isCurrent(capturedTargetKey)) return;
       const records: NativeRoomSearchResult[] = [];
-      for (const result of knowledgeResponse.resources) {
+      for (const result of knowledgeResponse) {
         if (!resourceMatchesNativeKnowledgeToolsTarget(result, capturedTarget) || result.kind !== "knowledge") continue;
         records.push({
           key: `knowledge:${result.id}`,
           kind: "knowledge",
+          id: result.id,
           title: result.title,
           summary: `${result.scope.kind === "room" ? "このRoom" : "Workspace共通"} · ${result.creationSource}`,
           resource: result,
@@ -677,8 +1055,12 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
         records.push({
           key: `${result.kind}:${result.id}`,
           kind: result.kind,
+          id: result.id,
           title: result.title,
-          summary: result.summary
+          summary: result.summary,
+          ...(result.session_id ? { session_id: result.session_id } : {}),
+          ...(result.work_id ? { work_id: result.work_id } : {}),
+          ...(result.operation_id ? { operation_id: result.operation_id } : {})
         });
       }
       const unique = new Map(records.map((record) => [record.key, record]));
@@ -691,7 +1073,7 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
   }, [getBridge, isCurrent, searchQuery]);
 
   const openSearchResult = useCallback(async (result: NativeRoomSearchResult): Promise<void> => {
-    if (result.resource) await openResource(result.resource.id);
+    if (result.resource) await openResource(result.resource.id, result.resource);
   }, [openResource]);
 
   const reloadSettings = useCallback(async (): Promise<void> => {
@@ -708,8 +1090,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     setSettingsError(null);
     try {
       const [workspace, learning] = await Promise.all([
-        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceSettings!()),
-        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceLearningSettings!(capturedTarget.roomId))
+        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceSettings!({ target: capturedTarget })),
+        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.getWorkspaceLearningSettings!({ roomId: capturedTarget.roomId, target: capturedTarget }))
       ]);
       if (generation !== settingsGeneration.current || !isCurrent(capturedTargetKey)) return;
       const learningSnapshot = learningSnapshotFromResponse(learning, capturedTarget);
@@ -754,7 +1136,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     try {
       const result = await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.patchWorkspaceSettings!({
         patch: { ui_locale: currentDraft.uiLocale, output_locale: currentDraft.outputLocale },
-        operationId: createIdempotencyKey()
+        operationId: createIdempotencyKey(),
+        target: capturedTarget
       }));
       if (!isSupportedLocale(result.settings.ui_locale) || !isSupportedLocale(result.settings.output_locale)) throw new Error("workspace_settings_response_invalid");
       if (!isCurrent(capturedTargetKey)) return false;
@@ -788,7 +1171,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       if (bridge.patchWorkspaceSettings && currentDraft.learningEnabled !== currentSettings.workspace.learning_enabled) {
         await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.patchWorkspaceSettings!({
           patch: { learning_enabled: currentDraft.learningEnabled },
-          operationId: createIdempotencyKey()
+          operationId: createIdempotencyKey(),
+          target: capturedTarget
         }));
       }
       const scopeKind = currentDraft.learningScope;
@@ -800,7 +1184,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
         ...(scopeKind === "room" ? { roomId: capturedTarget.roomId } : {}),
         enabled: currentDraft.scopedLearningEnabled,
         expectedVersion: currentScope?.version ?? 0,
-        operationId: createIdempotencyKey()
+        operationId: createIdempotencyKey(),
+        target: capturedTarget
       }));
       const resultSettings = result.settings;
       if (resultSettings.workspaceId !== capturedTarget.workspaceId) throw new Error("workspace_learning_response_scope_invalid");
@@ -837,7 +1222,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
         roomId: capturedTarget.roomId,
         removeOverride: true,
         expectedVersion: roomSettings.version,
-        operationId: createIdempotencyKey()
+        operationId: createIdempotencyKey(),
+        target: capturedTarget
       }));
       if (!isCurrent(capturedTargetKey)) return false;
       setSettingsLearningDirty(false);
@@ -865,8 +1251,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     setAutomationError(null);
     try {
       const [jobsResponse, runsResponse] = await Promise.all([
-        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceAutomationJobs!({ roomId: capturedTarget.roomId })),
-        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceAutomationRuns!({ roomId: capturedTarget.roomId }))
+        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceAutomationJobs!({ roomId: capturedTarget.roomId, target: capturedTarget })),
+        withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceAutomationRuns!({ roomId: capturedTarget.roomId, target: capturedTarget }))
       ]);
       if (generation !== automationGeneration.current || !isCurrent(capturedTargetKey)) return;
       setAutomationJobs(jobsResponse.jobs.filter((job) => automationJobMatchesNativeKnowledgeToolsTarget(job, capturedTarget)));
@@ -892,7 +1278,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       const result = await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.setWorkspaceAutomationManagement!({
         jobId: job.id,
         state: job.status === "enabled" ? "manager_stopped" : "allowed",
-        operationId: createIdempotencyKey()
+        operationId: createIdempotencyKey(),
+        target: capturedTarget
       }));
       if (!automationJobMatchesNativeKnowledgeToolsTarget(result.job, capturedTarget)) throw new Error("automation_response_scope_invalid");
       if (!isCurrent(capturedTargetKey)) return false;
@@ -912,9 +1299,15 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     searchGeneration.current += 1;
     settingsGeneration.current += 1;
     automationGeneration.current += 1;
+    selectedResourceIdRef.current = undefined;
+    draftRef.current = undefined;
+    createDraftRef.current = undefined;
     setSelectedResourceId(undefined);
     setSelectedResource(undefined);
     setDraft(undefined);
+    setCreateDraft(undefined);
+    createOperationRef.current = undefined;
+    resourceMutationOperationIds.current.clear();
     setResourceError(null);
     setSearchResults([]);
     setSearchError(null);
@@ -971,6 +1364,8 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
   const resourceCanArchive = Boolean(selectedResource && getBridge()?.archiveWorkspaceCompletionResource);
   const settingsCanEdit = Boolean(getBridge()?.patchWorkspaceSettings && getBridge()?.updateWorkspaceLearningSettings);
   const automationCanManage = Boolean(getBridge()?.setWorkspaceAutomationManagement);
+  const hasUnsavedChanges = Boolean(draft?.dirty || createDraft?.dirty || settingsLanguageDirty || settingsLearningDirty);
+  const saving = createBusy || resourceBusy === "save" || settingsBusy !== null;
 
   return {
     target: requestedTarget,
@@ -990,8 +1385,16 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     resourceLoading,
     resourceError,
     draft,
+    createDraft,
+    createBusy,
     resourceBusy,
     openResource,
+    startCreateResource,
+    updateCreateDraft,
+    cancelCreate,
+    createResource,
+    requestResourceLeave,
+    discardUnsavedChanges,
     updateDraft,
     cancelDraft,
     saveResource,
@@ -1012,6 +1415,10 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     settingsLoading,
     settingsError,
     settingsBusy,
+    hasUnsavedChanges,
+    saving,
+    settingsLanguageDirty,
+    settingsLearningDirty,
     settingsCanEdit,
     updateSettingsDraft,
     reloadSettings,

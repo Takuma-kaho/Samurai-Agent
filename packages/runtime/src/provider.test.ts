@@ -87,7 +87,19 @@ describe("provider profiles", () => {
     expect(createArtifact?.parameters.required).toEqual(expect.arrayContaining(["content", "title"]));
     expect(createGeneratedSurface?.description).toContain("bundle.script");
     expect(createGeneratedSurface?.description).toContain("never embed script");
+    expect(createGeneratedSurface?.description).toContain("form elements");
+    expect(createGeneratedSurface?.description).toContain("non-form container");
     expect(createGeneratedSurface?.description).toContain("window.dispatchSamuraiAction");
+    expect(createGeneratedSurface?.description).toContain("visible status or result region");
+    expect(createGeneratedSurface?.description).toContain("role=status");
+    expect(createGeneratedSurface?.description).toContain("aria-live=polite");
+    expect(createGeneratedSurface?.description).toContain("window.samuraiGeneratedSurface.onActionResult");
+    expect(createGeneratedSurface?.description).toContain("samurai.generated_surface.action.result");
+    expect(createGeneratedSurface?.description).toContain("samurai.generated_surface.action.error");
+    expect(createGeneratedSurface?.description).toContain("status=\"accepted\" with saved=false");
+    expect(createGeneratedSurface?.description).toContain("status=\"completed\" with saved=true");
+    expect(createGeneratedSurface?.description).toContain("latest.data");
+    expect(createGeneratedSurface?.description).toContain("textContent");
     expect(JSON.stringify(openAiTools)).toContain("additionalProperties");
   });
 
@@ -107,7 +119,18 @@ describe("provider profiles", () => {
     expect(anthropic.body).toHaveProperty("tools");
     expect(JSON.stringify(gemini.body)).toContain("Output locale: ja");
     expect(JSON.stringify(gemini.body)).toContain("bundle.html must not contain script or style tags");
+    expect(JSON.stringify(gemini.body)).toContain("form elements");
+    expect(JSON.stringify(gemini.body)).toContain("non-form container");
     expect(JSON.stringify(gemini.body)).toContain("window.dispatchSamuraiAction");
+    const geminiSystemPrompt = (gemini.body as { systemInstruction: { parts: Array<{ text: string }> } }).systemInstruction.parts[0]?.text ?? "";
+    expect(geminiSystemPrompt).toContain("visible status or result region");
+    expect(geminiSystemPrompt).toContain("window.samuraiGeneratedSurface.onActionResult");
+    expect(geminiSystemPrompt).toContain("samurai.generated_surface.action.result");
+    expect(geminiSystemPrompt).toContain("samurai.generated_surface.action.error");
+    expect(geminiSystemPrompt).toContain("status=\"accepted\" with saved=false");
+    expect(geminiSystemPrompt).toContain("status=\"completed\" with saved=true");
+    expect(geminiSystemPrompt).toContain("latest.data");
+    expect(geminiSystemPrompt).toContain("textContent");
     expect(JSON.stringify(openai.body)).toContain("Output locale: ja");
     expect(JSON.stringify(anthropic.body)).toContain("Output locale: ja");
   });

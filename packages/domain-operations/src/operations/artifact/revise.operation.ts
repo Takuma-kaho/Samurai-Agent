@@ -3,10 +3,13 @@ import { z } from "zod";
 import type { ActivityInboxItem, ArtifactRecord, ArtifactRevisionRecord, JsonValue, OperationRecord, ResourceRef, RollbackPoint } from "@samurai-agent/core-schemas";
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../definition/index.js";
 import { artifactRevisionWriteValueSchema } from "../../value-objects/artifact.js";
+import { normalizeArtifactContent } from "./create.operation.js";
 
 const artifactContentInputSchema = z.union([
   z.string(),
-  z.array(z.number().int().min(0).max(255)).max(50_000_000)
+  z.array(z.number().int().min(0).max(255)).max(50_000_000),
+  z.record(domainJsonValueSchema),
+  z.array(domainJsonValueSchema)
 ]);
 
 const Input = z.object({
@@ -90,7 +93,7 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
         const contract = ports.artifactContract("artifact.revise");
         const editorSource = input.editor_source ?? "system";
         const value = await ports.runArtifactMutation({ trustedContext: context, inputSummary: `Revise artifact: ${artifact.title}`, operationName: contract.id, proposedEffects: contract.proposed_effects, targetResourceRefs: [artifact.file_ref], execute: async (operation) => {
-          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: artifactContent(input.content), producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, expectedRevision: input.expected_revision, editorSource, changeSummary: input.change_summary, provenance: input.provenance, ...(input.mime_type ? { mimeType: input.mime_type } : {}), ...(input.encoding ? { encoding: input.encoding } : {}) });
+          const created = await ports.createArtifactRevision({ artifactId: artifact.id, content: normalizeArtifactContent({ content: input.content, kind: artifact.kind, mime_type: input.mime_type, encoding: input.encoding }), producerRunId: context.runId, extension: input.extension, baseRevisionId: input.base_revision_id, expectedRevision: input.expected_revision, editorSource, changeSummary: input.change_summary, provenance: input.provenance, ...(input.mime_type ? { mimeType: input.mime_type } : {}), ...(input.encoding ? { encoding: input.encoding } : {}) });
           const rollbackPoint = await ports.createArtifactRollback(operation, [artifact.file_ref, created.revision.file_ref], { artifact: jsonRecord(artifact) }, { artifact: jsonRecord(created.artifact) });
           return { resource: created.artifact, ref: created.artifact.file_ref, rollbackPoint, summary: `Created revision of ${artifact.title}.`, extra: { revision: created.revision } };
         }});
@@ -103,7 +106,3 @@ const artifactRevise = defineCommand<ArtifactRevisePorts>()({
 export default artifactRevise;
 
 function jsonRecord(artifact: ArtifactRecord): Record<string, JsonValue> { return JSON.parse(JSON.stringify(artifact)) as Record<string, JsonValue>; }
-
-function artifactContent(content: string | number[]): string | Uint8Array {
-  return Array.isArray(content) ? Uint8Array.from(content) : content;
-}

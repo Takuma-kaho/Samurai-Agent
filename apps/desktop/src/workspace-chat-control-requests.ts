@@ -1,3 +1,5 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type WorkspaceChatRunControlAction = "cancel" | "retry";
@@ -6,6 +8,7 @@ export interface WorkspaceChatRunControlRequest {
   action: WorkspaceChatRunControlAction;
   runId: string;
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: Record<string, unknown>;
 }
 
@@ -19,10 +22,12 @@ export function workspaceChatRunControlRequest(input: unknown, action: Workspace
   const value = input as Record<string, unknown>;
   const runId = requiredOpaque(value, "runId");
   const operationId = requiredOpaque(value, "operationId");
+  const target = workspaceTargetRequest(value.target);
   return {
     action,
     runId,
     operationId,
+    ...(target ? { target } : {}),
     body: action === "retry"
       ? { confirm_unknown: value.confirmUnknown === true }
       : {}

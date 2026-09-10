@@ -113,6 +113,7 @@ export interface WorkspaceInteractionRequestListInput {
   roomId: string;
   includeResolved?: boolean;
   limit?: number;
+  offset?: number;
 }
 
 export interface WorkspaceInteractionRequestGetInput {
@@ -149,12 +150,29 @@ export interface WorkspaceInteractionExecutionClaimInput extends WorkspaceIntera
   leaseMs?: number;
 }
 
+export interface WorkspaceInteractionExecutionValidationInput extends WorkspaceInteractionRequestTransitionInput {
+  ownerId: string;
+  executionOperationId: string;
+}
+
 export interface WorkspaceInteractionExecutionClaim {
   ownerId: string;
   executionOperationId: string;
   startedAt: string;
   leaseUntil: string;
   attempt: number;
+}
+
+/**
+ * Server-only provenance for locating a Generated Surface target result.
+ *
+ * The IDs are ordered from the first side-effect candidate to the newest
+ * recovery candidate.  This is intentionally not part of the public request
+ * projection: it is an execution concern used only by the application
+ * workflow while reconciling an indeterminate claim.
+ */
+export interface WorkspaceInteractionExecutionTargetResultLookup {
+  readonly operationIds: readonly string[];
 }
 
 /** Internal Server-only target loaded from the immutable request record. */
@@ -173,6 +191,8 @@ export interface WorkspaceInteractionExecutionClaimResult {
   executionTarget: WorkspaceInteractionExecutionTarget;
   /** Internal only: the persisted backend input must be passed to Runtime, never to a client. */
   executionInput?: WorkspaceInteractionJsonValue;
+  /** Internal only: ordered durable-result lookup provenance for Generated Surface recovery. */
+  executionTargetResultLookup: WorkspaceInteractionExecutionTargetResultLookup;
   replayed: boolean;
 }
 
@@ -188,7 +208,30 @@ export interface WorkspaceInteractionExecutionSettlementInput extends WorkspaceI
   errorCode?: string;
 }
 
+/**
+ * Internal terminalization for an execution whose lease has already elapsed.
+ * It is deliberately separate from ordinary settlement, which refuses to
+ * decide an outcome after a lease expiry. This path is reserved for a
+ * deterministic safety condition where the application workflow knows no
+ * side effect can be retried safely (for example, exhausted result lineage).
+ */
+export interface WorkspaceInteractionStaleExecutionFailureInput extends WorkspaceInteractionRequestTransitionInput {
+  executionOperationId: string;
+  summary?: string;
+  errorCode: string;
+}
+
 export interface WorkspaceInteractionExecutionSettlementResult {
+  request: WorkspaceInteractionRequest;
+  replayed: boolean;
+}
+
+/**
+ * Result of returning a claim to the accepted state before any external
+ * side-effect boundary was crossed. This is deliberately separate from a
+ * failed settlement: a retryable admission check must remain retryable.
+ */
+export interface WorkspaceInteractionExecutionReleaseResult {
   request: WorkspaceInteractionRequest;
   replayed: boolean;
 }
@@ -211,6 +254,17 @@ export interface WorkspaceInteractionRequestMaintenanceResult {
   deliveryOperationId: string;
 }
 
+/**
+ * A request that can be handed to the application recovery workflow. For an
+ * accepted request the operation ID is derived before claiming; for a stale
+ * Generated Surface execution it is the already persisted claim identity.
+ * The value never exposes the persisted backend input to maintenance.
+ */
+export interface WorkspaceInteractionRequestAcceptedRecovery {
+  request: WorkspaceInteractionRequest;
+  executionOperationId: string;
+}
+
 export interface WorkspaceInteractionRequestMaintenanceInput {
   roomId: string;
   limit?: number;
@@ -227,7 +281,7 @@ export interface WorkspaceInteractionRequestRecordStore {
   ): Promise<WorkspaceRecord>;
   listRecords(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-    input: { roomId: string; recordType?: string; limit?: number }
+    input: { roomId: string; recordType?: string; limit?: number; offset?: number }
   ): Promise<WorkspaceRecord[]>;
   putRecord(context: WorkspaceRequestContext, input: PutRecordInput): Promise<PutRecordResult>;
 }
@@ -264,6 +318,8 @@ interface StoredInteractionRequestPayload extends WorkspaceRecordPayload {
   response_operation_id?: string;
   cancel_operation_id?: string;
   expire_operation_id?: string;
+  /** Idempotency marker for a claim release after a retryable admission error. */
+  execution_release_operation_id?: string;
   /** Durable outbox marker for Server-maintained terminal transitions. */
   maintenance_event?: StoredInteractionMaintenanceEvent;
   execution?: StoredInteractionExecution;
@@ -294,6 +350,11 @@ interface StoredInteractionExecution {
   started_at: string;
   lease_until: string;
   attempt: number;
+  /**
+   * Append-only, oldest-first result lookup provenance. This is omitted from
+   * legacy records and from executions without a durable target result.
+   */
+  target_result_lookup_operation_ids?: string[];
   result?: {
     status: WorkspaceInteractionExecutionSettlementStatus;
     finished_at: string;
@@ -317,7 +378,17 @@ const defaultTtlMs = 10 * 60 * 1000;
 const defaultExecutionLeaseMs = 5 * 60 * 1000;
 const maxInteractionJsonBytes = 64 * 1024;
 const maxInteractionInputBytes = 256 * 1024;
+const defaultInteractionListLimit = 100;
+const interactionListPageSize = 500;
+const maxInteractionListRecords = 100_000;
 const maxMaintenanceBatchSize = 1_000;
+const maintenancePageSize = 500;
+const maxMaintenanceScanRecords = 100_000;
+/**
+ * Keep reconciliation bounded without dropping the first side-effect
+ * candidate. Overflow fails closed rather than truncating immutable history.
+ */
+const maxExecutionTargetResultLookupOperationIds = 32;
 const maintenanceOperationPrefix = "interaction_maintenance_";
 const interruptedExecutionSummary = "The Server stopped before it could verify this approved request. It was not retried to avoid a duplicate operation.";
 const interruptedExecutionErrorCode = "workspace_interaction_execution_interrupted";
@@ -399,17 +470,51 @@ export class WorkspaceInteractionRequestService {
   ): Promise<WorkspaceInteractionRequest[]> {
     assertReadContext(context);
     assertRoomId(input.roomId);
-    const records = await this.store.listRecords(context, {
-      roomId: input.roomId,
-      recordType: WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
-      limit: input.limit
-    });
-    return records
-      .map((record) => {
-        const payload = parsePayload(record);
-        return publicRequest(record, payload, this.clock(), true);
-      })
-      .filter((request) => input.includeResolved === true || request.status === "pending");
+    if (input.includeResolved === true) {
+      const records = await this.store.listRecords(context, {
+        roomId: input.roomId,
+        recordType: WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
+        limit: input.limit,
+        offset: input.offset
+      });
+      return records.map((record) => publicRequest(record, parsePayload(record), this.clock(), true));
+    }
+
+    // The storage query cannot filter the JSON status without making this
+    // service depend on one database implementation. Scan deterministic
+    // storage pages and apply the public pending filter before offset/limit;
+    // otherwise a Room with many resolved requests can hide an older pending
+    // request behind a full page of completed history.
+    const limit = normalizedInteractionListLimit(input.limit);
+    const offset = normalizedInteractionListOffset(input.offset);
+    const requests: WorkspaceInteractionRequest[] = [];
+    let storageOffset = 0;
+    let pendingOffset = 0;
+    while (storageOffset < maxInteractionListRecords) {
+      const records = await this.store.listRecords(context, {
+        roomId: input.roomId,
+        recordType: WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
+        limit: interactionListPageSize,
+        offset: storageOffset
+      });
+      if (records.length === 0) break;
+      for (const record of records) {
+        const request = publicRequest(record, parsePayload(record), this.clock(), true);
+        if (request.status !== "pending") continue;
+        if (pendingOffset < offset) {
+          pendingOffset += 1;
+          continue;
+        }
+        requests.push(request);
+        if (requests.length >= limit) return requests;
+      }
+      storageOffset += records.length;
+      if (records.length < interactionListPageSize) break;
+    }
+    if (storageOffset >= maxInteractionListRecords) {
+      throw new WorkspaceServerError("workspace_interaction_request_list_incomplete", 503);
+    }
+    return requests;
   }
 
   async listRequests(
@@ -426,6 +531,20 @@ export class WorkspaceInteractionRequestService {
 
   async getRequest(context: InteractionReadContext, input: WorkspaceInteractionRequestGetInput): Promise<WorkspaceInteractionRequest> {
     return this.get(context, input);
+  }
+
+  /**
+   * Reads Server-only result provenance for a durable Generated Surface
+   * execution. The public request projection intentionally omits these
+   * operation IDs: they identify recovery attempts, not a client mutation
+   * contract. Callers must still have ordinary read access to the request.
+   */
+  async getExecutionTargetResultLookup(
+    context: InteractionReadContext,
+    input: WorkspaceInteractionRequestGetInput
+  ): Promise<WorkspaceInteractionExecutionTargetResultLookup> {
+    const loaded = await this.load(context, input.roomId, input.requestId);
+    return internalExecutionTargetResultLookup(loaded.payload);
   }
 
   async respond(context: WorkspaceRequestContext, input: WorkspaceInteractionRequestRespondInput): Promise<WorkspaceInteractionRequestMutationResult> {
@@ -531,13 +650,55 @@ export class WorkspaceInteractionRequestService {
   }
 
   /**
+   * Lists requests that need execution recovery. This includes requests that
+   * stopped after the durable response write but before execution was claimed,
+   * and Generated Surface requests whose execution lease elapsed after the
+   * external target may already have persisted its durable result. The caller
+   * must perform the current permission/result checks and then use the
+   * application workflow; this method deliberately does not claim or execute
+   * anything itself.
+   */
+  async listAcceptedForRecovery(
+    context: WorkspaceRequestContext,
+    input: WorkspaceInteractionRequestMaintenanceInput
+  ): Promise<WorkspaceInteractionRequestAcceptedRecovery[]> {
+    assertMutationContext(context);
+    assertRoomId(input.roomId);
+    const limit = normalizeMaintenanceLimit(input.limit);
+    const candidates: WorkspaceInteractionRequestAcceptedRecovery[] = [];
+    await this.scanInteractionRecords(context, input.roomId, async (records) => {
+      for (const record of records) {
+        const payload = parsePayload(record);
+        if (payload.room_id !== input.roomId) {
+          throw new WorkspaceServerError("workspace_interaction_request_room_mismatch", 409);
+        }
+        const acceptedBeforeClaim = payload.status === "accepted" && payload.execution === undefined;
+        const staleGeneratedExecution = payload.status === "executing"
+          && payload.execution !== undefined
+          && isExecutionStale(payload.execution, this.clock())
+          && isGeneratedSurfaceApprovalPayload(payload);
+        if (!acceptedBeforeClaim && !staleGeneratedExecution) continue;
+        candidates.push({
+          request: publicRequest(record, payload, this.clock(), false),
+          executionOperationId: payload.execution?.operation_id
+            ?? workspaceInteractionExecutionOperationId(context.workspaceId, record.id, "initial")
+        });
+        if (candidates.length >= limit) return true;
+      }
+      return false;
+    });
+    return candidates;
+  }
+
+  /**
    * Finds terminal transitions that the Server must complete even when no
    * client reconnects. Expiry is persisted rather than merely projected.
    *
-   * A stale `executing` request is deliberately settled as an interrupted
-   * failure instead of being re-executed. The original external action may
-   * already have happened before the process stopped, so an automatic retry
-   * could duplicate a publish, send, or other irreversible operation.
+   * A stale non-Surface request is settled as an interrupted failure instead
+   * of being re-executed. Generated Surface claims are handed to the result-
+   * aware application workflow because their target adapter owns a durable
+   * result record; that workflow either settles the existing result or fails
+   * closed after confirming that no result is available.
    */
   async reconcileRoom(
     context: WorkspaceRequestContext,
@@ -546,92 +707,125 @@ export class WorkspaceInteractionRequestService {
     assertMutationContext(context);
     assertRoomId(input.roomId);
     const limit = normalizeMaintenanceLimit(input.limit);
-    const records = await this.store.listRecords(context, {
-      roomId: input.roomId,
-      recordType: WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
-      limit
-    });
     const reconciled: WorkspaceInteractionRequestMaintenanceResult[] = [];
 
-    for (const record of records) {
-      const payload = parsePayload(record);
-      if (payload.room_id !== input.roomId) {
-        throw new WorkspaceServerError("workspace_interaction_request_room_mismatch", 409);
-      }
-      if (payload.maintenance_event && payload.maintenance_event.delivered_at === undefined) {
-        reconciled.push(maintenanceResult(record, payload, this.clock()));
-        continue;
-      }
-
-      if (payload.status === "pending" && isExpired(payload.expires_at, this.clock())) {
-        const eventOperationId = interactionMaintenanceOperationId(context.workspaceId, record.id, "expired");
-        const transitionContext = { ...context, operationId: eventOperationId };
-        const next: StoredInteractionRequestPayload = {
-          ...payload,
-          status: "expired",
-          outcome: { kind: "expired", expiredAt: payload.expires_at },
-          operation_id: eventOperationId,
-          expire_operation_id: eventOperationId,
-          maintenance_event: { action: "expired", operation_id: eventOperationId }
-        };
-        await this.persistTransition(
-          transitionContext,
-          { record, payload },
-          next,
-          "workspace_interaction_request_expiry_reconciliation_conflict",
-          (candidate) => candidate.status === "expired"
-            && candidate.expire_operation_id === eventOperationId
-            && sameMaintenanceEvent(candidate.maintenance_event, "expired", eventOperationId)
-        );
-        const current = await this.load(context, input.roomId, record.id);
-        if (current.payload.maintenance_event?.delivered_at === undefined
-          && sameMaintenanceEvent(current.payload.maintenance_event, "expired", eventOperationId)) {
-          reconciled.push(maintenanceResult(current.record, current.payload, this.clock()));
+    await this.scanInteractionRecords(context, input.roomId, async (records) => {
+      for (const record of records) {
+        if (reconciled.length >= limit) return true;
+        const payload = parsePayload(record);
+        if (payload.room_id !== input.roomId) {
+          throw new WorkspaceServerError("workspace_interaction_request_room_mismatch", 409);
         }
-        continue;
-      }
+        if (payload.maintenance_event && payload.maintenance_event.delivered_at === undefined) {
+          reconciled.push(maintenanceResult(record, payload, this.clock()));
+          continue;
+        }
 
-      if (payload.status === "executing" && payload.execution && isExecutionStale(payload.execution, this.clock())) {
-        const eventOperationId = interactionMaintenanceOperationId(
-          context.workspaceId,
-          record.id,
-          `interrupted:${payload.execution.operation_id}`
-        );
-        const transitionContext = { ...context, operationId: eventOperationId };
-        const next: StoredInteractionRequestPayload = {
-          ...payload,
-          status: "failed",
-          execution: {
-            ...payload.execution,
-            result: {
-              status: "failed",
-              finished_at: nowIso(this.clock()),
-              summary: interruptedExecutionSummary,
-              error_code: interruptedExecutionErrorCode
-            }
-          },
-          operation_id: eventOperationId,
-          maintenance_event: { action: "failed", operation_id: eventOperationId }
-        };
-        await this.persistTransition(
-          transitionContext,
-          { record, payload },
-          next,
-          "workspace_interaction_request_execution_reconciliation_conflict",
-          (candidate) => candidate.status === "failed"
-            && candidate.execution?.operation_id === payload.execution?.operation_id
-            && candidate.execution?.result?.error_code === interruptedExecutionErrorCode
-            && sameMaintenanceEvent(candidate.maintenance_event, "failed", eventOperationId)
-        );
-        const current = await this.load(context, input.roomId, record.id);
-        if (current.payload.maintenance_event?.delivered_at === undefined
-          && sameMaintenanceEvent(current.payload.maintenance_event, "failed", eventOperationId)) {
-          reconciled.push(maintenanceResult(current.record, current.payload, this.clock()));
+        if (["pending", "accepted"].includes(payload.status) && isExpired(payload.expires_at, this.clock())) {
+          const eventOperationId = interactionMaintenanceOperationId(context.workspaceId, record.id, "expired");
+          const transitionContext = { ...context, operationId: eventOperationId };
+          const next: StoredInteractionRequestPayload = {
+            ...payload,
+            status: "expired",
+            outcome: { kind: "expired", expiredAt: payload.expires_at },
+            operation_id: eventOperationId,
+            expire_operation_id: eventOperationId,
+            maintenance_event: { action: "expired", operation_id: eventOperationId }
+          };
+          await this.persistTransition(
+            transitionContext,
+            { record, payload },
+            next,
+            "workspace_interaction_request_expiry_reconciliation_conflict",
+            (candidate) => candidate.status === "expired"
+              && candidate.expire_operation_id === eventOperationId
+              && sameMaintenanceEvent(candidate.maintenance_event, "expired", eventOperationId)
+          );
+          const current = await this.load(context, input.roomId, record.id);
+          if (current.payload.maintenance_event?.delivered_at === undefined
+            && sameMaintenanceEvent(current.payload.maintenance_event, "expired", eventOperationId)) {
+            reconciled.push(maintenanceResult(current.record, current.payload, this.clock()));
+          }
+          continue;
+        }
+
+        if (payload.status === "executing" && payload.execution && isExecutionStale(payload.execution, this.clock())) {
+          // Generated Surface target results are stored by the execution
+          // adapter, not by this generic lifecycle store. Leave those claims
+          // for the application workflow, which can read that result and
+          // settle completed without dispatching the target again. If no
+          // workflow is installed, this is intentionally fail-closed: the
+          // record remains executing instead of being falsely failed.
+          if (isGeneratedSurfaceApprovalPayload(payload)) continue;
+          const eventOperationId = interactionMaintenanceOperationId(
+            context.workspaceId,
+            record.id,
+            `interrupted:${payload.execution.operation_id}`
+          );
+          const transitionContext = { ...context, operationId: eventOperationId };
+          const next: StoredInteractionRequestPayload = {
+            ...payload,
+            status: "failed",
+            execution: {
+              ...payload.execution,
+              result: {
+                status: "failed",
+                finished_at: nowIso(this.clock()),
+                summary: interruptedExecutionSummary,
+                error_code: interruptedExecutionErrorCode
+              }
+            },
+            operation_id: eventOperationId,
+            maintenance_event: { action: "failed", operation_id: eventOperationId }
+          };
+          await this.persistTransition(
+            transitionContext,
+            { record, payload },
+            next,
+            "workspace_interaction_request_execution_reconciliation_conflict",
+            (candidate) => candidate.status === "failed"
+              && candidate.execution?.operation_id === payload.execution?.operation_id
+              && candidate.execution?.result?.error_code === interruptedExecutionErrorCode
+              && sameMaintenanceEvent(candidate.maintenance_event, "failed", eventOperationId)
+          );
+          const current = await this.load(context, input.roomId, record.id);
+          if (current.payload.maintenance_event?.delivered_at === undefined
+            && sameMaintenanceEvent(current.payload.maintenance_event, "failed", eventOperationId)) {
+            reconciled.push(maintenanceResult(current.record, current.payload, this.clock()));
+          }
         }
       }
-    }
+      return reconciled.length >= limit;
+    });
 
     return reconciled;
+  }
+
+  /**
+   * Maintenance must not treat the newest storage page as the complete
+   * recovery set.  Records can be numerous and an accepted request may be
+   * older than the first page, so scan deterministic pages until the caller
+   * has enough results or the complete Room has been inspected.
+   */
+  private async scanInteractionRecords(
+    context: InteractionReadContext,
+    roomId: string,
+    visit: (records: WorkspaceRecord[]) => boolean | Promise<boolean>
+  ): Promise<void> {
+    let offset = 0;
+    while (offset < maxMaintenanceScanRecords) {
+      const records = await this.store.listRecords(context, {
+        roomId,
+        recordType: WORKSPACE_INTERACTION_REQUEST_RECORD_TYPE,
+        limit: maintenancePageSize,
+        offset
+      });
+      if (records.length === 0) return;
+      if (await visit(records)) return;
+      offset += records.length;
+      if (records.length < maintenancePageSize) return;
+    }
+    throw new WorkspaceServerError("workspace_interaction_request_scan_incomplete", 503);
   }
 
   /**
@@ -693,6 +887,7 @@ export class WorkspaceInteractionRequestService {
         claim: publicExecutionClaim(existingExecution),
         executionTarget: internalExecutionTarget(loaded.payload),
         ...internalExecutionInput(loaded.payload),
+        executionTargetResultLookup: internalExecutionTargetResultLookup(loaded.payload),
         replayed: true
       };
     }
@@ -707,10 +902,19 @@ export class WorkspaceInteractionRequestService {
     if (loaded.payload.status !== "accepted") {
       throw new WorkspaceServerError("workspace_interaction_request_not_accepted", 409);
     }
+    if (isExpired(loaded.payload.expires_at, this.clock())) {
+      throw new WorkspaceServerError("workspace_interaction_request_expired", 409);
+    }
 
     assertExpectedVersion(input.expectedVersion, loaded.record.version);
     const now = nowIso(this.clock());
-    const nextExecution = newStoredExecution(claimInput, now, claimInput.leaseMs);
+    const nextExecution = newStoredExecution(
+      claimInput,
+      now,
+      claimInput.leaseMs,
+      1,
+      newTargetResultLookupOperationIds(loaded.payload, claimInput.executionOperationId)
+    );
     const next: StoredInteractionRequestPayload = {
       ...loaded.payload,
       status: "executing",
@@ -730,6 +934,7 @@ export class WorkspaceInteractionRequestService {
       claim: publicExecutionClaim(final.payload.execution ?? nextExecution),
       executionTarget: internalExecutionTarget(final.payload),
       ...internalExecutionInput(final.payload),
+      executionTargetResultLookup: internalExecutionTargetResultLookup(final.payload),
       replayed: transition.replayed
     };
   }
@@ -739,6 +944,93 @@ export class WorkspaceInteractionRequestService {
     input: WorkspaceInteractionExecutionClaimInput
   ): Promise<WorkspaceInteractionExecutionClaimResult> {
     return this.claimExecution(context, input);
+  }
+
+  /**
+   * Revalidates the current claim immediately before its side effect. This is
+   * intentionally read-only: a permission/expiry/lease failure must not turn
+   * an already executing request into a new claim or retry.
+   */
+  async assertExecutionClaim(
+    context: WorkspaceRequestContext,
+    input: WorkspaceInteractionExecutionValidationInput
+  ): Promise<WorkspaceInteractionRequest> {
+    assertMutationContext(context);
+    assertExpectedVersionValue(input.expectedVersion);
+    const loaded = await this.load(context, input.roomId, input.requestId);
+    const execution = loaded.payload.execution;
+    if (!execution || !sameExecutionIdentity(execution, input)) {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_owner_conflict", 409);
+    }
+    if (loaded.payload.status !== "executing") {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_not_active", 409);
+    }
+    if (isExecutionStale(execution, this.clock())) {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_lease_expired", 409, {
+        lease_until: execution.lease_until
+      });
+    }
+    if (isExpired(loaded.payload.expires_at, this.clock())) {
+      throw new WorkspaceServerError("workspace_interaction_request_expired", 409);
+    }
+    assertExpectedVersion(input.expectedVersion, loaded.record.version);
+    return publicRequest(loaded.record, loaded.payload, this.clock(), false);
+  }
+
+  /**
+   * Returns an execution claim to `accepted` without recording a terminal
+   * result. The Application Workflow uses this only when re-authorization
+   * failed for a retryable infrastructure reason. No caller may use it after
+   * the lease has elapsed because the external side-effect outcome is then
+   * unknown and must follow the explicit recovery path.
+   */
+  async releaseExecutionClaim(
+    context: WorkspaceRequestContext,
+    input: WorkspaceInteractionExecutionValidationInput
+  ): Promise<WorkspaceInteractionExecutionReleaseResult> {
+    assertMutationContext(context);
+    assertExpectedVersionValue(input.expectedVersion);
+    const loaded = await this.load(context, input.roomId, input.requestId);
+
+    if (
+      loaded.payload.status === "accepted"
+      && loaded.payload.execution === undefined
+      && loaded.payload.execution_release_operation_id === context.operationId
+    ) {
+      return { request: publicRequest(loaded.record, loaded.payload, this.clock(), false), replayed: true };
+    }
+
+    const execution = loaded.payload.execution;
+    if (!execution || !sameExecutionIdentity(execution, input)) {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_owner_conflict", 409);
+    }
+    if (loaded.payload.status !== "executing") {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_not_active", 409);
+    }
+    if (isExecutionStale(execution, this.clock())) {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_lease_expired", 409, {
+        lease_until: execution.lease_until
+      });
+    }
+    assertExpectedVersion(input.expectedVersion, loaded.record.version);
+
+    const { execution: _execution, ...acceptedPayload } = loaded.payload;
+    const next: StoredInteractionRequestPayload = {
+      ...acceptedPayload,
+      status: "accepted",
+      operation_id: context.operationId,
+      execution_release_operation_id: context.operationId
+    };
+    const transition = await this.persistTransition(
+      context,
+      loaded,
+      next,
+      "workspace_interaction_request_execution_release_conflict",
+      (payload) => payload.status === "accepted"
+        && payload.execution === undefined
+        && payload.execution_release_operation_id === context.operationId
+    );
+    return { request: transition.request, replayed: transition.replayed };
   }
 
   /**
@@ -764,6 +1056,7 @@ export class WorkspaceInteractionRequestService {
         claim: publicExecutionClaim(existingExecution),
         executionTarget: internalExecutionTarget(loaded.payload),
         ...internalExecutionInput(loaded.payload),
+        executionTargetResultLookup: internalExecutionTargetResultLookup(loaded.payload),
         replayed: true
       };
     }
@@ -775,7 +1068,13 @@ export class WorkspaceInteractionRequestService {
     assertExpectedVersion(input.expectedVersion, loaded.record.version);
 
     const now = nowIso(this.clock());
-    const nextExecution = newStoredExecution(claimInput, now, claimInput.leaseMs, existingExecution.attempt + 1);
+    const nextExecution = newStoredExecution(
+      claimInput,
+      now,
+      claimInput.leaseMs,
+      existingExecution.attempt + 1,
+      recoveredTargetResultLookupOperationIds(loaded.payload, existingExecution, claimInput.executionOperationId)
+    );
     const next: StoredInteractionRequestPayload = {
       ...loaded.payload,
       status: "executing",
@@ -795,6 +1094,7 @@ export class WorkspaceInteractionRequestService {
       claim: publicExecutionClaim(final.payload.execution ?? nextExecution),
       executionTarget: internalExecutionTarget(final.payload),
       ...internalExecutionInput(final.payload),
+      executionTargetResultLookup: internalExecutionTargetResultLookup(final.payload),
       replayed: transition.replayed
     };
   }
@@ -804,6 +1104,71 @@ export class WorkspaceInteractionRequestService {
     input: WorkspaceInteractionExecutionClaimInput
   ): Promise<WorkspaceInteractionExecutionClaimResult> {
     return this.recoverExecution(context, input);
+  }
+
+  /**
+   * Terminalizes one still-current, expired execution only when the caller
+   * has reached a deterministic fail-closed condition. Unlike
+   * `settleExecution`, the elapsed lease is required rather than rejected.
+   * This prevents an indeterminate claim from remaining retryable forever
+   * after its immutable recovery provenance is exhausted.
+   */
+  async failStaleExecution(
+    context: WorkspaceRequestContext,
+    input: WorkspaceInteractionStaleExecutionFailureInput
+  ): Promise<WorkspaceInteractionExecutionSettlementResult> {
+    assertMutationContext(context);
+    assertExpectedVersionValue(input.expectedVersion);
+    const failure = normalizeStaleExecutionFailureInput(input);
+    const loaded = await this.load(context, input.roomId, input.requestId);
+    const execution = loaded.payload.execution;
+    if (!execution || execution.operation_id !== failure.executionOperationId) {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_owner_conflict", 409);
+    }
+    if (loaded.payload.status === "failed") {
+      if (sameSettlementIntent(execution.result, failure)) {
+        return { request: publicRequest(loaded.record, loaded.payload, this.clock(), false), replayed: true };
+      }
+      throw new WorkspaceServerError("workspace_interaction_request_execution_already_settled", 409);
+    }
+    if (loaded.payload.status === "completed") {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_already_settled", 409);
+    }
+    if (loaded.payload.status !== "executing") {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_not_active", 409);
+    }
+    if (!isExecutionStale(execution, this.clock())) {
+      throw new WorkspaceServerError("workspace_interaction_request_execution_not_stale", 409, {
+        lease_until: execution.lease_until
+      });
+    }
+    assertExpectedVersion(input.expectedVersion, loaded.record.version);
+
+    const result: StoredInteractionExecution["result"] = {
+      status: "failed",
+      finished_at: nowIso(this.clock()),
+      ...(failure.summary === undefined ? {} : { summary: failure.summary }),
+      error_code: failure.errorCode
+    };
+    const next: StoredInteractionRequestPayload = {
+      ...loaded.payload,
+      status: "failed",
+      execution: { ...execution, result },
+      operation_id: context.operationId
+    };
+    const transition = await this.persistTransition(
+      context,
+      loaded,
+      next,
+      "workspace_interaction_request_stale_execution_failure_conflict",
+      (payload) => Boolean(
+        payload.execution
+          && payload.execution.operation_id === failure.executionOperationId
+          && payload.status === "failed"
+          && sameSettlementIntent(payload.execution.result, failure)
+      )
+    );
+    return { request: transition.request, replayed: transition.replayed };
   }
 
   /** Internal Server-only result settlement for the currently owned claim. */
@@ -1282,7 +1647,13 @@ function parsePayload(record: WorkspaceRecord): StoredInteractionRequestPayload 
   }
   const outcome = value.outcome === undefined ? undefined : parseStoredOutcome(value.outcome);
   validateStoredLifecycle(value.status as WorkspaceInteractionRequestStatus, value.kind as WorkspaceInteractionRequestKind, options, inputSchema, outcome);
-  for (const operationId of [value.operation_id, value.response_operation_id, value.cancel_operation_id, value.expire_operation_id]) {
+  for (const operationId of [
+    value.operation_id,
+    value.response_operation_id,
+    value.cancel_operation_id,
+    value.expire_operation_id,
+    value.execution_release_operation_id
+  ]) {
     if (operationId !== undefined) {
       if (typeof operationId !== "string") throw new WorkspaceServerError("workspace_interaction_request_corrupt", 500);
       assertOpaqueId(operationId, "workspace_interaction_request_corrupt");
@@ -1321,6 +1692,13 @@ function parsePayload(record: WorkspaceRecord): StoredInteractionRequestPayload 
   } catch {
     throw new WorkspaceServerError("workspace_interaction_request_corrupt", 500);
   }
+  if (execution?.target_result_lookup_operation_ids !== undefined
+    && !isGeneratedSurfaceApprovalPayload({
+      kind: value.kind as WorkspaceInteractionRequestKind,
+      action_target: actionTarget
+    })) {
+    throw new WorkspaceServerError("workspace_interaction_request_corrupt", 500);
+  }
   return {
     schema_version: 1,
     kind: value.kind as WorkspaceInteractionRequestKind,
@@ -1344,6 +1722,7 @@ function parsePayload(record: WorkspaceRecord): StoredInteractionRequestPayload 
     ...(typeof value.response_operation_id === "string" ? { response_operation_id: value.response_operation_id } : {}),
     ...(typeof value.cancel_operation_id === "string" ? { cancel_operation_id: value.cancel_operation_id } : {}),
     ...(typeof value.expire_operation_id === "string" ? { expire_operation_id: value.expire_operation_id } : {}),
+    ...(typeof value.execution_release_operation_id === "string" ? { execution_release_operation_id: value.execution_release_operation_id } : {}),
     ...(maintenanceEvent === undefined ? {} : { maintenance_event: maintenanceEvent }),
     ...(execution === undefined ? {} : { execution })
   };
@@ -1452,13 +1831,20 @@ function parseStoredExecution(value: WorkspaceInteractionJsonValue): StoredInter
   }
   assertOpaqueId(ownerId, "workspace_interaction_request_corrupt");
   assertOpaqueId(operationId, "workspace_interaction_request_corrupt");
+  const targetResultLookupOperationIds = parseStoredTargetResultLookupOperationIds(
+    value.target_result_lookup_operation_ids,
+    operationId
+  );
   if (value.result === undefined) {
     return {
       owner_id: ownerId,
       operation_id: operationId,
       started_at: startedAt,
       lease_until: leaseUntil,
-      attempt
+      attempt,
+      ...(targetResultLookupOperationIds === undefined
+        ? {}
+        : { target_result_lookup_operation_ids: targetResultLookupOperationIds })
     };
   }
   if (!isJsonObject(value.result)
@@ -1476,6 +1862,9 @@ function parseStoredExecution(value: WorkspaceInteractionJsonValue): StoredInter
     started_at: startedAt,
     lease_until: leaseUntil,
     attempt,
+    ...(targetResultLookupOperationIds === undefined
+      ? {}
+      : { target_result_lookup_operation_ids: targetResultLookupOperationIds }),
     result: {
       status: value.result.status as WorkspaceInteractionExecutionSettlementStatus,
       finished_at: value.result.finished_at,
@@ -1483,6 +1872,28 @@ function parseStoredExecution(value: WorkspaceInteractionJsonValue): StoredInter
       ...(value.result.error_code === undefined ? {} : { error_code: value.result.error_code })
     }
   };
+}
+
+function parseStoredTargetResultLookupOperationIds(
+  value: WorkspaceInteractionJsonValue | undefined,
+  currentOperationId: string
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)
+    || value.length === 0
+    || value.length > maxExecutionTargetResultLookupOperationIds
+    || value.some((operationId) => typeof operationId !== "string")) {
+    throw new WorkspaceServerError("workspace_interaction_request_corrupt", 500);
+  }
+  const operationIds = value as string[];
+  if (new Set(operationIds).size !== operationIds.length
+    || operationIds[operationIds.length - 1] !== currentOperationId) {
+    throw new WorkspaceServerError("workspace_interaction_request_corrupt", 500);
+  }
+  for (const operationId of operationIds) {
+    assertOpaqueId(operationId, "workspace_interaction_request_corrupt");
+  }
+  return [...operationIds];
 }
 
 function validateSchemaDeclaration(schema: WorkspaceInteractionJsonObject, depth: number): void {
@@ -1663,6 +2074,21 @@ function normalizeSettlementInput(input: WorkspaceInteractionExecutionSettlement
   };
 }
 
+function normalizeStaleExecutionFailureInput(
+  input: WorkspaceInteractionStaleExecutionFailureInput
+): Pick<WorkspaceInteractionStaleExecutionFailureInput, "executionOperationId" | "summary" | "errorCode"> & { status: "failed" } {
+  const executionOperationId = assertOpaqueId(input.executionOperationId, "workspace_interaction_execution_operation_invalid");
+  const summary = input.summary === undefined
+    ? undefined
+    : normalizeText(input.summary, 2_000, "workspace_interaction_request_settlement_summary_invalid");
+  return {
+    status: "failed",
+    executionOperationId,
+    ...(summary === undefined ? {} : { summary }),
+    errorCode: normalizeErrorCode(input.errorCode)
+  };
+}
+
 function normalizeErrorCode(value: string): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
     throw new WorkspaceServerError("workspace_interaction_request_settlement_error_code_invalid", 400);
@@ -1674,14 +2100,18 @@ function newStoredExecution(
   input: WorkspaceInteractionExecutionClaimInput & { leaseMs: number },
   startedAt: string,
   leaseMs: number,
-  attempt = 1
+  attempt = 1,
+  targetResultLookupOperationIds?: readonly string[]
 ): StoredInteractionExecution {
   return {
     owner_id: input.ownerId,
     operation_id: input.executionOperationId,
     started_at: startedAt,
     lease_until: new Date(new Date(startedAt).getTime() + leaseMs).toISOString(),
-    attempt
+    attempt,
+    ...(targetResultLookupOperationIds === undefined
+      ? {}
+      : { target_result_lookup_operation_ids: [...targetResultLookupOperationIds] })
   };
 }
 
@@ -1704,6 +2134,61 @@ function sameExecutionIdentity(
 
 function isExecutionStale(execution: StoredInteractionExecution, now: Date): boolean {
   return new Date(execution.lease_until).getTime() <= now.getTime();
+}
+
+function isGeneratedSurfaceApprovalPayload(
+  payload: Pick<StoredInteractionRequestPayload, "kind" | "action_target">
+): boolean {
+  return payload.kind === "approval"
+    && isJsonObject(payload.action_target)
+    && payload.action_target.kind === "generated_surface_action";
+}
+
+function newTargetResultLookupOperationIds(
+  payload: StoredInteractionRequestPayload,
+  operationId: string
+): readonly string[] | undefined {
+  return isGeneratedSurfaceApprovalPayload(payload) ? [operationId] : undefined;
+}
+
+/**
+ * Builds the next immutable lookup history during stale recovery.
+ *
+ * Records written before this field existed are upgraded in memory by using
+ * their current operation as the first candidate. A recovery candidate is
+ * appended only once, and overflow is rejected instead of truncating the
+ * first candidate that protects against duplicate side effects.
+ */
+function recoveredTargetResultLookupOperationIds(
+  payload: StoredInteractionRequestPayload,
+  existingExecution: StoredInteractionExecution,
+  nextOperationId: string
+): readonly string[] | undefined {
+  if (!isGeneratedSurfaceApprovalPayload(payload)) return undefined;
+  const operationIds = [
+    ...(existingExecution.target_result_lookup_operation_ids ?? [existingExecution.operation_id])
+  ];
+  appendUniqueOperationId(operationIds, existingExecution.operation_id);
+  appendUniqueOperationId(operationIds, nextOperationId);
+  if (operationIds.length > maxExecutionTargetResultLookupOperationIds) {
+    throw new WorkspaceServerError("workspace_interaction_execution_provenance_limit_exceeded", 409);
+  }
+  return operationIds;
+}
+
+function appendUniqueOperationId(operationIds: string[], operationId: string): void {
+  if (!operationIds.includes(operationId)) operationIds.push(operationId);
+}
+
+function internalExecutionTargetResultLookup(
+  payload: StoredInteractionRequestPayload
+): WorkspaceInteractionExecutionTargetResultLookup {
+  if (!payload.execution || !isGeneratedSurfaceApprovalPayload(payload)) {
+    return Object.freeze({ operationIds: Object.freeze([] as string[]) });
+  }
+  const operationIds = payload.execution.target_result_lookup_operation_ids
+    ?? [payload.execution.operation_id];
+  return Object.freeze({ operationIds: Object.freeze([...operationIds]) });
 }
 
 function sameMaintenanceEvent(
@@ -1785,6 +2270,10 @@ function interactionRequestId(workspaceId: string, operationId: string): string 
   return `interaction_${createHash("sha256").update(`workspace-interaction-request-v1|${workspaceId}|${operationId}`).digest("hex").slice(0, 40)}`;
 }
 
+export function workspaceInteractionExecutionOperationId(workspaceId: string, requestId: string, attempt: string): string {
+  return `interaction_execution_${createHash("sha256").update(`${workspaceId}|${requestId}|${attempt}`).digest("hex").slice(0, 48)}`;
+}
+
 function interactionMaintenanceOperationId(workspaceId: string, requestId: string, phase: string): string {
   return `${maintenanceOperationPrefix}${createHash("sha256")
     .update(`workspace-interaction-maintenance-v1|${workspaceId}|${requestId}|${phase}`)
@@ -1805,6 +2294,22 @@ function normalizeMaintenanceLimit(value: number | undefined): number {
     throw new WorkspaceServerError("workspace_interaction_request_maintenance_limit_invalid", 400);
   }
   return limit;
+}
+
+function normalizedInteractionListLimit(value: number | undefined): number {
+  const limit = value ?? defaultInteractionListLimit;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > interactionListPageSize) {
+    throw new WorkspaceServerError("workspace_query_limit_invalid", 400);
+  }
+  return limit;
+}
+
+function normalizedInteractionListOffset(value: number | undefined): number {
+  const offset = value ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > maxInteractionListRecords) {
+    throw new WorkspaceServerError("workspace_query_offset_invalid", 400);
+  }
+  return offset;
 }
 
 function nowIso(clock: Date): string {

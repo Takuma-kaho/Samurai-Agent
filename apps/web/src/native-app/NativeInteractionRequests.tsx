@@ -6,6 +6,8 @@ import {
   type NativeWorkspaceTargetGuardBridge
 } from "./native-workspace-target";
 import type { NativeWorkspaceTarget } from "./types";
+import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
+import { useNativeDraftNavigation, type NativeDraftNavigationController } from "./use-native-draft-navigation";
 
 export type NativeInteractionKind = "approval" | "backend_input";
 export type NativeInteractionStatus =
@@ -25,6 +27,7 @@ export type NativeInteractionStatus =
 export interface NativeInteractionOption {
   id: string;
   label: string;
+  decision: "approve" | "deny" | "submit_input";
   description?: string;
 }
 
@@ -95,10 +98,51 @@ export interface NativeInteractionRequest {
   updatedAt?: string;
 }
 
+export type NativeInteractionDraft = Record<string, string | number | boolean>;
+
+export interface NativeInteractionDraftState {
+  dirty: boolean;
+  saving: boolean;
+}
+
+export interface NativeInteractionDraftSnapshot {
+  requestId: string;
+  values: Readonly<NativeInteractionDraft>;
+}
+
+export function captureNativeInteractionDraftSnapshot(
+  requestId: string,
+  draft: NativeInteractionDraft
+): NativeInteractionDraftSnapshot {
+  return { requestId, values: { ...draft } };
+}
+
+export function nativeInteractionDraftSnapshotHasNewerChanges(
+  snapshot: NativeInteractionDraftSnapshot,
+  current: NativeInteractionDraft | undefined
+): boolean {
+  if (!current) return false;
+  const keys = new Set([...Object.keys(snapshot.values), ...Object.keys(current)]);
+  return [...keys].some((key) => !Object.is(snapshot.values[key], current[key]));
+}
+
+/** Preserve an edit made after a response started; only the submitted draft may be cleared. */
+export function nativeInteractionDraftAfterResponse(
+  current: NativeInteractionDraft | undefined,
+  snapshot: NativeInteractionDraftSnapshot,
+  succeeded = true
+): NativeInteractionDraft | undefined {
+  if (!current) return undefined;
+  if (!succeeded) return current;
+  if (!nativeInteractionDraftSnapshotHasNewerChanges(snapshot, current)) return undefined;
+  return current;
+}
+
 export interface NativeInteractionRequestsBridge extends NativeWorkspaceTargetGuardBridge {
   listWorkspaceInteractionRequests?: (input: {
     roomId: string;
     includeResolved?: boolean;
+    target?: NativeWorkspaceTarget;
   }) => Promise<{ requests: NativeInteractionRequest[] }>;
   respondWorkspaceInteractionRequest?: (input: {
     roomId: string;
@@ -108,12 +152,14 @@ export interface NativeInteractionRequestsBridge extends NativeWorkspaceTargetGu
     optionId: string;
     values?: Record<string, JsonValue>;
     operationId: string;
+    target?: NativeWorkspaceTarget;
   }) => Promise<{ request: NativeInteractionRequest; replayed?: boolean }>;
   cancelWorkspaceInteractionRequest?: (input: {
     roomId: string;
     requestId: string;
     expectedVersion: number;
     operationId: string;
+    target?: NativeWorkspaceTarget;
   }) => Promise<{ request: NativeInteractionRequest; replayed?: boolean }>;
 }
 
@@ -122,6 +168,7 @@ export interface NativeInteractionRequestsProps {
   target?: NativeWorkspaceTarget;
   bridge?: NativeInteractionRequestsBridge;
   onClose?: () => void;
+  onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
 }
 
 export interface NativeInteractionRequestOperations {
@@ -154,7 +201,7 @@ export function nativeInteractionRequestOperations(
 
   return {
     ...(bridge.listWorkspaceInteractionRequests ? {
-      list: () => withNativeWorkspaceTarget(bridge, target, () => bridge.listWorkspaceInteractionRequests!({ roomId, includeResolved: true }))
+      list: () => withNativeWorkspaceTarget(bridge, target, () => bridge.listWorkspaceInteractionRequests!({ roomId, includeResolved: true, target }))
     } : {}),
     ...(bridge.respondWorkspaceInteractionRequest ? {
       respond: (input) => withNativeWorkspaceTarget(bridge, target, () => bridge.respondWorkspaceInteractionRequest!({
@@ -163,7 +210,8 @@ export function nativeInteractionRequestOperations(
         expectedVersion: input.expectedVersion,
         optionId: input.optionId,
         ...(input.values === undefined ? {} : { values: input.values }),
-        operationId: input.operationId
+        operationId: input.operationId,
+        target
       }))
     } : {}),
     ...(bridge.cancelWorkspaceInteractionRequest ? {
@@ -171,7 +219,8 @@ export function nativeInteractionRequestOperations(
         roomId,
         requestId: input.requestId,
         expectedVersion: input.expectedVersion,
-        operationId: input.operationId
+        operationId: input.operationId,
+        target
       }))
     } : {})
   };
@@ -204,19 +253,25 @@ export function createNativeInteractionBusyGate(): NativeInteractionBusyGate {
  * absent Server list/respond methods are rendered as unavailable instead of a
  * locally successful button.
  */
-export function NativeInteractionRequests({ roomId, target, bridge, onClose }: NativeInteractionRequestsProps) {
+export function NativeInteractionRequests({ roomId, target, bridge, onClose, onDraftNavigationControllerChange }: NativeInteractionRequestsProps) {
   const sectionId = useId().replace(/:/g, "");
   const generation = useRef(0);
   const busyRef = useRef(createNativeInteractionBusyGate());
+  const operationIds = useRef(new Map<string, string>());
+  const draftsRef = useRef<Record<string, NativeInteractionDraft>>({});
   const [requests, setRequests] = useState<NativeInteractionRequest[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, Record<string, string | number | boolean>>>({});
+  const [drafts, setDrafts] = useState<Record<string, NativeInteractionDraft>>({});
   const [loading, setLoading] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  draftsRef.current = drafts;
   const stableTarget = useMemo(
-    () => target ? { connectionId: target.connectionId, workspaceId: target.workspaceId } : undefined,
-    [target?.connectionId, target?.workspaceId]
+    // Preserve an optional Room/selection generation carried by a richer host
+    // target.  The generic interaction surface still accepts the legacy
+    // connection + Workspace pair.
+    () => target ? { ...target } : undefined,
+    [target]
   );
   const operations = useMemo(
     () => nativeInteractionRequestOperations(bridge, stableTarget, roomId),
@@ -251,7 +306,11 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
       if (!Array.isArray(response.requests)) throw new Error("interaction_request_list_invalid");
       const scoped = response.requests.filter((request) => isInteractionRequestInScope(request, roomId, stableTarget));
       setRequests(scoped);
-      setDrafts((current) => mergeInitialDrafts(current, scoped));
+      setDrafts((current) => {
+        const next = mergeInitialDrafts(current, scoped);
+        draftsRef.current = next;
+        return next;
+      });
     } catch (cause) {
       if (requestGeneration === generation.current) setError(nativeInteractionErrorMessage(cause));
     } finally {
@@ -262,8 +321,10 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
   useEffect(() => {
     generation.current += 1;
     busyRef.current.clear();
+    operationIds.current.clear();
     setBusyIds(new Set());
     setRequests([]);
+    draftsRef.current = {};
     setDrafts({});
     setError(undefined);
     setNotice(undefined);
@@ -271,43 +332,104 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
     return () => { generation.current += 1; };
   }, [reload]);
 
+  const draftState = useMemo<NativeInteractionDraftState>(() => ({
+    dirty: requests.some((request) => nativeInteractionDraftIsDirty(request, drafts[request.id] ?? {})),
+    saving: busyIds.size > 0
+  }), [busyIds, drafts, requests]);
+
+  // Accepted/executing requests are not terminal.  Keep the projection fresh
+  // until the Server records a terminal result so a failed execution is not
+  // hidden behind a manual refresh.
+  const hasUnresolvedExecution = requests.some((request) => request.status === "accepted" || request.status === "executing");
+  useEffect(() => {
+    if (!hasUnresolvedExecution || !operations?.list || loading || busyIds.size > 0) return;
+    const timer = setTimeout(() => { void reload(); }, 1_000);
+    return () => clearTimeout(timer);
+  }, [busyIds.size, hasUnresolvedExecution, loading, operations, reload]);
+
+  const updateDraft = useCallback((requestId: string, field: string, value: string | number | boolean): void => {
+    const next = {
+      ...draftsRef.current,
+      [requestId]: { ...(draftsRef.current[requestId] ?? {}), [field]: value }
+    };
+    draftsRef.current = next;
+    setDrafts(next);
+  }, []);
+
   const respond = useCallback(async (
     request: NativeInteractionRequest,
     option: NativeInteractionOption
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const respondOperation = operations?.respond;
-    if (!respondOperation || !roomId || !interactionRequestCanRespond(request, option)) return;
-    if (!beginBusy(request.id)) return;
+    if (!respondOperation || !roomId || !interactionRequestCanRespond(request, option)) return false;
+    if (!beginBusy(request.id)) return false;
     const requestGeneration = generation.current;
     setError(undefined);
     setNotice(undefined);
     try {
-      const input = interactionRequestInput(request, drafts[request.id] ?? {});
-      if (!input.ok) {
+      const requiresInput = option.decision === "submit_input";
+      const submittedDraft = { ...(draftsRef.current[request.id] ?? {}) };
+      const draftSnapshot = captureNativeInteractionDraftSnapshot(request.id, submittedDraft);
+      const input = requiresInput ? interactionRequestInput(request, submittedDraft) : undefined;
+      if (input && !input.ok) {
         setError(input.error);
-        return;
+        return false;
       }
-      if (!input.supported) {
+      if (input && !input.supported) {
         setError("Serverが宣言した入力形式に、この画面はまだ対応していません。要求を安全のため保留しました。");
-        return;
+        return false;
       }
+      const operationKey = interactionOperationKey(request.id, option.id, input?.values);
+      const operationId = operationIds.current.get(operationKey) ?? createIdempotencyKey();
+      operationIds.current.set(operationKey, operationId);
       const response = await respondOperation({
         requestId: request.id,
         expectedVersion: request.version,
         optionId: option.id,
-        ...(input.values === undefined ? {} : { values: input.values }),
-        operationId: createIdempotencyKey()
+        ...(input?.values === undefined ? {} : { values: input.values }),
+        operationId
       });
-      if (requestGeneration !== generation.current) return;
+      if (requestGeneration !== generation.current) return false;
       assertInteractionResponse(response.request, request, roomId, stableTarget);
+      clearInteractionOperationIds(operationIds.current, request.id);
       setRequests((current) => current.map((candidate) => candidate.id === response.request.id ? response.request : candidate));
+      const currentDraft = draftsRef.current[request.id];
+      const nextDraft = nativeInteractionDraftAfterResponse(currentDraft, draftSnapshot, response.request.status !== "failed");
+      if (nextDraft) {
+        const next = { ...draftsRef.current, [request.id]: nextDraft };
+        draftsRef.current = next;
+        setDrafts(next);
+      } else if (currentDraft) {
+        const next = { ...draftsRef.current };
+        delete next[request.id];
+        draftsRef.current = next;
+        setDrafts(next);
+      }
       setNotice(response.replayed ? "Serverに保存済みの応答を再表示しました。" : undefined);
+      return true;
     } catch (cause) {
       if (requestGeneration === generation.current) setError(nativeInteractionErrorMessage(cause));
+      return false;
     } finally {
       endBusy(request.id);
     }
-  }, [beginBusy, drafts, endBusy, operations, roomId, stableTarget]);
+  }, [beginBusy, endBusy, operations, roomId, stableTarget]);
+
+  const saveDraftAndNavigate = useCallback(async (): Promise<boolean> => {
+    const dirtyRequests = requests.filter((request) => nativeInteractionDraftIsDirty(request, draftsRef.current[request.id] ?? {}));
+    for (const request of dirtyRequests) {
+      const option = request.options.find((candidate) => candidate.decision === "submit_input");
+      if (!option) {
+        setError("保存できる入力応答がありません。入力を送信する選択肢を確認してください。");
+        return false;
+      }
+      if (!await respond(request, option)) {
+        setError("入力の保存に失敗しました。下書きを保持しています。内容を確認して、もう一度保存してください。");
+        return false;
+      }
+    }
+    return !requests.some((request) => nativeInteractionDraftIsDirty(request, draftsRef.current[request.id] ?? {}));
+  }, [requests, respond]);
 
   const cancel = useCallback(async (request: NativeInteractionRequest): Promise<void> => {
     const cancelOperation = operations?.cancel;
@@ -317,13 +439,17 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
     setError(undefined);
     setNotice(undefined);
     try {
+      const operationKey = `cancel:${request.id}:${request.version}`;
+      const operationId = operationIds.current.get(operationKey) ?? createIdempotencyKey();
+      operationIds.current.set(operationKey, operationId);
       const response = await cancelOperation({
         requestId: request.id,
         expectedVersion: request.version,
-        operationId: createIdempotencyKey()
+        operationId
       });
       if (requestGeneration !== generation.current) return;
       assertInteractionResponse(response.request, request, roomId, stableTarget);
+      clearInteractionOperationIds(operationIds.current, request.id);
       setRequests((current) => current.map((candidate) => candidate.id === response.request.id ? response.request : candidate));
       setNotice(response.replayed ? "Serverに保存済みの取消を再表示しました。" : undefined);
     } catch (cause) {
@@ -332,6 +458,26 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
       endBusy(request.id);
     }
   }, [beginBusy, endBusy, operations, roomId, stableTarget]);
+
+  const draftNavigation = useNativeDraftNavigation({
+    scopeKey: "interaction\n" + (stableTarget?.connectionId ?? "") + "\n" + (stableTarget?.workspaceId ?? "") + "\n" + (roomId ?? ""),
+    label: "確認待ち入力",
+    dirty: draftState.dirty,
+    saving: draftState.saving,
+    canSave: Boolean(operations?.respond),
+    saveUnavailableMessage: "入力を保存するServer操作が利用できません。下書きを破棄するか、接続を確認してください。",
+    save: saveDraftAndNavigate,
+    discard: () => {
+      draftsRef.current = {};
+      setDrafts({});
+    },
+    onControllerChange: onDraftNavigationControllerChange
+  });
+
+  const requestClose = useCallback((): void => {
+    if (!onClose) return;
+    draftNavigation.requestNavigation(onClose);
+  }, [draftNavigation, onClose]);
 
   const unavailableMessage = interactionUnavailableMessage(roomId, stableTarget, operations);
   const unavailable = Boolean(unavailableMessage);
@@ -347,19 +493,21 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
           type="button"
           className="native-button native-button-quiet"
           onClick={() => void reload()}
-          disabled={unavailable || loading || busyIds.size > 0}
+          disabled={unavailable || loading || busyIds.size > 0 || draftNavigation.getState().pending}
         >
           {loading ? "更新中…" : "更新"}
         </button>
-        {onClose ? <button type="button" className="native-button native-button-quiet" onClick={onClose}>仕事へ戻る</button> : null}
+        {onClose ? <button type="button" className="native-button native-button-quiet" onClick={requestClose}>仕事へ戻る</button> : null}
       </div>
     </header>
     {unavailableMessage ? <p className="native-inline-note" role="status">{unavailableMessage}</p> : null}
     {stableTarget && roomId && !unavailable ? <p className="native-interaction-requests__target-note">Workspace target: {stableTarget.workspaceId}・Room: {roomId}</p> : null}
     {error ? <p className="native-inline-error" role="alert">{error}</p> : null}
     {notice ? <p className="native-inline-note" role="status">{notice}</p> : null}
+    {draftState.dirty ? <p className="native-inline-note" role="status">未保存の入力下書きを保持しています。</p> : null}
     {loading ? <p className="native-inline-note" role="status">確認要求を読み込んでいます…</p> : null}
     {!loading && !unavailable && requests.length === 0 ? <p className="native-inline-note">このRoomに確認待ちまたは最近の確定要求はありません。</p> : null}
+    <NativeDraftNavigationPrompt controller={draftNavigation} />
     <div className="native-interaction-requests__list">
       {requests.map((request) => <NativeInteractionRequestCard
         key={request.id}
@@ -368,10 +516,8 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
         busy={busyIds.has(request.id)}
         respondAvailable={Boolean(operations?.respond)}
         cancelAvailable={Boolean(operations?.cancel)}
-        onDraftChange={(field, value) => setDrafts((current) => ({
-          ...current,
-          [request.id]: { ...(current[request.id] ?? {}), [field]: value }
-        }))}
+        leavePending={draftNavigation.getState().pending}
+        onDraftChange={(field, value) => updateDraft(request.id, field, value)}
         onRespond={(option) => void respond(request, option)}
         onCancel={() => void cancel(request)}
       />)}
@@ -379,12 +525,13 @@ export function NativeInteractionRequests({ roomId, target, bridge, onClose }: N
   </section>;
 }
 
-export function NativeInteractionRequestCard({ request, draft, busy, respondAvailable, cancelAvailable, onDraftChange, onRespond, onCancel }: {
+export function NativeInteractionRequestCard({ request, draft, busy, respondAvailable, cancelAvailable, leavePending = false, onDraftChange, onRespond, onCancel }: {
   request: NativeInteractionRequest;
-  draft: Record<string, string | number | boolean>;
+  draft: NativeInteractionDraft;
   busy: boolean;
   respondAvailable: boolean;
   cancelAvailable: boolean;
+  leavePending?: boolean;
   onDraftChange: (field: string, value: string | number | boolean) => void;
   onRespond: (option: NativeInteractionOption) => void;
   onCancel: () => void;
@@ -425,7 +572,7 @@ export function NativeInteractionRequestCard({ request, draft, busy, respondAvai
         field={field}
         value={draft[field.id] ?? ""}
         onChange={(value) => onDraftChange(field.id, value)}
-        disabled={busy}
+        disabled={busy || leavePending}
       />)}
     </fieldset> : null}
     {pending && request.kind === "backend_input" && input.supported && input.fields.length === 0 ? <p className="native-interaction-request-card__input-note">入力項目はありません。Serverへ空のJSON objectを送ります。</p> : null}
@@ -445,12 +592,14 @@ export function NativeInteractionRequestCard({ request, draft, busy, respondAvai
       {request.options.length === 0 ? <span className="native-interaction-request-card__unavailable">Serverが許可した選択肢がありません。</span> : null}
       {request.options.map((option) => {
         const optionHelpId = `${cardId}-option-${domSafeId(option.id)}-help`;
-        const allowed = interactionRequestCanRespond(request, option) && !unavailableInput && input.supported && respondAvailable;
+        const allowed = interactionRequestCanRespond(request, option)
+            && respondAvailable
+            && (option.decision === "deny" || (!unavailableInput && option.decision === "submit_input" && input.supported) || (request.kind === "approval" && option.decision === "approve"));
         return <span className="native-interaction-request-card__option" key={option.id}>
           <button
             type="button"
             className="native-button native-button-primary"
-            disabled={busy || !allowed}
+            disabled={busy || leavePending || !allowed}
             onClick={() => onRespond(option)}
             aria-describedby={option.description ? optionHelpId : summaryId}
           >
@@ -459,7 +608,7 @@ export function NativeInteractionRequestCard({ request, draft, busy, respondAvai
           {option.description ? <small id={optionHelpId}>{option.description}</small> : null}
         </span>;
       })}
-      {cancelAvailable && interactionRequestCanCancel(request) ? <button type="button" className="native-text-button" disabled={busy} onClick={onCancel}>取消</button> : null}
+      {cancelAvailable && interactionRequestCanCancel(request) ? <button type="button" className="native-text-button" disabled={busy || leavePending} onClick={onCancel}>取消</button> : null}
       {!cancelAvailable ? <span className="native-interaction-request-card__unavailable">取消経路が未接続です。</span> : null}
     </footer> : null}
   </article>;
@@ -503,7 +652,7 @@ function InputField({ requestId, field, value, onChange, disabled }: {
 
 export function interactionRequestCanRespond(request: NativeInteractionRequest, option: NativeInteractionOption): boolean {
   if (request.status !== "pending" || !option.id || !safeInteractionOptions(request.options)) return false;
-  return request.options.some((candidate) => candidate.id === option.id);
+  return request.options.some((candidate) => candidate.id === option.id && candidate.decision === option.decision);
 }
 
 export function interactionRequestCanCancel(request: NativeInteractionRequest): boolean {
@@ -629,6 +778,34 @@ function isEmptyInputValue(value: string | number | boolean | undefined): boolea
   return value === undefined || (typeof value === "string" && value.trim().length === 0);
 }
 
+export function nativeInteractionDraftIsDirty(
+  request: NativeInteractionRequest,
+  draft: NativeInteractionDraft
+): boolean {
+  if (request.status !== "pending") return false;
+  const input = interactionInputSpec(request);
+  if (!input.supported) return Object.keys(draft).length > 0;
+  const fields = new Map(input.fields.map((field) => [field.id, field]));
+  return Object.entries(draft).some(([fieldId, value]) => {
+    const field = fields.get(fieldId);
+    if (!field) return true;
+    return !interactionDraftValueMatchesServer(field, value, request.inputValues?.[fieldId]);
+  });
+}
+
+function interactionDraftValueMatchesServer(
+  field: NativeInteractionInputField,
+  current: string | number | boolean,
+  serverValue: JsonValue | undefined
+): boolean {
+  if (current === "") return serverValue === undefined || serverValue === "";
+  if (serverValue === undefined || serverValue === null || typeof serverValue === "object") return false;
+  const valueType = field.valueType ?? (field.type === "number" ? "number" : field.type === "checkbox" ? "boolean" : "string");
+  if (valueType === "number" || valueType === "integer") return typeof serverValue === "number" && Number(current) === serverValue;
+  if (valueType === "boolean") return typeof current === "boolean" && typeof serverValue === "boolean" && current === serverValue;
+  return String(current) === String(serverValue);
+}
+
 function mergeInitialDrafts(
   current: Record<string, Record<string, string | number | boolean>>,
   requests: NativeInteractionRequest[]
@@ -643,7 +820,32 @@ function mergeInitialDrafts(
 
 function safeInteractionOptions(options: readonly NativeInteractionOption[]): boolean {
   const ids = options.map((option) => option.id);
-  return ids.length > 0 && ids.every((id) => Boolean(id)) && new Set(ids).size === ids.length;
+  return ids.length > 0
+    && ids.every((id) => Boolean(id))
+    && options.every((option) => ["approve", "deny", "submit_input"].includes(option.decision))
+    && new Set(ids).size === ids.length;
+}
+
+function interactionOperationKey(
+  requestId: string,
+  optionId: string,
+  values: Record<string, JsonValue> | undefined
+): string {
+  return `respond:${requestId}:${optionId}:${values === undefined ? "no-input" : stableJson(values)}`;
+}
+
+function stableJson(value: JsonValue): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key]!)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function clearInteractionOperationIds(operationIds: Map<string, string>, requestId: string): void {
+  for (const key of operationIds.keys()) {
+    if (key.includes(`:${requestId}:`) || key.startsWith(`cancel:${requestId}:`)) operationIds.delete(key);
+  }
 }
 
 function isInteractionRequestInScope(request: NativeInteractionRequest, roomId: string | undefined, target: NativeWorkspaceTarget | undefined): boolean {

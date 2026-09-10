@@ -35,7 +35,7 @@ import {
   type CollectionUiAction
 } from "../lib/collection-view-state";
 
-export type NativeCollectionRecord = Record<string, unknown>;
+export type NativeCollectionRecord = Record<string, JsonValue>;
 export type NativeCollectionControllerResult = void | Promise<void>;
 
 /**
@@ -57,6 +57,8 @@ export interface NativeCollectionSurfaceController {
   setCollectionDraftValue: (record: NativeCollectionRecord, field: string, value: string) => void;
   saveCollectionRecord: (spec: SurfaceRenderSpec, record: NativeCollectionRecord) => NativeCollectionControllerResult;
   deleteCollectionRecordFromTable: (spec: SurfaceRenderSpec, record: NativeCollectionRecord) => NativeCollectionControllerResult;
+  discardCollectionDraft?: (spec: SurfaceRenderSpec, record: NativeCollectionRecord) => void;
+  discardCollectionNewDraft?: (spec: SurfaceRenderSpec) => void;
 }
 
 export interface NativeCollectionSurfaceProps {
@@ -94,16 +96,21 @@ export function NativeCollectionSurface({
   const renderer = collectionRenderer(spec);
   const fields = collectionTableFields(spec);
   const editableFields = collectionTableEditableFields(spec);
-  const records = appCollectionRecords(spec);
-  const visibleRecords = collectionVisibleRecords(spec);
+  const records = appCollectionRecords(spec).map(nativeCollectionRecordFromValue).filter(isNativeCollectionRecord);
+  const visibleRecords = collectionVisibleRecords(spec).map(nativeCollectionRecordFromValue).filter(isNativeCollectionRecord);
   const collectionId = collectionTableId(spec);
   const title = spec.title?.trim() || collectionId || "Collection";
   const busy = saving || pendingOperation !== null;
+  const draftInputDisabled = !canEdit || (
+    pendingOperation !== null
+      && pendingOperation !== "create"
+      && !pendingOperation.startsWith("save:")
+  );
   const externalError = typeof error === "string" && error.trim() ? error.trim() : null;
   const localIssue = localError?.trim() || null;
   const explicitConflict = typeof conflict === "string" && conflict.trim() ? conflict.trim() : null;
   const issue = externalError ?? localIssue;
-  const conflictMessage = explicitConflict ?? (issue && looksLikeConflict(issue) ? issue : null);
+  const conflictMessage = explicitConflict;
   const failureMessage = issue && issue !== conflictMessage ? issue : null;
   const specError = spec.errors?.find((item) => item.message.trim())?.message.trim() ?? null;
   const unsupportedRenderer = renderer !== "collection_table";
@@ -370,7 +377,6 @@ export function NativeCollectionSurface({
               id={`${surfaceId}-sort`}
               value={collectionSortFieldId(spec)}
               onChange={(event) => setSortField(event.currentTarget.value)}
-              disabled={busy}
             >
               <option value="">並び替えなし</option>
               {fields.map((field) => (
@@ -381,7 +387,7 @@ export function NativeCollectionSurface({
               type="button"
               className="native-collection-surface__icon-button"
               onClick={toggleSortDirection}
-              disabled={busy || !collectionSortFieldId(spec)}
+              disabled={!collectionSortFieldId(spec)}
               aria-label={collectionSortDirection(spec) === "desc" ? "昇順に切り替え" : "降順に切り替え"}
               title={collectionSortDirection(spec) === "desc" ? "昇順" : "降順"}
             >
@@ -395,7 +401,6 @@ export function NativeCollectionSurface({
                 id={`${surfaceId}-filter`}
                 value={collectionFilterValue(spec)}
                 onChange={(event) => setFilter(event.currentTarget.value)}
-                disabled={busy}
               >
                 <option value="">すべて</option>
                 {filterOptions.map((option) => <option key={option} value={option}>{option}</option>)}
@@ -409,7 +414,7 @@ export function NativeCollectionSurface({
             aria-labelledby={`${surfaceId}-create-title`}
             aria-describedby={createDescribedBy}
           >
-            <fieldset disabled={busy || !canEdit || editableFields.length === 0}>
+            <fieldset disabled={!canEdit || editableFields.length === 0}>
               <legend id={`${surfaceId}-create-title`}>新しいレコードを追加</legend>
               <div className="native-collection-surface__form-grid">
                 {editableFields.map((field) => {
@@ -422,7 +427,7 @@ export function NativeCollectionSurface({
                         field={field}
                         id={`${surfaceId}-new-${safePart(id)}`}
                         value={newDraft[id] ?? ""}
-                        disabled={busy || !canEdit}
+                        disabled={draftInputDisabled}
                         compact={false}
                         onChange={(value) => setNewDraft(id, value)}
                         ariaLabel={`${collectionFieldLabel(field)}（新しいレコード）`}
@@ -466,7 +471,7 @@ export function NativeCollectionSurface({
                   const ready = collectionRequiredReady(spec, draft);
                   return (
                     <tr
-                      key={recordId || `row-${index}`}
+                      key={recordId}
                       tabIndex={0}
                       aria-selected={selected}
                       className={selected ? "is-selected" : undefined}
@@ -487,7 +492,7 @@ export function NativeCollectionSurface({
                                 field={field}
                                 id={`${surfaceId}-${safePart(recordId || `row-${index}`)}-${safePart(id)}`}
                                 value={draft[id] ?? ""}
-                                disabled={busy || !canEdit}
+                                disabled={draftInputDisabled}
                                 compact
                                 onChange={(value) => setRecordDraft(record, id, value)}
                                 ariaLabel={`${collectionFieldLabel(field)}（${recordTitle}）`}
@@ -718,8 +723,26 @@ function recordIdFor(record: NativeCollectionRecord): string {
   return typeof record.id === "string" || typeof record.id === "number" ? String(record.id).trim() : "";
 }
 
-function looksLikeConflict(value: string): boolean {
-  return /conflict|concurr|version|stale|競合|同時|最新版|版/.test(value.toLowerCase());
+function nativeCollectionRecordFromValue(value: Record<string, unknown>): NativeCollectionRecord | undefined {
+  const rawId = value.id;
+  if ((typeof rawId !== "string" && typeof rawId !== "number") || !String(rawId).trim()) return undefined;
+  const entries: Array<[string, JsonValue]> = [];
+  for (const [key, fieldValue] of Object.entries(value)) {
+    if (!isJsonValue(fieldValue)) return undefined;
+    entries.push([key, fieldValue]);
+  }
+  return Object.fromEntries(entries.map(([key, fieldValue]) => key === "id" ? [key, String(rawId).trim()] : [key, fieldValue]));
+}
+
+function isNativeCollectionRecord(value: NativeCollectionRecord | undefined): value is NativeCollectionRecord {
+  return value !== undefined;
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value !== "object") return false;
+  return Object.values(value).every(isJsonValue);
 }
 
 function errorMessage(cause: unknown, fallback: string): string {

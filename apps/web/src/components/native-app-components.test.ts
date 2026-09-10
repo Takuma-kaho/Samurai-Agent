@@ -7,7 +7,7 @@ import OrganizationSwitcher from "./OrganizationSwitcher";
 import RoomNavigator from "./RoomNavigator";
 import WorkspaceNavigator from "./WorkspaceNavigator";
 import ConnectionRequired from "./ConnectionRequired";
-import WorkspaceConnectionSettings, { workspaceConnectionActionError, workspaceConnectionActionLabel, workspaceConnectionActionSuccess, WorkspaceConnectionFeedback } from "./WorkspaceConnectionSettings";
+import WorkspaceConnectionSettings, { workspaceConnectionActionError, workspaceConnectionActionLabel, workspaceConnectionActionSuccess, workspaceConnectionDraftAfterSave, workspaceConnectionDraftIsDirty, WorkspaceConnectionFeedback } from "./WorkspaceConnectionSettings";
 import { EmptyMainState } from "../native-app/NativeApp";
 import { preferredWorkspaceTargetForState, workspaceConnectionStateFromUnknown } from "../native-app/use-native-app";
 
@@ -127,6 +127,17 @@ describe("Native App component states", () => {
     expect(workspaceConnectionActionLabel("save", "save")).toBe("保存中…");
     expect(workspaceConnectionActionLabel("select", "select")).toBe("切替中…");
     expect(workspaceConnectionActionLabel("import", null)).toBe("コピー済みの秘密鍵を読み込む");
+  });
+
+  it("keeps connection input typed during save, while allowing a successful retry to clear only its snapshot", () => {
+    const submitted = { label: "Server B", serverUrl: "http://127.0.0.1:4318", accountId: "account_b" };
+    const newer = { ...submitted, accountId: "account_c" };
+
+    expect(workspaceConnectionDraftIsDirty({ label: "", serverUrl: "", accountId: "" })).toBe(false);
+    expect(workspaceConnectionDraftIsDirty(submitted)).toBe(true);
+    expect(workspaceConnectionDraftAfterSave(submitted, submitted)).toEqual({ label: "", serverUrl: "", accountId: "" });
+    expect(workspaceConnectionDraftAfterSave(newer, submitted)).toEqual(newer);
+    expect(workspaceConnectionDraftAfterSave(submitted, submitted, false)).toEqual(submitted);
   });
 
   it("shows the newest failure instead of a previous success", () => {

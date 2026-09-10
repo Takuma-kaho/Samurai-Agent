@@ -115,6 +115,17 @@ function runPostgresChecks() {
   }
   runCheck("postgres-rls", "postgres", process.execPath, ["--import", "tsx", "scripts/verify-server-02-rls.ts"], { timeoutMs: 20 * 60 * 1000 });
   runCheck("postgres-room-hierarchy", "postgres", process.execPath, ["--import", "tsx", "scripts/verify-server-03-rls.ts"], { timeoutMs: 20 * 60 * 1000 });
+  // The normal full suite deliberately skips these R15 tests without an
+  // explicitly disposable database. Run them here, after the hosted target
+  // has been migrated, so CI exercises the real HTTP Server composition and
+  // its interaction-request maintenance worker rather than only mocks.
+  runCheck(
+    "postgres-interaction-request-http-recovery",
+    "postgres",
+    "pnpm",
+    ["exec", "vitest", "run", "apps/server/src/workspace-server/domain-api-v1-http.test.ts", "--pool=forks"],
+    { timeoutMs: 30 * 60 * 1000 }
+  );
   runCheck("server-worker-bundle", "server-worker-bundle", process.execPath, ["--import", "tsx", "scripts/verify-server-04-rls.ts"], { timeoutMs: 30 * 60 * 1000 });
   runCheck("completion-worker-bundle", "server-worker-bundle", process.execPath, ["--import", "tsx", "scripts/verify-server-04-completion-rls.ts"], { timeoutMs: 30 * 60 * 1000 });
   runCheck("runtime-recovery-rls", "server-worker-recovery", process.execPath, ["--import", "tsx", "scripts/verify-runtime-recovery-rls.ts"], { timeoutMs: 30 * 60 * 1000 });

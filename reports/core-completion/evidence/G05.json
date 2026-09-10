@@ -3,18 +3,19 @@
   "test_id": "G05",
   "command": "pnpm core:test:release-hygiene",
   "status": "passed",
-  "commit_sha": "a1c07f646a9486c0c1bed5672371531ab75bfac1",
+  "commit_sha": "2cbf2b2d81caeb535df3eae264dd3712144de084",
   "worktree_clean": false,
-  "source_sha256": "57812b65075bca9115ddff7f828dcdb5f01543e87838ef2cfc69786b4650d684",
+  "source_sha256": "7086fa64666559e56f331a6d9b53856c2723f3fbf364395c2e02da1163bba867",
   "source_files": [
+    "contracts/domain-command-contract-ledger.json",
     "package.json",
-    "plans/core-completion-scorecard.json",
     "scripts/lib/core-evidence.mjs",
+    "scripts/verify-domain-contracts.mjs",
     "scripts/verify-phase13-completion.mjs",
     "scripts/verify-release-hygiene.mjs"
   ],
-  "started_at": "2026-08-24T04:34:08.307Z",
-  "completed_at": "2026-08-24T04:34:31.157Z",
+  "started_at": "2026-09-10T05:21:29.475Z",
+  "completed_at": "2026-09-10T05:21:58.135Z",
   "assertions": [
     {
       "name": "inspection_ok",
@@ -66,17 +67,22 @@
       "apps/desktop/src/workspace-attachment-requests.test.ts",
       "apps/desktop/src/workspace-learning-requests.test.ts",
       "apps/desktop/src/workspace-room-requests.test.ts",
+      "apps/web/src/native-app/use-native-app.test.ts",
       "packages/gateway/src/gateway.test.ts",
       "packages/runtime/src/backend-release-readiness-script.test.ts",
+      "packages/runtime/src/native-backend.test.ts",
+      "packages/runtime/src/provider.test.ts",
       "packages/skill-optimization/src/skill-optimization.test.ts",
       "packages/workspace-server/src/config.test.ts",
       "packages/workspace-server/src/workspace-bundle-v3.test.ts",
+      "packages/workspace-server/src/workspace-completion-bundle-v4.test.ts",
+      "packages/workspace-server/src/workspace-server-store.test.ts",
       "scripts/fixtures/owner-access-security.ts"
     ],
     "duplicate_sources": [],
     "duplicate_candidates": [],
     "untracked_generated": [],
-    "inspected_source_files": 955,
-    "dirty_entries": 0
+    "inspected_source_files": 1058,
+    "dirty_entries": 13
   }
 }

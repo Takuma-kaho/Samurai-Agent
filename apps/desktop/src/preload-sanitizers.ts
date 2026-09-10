@@ -2,6 +2,7 @@ export function sanitizeWorkspaceChatSessionInput(input: unknown): Record<string
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTarget(value, output);
   for (const key of ["roomId", "operationId", "title", "uiLocale", "outputLocale"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, key === "title" ? 240 : key === "roomId" || key === "operationId" ? 128 : 32);
   }
@@ -51,6 +52,7 @@ export function sanitizeWorkspaceArtifactRevisionInput(input: unknown): Record<s
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTarget(value, output);
   for (const key of ["roomId", "artifactId", "revisionId", "baseRevisionId", "operationId"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }
@@ -74,6 +76,7 @@ export function sanitizeWorkspaceGeneratedSurfaceMutationInput(input: unknown): 
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
   const output: Record<string, unknown> = {};
+  copyWorkspaceTarget(value, output);
   for (const key of ["roomId", "surfaceId", "operationId"]) {
     if (typeof value[key] === "string") output[key] = value[key].slice(0, 160);
   }
@@ -156,12 +159,26 @@ const interactionRequestJsonMaxLength = 256 * 1024;
 /** Fixed, renderer-safe input for the durable interaction-request list route. */
 export function sanitizeWorkspaceInteractionRequestListInput(input: unknown): Record<string, unknown> {
   const value = strictInteractionRequestInputRecord(input);
-  return {
+  const output: Record<string, unknown> = {
     roomId: strictInteractionRequestId(value.roomId, "roomId"),
     includeResolved: value.includeResolved === undefined
       ? false
       : strictInteractionRequestBoolean(value.includeResolved, "includeResolved")
   };
+  copyWorkspaceTarget(value, output);
+  return output;
+}
+
+/** Fixed, renderer-safe input for reading one durable interaction result. */
+export function sanitizeWorkspaceInteractionRequestResultInput(input: unknown): Record<string, unknown> {
+  const value = strictInteractionRequestInputRecord(input);
+  const output: Record<string, unknown> = {
+    roomId: strictInteractionRequestId(value.roomId, "roomId"),
+    requestId: strictInteractionRequestId(value.requestId, "requestId"),
+    operationId: strictInteractionRequestId(value.operationId, "operationId")
+  };
+  copyWorkspaceTarget(value, output);
+  return output;
 }
 
 /** Fixed, renderer-safe input for the durable interaction-request respond route. */
@@ -174,6 +191,7 @@ export function sanitizeWorkspaceInteractionRequestRespondInput(input: unknown):
     optionId: strictInteractionRequestId(value.optionId, "optionId"),
     operationId: strictInteractionRequestId(value.operationId, "operationId")
   };
+  copyWorkspaceTarget(value, output);
   if (value.values !== undefined) output.values = strictInteractionRequestJsonObject(value.values, "values");
   return output;
 }
@@ -181,12 +199,49 @@ export function sanitizeWorkspaceInteractionRequestRespondInput(input: unknown):
 /** Fixed, renderer-safe input for the durable interaction-request cancel route. */
 export function sanitizeWorkspaceInteractionRequestCancelInput(input: unknown): Record<string, unknown> {
   const value = strictInteractionRequestInputRecord(input);
-  return {
+  const output: Record<string, unknown> = {
     roomId: strictInteractionRequestId(value.roomId, "roomId"),
     requestId: strictInteractionRequestId(value.requestId, "requestId"),
     expectedVersion: strictInteractionRequestVersion(value.expectedVersion),
     operationId: strictInteractionRequestId(value.operationId, "operationId")
   };
+  copyWorkspaceTarget(value, output);
+  return output;
+}
+
+/** Keep durable operation-history reads to a Room and an explicit allowlist. */
+export function sanitizeWorkspaceOperationHistoryInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  if (typeof value.roomId === "string") output.roomId = value.roomId.slice(0, 128);
+  if (typeof value.recordType === "string") output.recordType = value.recordType.slice(0, 128);
+  copyWorkspaceTarget(value, output);
+  return output;
+}
+
+/** Preserve the request's target without allowing arbitrary renderer fields to cross preload. */
+function copyWorkspaceTarget(value: Record<string, unknown>, output: Record<string, unknown>): void {
+  if (!("target" in value)) return;
+  const target = value.target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) {
+    output.target = { connectionId: "", workspaceId: "" };
+    return;
+  }
+  const candidate = target as Record<string, unknown>;
+  const sanitizedTarget: Record<string, unknown> = {
+    connectionId: typeof candidate.connectionId === "string" ? candidate.connectionId.slice(0, 128) : "",
+    workspaceId: typeof candidate.workspaceId === "string" ? candidate.workspaceId.slice(0, 128) : ""
+  };
+  if (candidate.roomId !== undefined) {
+    sanitizedTarget.roomId = typeof candidate.roomId === "string" ? candidate.roomId.slice(0, 128) : "";
+  }
+  if (candidate.selectionGeneration !== undefined) {
+    sanitizedTarget.selectionGeneration = typeof candidate.selectionGeneration === "number"
+      ? candidate.selectionGeneration
+      : -1;
+  }
+  output.target = sanitizedTarget;
 }
 
 function strictInteractionRequestInputRecord(input: unknown): Record<string, unknown> {

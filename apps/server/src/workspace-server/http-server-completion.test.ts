@@ -273,6 +273,56 @@ describe("Native Runtime provider tools", () => {
       event: toolEvent("create_artifact", "generated_surface.create", generatedSurfaceToolInput())
     })).rejects.toMatchObject({ code: "runtime_tool_identity_mismatch", status: 409 });
   });
+
+  it("decodes binary Artifact input only from explicit base64 transport and rejects malformed input", async () => {
+    const commands = { assertRoomExecutable: vi.fn(async () => undefined) };
+    const artifacts = {
+      create: vi.fn(async () => ({
+        artifact: { id: "artifact-pdf", title: "PDF", kind: "pdf", file_ref: { kind: "artifact", id: "artifact-pdf", uri: "artifacts/artifact-pdf.pdf" } },
+        replayed: false
+      })),
+      revise: vi.fn()
+    };
+    const port = createPostgresRuntimeToolExecutionPort(commands as never, artifacts as never, {} as never, {} as never, {
+      workspaceId: "workspace-tools",
+      accountId: "account-tools"
+    });
+    const bytes = Buffer.from("%PDF-1.7\nportable binary\n", "utf8");
+
+    await port.execute({
+      run: { id: "run-pdf", room_id: "room-tools", metadata: {} } as never,
+      operation: { id: "operation-pdf" } as never,
+      runInput: {} as never,
+      event: toolEvent("create_artifact", "artifact.create", {
+        title: "PDF",
+        kind: "pdf",
+        mime_type: "application/pdf",
+        encoding: "binary",
+        content_base64: bytes.toString("base64")
+      })
+    });
+
+    expect(artifacts.create).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      kind: "pdf",
+      mimeType: "application/pdf",
+      encoding: "binary",
+      content: expect.any(Uint8Array)
+    }));
+    expect([...((artifacts.create.mock.calls[0]?.[1] as { content: Uint8Array }).content ?? [])]).toEqual([...bytes]);
+
+    await expect(port.execute({
+      run: { id: "run-pdf-invalid", room_id: "room-tools", metadata: {} } as never,
+      operation: { id: "operation-pdf-invalid" } as never,
+      runInput: {} as never,
+      event: toolEvent("create_artifact", "artifact.create", {
+        title: "Invalid PDF",
+        kind: "pdf",
+        mime_type: "application/pdf",
+        encoding: "binary",
+        content_base64: "not-base64"
+      })
+    })).rejects.toMatchObject({ code: "content_base64_invalid", status: 400 });
+  });
 });
 
 function toolEvent(providerToolName: string, actionId: string, argumentsValue: Record<string, unknown>) {

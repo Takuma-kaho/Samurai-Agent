@@ -119,7 +119,16 @@ export function buildGeneratedSurfaceRevision(input: {
   const assetRefs: ResourceRef[] = (input.bundle.assets ?? []).map((asset) => {
     const assetPath = safeGeneratedSurfaceAssetPath(asset.path);
     if (!assetPath) throw new Error("generated_surface_asset_path_invalid");
-    return { kind: "generated_surface_asset", id: `${revisionId}:${assetPath}`, uri: `${root}/assets/${assetPath}`, label: assetPath };
+    const content = asset.encoding === "base64"
+      ? Buffer.from(asset.content, "base64")
+      : Buffer.from(asset.content, "utf8");
+    return {
+      kind: "generated_surface_asset",
+      id: `${revisionId}:${assetPath}`,
+      uri: `${root}/assets/${assetPath}`,
+      label: assetPath,
+      content_hash: sha256Bytes(content)
+    };
   });
   const bundleHash = sha256(`${input.bundle.html}\0${input.bundle.css ?? ""}\0${input.bundle.script ?? ""}\0${JSON.stringify(input.bundle.actions)}\0${JSON.stringify(input.bundle.assets ?? [])}`);
   const revision = GeneratedSurfaceRevisionRecordSchema.parse({
@@ -183,5 +192,9 @@ export function safeGeneratedSurfaceAssetPath(value: string): string | undefined
 }
 
 function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function sha256Bytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }

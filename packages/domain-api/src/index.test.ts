@@ -10,6 +10,15 @@ import {
   PublicRoomAgentRemoveInputSchema,
   PublicRoomAgentPermissionRecordSchema,
   PublicAgentBackendRecordSchema,
+  PublicAutomationJobListSchema,
+  PublicAutomationRunSchema,
+  PublicCompletionResourceBodySchema,
+  PublicCompletionResourceCreateInputSchema,
+  PublicCompletionResourceDetailSchema,
+  PublicCompletionResourcePageSchema,
+  PublicCompletionResourceMutationResultSchema,
+  PublicLearningSettingsLayersSchema,
+  PublicLearningSettingsPatchInputSchema,
   PublicRoomMemberListRecordSchema,
   PublicRoomDomainApiRequestSchema,
   PublicRoomWorkCommentCreateInputSchema,
@@ -27,10 +36,12 @@ import {
   isEventVersionCompatible,
   publicLegacyDomainOperationCompatibility,
   legacyPublicDomainOperationIds,
+  publicManagementContractDefinitions,
   parsePublicEventPayload,
   publicDomainOperationIds,
   publicOperationOutputSchemaFor,
   publicOperationInputSchemaFor,
+  PublicRuntimeSettingsSchema,
   runControlRequestSchemaFor
 } from "./index";
 
@@ -451,7 +462,10 @@ describe("public Domain API contract", () => {
     await client.listGeneratedSurfaces("workspace_1", "room_1");
     await client.getGeneratedSurface("workspace_1", "room_1", "surface_1");
     await client.getGeneratedSurfaceBundle("workspace_1", "room_1", "surface_1", "surface_revision_1");
-    await client.runGeneratedSurfaceAction("workspace_1", "room_1", "surface_1", "refresh", {}, { operationId: "surface_action_1" });
+    await client.runGeneratedSurfaceAction("workspace_1", "room_1", "surface_1", "refresh", {
+      revision_id: "surface_revision_1",
+      action_payload: { record_id: "record_1" }
+    }, { operationId: "surface_action_1" });
     await client.runGeneratedSurfaceState("workspace_1", "room_1", "surface_1", { action: "pin" }, { operationId: "surface_state_1" });
     await client.exportGeneratedSurface("workspace_1", "room_1", "surface_1", { format: "html" });
     await client.runArtifactSurfaceOperation("workspace_1", "room_1", { id: "surface_op_1", kind: "artifact.request", action: "create" }, { operationId: "artifact_surface_1" });
@@ -467,6 +481,142 @@ describe("public Domain API contract", () => {
       "GET /api/v1/workspaces/workspace_1/generated-surfaces/surface_1/export?room_id=room_1&format=html",
       "POST /api/v1/workspaces/workspace_1/artifacts/surface/operations"
     ]);
+    expect(requests[5]).toMatchObject({
+      body: {
+        room_id: "room_1",
+        revision_id: "surface_revision_1",
+        action_payload: { record_id: "record_1" }
+      }
+    });
+    expect(requests[8]).toMatchObject({
+      body: {
+        room_id: "room_1",
+        operation: { id: "artifact_surface_1", kind: "artifact.request", action: "create" }
+      }
+    });
+    await expect(client.runArtifactSurfaceOperation("workspace_1", "room_1", "invalid", { operationId: "invalid_surface" }))
+      .rejects.toThrow("artifact_surface_operation_invalid");
+  });
+
+  it("publishes the implemented management contracts, projections, and events", () => {
+    const ids = publicManagementContractDefinitions.map((definition) => definition.id);
+    const requiredManagementCommands = [
+      "settings.patch",
+      "automation.job.save",
+      "automation.job.manager_stop",
+      "automation.job.manager_resume",
+      "automation.job.run_now"
+    ];
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(expect.arrayContaining(requiredManagementCommands));
+    for (const operationId of requiredManagementCommands) {
+      const definition = publicManagementContractDefinitions.find((candidate) => candidate.id === operationId);
+      expect(definition).toBeDefined();
+      expect(publicOperationInputSchemaFor(operationId, z.never())).toBe(definition?.input);
+      expect(publicOperationOutputSchemaFor(operationId, z.never())).toBe(definition?.output);
+    }
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining([
+      "completion.resource.list", "completion.resource.view", "completion.resource.body",
+      "completion.resource.create", "completion.resource.update", "completion.resource.archive", "completion.resource.fix",
+      "settings.view", "settings.patch", "learning.settings.view", "learning.settings.patch",
+      "automation.job.list", "automation.run.list", "automation.job.save", "automation.job.manager_stop", "automation.job.manager_resume", "automation.job.run_now"
+    ]));
+    expect(ids).toEqual(expect.arrayContaining([
+      "completion.resource.list", "completion.resource.create", "learning.settings.patch", "automation.job.run_now"
+    ]));
+    expect(eventCatalog.map((entry) => entry.event_type)).toEqual(expect.arrayContaining([
+      "completion.resource.created", "completion.resource.updated", "completion.resource.archived", "completion.resource.fixed",
+      "workspace.settings.changed", "learning.settings.updated", "automation.job.created", "automation.job.management_changed"
+    ]));
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "room", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact",
+      title: "A fact", content: "The body", reason: "human edit"
+    }).success).toBe(true);
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "workspace", room_id: "room_1", kind: "skill", title: "A skill", content: "# Skill", reason: "human edit"
+    }).success).toBe(false);
+    expect(PublicCompletionResourcePageSchema.safeParse({ resources: [], next_cursor: "cursor_1" }).success).toBe(true);
+    expect(PublicCompletionResourceDetailSchema.safeParse({
+      resource: {
+        workspaceId: "workspace_1", id: "resource_1", scope: { kind: "room", roomId: "room_1" }, kind: "knowledge", knowledgeKind: "fact",
+        title: "A fact", evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", aiManaged: false,
+        version: 2, createdBy: "account_1", updatedBy: "account_1", createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+      },
+      current_version: {
+        workspaceId: "workspace_1", id: "version_2", resourceId: "resource_1", version: 2, contentHash: "hash", contentSize: 8,
+        evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", metadata: {}, reason: "human edit",
+        actorAccountId: "account_1", createdAt: "2026-09-01T00:00:00.000Z"
+      },
+      versions: [], evidence: []
+    }).success).toBe(true);
+    expect(PublicCompletionResourceBodySchema.safeParse({
+      resource: {
+        workspaceId: "workspace_1", id: "resource_1", scope: { kind: "workspace" }, kind: "skill", title: "A skill", evidenceState: "confirmed",
+        lifecycleState: "active", aiProtection: "editable", creationSource: "human", aiManaged: false, version: 1, createdBy: "account_1", updatedBy: "account_1",
+        createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+      },
+      version: {
+        workspaceId: "workspace_1", id: "version_1", resourceId: "resource_1", version: 1, contentHash: "hash", contentSize: 7,
+        evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", metadata: {}, reason: "human edit",
+        actorAccountId: "account_1", createdAt: "2026-09-01T00:00:00.000Z"
+      },
+      content: "# Skill"
+    }).success).toBe(true);
+    expect(PublicRuntimeSettingsSchema.safeParse({
+      ui_locale: "ja", output_locale: "ja", memory_capture_mode: "auto", knowledge_wiki_capture_mode: "auto", skill_capture_mode: "auto",
+      learning_enabled: true, learning_budget_ratio: 0.1, learning_budget_window_days: 7, external_provider_role: "assistive",
+      updated_at: "2026-09-01T00:00:00.000Z"
+    }).success).toBe(true);
+    expect(PublicLearningSettingsPatchInputSchema.safeParse({ scope_kind: "room", room_id: "room_1", enabled: false }).success).toBe(true);
+    expect(PublicLearningSettingsLayersSchema.safeParse({
+      settings: {
+        workspaceId: "workspace_1", id: "workspace_learning_settings", scope: { kind: "workspace" }, enabled: true, currencyUsed: 0,
+        tokensUsed: 0, currencyReserved: 0, tokensReserved: 0, version: 1, updatedBy: "account_1", updatedAt: "2026-09-01T00:00:00.000Z"
+      }
+    }).success).toBe(true);
+    expect(PublicAutomationJobListSchema.safeParse({ jobs: [] }).success).toBe(true);
+    expect(PublicAutomationRunSchema.safeParse({
+      id: "run_1", kind: "custom_instruction", source: "manual", status: "completed", job_id: "job_1", workspace_id: "workspace_1", room_id: "room_1",
+      scheduled_at: "2026-09-01T00:00:00.000Z", started_at: "2026-09-01T00:00:00.000Z", attempt_no: 1
+    }).success).toBe(true);
+    expect(PublicCompletionResourceMutationResultSchema.safeParse({ resource: {} }).success).toBe(false);
+  });
+
+  it("routes typed management client calls to the versioned GET/POST/PATCH paths", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    });
+    await client.listCompletionResources("workspace_1", { scope_kind: "room", room_id: "room_1", include_archived: true, cursor: "cursor_1" });
+    await client.createCompletionResource("workspace_1", { scope_kind: "room", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact", title: "Fact", content: "Body", reason: "Save" }, { operationId: "completion_create" });
+    await client.updateCompletionResource("workspace_1", "resource_1", { scope_kind: "room", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact", title: "Fact", content: "Body 2", reason: "Edit", expected_version: 1 }, { operationId: "completion_update" });
+    await client.getRuntimeSettings("workspace_1");
+    await client.patchRuntimeSettings("workspace_1", { learning_enabled: false }, { operationId: "settings_patch" });
+    await client.getLearningSettings("workspace_1", "room_1");
+    await client.patchLearningSettings("workspace_1", { scope_kind: "room", room_id: "room_1", enabled: false }, { operationId: "learning_patch" });
+    await client.listAutomationJobs("workspace_1", "room_1");
+    await client.listAutomationRuns("workspace_1", { room_id: "room_1" });
+    await client.setCompletionResourceArchived("workspace_1", "resource_1", { room_id: "room_1", archived: true, expected_version: 1, reason: "Archive" }, { operationId: "completion_archive" });
+    await client.setCompletionResourceFixed("workspace_1", "resource_1", { room_id: "room_1", fixed: true, expected_version: 1, reason: "Fix" }, { operationId: "completion_fix" });
+    await client.setAutomationManagement("workspace_1", "job_1", "manager_stopped", { operationId: "automation_stop" });
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /api/v1/workspaces/workspace_1/completion/resources?scope_kind=room&room_id=room_1&include_archived=true&cursor=cursor_1",
+      "POST /api/v1/workspaces/workspace_1/completion/resources",
+      "PATCH /api/v1/workspaces/workspace_1/completion/resources/resource_1",
+      "GET /api/v1/workspaces/workspace_1/settings",
+      "PATCH /api/v1/workspaces/workspace_1/settings",
+      "GET /api/v1/workspaces/workspace_1/learning/settings?room_id=room_1",
+      "PATCH /api/v1/workspaces/workspace_1/learning/settings",
+      "GET /api/v1/workspaces/workspace_1/automation/jobs?room_id=room_1",
+      "GET /api/v1/workspaces/workspace_1/automation/runs?room_id=room_1",
+      "POST /api/v1/workspaces/workspace_1/completion/resources/resource_1/archive",
+      "POST /api/v1/workspaces/workspace_1/completion/resources/resource_1/fix",
+      "POST /api/v1/workspaces/workspace_1/automation/jobs/job_1/management"
+    ]);
+    expect(requests[2]).toMatchObject({ method: "PATCH", operationId: "completion_update", idempotencyKey: "completion_update" });
+    expect(requests[9]).toMatchObject({ method: "POST", operationId: "completion_archive", idempotencyKey: "completion_archive", body: expect.objectContaining({ room_id: "room_1" }) });
+    expect(requests[10]).toMatchObject({ method: "POST", operationId: "completion_fix", idempotencyKey: "completion_fix", body: expect.objectContaining({ room_id: "room_1" }) });
   });
 
   it("validates transfer proof and keeps cutover stages explicit", () => {

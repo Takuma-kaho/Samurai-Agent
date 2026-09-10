@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
+  WorkspaceInteractionRequestAcceptedRecovery,
   WorkspaceInteractionRequestMaintenanceResult,
   WorkspaceInteractionRequestService,
   WorkspaceRequestContext,
@@ -95,5 +96,102 @@ describe("WorkspaceInteractionRequestMaintenanceWorker", () => {
       signal: new AbortController().signal
     })).rejects.toThrow("event_store_unavailable");
     expect(delivery).not.toHaveBeenCalled();
+  });
+
+  it("passes an accepted unclaimed request to the existing claim/execution path once", async () => {
+    const candidate: WorkspaceInteractionRequestAcceptedRecovery = {
+      request: {
+        id: "interaction_accepted_recovery",
+        workspaceId: context.workspaceId,
+        roomId: "room_accepted_recovery",
+        version: 2,
+        kind: "approval",
+        status: "accepted",
+        title: "Approval accepted",
+        summary: "Recover this request.",
+        surfaceId: "surface_accepted_recovery",
+        revisionId: "revision_accepted_recovery",
+        actionTarget: { kind: "generated_surface_action", surface_id: "surface_accepted_recovery", action_id: "publish" },
+        options: [{ id: "approve", label: "Allow", decision: "approve" }],
+        requestedAccountId: context.accountId,
+        decidedAccountId: context.accountId,
+        expiresAt: "2026-09-08T00:10:00.000Z",
+        outcome: { kind: "response", optionId: "approve", decision: "approve", decidedAt: "2026-09-08T00:00:01.000Z" },
+        createdAt: "2026-09-08T00:00:00.000Z",
+        updatedAt: "2026-09-08T00:00:01.000Z"
+      },
+      executionOperationId: "interaction_execution_accepted_recovery"
+    };
+    const acceptedRecovery = vi.fn(async () => undefined);
+    const worker = new WorkspaceInteractionRequestMaintenanceWorker({
+      store: { listRooms: vi.fn(async () => [{ id: candidate.request.roomId }]) } as unknown as Pick<WorkspaceServerStore, "listRooms">,
+      interactionRequests: {
+        reconcileRoom: vi.fn(async () => []),
+        listAcceptedForRecovery: vi.fn(async () => [candidate]),
+        markMaintenanceEventDelivered: vi.fn(async () => undefined)
+      } as unknown as WorkspaceInteractionRequestService,
+      onReconciled: vi.fn(async () => undefined),
+      recoverAcceptedInteraction: acceptedRecovery
+    });
+
+    await expect(worker.runTick(context, {
+      workerId: "workspace_worker_test",
+      maxRuns: 10,
+      signal: new AbortController().signal
+    })).resolves.toEqual({ reconciled: 1, delivered: 0 });
+    expect(acceptedRecovery).toHaveBeenCalledWith(context, candidate);
+  });
+
+  it("passes a stale Generated Surface claim to result-aware recovery instead of emitting a blind failure", async () => {
+    const candidate: WorkspaceInteractionRequestAcceptedRecovery = {
+      request: {
+        id: "interaction_stale_surface_recovery",
+        workspaceId: context.workspaceId,
+        roomId: "room_stale_surface_recovery",
+        version: 4,
+        kind: "approval",
+        status: "executing",
+        title: "Approval accepted",
+        summary: "Recover this request.",
+        surfaceId: "surface_stale_surface_recovery",
+        revisionId: "revision_stale_surface_recovery",
+        actionTarget: {
+          kind: "generated_surface_action",
+          room_id: "room_stale_surface_recovery",
+          surface_id: "surface_stale_surface_recovery",
+          revision_id: "revision_stale_surface_recovery",
+          action_id: "publish",
+          command_id: "artifact.create",
+          payload: {}
+        },
+        options: [{ id: "approve", label: "Allow", decision: "approve" }],
+        requestedAccountId: context.accountId,
+        decidedAccountId: context.accountId,
+        expiresAt: "2026-09-08T00:10:00.000Z",
+        outcome: { kind: "response", optionId: "approve", decision: "approve", decidedAt: "2026-09-08T00:00:01.000Z" },
+        execution: { status: "executing", startedAt: "2026-09-08T00:00:02.000Z" },
+        createdAt: "2026-09-08T00:00:00.000Z",
+        updatedAt: "2026-09-08T00:00:03.000Z"
+      },
+      executionOperationId: "execution_stale_surface_recovery"
+    };
+    const acceptedRecovery = vi.fn(async () => undefined);
+    const worker = new WorkspaceInteractionRequestMaintenanceWorker({
+      store: { listRooms: vi.fn(async () => [{ id: candidate.request.roomId }]) } as unknown as Pick<WorkspaceServerStore, "listRooms">,
+      interactionRequests: {
+        reconcileRoom: vi.fn(async () => []),
+        listAcceptedForRecovery: vi.fn(async () => [candidate]),
+        markMaintenanceEventDelivered: vi.fn(async () => undefined)
+      } as unknown as WorkspaceInteractionRequestService,
+      onReconciled: vi.fn(async () => undefined),
+      recoverAcceptedInteraction: acceptedRecovery
+    });
+
+    await expect(worker.runTick(context, {
+      workerId: "workspace_worker_test",
+      maxRuns: 10,
+      signal: new AbortController().signal
+    })).resolves.toEqual({ reconciled: 1, delivered: 0 });
+    expect(acceptedRecovery).toHaveBeenCalledWith(context, candidate);
   });
 });

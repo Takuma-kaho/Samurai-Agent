@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 127 }, (_, index) => index + 1));
+    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 128 }, (_, index) => index + 1));
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -1238,6 +1238,20 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(sql).toContain("binding ->> 'reservation_id'");
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_recover_human_work_launch");
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_assert_human_work_runtime_admission_v2");
+  });
+
+  it("restores human-work Completion refs only through the guarded v128 import", () => {
+    const migration = workspaceServerMigrationDefinitions().find((entry) => entry.version === 128);
+    expect(migration?.name).toBe("workspace_server_human_work_resource_refs_bundle_import");
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_validate_human_work_resource_refs(");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION samurai_import_workspace_human_work_v2(");
+    expect(sql).toContain("workspace_bundle_human_work_resource_reference_invalid");
+    expect(sql).toContain("workspace_bundle_human_work_resource_reference_not_found");
+    expect(sql).toContain("workspace_bundle_human_work_resource_reference_scope_invalid");
+    expect(sql).toContain("resource_refs");
+    expect(sql).toContain("REVOKE EXECUTE ON FUNCTION samurai_import_workspace_human_work_v2");
+    expect(sql).toContain("PERFORM samurai_import_workspace_human_work(");
   });
 
 });

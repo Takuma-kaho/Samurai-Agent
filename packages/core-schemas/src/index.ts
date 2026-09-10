@@ -453,7 +453,9 @@ export const ResourceRefSchema = z.object({
   id: z.string().min(1),
   uri: z.string().min(1),
   version: z.string().optional(),
-  label: z.string().optional()
+  label: z.string().optional(),
+  /** Optional immutable content evidence for file-backed resources. */
+  content_hash: z.string().regex(/^[a-f0-9]{64}$/).optional()
 }).strict();
 export type ResourceRef = z.infer<typeof ResourceRefSchema>;
 

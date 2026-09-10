@@ -64,4 +64,69 @@ describe("artifact.create handler", () => {
 
     expect(fixture.runArtifactMutation).not.toHaveBeenCalled();
   });
+
+  it("keeps numeric table content as JSON instead of guessing bytes", async () => {
+    const fixture = createPorts();
+    const handler = artifactCreate.createHandler(fixture.ports);
+
+    await handler.execute(context, artifactCreate.input.parse({
+      title: "Numbers",
+      kind: "table",
+      content: [1, 2, 3],
+      mime_type: "application/json",
+      encoding: "utf8"
+    }));
+
+    expect(fixture.createArtifactDraft).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "table",
+      content: "[\n  1,\n  2,\n  3\n]\n"
+    }));
+    expect(fixture.createArtifactDraft.mock.calls[0]?.[0].content).not.toBeInstanceOf(Uint8Array);
+  });
+
+  it("converts only an explicit PDF byte transport to binary content", async () => {
+    const fixture = createPorts();
+    const handler = artifactCreate.createHandler(fixture.ports);
+    const bytes = [0x25, 0x50, 0x44, 0x46];
+
+    await handler.execute(context, artifactCreate.input.parse({
+      title: "Report",
+      kind: "pdf",
+      content: bytes,
+      mime_type: "application/pdf",
+      encoding: "binary"
+    }));
+
+    const content = fixture.createArtifactDraft.mock.calls[0]?.[0].content;
+    expect(content).toMatchObject({ mime_type: "application/pdf", extension: "pdf" });
+    expect(content).toHaveProperty("bytes");
+    expect(Array.from((content as { bytes: Uint8Array }).bytes)).toEqual(bytes);
+  });
+
+  it("rejects non-byte content under an explicit binary contract", async () => {
+    const fixture = createPorts();
+    const handler = artifactCreate.createHandler(fixture.ports);
+
+    await expect(handler.execute(context, artifactCreate.input.parse({
+      title: "Invalid image",
+      kind: "image",
+      content: ["not a byte"],
+      encoding: "binary"
+    }))).rejects.toThrow("artifact_binary_content_transport_required");
+
+    expect(fixture.createArtifactDraft).not.toHaveBeenCalled();
+  });
+
+  it("rejects binary-looking content without an explicit binary encoding", async () => {
+    const fixture = createPorts();
+    const handler = artifactCreate.createHandler(fixture.ports);
+
+    await expect(handler.execute(context, artifactCreate.input.parse({
+      title: "Implicit image",
+      kind: "image",
+      content: [1, 2, 3]
+    }))).rejects.toThrow("artifact_binary_content_transport_required");
+
+    expect(fixture.createArtifactDraft).not.toHaveBeenCalled();
+  });
 });

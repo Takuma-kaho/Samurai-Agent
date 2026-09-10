@@ -1909,9 +1909,9 @@ describe("WorkspaceServerStore Workspace-first core", () => {
         result: {
           resource_refs: [
             { kind: "artifact", id: "artifact_result", uri: "artifacts/artifact_result/revisions/1.md", version: "1", label: "Result artifact" },
-            { kind: "artifact_revision", id: "artifact_revision_result", uri: "artifacts/artifact_result/revisions/1.md", version: "1" },
+            { kind: "artifact_revision", id: "artifact_revision_result", uri: "artifacts/artifact_result/revisions/1.md", parent_id: "artifact_result", version: "1" },
             { kind: "generated_surface", id: "surface_result", uri: "surfaces/surface_result", label: "Result surface" },
-            { kind: "generated_surface_revision", id: "surface_revision_result", uri: "surfaces/surface_result/revisions/1.html", label: "Result surface r1" }
+            { kind: "generated_surface_revision", id: "surface_revision_result", uri: "surfaces/surface_result/revisions/1.html", parent_id: "surface_result", label: "Result surface r1" }
           ]
         }
       }
@@ -1925,6 +1925,114 @@ describe("WorkspaceServerStore Workspace-first core", () => {
         { kind: "generated_surface_revision", id: "surface_revision_result", parent_id: "surface_result" }
       ]
     });
+  });
+
+  it("rebuilds Room Work refs from one Run's saved events, changes, operations, and revisions", async () => {
+    const workspaceId = "workspace_store_completion_evidence";
+    const workId = "work_store_completion_evidence";
+    const assignmentId = "assignment_store_completion_evidence";
+    const roomId = "room_store_completion_evidence";
+    const runId = "run_store_completion_evidence";
+    const artifactId = "artifact_same_run";
+    const revisionOneId = "artifact_revision_one";
+    const revisionTwoId = "artifact_revision_two";
+    const operationOneId = "operation_store_completion_one";
+    const operationTwoId = "operation_store_completion_two";
+    const currentRevisionRef = {
+      kind: "artifact_revision",
+      id: revisionTwoId,
+      uri: `artifacts/${artifactId}/revisions/2.md`,
+      version: "v2",
+      label: "Renamed artifact r2"
+    };
+    const revisionOneRef = {
+      kind: "artifact_revision",
+      id: revisionOneId,
+      uri: `artifacts/${artifactId}/revisions/1.md`,
+      version: "v1",
+      label: "Renamed artifact r1"
+    };
+    const store = storeWithQuery(async (text, values) => {
+      if (text.includes("SELECT workspace_id, work_id, room_id, current_run_id")) {
+        return { rows: [{ workspace_id: workspaceId, work_id: workId, room_id: roomId, current_run_id: runId }] };
+      }
+      if (text.includes("FROM workspace_runtime_runs")) {
+        return {
+          rows: [{
+            id: runId,
+            room_id: roomId,
+            status: "completed",
+            output_summary: "Artifact created and revised.",
+            metadata: { runtime_binding: { workspace_id: workspaceId, room_id: roomId, work_id: workId, assignee_id: assignmentId } }
+          }]
+        };
+      }
+      if (text.includes("FROM workspace_runtime_events")) {
+        return {
+          rows: [{ resource_refs: [
+            { kind: "artifact", id: artifactId, uri: `artifacts/${artifactId}/revisions/1.md`, label: "stale current pointer" },
+            revisionOneRef
+          ] }, { resource_refs: [
+            { kind: "artifact", id: artifactId, uri: `artifacts/${artifactId}/revisions/2.md`, label: "new current pointer" },
+            currentRevisionRef
+          ] }]
+        };
+      }
+      if (text.includes("FROM workspace_runtime_changes")) {
+        return {
+          rows: [
+            { resource_ref: revisionOneRef, domain_operation_id: operationOneId, legacy_operation_id: null },
+            { resource_ref: currentRevisionRef, domain_operation_id: operationTwoId, legacy_operation_id: null }
+          ]
+        };
+      }
+      if (text.includes("FROM workspace_runtime_operations")) {
+        return {
+          rows: [
+            { payload: { result_ref: { kind: "artifact", id: artifactId, uri: `artifacts/${artifactId}/revisions/1.md` } } },
+            { payload: { result_ref: { kind: "artifact", id: artifactId, uri: `artifacts/${artifactId}/revisions/2.md` } } }
+          ]
+        };
+      }
+      if (text.includes("record_type IN ('artifact_revision', 'generated_surface_revision')")) return { rows: [] };
+      if (text.includes("FROM workspace_records")) {
+        const recordType = values?.[1];
+        const id = values?.[2];
+        if (recordType === "artifact" && id === artifactId) {
+          return { rows: [{ record_type: "artifact", room_id: roomId, id: artifactId, payload: {
+            id: artifactId,
+            title: "Renamed artifact",
+            file_ref: currentRevisionRef
+          } }] };
+        }
+        if (recordType === "artifact_revision" && id === revisionOneId) {
+          return { rows: [{ record_type: "artifact_revision", room_id: roomId, id: revisionOneId, payload: {
+            artifact_id: artifactId,
+            file_ref: revisionOneRef
+          } }] };
+        }
+        if (recordType === "artifact_revision" && id === revisionTwoId) {
+          return { rows: [{ record_type: "artifact_revision", room_id: roomId, id: revisionTwoId, payload: {
+            artifact_id: artifactId,
+            file_ref: currentRevisionRef
+          } }] };
+        }
+      }
+      return { rows: [] };
+    });
+
+    const evidence = await store.readRoomWorkCompletionEvidence(
+      { workspaceId, accountId: "account_store_completion_evidence", operationId: "operation_store_completion_evidence" },
+      { workId, assignmentId, roomId, runId }
+    );
+
+    expect(evidence).toMatchObject({ runId, runStatus: "completed" });
+    expect(evidence.resourceRefs).toEqual([
+      { kind: "artifact", id: artifactId, uri: `artifacts/${artifactId}`, label: "Renamed artifact" },
+      { kind: "artifact_revision", id: revisionOneId, uri: revisionOneRef.uri, parent_id: artifactId, version: "v1", label: "Renamed artifact r1" },
+      { kind: "artifact_revision", id: revisionTwoId, uri: currentRevisionRef.uri, parent_id: artifactId, version: "v2", label: "Renamed artifact r2" }
+    ]);
+    expect(evidence.resourceRefs).not.toContainEqual(expect.objectContaining({ kind: "artifact", uri: currentRevisionRef.uri }));
   });
 
   it("maps reassignment safety errors to the public Room-work conflict codes", async () => {

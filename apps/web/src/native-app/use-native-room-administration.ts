@@ -28,6 +28,57 @@ export type NativeRoomAdministrationAction =
   | "preview-member"
   | "save-member";
 
+export interface NativeRoomAdministrationDraftState {
+  dirty: boolean;
+  saving: boolean;
+}
+
+export interface NativeRoomAdministrationDraftValues {
+  createName: string;
+  moveParentId: string | undefined;
+  memberAccountId: string;
+  memberRole: NativeRoomAdministrationRole;
+  memberState: NativeRoomAdministrationMemberState;
+}
+
+export interface NativeRoomAdministrationDraftSnapshot extends NativeRoomAdministrationDraftValues {
+  contextKey: string;
+}
+
+export type NativeRoomAdministrationDraftScope = "create" | "move" | "member";
+
+export function captureNativeRoomAdministrationDraftSnapshot(
+  contextKey: string,
+  draft: NativeRoomAdministrationDraftValues
+): NativeRoomAdministrationDraftSnapshot {
+  return { contextKey, ...draft };
+}
+
+export function nativeRoomAdministrationDraftSnapshotHasNewerChanges(
+  snapshot: NativeRoomAdministrationDraftSnapshot,
+  currentContextKey: string,
+  currentDraft: NativeRoomAdministrationDraftValues,
+  scope: NativeRoomAdministrationDraftScope
+): boolean {
+  if (snapshot.contextKey !== currentContextKey) return true;
+  if (scope === "create") return snapshot.createName !== currentDraft.createName;
+  if (scope === "move") return snapshot.moveParentId !== currentDraft.moveParentId;
+  return snapshot.memberAccountId !== currentDraft.memberAccountId
+    || snapshot.memberRole !== currentDraft.memberRole
+    || snapshot.memberState !== currentDraft.memberState;
+}
+
+export function nativeRoomAdministrationDraftIsDirty(
+  draft: NativeRoomAdministrationDraftValues,
+  moveParentTouched: boolean
+): boolean {
+  return draft.createName.length > 0
+    || moveParentTouched
+    || draft.memberAccountId.length > 0
+    || draft.memberRole !== "member"
+    || draft.memberState !== "active";
+}
+
 export interface NativeRoomAdministrationCreateInput {
   name: string;
   parentRoomId: string;
@@ -101,6 +152,8 @@ export interface UseNativeRoomAdministrationOptions {
   bridge?: NativeRoomAdministrationBridgeSource;
   onSelectRoom?: (room: NativeRoom) => void | Promise<void>;
   onRefresh?: (reason: "room-created" | "room-moved" | "membership-changed") => void | Promise<void>;
+  /** Parent navigation guard receives the current Room administration draft state. */
+  onDraftStateChange?: (state: NativeRoomAdministrationDraftState) => void;
 }
 
 interface ContextStamp {
@@ -322,6 +375,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   const [membersError, setMembersError] = useState<string | null>(null);
   const [createName, setCreateNameState] = useState("");
   const [moveParentId, setMoveParentIdState] = useState<string | undefined>();
+  const [moveParentTouched, setMoveParentTouched] = useState(false);
   const [movePreviewRecord, setMovePreviewRecord] = useState<MovePreviewRecord | null>(null);
   const [memberAccountId, setMemberAccountIdState] = useState("");
   const [memberRole, setMemberRoleState] = useState<NativeRoomAdministrationRole>("member");
@@ -338,6 +392,13 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   const movePreviewSequenceRef = useRef(0);
   const memberPreviewSequenceRef = useRef(0);
   const operationIdsRef = useRef(new Map<string, string>());
+  const draftRef = useRef<NativeRoomAdministrationDraftValues>({
+    createName: "",
+    moveParentId: undefined,
+    memberAccountId: "",
+    memberRole: "member",
+    memberState: "active"
+  });
 
   const renderedContextKeyRef = useRef(contextKey);
   if (renderedContextKeyRef.current !== contextKey) {
@@ -348,6 +409,13 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   latestContextKeyRef.current = contextKey;
   latestTargetKeyRef.current = targetScopeKey;
   latestRoomIdRef.current = currentRoomId ?? "";
+  draftRef.current = {
+    createName,
+    moveParentId,
+    memberAccountId,
+    memberRole,
+    memberState
+  };
 
   const parentRooms = useMemo(
     () => currentRoomId
@@ -409,6 +477,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
     setMovePreviewRecord(null);
     setMemberPreviewRecord(null);
     setActionError(null);
+    setBusyAction(null);
   }, [contextKey]);
 
   useEffect(() => {
@@ -417,25 +486,34 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
         ...(canMoveToRoot ? [WORKSPACE_ROOT_VALUE] : []),
         ...parentRooms.map((room) => room.id)
       ]);
-      if (current && allowed.has(current)) return current;
-      if (canMoveToRoot) return undefined;
-      return parentRooms[0]?.id;
+      const next = current && allowed.has(current)
+        ? current
+        : canMoveToRoot
+          ? undefined
+          : parentRooms[0]?.id;
+      draftRef.current = { ...draftRef.current, moveParentId: next };
+      return next;
     });
   }, [canMoveToRoot, destinationIds, parentRooms]);
 
   const setCreateName = useCallback((value: string) => {
+    draftRef.current = { ...draftRef.current, createName: value };
     setCreateNameState(value);
     setActionError(null);
   }, []);
 
   const setMoveParentId = useCallback((value: string | undefined) => {
+    const changed = draftRef.current.moveParentId !== value;
+    draftRef.current = { ...draftRef.current, moveParentId: value };
     movePreviewSequenceRef.current += 1;
     setMoveParentIdState(value);
+    if (changed) setMoveParentTouched(true);
     setMovePreviewRecord(null);
     setActionError(null);
   }, []);
 
   const setMemberAccountId = useCallback((value: string) => {
+    draftRef.current = { ...draftRef.current, memberAccountId: value };
     memberPreviewSequenceRef.current += 1;
     setMemberAccountIdState(value);
     setMemberPreviewRecord(null);
@@ -443,6 +521,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   }, []);
 
   const setMemberRole = useCallback((value: NativeRoomAdministrationRole) => {
+    draftRef.current = { ...draftRef.current, memberRole: value };
     memberPreviewSequenceRef.current += 1;
     setMemberRoleState(value);
     setMemberPreviewRecord(null);
@@ -450,11 +529,48 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   }, []);
 
   const setMemberState = useCallback((value: NativeRoomAdministrationMemberState) => {
+    draftRef.current = { ...draftRef.current, memberState: value };
     memberPreviewSequenceRef.current += 1;
     setMemberStateState(value);
     setMemberPreviewRecord(null);
     setActionError(null);
   }, []);
+
+  const draftValues: NativeRoomAdministrationDraftValues = {
+    createName,
+    moveParentId,
+    memberAccountId,
+    memberRole,
+    memberState
+  };
+  const draftDirty = nativeRoomAdministrationDraftIsDirty(draftValues, moveParentTouched);
+  const saving = busyAction === "create-child" || busyAction === "move" || busyAction === "save-member";
+
+  useEffect(() => {
+    options.onDraftStateChange?.({ dirty: draftDirty, saving });
+    return () => options.onDraftStateChange?.({ dirty: false, saving: false });
+  }, [draftDirty, options.onDraftStateChange, saving]);
+
+  const discardDraft = useCallback((): void => {
+    const defaultMoveParentId = canMoveToRoot ? undefined : parentRooms[0]?.id;
+    const nextDraft: NativeRoomAdministrationDraftValues = {
+      createName: "",
+      moveParentId: defaultMoveParentId,
+      memberAccountId: "",
+      memberRole: "member",
+      memberState: "active"
+    };
+    draftRef.current = nextDraft;
+    setCreateNameState(nextDraft.createName);
+    setMoveParentIdState(nextDraft.moveParentId);
+    setMoveParentTouched(false);
+    setMovePreviewRecord(null);
+    setMemberAccountIdState(nextDraft.memberAccountId);
+    setMemberRoleState(nextDraft.memberRole);
+    setMemberStateState(nextDraft.memberState);
+    setMemberPreviewRecord(null);
+    setActionError(null);
+  }, [canMoveToRoot, parentRooms]);
 
   const refreshMembers = useCallback(async (): Promise<DesktopWorkspaceRoomMembership[]> => {
     const roomId = currentRoomId;
@@ -502,7 +618,8 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
 
   const createChildRoom = useCallback(async (input?: { name?: string }): Promise<unknown> => {
     const roomId = currentRoomId;
-    const name = (input?.name ?? createName).trim();
+    const submittedCreateName = input?.name ?? createName;
+    const name = submittedCreateName.trim();
     const stamp = currentContextStamp();
     if (!roomId || !stamp || currentRoomIsDm) {
       setActionError("agent_dm_room_administration_unavailable");
@@ -531,6 +648,10 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
     }
     const operationKey = `create\n${targetScopeKey}\n${roomId}\n${name}\n${workspaceVersion}`;
     const operationId = operationIdFor(operationKey);
+    const submittedDraft = captureNativeRoomAdministrationDraftSnapshot(stamp.contextKey, {
+      ...draftRef.current,
+      createName: submittedCreateName
+    });
     setBusyAction("create-child");
     setActionError(null);
     try {
@@ -543,7 +664,10 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
       })));
       operationIdsRef.current.delete(operationKey);
       if (isCurrentContext(stamp)) {
-        if (createName.trim() === name) setCreateNameState("");
+        if (!nativeRoomAdministrationDraftSnapshotHasNewerChanges(submittedDraft, latestContextKeyRef.current, draftRef.current, "create")) {
+          draftRef.current = { ...draftRef.current, createName: "" };
+          setCreateNameState((current) => current === submittedCreateName ? "" : current);
+        }
         try {
           await options.onRefresh?.("room-created");
         } catch (refreshError) {
@@ -650,6 +774,11 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
     }
     const roomVersion = activeRoom.version;
     const workspaceVersion = options.workspaceVersion;
+    const submittedMoveParentId = moveParentId;
+    const submittedDraft = captureNativeRoomAdministrationDraftSnapshot(stamp.contextKey, {
+      ...draftRef.current,
+      moveParentId: submittedMoveParentId
+    });
     if (!record || !record.preview.allowed || !movePreviewIsCurrent) {
       setActionError("room_move_preview_required");
       return undefined;
@@ -673,7 +802,10 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
       })));
       operationIdsRef.current.delete(operationKey);
       if (isCurrentContext(stamp)) {
-        setMovePreviewRecord(null);
+        setMovePreviewRecord((current) => current === record ? null : current);
+        if (!nativeRoomAdministrationDraftSnapshotHasNewerChanges(submittedDraft, latestContextKeyRef.current, draftRef.current, "move")) {
+          setMoveParentTouched(false);
+        }
         try {
           await options.onRefresh?.("room-moved");
         } catch (refreshError) {
@@ -795,6 +927,12 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
       return undefined;
     }
     const expectedVersion = currentMember?.version ?? 0;
+    const submittedDraft = captureNativeRoomAdministrationDraftSnapshot(stamp.contextKey, {
+      ...draftRef.current,
+      memberAccountId: accountId,
+      memberRole,
+      memberState
+    });
     const operationKey = `member\n${targetScopeKey}\n${roomId}\n${accountId}\n${memberRole}\n${memberState}\n${expectedVersion}`;
     const operationId = operationIdFor(operationKey);
     setBusyAction("save-member");
@@ -811,7 +949,18 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
       })));
       operationIdsRef.current.delete(operationKey);
       if (isCurrentContext(stamp)) {
-        setMemberPreviewRecord(null);
+        setMemberPreviewRecord((current) => current === record ? null : current);
+        if (!nativeRoomAdministrationDraftSnapshotHasNewerChanges(submittedDraft, latestContextKeyRef.current, draftRef.current, "member")) {
+          draftRef.current = {
+            ...draftRef.current,
+            memberAccountId: "",
+            memberRole: "member",
+            memberState: "active"
+          };
+          setMemberAccountIdState((current) => current === accountId ? "" : current);
+          setMemberRoleState((current) => current === memberRole ? "member" : current);
+          setMemberStateState((current) => current === memberState ? "active" : current);
+        }
         await refreshMembers();
         try {
           await options.onRefresh?.("membership-changed");
@@ -862,7 +1011,10 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
     setMemberState,
     memberPreview: memberPreviewRecord?.preview ?? null,
     previewMemberChange,
-    saveMemberChange,
+   saveMemberChange,
+    discardDraft,
+   draftDirty,
+    saving,
     actionError,
     setActionError,
     busyAction,

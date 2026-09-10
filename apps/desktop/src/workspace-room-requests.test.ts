@@ -8,6 +8,7 @@ import {
   workspaceRoomAgentMemberListRequest,
   workspaceRoomAgentPermissionRequest,
   workspaceRoomAgentRemoveRequest,
+  workspaceRoomMemberListRequest,
   workspaceRoomCreateRequest,
   workspaceRoomDefaultAgentRequest,
   workspaceRoomMemberRequest,
@@ -234,5 +235,47 @@ describe("Desktop Room operation boundary", () => {
       operationId: "room_member_1",
       body: { role: "member", state: "revoked", expected_version: 2 }
     });
+  });
+
+  it("carries the complete target through Room move and membership requests", () => {
+    const target = { connectionId: "server_a", workspaceId: "workspace_a", roomId: "room_child", selectionGeneration: 7 };
+
+    expect(workspaceRoomMemberListRequest({ roomId: "room_child", target })).toEqual({ roomId: "room_child", target });
+    expect(workspaceRoomMoveRequest({
+      roomId: "room_child",
+      parentRoomId: null,
+      expectedRoomVersion: 4,
+      expectedWorkspaceVersion: 8,
+      operationId: "room_move_target",
+      target
+    })).toMatchObject({ roomId: "room_child", operationId: "room_move_target", target });
+    expect(workspaceRoomMemberRequest({
+      roomId: "room_child",
+      accountId: "account_member",
+      role: "member",
+      state: "active",
+      expectedVersion: 2,
+      operationId: "room_member_target",
+      target
+    })).toMatchObject({ roomId: "room_child", accountId: "account_member", operationId: "room_member_target", target });
+    expect(() => workspaceRoomMoveRequest({
+      roomId: "room_child",
+      parentRoomId: null,
+      expectedRoomVersion: 4,
+      expectedWorkspaceVersion: 8,
+      operationId: "room_move_invalid_target",
+      target: { connectionId: "", workspaceId: "workspace_a" }
+    })).toThrow("workspace_target_invalid");
+  });
+
+  it("rejects malformed optional Room target fields instead of dropping their scope", () => {
+    expect(() => workspaceRoomMemberListRequest({
+      roomId: "room_child",
+      target: { connectionId: "server_a", workspaceId: "workspace_a", roomId: "" }
+    })).toThrow("workspace_target_invalid");
+    expect(() => workspaceRoomMemberListRequest({
+      roomId: "room_child",
+      target: { connectionId: "server_a", workspaceId: "workspace_a", selectionGeneration: -1 }
+    })).toThrow("workspace_target_invalid");
   });
 });

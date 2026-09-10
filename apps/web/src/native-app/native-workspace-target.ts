@@ -2,9 +2,17 @@ import type {
   DesktopWorkspaceConnectionState,
   DesktopWorkspaceTarget
 } from "../lib/api";
-import type { NativeWorkspaceTarget } from "./types";
+import { currentActiveWorkspaceRoomId } from "../lib/workspace-navigation-state";
+import {
+  nativeWorkspaceTargetMatches,
+  type NativeWorkspaceTarget
+} from "./types";
 
-export { nativeWorkspaceTargetKey } from "./types";
+export {
+  nativeWorkspaceTargetIdentityKey,
+  nativeWorkspaceTargetKey,
+  nativeWorkspaceTargetMatches
+} from "./types";
 
 /** The smallest Desktop bridge surface needed to guard an asynchronous call. */
 export interface NativeWorkspaceTargetGuardBridge {
@@ -41,8 +49,12 @@ export async function assertNativeWorkspaceTarget(
   if (!bridge.listWorkspaceConnections) throw new Error("workspace_target_guard_unavailable");
   const active = activeNativeWorkspaceTarget(await bridge.listWorkspaceConnections());
   if (!active) throw new Error("workspace_target_unavailable");
-  if (active.connectionId !== target.connectionId || active.workspaceId !== target.workspaceId) {
+  if (!nativeWorkspaceTargetMatches(target, active)) {
     throw new Error("workspace_navigation_changed");
+  }
+  const activeRoomId = currentActiveWorkspaceRoomId();
+  if (target.roomId !== undefined && activeRoomId !== undefined && target.roomId !== activeRoomId) {
+    throw new Error("room_navigation_changed");
   }
 }
 
@@ -58,5 +70,18 @@ export async function withNativeWorkspaceTarget<T>(
 }
 
 function workspaceTarget(target: DesktopWorkspaceTarget): NativeWorkspaceTarget {
-  return { connectionId: target.connectionId, workspaceId: target.workspaceId };
+  const scoped = target as DesktopWorkspaceTarget & {
+    roomId?: unknown;
+    selectionGeneration?: unknown;
+  };
+  return {
+    connectionId: target.connectionId,
+    workspaceId: target.workspaceId,
+    ...(typeof scoped.roomId === "string" && scoped.roomId.length > 0 ? { roomId: scoped.roomId } : {}),
+    ...(typeof scoped.selectionGeneration === "number"
+      && Number.isSafeInteger(scoped.selectionGeneration)
+      && scoped.selectionGeneration >= 0
+      ? { selectionGeneration: scoped.selectionGeneration }
+      : {})
+  };
 }

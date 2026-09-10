@@ -901,6 +901,232 @@ describe("Workspace Bundle v4 HTTP transport", () => {
     }
   });
 
+  it("round-trips Knowledge/Skill refs, versioned bodies, and lineage in human work", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-resource-refs-"));
+    try {
+      const source = path.join(root, "source");
+      const restored = path.join(root, "restored");
+      const knowledgeBody = "# Portable knowledge\n\nKeep the source decision.\n";
+      const skillBody = "---\nname: portable-skill\n---\n\nUse the verified source.\n";
+      const knowledgeRef = {
+        kind: "knowledge",
+        id: "knowledge_bundle_refs",
+        uri: "knowledge/bundle-refs.md",
+        version: "2",
+        label: "Bundle knowledge"
+      };
+      const skillRef = {
+        kind: "skill",
+        id: "skill_bundle_refs",
+        uri: "skills/bundle-refs/SKILL.md",
+        version: "3",
+        label: "Bundle skill"
+      };
+      const work = {
+        workspace_id: workspaceId,
+        id: "work_bundle_resource_refs",
+        room_id: "room_bundle_attachment",
+        requester_account_id: "account_owner",
+        default_agent_id: "agent_bundle_resource_refs",
+        default_agent_version: 1,
+        title: "Resource refs work",
+        objective: "Keep Knowledge and Skill context",
+        completion_criteria: [],
+        status: "completed",
+        stop_state: "none",
+        instruction_version: 1,
+        control_generation: 0,
+        operation_id: "operation_bundle_resource_refs",
+        resource_refs: [knowledgeRef, skillRef],
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const instruction = {
+        workspace_id: workspaceId,
+        id: "instruction_bundle_resource_refs",
+        work_id: work.id,
+        room_id: work.room_id,
+        version: 1,
+        body: "Use the portable context.",
+        attachment_refs: [],
+        resource_refs: [skillRef],
+        source_kind: "request",
+        state: "applied",
+        created_by: "account_owner",
+        created_at: timestamp
+      };
+      const batchId = "completion_file_batch_bundle_refs";
+      const knowledgeHash = hash(knowledgeBody);
+      const skillHash = hash(skillBody);
+      await writeMinimalV4Bundle(source, {
+        agents: [{
+          workspace_id: workspaceId,
+          id: "agent_bundle_resource_refs",
+          display_name: "Resource refs agent",
+          description: "",
+          role: "assistant",
+          instructions: "Keep portable context",
+          backend_id: "samurai-native",
+          enabled: true,
+          status: "active",
+          version: 1,
+          created_by: "account_owner",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        humanWork: { work, instruction, fileHash: hash("portable attachment\n"), fileContent: "portable attachment\n" },
+        completionResources: [{
+          workspace_id: workspaceId,
+          id: knowledgeRef.id,
+          scope_kind: "workspace",
+          room_id: null,
+          resource_kind: "knowledge",
+          title: knowledgeRef.label,
+          lifecycle_state: "active",
+          current_confirmed_version: 2,
+          current_provisional_version: null
+        }, {
+          workspace_id: workspaceId,
+          id: skillRef.id,
+          scope_kind: "workspace",
+          room_id: null,
+          resource_kind: "skill",
+          title: skillRef.label,
+          lifecycle_state: "active",
+          current_confirmed_version: 3,
+          current_provisional_version: null
+        }],
+        completionResourceVersions: [{
+          workspace_id: workspaceId,
+          id: "resource_version_bundle_knowledge_2",
+          resource_id: knowledgeRef.id,
+          version: 2,
+          file_path: knowledgeRef.uri,
+          content_hash: knowledgeHash,
+          content_size: Buffer.byteLength(knowledgeBody),
+          lifecycle_state: "active"
+        }, {
+          workspace_id: workspaceId,
+          id: "resource_version_bundle_skill_3",
+          resource_id: skillRef.id,
+          version: 3,
+          file_path: skillRef.uri,
+          content_hash: skillHash,
+          content_size: Buffer.byteLength(skillBody),
+          lifecycle_state: "active"
+        }],
+        completionFileBatches: [{
+          workspace_id: workspaceId,
+          id: batchId,
+          scope_kind: "workspace",
+          room_id: null,
+          status: "renamed",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        completionFileBatchEntries: [{
+          workspace_id: workspaceId,
+          batch_id: batchId,
+          path: knowledgeRef.uri,
+          sha256: knowledgeHash,
+          size: Buffer.byteLength(knowledgeBody)
+        }, {
+          workspace_id: workspaceId,
+          batch_id: batchId,
+          path: skillRef.uri,
+          sha256: skillHash,
+          size: Buffer.byteLength(skillBody)
+        }],
+        completionBodies: {
+          [knowledgeRef.uri]: knowledgeBody,
+          [skillRef.uri]: skillBody
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+      const transport = await readWorkspaceBundleV4Transport(source);
+      const entries = new Map(transport.entries.map((entry) => [entry.path, Buffer.from(entry.content_base64, "base64").toString("utf8")]));
+      expect(JSON.parse(entries.get("completion/human-works.jsonl")!.trim()).resource_refs).toEqual([knowledgeRef, skillRef]);
+      expect(JSON.parse(entries.get("completion/human-work-instructions.jsonl")!.trim()).resource_refs).toEqual([skillRef]);
+      expect(entries.get(`completion/files/${knowledgeRef.uri}`)).toBe(knowledgeBody);
+      expect(entries.get(`completion/files/${skillRef.uri}`)).toBe(skillBody);
+
+      await expect(writeWorkspaceBundleV4Transport({ transport, destination: restored })).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+      expect(await readFile(path.join(restored, "completion", "files", knowledgeRef.uri), "utf8")).toBe(knowledgeBody);
+      expect(await readFile(path.join(restored, "completion", "files", skillRef.uri), "utf8")).toBe(skillBody);
+      expect(JSON.parse(await readFile(path.join(restored, "completion", "human-works.jsonl"), "utf8"))).toMatchObject({ resource_refs: [knowledgeRef, skillRef] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects human-work refs to an unknown Completion resource explicitly", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-resource-ref-error-"));
+    try {
+      const source = path.join(root, "source");
+      await writeMinimalV4Bundle(source, {
+        agents: [{
+          workspace_id: workspaceId,
+          id: "agent_bundle_unknown_ref",
+          display_name: "Unknown ref agent",
+          description: "",
+          role: "assistant",
+          instructions: "",
+          backend_id: "samurai-native",
+          enabled: true,
+          status: "active",
+          version: 1,
+          created_by: "account_owner",
+          created_at: timestamp,
+          updated_at: timestamp
+        }],
+        humanWork: {
+          work: {
+            workspace_id: workspaceId,
+            id: "work_bundle_unknown_ref",
+            room_id: "room_bundle_attachment",
+            requester_account_id: "account_owner",
+            default_agent_id: "agent_bundle_unknown_ref",
+            default_agent_version: 1,
+            title: "Unknown resource work",
+            objective: "Fail closed",
+            completion_criteria: [],
+            status: "queued",
+            stop_state: "none",
+            instruction_version: 1,
+            control_generation: 0,
+            operation_id: "operation_bundle_unknown_ref",
+            resource_refs: [{ kind: "knowledge", id: "knowledge_missing", uri: "knowledge/missing.md", version: "1" }],
+            created_at: timestamp,
+            updated_at: timestamp
+          },
+          instruction: {
+            workspace_id: workspaceId,
+            id: "instruction_bundle_unknown_ref",
+            work_id: "work_bundle_unknown_ref",
+            room_id: "room_bundle_attachment",
+            version: 1,
+            body: "Fail closed",
+            attachment_refs: [],
+            resource_refs: [],
+            source_kind: "request",
+            state: "pending",
+            created_by: "account_owner",
+            created_at: timestamp
+          },
+          fileHash: hash("portable attachment\n"),
+          fileContent: "portable attachment\n"
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(source)).rejects.toMatchObject({
+        code: "workspace_bundle_v4_human_work_resource_reference_not_found",
+        status: 404
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps an unresolved legacy attachment marker readable and portable", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-legacy-attachment-marker-"));
     try {
@@ -2077,6 +2303,11 @@ async function writeMinimalV4Bundle(
     runtimeChanges?: readonly Record<string, unknown>[];
     runtimeActivities?: readonly Record<string, unknown>[];
     runtimeResourceUsage?: readonly Record<string, unknown>[];
+    completionResources?: readonly Record<string, unknown>[];
+    completionResourceVersions?: readonly Record<string, unknown>[];
+    completionFileBatches?: readonly Record<string, unknown>[];
+    completionFileBatchEntries?: readonly Record<string, unknown>[];
+    completionBodies?: Readonly<Record<string, string | Uint8Array>>;
     humanWork?: {
       work: Record<string, unknown>;
       instruction: Record<string, unknown>;
@@ -2225,6 +2456,10 @@ async function writeMinimalV4Bundle(
   const runtimeChanges = input.runtimeChanges ?? [];
   const runtimeActivities = input.runtimeActivities ?? [];
   const runtimeResourceUsage = input.runtimeResourceUsage ?? [];
+  const completionResources = input.completionResources ?? [];
+  const completionResourceVersions = input.completionResourceVersions ?? [];
+  const completionFileBatches = input.completionFileBatches ?? [];
+  const completionFileBatchEntries = input.completionFileBatchEntries ?? [];
   for (const file of completionFiles) {
     const rows = file === "migration-receipts.jsonl"
       ? migrationReceipts
@@ -2246,9 +2481,22 @@ async function writeMinimalV4Bundle(
                     ? runtimeActivities
                     : file === "runtime-resource-usage.jsonl"
                       ? runtimeResourceUsage
-                      : [];
+                      : file === "resources.jsonl"
+                        ? completionResources
+                        : file === "resource-versions.jsonl"
+                          ? completionResourceVersions
+                          : file === "file-batches.jsonl"
+                            ? completionFileBatches
+                            : file === "file-batch-entries.jsonl"
+                              ? completionFileBatchEntries
+                              : [];
     const content = rows.map((row) => canonicalJson(row)).join("\n") + (rows.length ? "\n" : "");
     await writeFile(path.join(completionRoot, file), content, { flag: "wx", mode: 0o600 });
+  }
+  for (const [relative, content] of Object.entries(input.completionBodies ?? {})) {
+    const destination = path.join(completionRoot, "files", relative);
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await writeFile(destination, content, { flag: "wx", mode: 0o600 });
   }
   if (input.humanWork) {
     const instructions = input.humanWork.instructions ?? [input.humanWork.instruction];
@@ -2292,9 +2540,17 @@ async function writeMinimalV4Bundle(
                 ? runtimeChanges.length
                 : key === "runtime_activities"
                   ? runtimeActivities.length
-                  : key === "runtime_resource_usage"
-                    ? runtimeResourceUsage.length
-                    : 0
+                : key === "runtime_resource_usage"
+                  ? runtimeResourceUsage.length
+                  : key === "resources"
+                    ? completionResources.length
+                    : key === "resource_versions"
+                      ? completionResourceVersions.length
+                      : key === "file_batches"
+                        ? completionFileBatches.length
+                        : key === "file_batch_entries"
+                          ? completionFileBatchEntries.length
+                          : 0
   ]));
   if (input.humanWork) {
     const humanWorkRows: Record<string, readonly Record<string, unknown>[]> = {
@@ -2355,7 +2611,7 @@ async function hashFiles(root: string, prefix = ""): Promise<Record<string, stri
   for (const entry of (await entries).sort((left, right) => left.name.localeCompare(right.name))) {
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.isDirectory()) Object.assign(result, await hashFiles(root, relative));
-    else if (!(entry.name === "manifest.json" && prefix === "")) result[relative] = hash((await readFile(path.join(root, relative))).toString("utf8"));
+    else if (!(entry.name === "manifest.json" && prefix === "")) result[relative] = hashBytes(await readFile(path.join(root, relative)));
   }
   return Object.fromEntries(Object.entries(result).sort(([left], [right]) => left.localeCompare(right)));
 }
@@ -2365,5 +2621,9 @@ async function readFileText(file: string): Promise<string> {
 }
 
 function hash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function hashBytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }

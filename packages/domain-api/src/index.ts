@@ -5,7 +5,9 @@ import {
   ArtifactRecordSchema,
   ArtifactRevisionRecordSchema,
   GeneratedSurfaceDefinitionSchema,
+  GeneratedSurfaceActionDeclarationSchema,
   GeneratedSurfaceRevisionRecordSchema,
+  SurfaceInteractionRecordSchema,
   PublicAgentDmRecordSchema as CorePublicAgentDmRecordSchema,
   PublicRoomWorkAssigneeSchema as CorePublicRoomWorkAssigneeSchema,
   PublicRoomWorkAssignmentResultSchema as CorePublicRoomWorkAssignmentResultSchema,
@@ -24,6 +26,13 @@ import {
   ResourceUsageRecordSchema,
   AgentBackendKindSchema,
   BackendConnectionStateSchema,
+  AutomationAuthorizationStateSchema,
+  AutomationJobStatusSchema,
+  AutomationManagementStateSchema,
+  AutomationRunStatusSchema,
+  CaptureModeSchema,
+  ExternalProviderRoleSchema,
+  SupportedLocaleSchema,
   jsonValueSchema,
   toStrictJsonSchema,
   type JsonValue,
@@ -706,6 +715,425 @@ export const PublicWorkspaceTransferReceiptSchema = z.object({
 });
 export type PublicWorkspaceTransferReceipt = z.infer<typeof PublicWorkspaceTransferReceiptSchema>;
 
+const publicManagementId = z.string().trim().min(1).max(512);
+const publicManagementTimestamp = z.string().datetime();
+
+export const PublicCompletionScopeSchema = z.object({
+  kind: z.enum(["workspace", "room"]),
+  roomId: publicManagementId.optional()
+}).strict().superRefine((scope, issue) => {
+  if (scope.kind === "room" && !scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "room_id_required" });
+  if (scope.kind === "workspace" && scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "workspace_scope_room_forbidden" });
+});
+export type PublicCompletionScope = z.infer<typeof PublicCompletionScopeSchema>;
+
+const publicCompletionWriteBase = z.object({
+  resource_id: publicManagementId.optional(),
+  scope_kind: z.enum(["workspace", "room"]),
+  room_id: publicManagementId.optional(),
+  kind: z.enum(["knowledge", "skill"]),
+  knowledge_kind: z.enum(["fact", "decision", "explanation", "experience_rule"]).optional(),
+  title: z.string().trim().min(1).max(200),
+  content: z.string().min(1).max(8 * 1024 * 1024),
+  metadata: z.record(jsonValueSchema).default({}),
+  reason: z.string().trim().min(1).max(4_000),
+  expected_version: z.number().int().nonnegative().optional(),
+  ai_managed: z.boolean().optional(),
+  support_files: z.array(z.object({
+    path: z.string().trim().min(1).max(1_024),
+    content_base64: z.string().min(1).max(8 * 1024 * 1024)
+  }).strict()).max(99).optional()
+}).strict();
+
+function refinePublicCompletionWrite(value: z.infer<typeof publicCompletionWriteBase>, issue: z.RefinementCtx): void {
+  if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
+  if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
+  if (value.kind === "knowledge" && !value.knowledge_kind) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["knowledge_kind"], message: "knowledge_kind_required" });
+  if (value.kind === "skill" && value.knowledge_kind) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["knowledge_kind"], message: "skill_knowledge_kind_forbidden" });
+}
+
+export const PublicCompletionResourceCreateInputSchema = publicCompletionWriteBase.superRefine(refinePublicCompletionWrite);
+export type PublicCompletionResourceCreateInput = z.input<typeof PublicCompletionResourceCreateInputSchema>;
+export const PublicCompletionResourceUpdateInputSchema = publicCompletionWriteBase.extend({
+  resource_id: publicManagementId,
+  expected_version: z.number().int().positive()
+}).superRefine(refinePublicCompletionWrite);
+export type PublicCompletionResourceUpdateInput = z.input<typeof PublicCompletionResourceUpdateInputSchema>;
+
+export const PublicCompletionResourceListInputSchema = z.object({
+  scope_kind: z.enum(["workspace", "room"]).optional(),
+  room_id: publicManagementId.optional(),
+  kind: z.enum(["knowledge", "skill", "policy"]).optional(),
+  include_archived: z.boolean().default(false),
+  limit: z.number().int().positive().max(100).default(50),
+  cursor: publicManagementId.optional()
+}).strict().superRefine((value, issue) => {
+  if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
+  if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
+});
+export type PublicCompletionResourceListInput = z.input<typeof PublicCompletionResourceListInputSchema>;
+
+export const PublicCompletionKnowledgeSearchInputSchema = z.object({
+  room_id: publicManagementId,
+  q: z.string().trim().min(1).max(4_000),
+  limit: z.number().int().positive().max(100).default(50),
+  cursor: publicManagementId.optional()
+}).strict();
+export type PublicCompletionKnowledgeSearchInput = z.input<typeof PublicCompletionKnowledgeSearchInputSchema>;
+
+export const PublicCompletionResourceViewInputSchema = z.object({
+  resource_id: publicManagementId,
+  room_id: publicManagementId.optional(),
+  kind: z.enum(["knowledge", "skill"]).optional(),
+  versions_limit: z.number().int().positive().max(100).default(50),
+  evidence_limit: z.number().int().positive().max(100).default(50)
+}).strict();
+export const PublicCompletionResourceBodyInputSchema = z.object({
+  resource_id: publicManagementId,
+  room_id: publicManagementId.optional(),
+  kind: z.enum(["knowledge", "skill"]).optional(),
+  version: z.number().int().positive().optional()
+}).strict();
+export const PublicCompletionResourceStateInputSchema = z.object({
+  resource_id: publicManagementId,
+  expected_version: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(4_000),
+  archived: z.boolean().optional(),
+  fixed: z.boolean().optional()
+}).strict().superRefine((value, issue) => {
+  if ((value.archived === undefined) === (value.fixed === undefined)) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["resource_id"], message: "completion_state_action_required" });
+});
+export const PublicCompletionResourceArchiveInputSchema = z.object({
+  resource_id: publicManagementId,
+  room_id: publicManagementId.optional(),
+  archived: z.boolean(),
+  expected_version: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(4_000)
+}).strict();
+export const PublicCompletionResourceFixInputSchema = z.object({
+  resource_id: publicManagementId,
+  room_id: publicManagementId.optional(),
+  fixed: z.boolean(),
+  expected_version: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(4_000)
+}).strict();
+
+export const PublicCompletionResourceSchema = z.object({
+  workspaceId: publicManagementId,
+  id: publicManagementId,
+  scope: PublicCompletionScopeSchema,
+  kind: z.enum(["knowledge", "skill", "policy"]),
+  knowledgeKind: z.enum(["fact", "decision", "explanation", "experience_rule"]).optional(),
+  title: z.string().trim().min(1),
+  evidenceState: z.enum(["provisional", "confirmed", "contradicted", "review_required"]),
+  lifecycleState: z.enum(["active", "stale", "archived"]),
+  aiProtection: z.enum(["editable", "fixed"]),
+  creationSource: z.enum(["human", "ai", "import", "machine_verified", "physical_file_import"]),
+  aiManaged: z.boolean(),
+  version: z.number().int().positive(),
+  currentConfirmedVersion: z.number().int().positive().optional(),
+  currentProvisionalVersion: z.number().int().positive().optional(),
+  candidateVersion: z.number().int().positive().optional(),
+  archivedAt: publicManagementTimestamp.optional(),
+  createdBy: publicManagementId,
+  updatedBy: publicManagementId,
+  createdAt: publicManagementTimestamp,
+  updatedAt: publicManagementTimestamp
+}).strict();
+export type PublicCompletionResource = z.infer<typeof PublicCompletionResourceSchema>;
+
+export const PublicCompletionResourceVersionSchema = z.object({
+  workspaceId: publicManagementId,
+  id: publicManagementId,
+  resourceId: publicManagementId,
+  version: z.number().int().positive(),
+  parentVersion: z.number().int().positive().optional(),
+  contentHash: z.string().trim().min(1),
+  contentSize: z.number().int().nonnegative(),
+  evidenceState: z.enum(["provisional", "confirmed", "contradicted", "review_required"]),
+  lifecycleState: z.enum(["active", "stale", "archived"]),
+  aiProtection: z.enum(["editable", "fixed"]),
+  creationSource: z.enum(["human", "ai", "import", "machine_verified", "physical_file_import"]),
+  metadata: z.record(jsonValueSchema),
+  reason: z.string(),
+  actorAccountId: publicManagementId,
+  createdAt: publicManagementTimestamp
+}).strict();
+export type PublicCompletionResourceVersion = z.infer<typeof PublicCompletionResourceVersionSchema>;
+
+export const PublicCompletionEvidenceSchema = z.object({
+  workspaceId: publicManagementId,
+  id: publicManagementId,
+  resourceId: publicManagementId,
+  resourceVersion: z.number().int().positive(),
+  activityId: publicManagementId.optional(),
+  episodeId: publicManagementId.optional(),
+  kind: z.enum(["activity", "human_edit", "explicit_remember", "use_outcome", "machine_attestation", "physical_file_import", "unverified_claim"]),
+  attestationId: publicManagementId.optional(),
+  summary: z.string(),
+  createdAt: publicManagementTimestamp
+}).strict();
+
+export const PublicCompletionResourcePageSchema = z.object({
+  resources: z.array(PublicCompletionResourceSchema),
+  next_cursor: publicManagementId.optional()
+}).strict();
+export const PublicCompletionKnowledgeSearchResourceSchema = PublicCompletionResourceSchema.extend({
+  rank: z.number().finite()
+}).strict();
+export const PublicCompletionKnowledgeSearchPageSchema = z.object({
+  resources: z.array(PublicCompletionKnowledgeSearchResourceSchema),
+  next_cursor: publicManagementId.optional()
+}).strict();
+export const PublicCompletionResourceDetailSchema = z.object({
+  resource: PublicCompletionResourceSchema,
+  current_version: PublicCompletionResourceVersionSchema,
+  versions: z.array(PublicCompletionResourceVersionSchema),
+  evidence: z.array(PublicCompletionEvidenceSchema)
+}).strict();
+export const PublicCompletionResourceBodySchema = z.object({
+  resource: PublicCompletionResourceSchema,
+  version: PublicCompletionResourceVersionSchema,
+  content: z.string()
+}).strict();
+export const PublicCompletionResourceMutationResultSchema = z.object({
+  resource: PublicCompletionResourceSchema
+}).strict();
+export const PublicCompletionResourceMutationResponseSchema = PublicCompletionResourceMutationResultSchema.extend({ replayed: z.boolean() }).strict();
+
+export const PublicRuntimeSettingsSchema = z.object({
+  workspace_name: z.string().optional(),
+  workspace_rules: z.array(z.string()).optional(),
+  ui_locale: SupportedLocaleSchema,
+  output_locale: SupportedLocaleSchema,
+  memory_capture_mode: CaptureModeSchema,
+  knowledge_wiki_capture_mode: CaptureModeSchema,
+  skill_capture_mode: CaptureModeSchema,
+  learning_enabled: z.boolean(),
+  learning_budget_ratio: z.number().min(0).max(1),
+  learning_budget_window_days: z.number().int().positive(),
+  external_provider_role: ExternalProviderRoleSchema,
+  default_backend_id: publicManagementId.optional(),
+  default_room_id: publicManagementId.optional(),
+  default_agent_id: publicManagementId.optional(),
+  updated_at: publicManagementTimestamp
+}).strict();
+export type PublicRuntimeSettings = z.infer<typeof PublicRuntimeSettingsSchema>;
+
+/** Public mutation input for Workspace Runtime settings. Keep this separate
+ * from the stored settings projection so a caller cannot submit read-only
+ * fields such as `updated_at`. */
+export const PublicRuntimeSettingsPatchInputSchema = z.object({
+  default_agent_id: publicManagementId.optional(),
+  default_room_id: publicManagementId.optional(),
+  external_provider_role: ExternalProviderRoleSchema.optional(),
+  knowledge_wiki_capture_mode: CaptureModeSchema.optional(),
+  learning_enabled: z.boolean().optional(),
+  learning_budget_ratio: z.number().min(0).max(1).optional(),
+  learning_budget_window_days: z.number().int().positive().max(90).optional(),
+  memory_capture_mode: CaptureModeSchema.optional(),
+  output_locale: SupportedLocaleSchema.optional(),
+  skill_capture_mode: CaptureModeSchema.optional(),
+  ui_locale: SupportedLocaleSchema.optional()
+}).strict();
+
+export const PublicLearningScopeSchema = z.object({
+  kind: z.enum(["workspace", "room"]),
+  roomId: publicManagementId.optional()
+}).strict().superRefine((scope, issue) => {
+  if (scope.kind === "room" && !scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "room_id_required" });
+  if (scope.kind === "workspace" && scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "workspace_scope_room_forbidden" });
+});
+export const PublicLearningSettingsSchema = z.object({
+  workspaceId: publicManagementId,
+  id: publicManagementId,
+  scope: PublicLearningScopeSchema,
+  enabled: z.boolean(),
+  engineId: publicManagementId.optional(),
+  model: z.string().optional(),
+  currencyLimit: z.number().nonnegative().optional(),
+  tokenLimit: z.number().int().nonnegative().optional(),
+  currencyUsed: z.number().nonnegative(),
+  tokensUsed: z.number().int().nonnegative(),
+  currencyReserved: z.number().nonnegative(),
+  tokensReserved: z.number().int().nonnegative(),
+  version: z.number().int().nonnegative(),
+  updatedBy: publicManagementId,
+  updatedAt: publicManagementTimestamp
+}).strict();
+export const PublicLearningSettingsLayersSchema = z.object({
+  settings: PublicLearningSettingsSchema,
+  workspace_settings: PublicLearningSettingsSchema.optional(),
+  room_settings: PublicLearningSettingsSchema.optional()
+}).strict();
+export const PublicLearningSettingsPatchInputSchema = z.object({
+  scope_kind: z.enum(["workspace", "room"]),
+  room_id: publicManagementId.optional(),
+  enabled: z.boolean().optional(),
+  engine_id: publicManagementId.optional(),
+  model: z.string().trim().max(512).optional(),
+  secret_ref: publicManagementId.optional(),
+  currency_limit: z.number().nonnegative().optional(),
+  token_limit: z.number().int().nonnegative().optional(),
+  clear_engine_id: z.boolean().optional(),
+  clear_model: z.boolean().optional(),
+  clear_secret_ref: z.boolean().optional(),
+  clear_currency_limit: z.boolean().optional(),
+  clear_token_limit: z.boolean().optional(),
+  remove_override: z.boolean().optional(),
+  expected_version: z.number().int().nonnegative().optional()
+}).strict().superRefine((value, issue) => {
+  if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
+  if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
+});
+
+export const PublicAutomationJobSchema = z.object({
+  id: publicManagementId,
+  title: z.string().trim().min(1),
+  kind: z.enum(["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"]),
+  status: AutomationJobStatusSchema,
+  schedule: z.string().trim().min(1),
+  target_instruction: z.string().trim().min(1),
+  delivery_target: z.record(jsonValueSchema),
+  workspace_id: publicManagementId,
+  room_id: publicManagementId,
+  authorization_state: AutomationAuthorizationStateSchema,
+  authorization_error_code: publicManagementId.optional(),
+  authorized_at: publicManagementTimestamp.optional(),
+  blocked_at: publicManagementTimestamp.optional(),
+  rebound_at: publicManagementTimestamp.optional(),
+  management_state: AutomationManagementStateSchema,
+  management_operation_id: publicManagementId.optional(),
+  created_operation_id: publicManagementId.optional(),
+  next_run_at: publicManagementTimestamp.optional(),
+  last_run_at: publicManagementTimestamp.optional(),
+  retry_after_at: publicManagementTimestamp.optional(),
+  failure_count: z.number().int().nonnegative(),
+  max_attempts: z.number().int().positive(),
+  last_error: z.string().optional(),
+  created_at: publicManagementTimestamp,
+  updated_at: publicManagementTimestamp
+}).strict();
+export const PublicAutomationJobListSchema = z.object({ jobs: z.array(PublicAutomationJobSchema) }).strict();
+export const PublicAutomationRunSchema = z.object({
+  id: publicManagementId,
+  kind: z.string().trim().min(1),
+  source: z.string().trim().min(1),
+  backend_run_id: publicManagementId.optional(),
+  status: AutomationRunStatusSchema,
+  operation_id: publicManagementId.optional(),
+  job_id: publicManagementId,
+  workspace_id: publicManagementId,
+  room_id: publicManagementId,
+  connector_id: publicManagementId.optional(),
+  app_id: publicManagementId.optional(),
+  activity_id: publicManagementId.optional(),
+  error_code: publicManagementId.optional(),
+  scheduled_at: publicManagementTimestamp,
+  started_at: publicManagementTimestamp,
+  completed_at: publicManagementTimestamp.optional(),
+  blocked_at: publicManagementTimestamp.optional(),
+  error: z.string().optional(),
+  attempt_no: z.number().int().positive()
+}).strict();
+export const PublicAutomationJobListInputSchema = z.object({ room_id: publicManagementId.optional() }).strict();
+export const PublicAutomationRunListInputSchema = z.object({
+  room_id: publicManagementId.optional(),
+  job_id: publicManagementId.optional()
+}).strict().superRefine((value, issue) => {
+  if (!value.room_id && !value.job_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_or_job_id_required" });
+  if (value.room_id && value.job_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["job_id"], message: "room_id_and_job_id_are_mutually_exclusive" });
+});
+export const PublicAutomationRunNowInputSchema = z.object({
+  room_id: publicManagementId,
+  kind: z.enum(["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"])
+}).strict();
+export const PublicAutomationJobSaveInputSchema = z.object({
+  delivery_target: z.record(jsonValueSchema).default({ channel: "activity" }),
+  enabled: z.boolean().optional(),
+  kind: z.enum(["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "resource_translation", "custom_instruction"]),
+  max_attempts: z.number().int().positive().default(3),
+  next_run_at: z.string().datetime().optional(),
+  schedule: z.string().trim().min(1),
+  target_instruction: z.string().trim().min(1),
+  title: z.string().trim().min(1)
+}).strict();
+export const PublicAutomationJobManagerStopInputSchema = z.object({
+  job_id: publicManagementId,
+  note: z.string().trim().min(1).max(500).optional()
+}).strict();
+export const PublicAutomationJobManagerResumeInputSchema = z.object({
+  job_id: publicManagementId
+}).strict();
+
+export type PublicManagementContractDefinition = Readonly<{
+  id: string;
+  kind: "command" | "query";
+  version: string;
+  availability: "active";
+  input: z.ZodTypeAny;
+  output: z.ZodTypeAny;
+  idempotency: "required" | "optional" | "none" | "external";
+  concurrency: "optimistic_version" | "state_transition" | "append_or_unique" | "external_idempotency" | "none";
+  sources: readonly string[];
+}>;
+
+const managementQuery = (id: string, input: z.ZodTypeAny, output: z.ZodTypeAny): PublicManagementContractDefinition => ({
+  id, kind: "query", version: "1.0", availability: "active", input, output, idempotency: "none", concurrency: "none", sources: ["runtime_api"]
+});
+const managementCommand = (
+  id: string,
+  input: z.ZodTypeAny,
+  output: z.ZodTypeAny,
+  concurrency: PublicManagementContractDefinition["concurrency"],
+  options: { version?: string; sources?: readonly string[] } = {}
+): PublicManagementContractDefinition => ({
+  id,
+  kind: "command",
+  version: options.version ?? "1.0",
+  availability: "active",
+  input,
+  output,
+  idempotency: "required",
+  concurrency,
+  sources: options.sources ?? ["runtime_api"]
+});
+
+export const publicManagementContractDefinitions: readonly PublicManagementContractDefinition[] = Object.freeze([
+  managementQuery("completion.resource.list", PublicCompletionResourceListInputSchema, PublicCompletionResourcePageSchema),
+  managementQuery("completion.knowledge.search", PublicCompletionKnowledgeSearchInputSchema, PublicCompletionKnowledgeSearchPageSchema),
+  managementQuery("completion.resource.view", PublicCompletionResourceViewInputSchema, PublicCompletionResourceDetailSchema),
+  managementQuery("completion.resource.body", PublicCompletionResourceBodyInputSchema, PublicCompletionResourceBodySchema),
+  managementCommand("completion.resource.create", PublicCompletionResourceCreateInputSchema, PublicCompletionResourceMutationResultSchema, "append_or_unique"),
+  managementCommand("completion.resource.update", PublicCompletionResourceUpdateInputSchema, PublicCompletionResourceMutationResultSchema, "optimistic_version"),
+  managementCommand("completion.resource.archive", PublicCompletionResourceArchiveInputSchema, PublicCompletionResourceMutationResultSchema, "state_transition"),
+  managementCommand("completion.resource.fix", PublicCompletionResourceFixInputSchema, PublicCompletionResourceMutationResultSchema, "state_transition"),
+  managementQuery("settings.view", z.object({}).strict(), PublicRuntimeSettingsSchema),
+  managementCommand("settings.patch", PublicRuntimeSettingsPatchInputSchema, PublicRuntimeSettingsSchema, "optimistic_version", {
+    version: "2.1",
+    sources: ["runtime_api", "surface_operation"]
+  }),
+  managementQuery("learning.settings.view", z.object({ room_id: publicManagementId }).strict(), PublicLearningSettingsLayersSchema),
+  managementCommand("learning.settings.patch", PublicLearningSettingsPatchInputSchema, z.object({ settings: PublicLearningSettingsSchema }).strict(), "optimistic_version"),
+  managementQuery("automation.job.list", PublicAutomationJobListInputSchema, PublicAutomationJobListSchema),
+  managementQuery("automation.run.list", PublicAutomationRunListInputSchema, z.object({ runs: z.array(PublicAutomationRunSchema) }).strict()),
+  managementCommand("automation.job.save", PublicAutomationJobSaveInputSchema, PublicAutomationJobSchema, "append_or_unique", {
+    version: "4.0",
+    sources: ["runtime_api", "external_app"]
+  }),
+  managementCommand("automation.job.manager_stop", PublicAutomationJobManagerStopInputSchema, PublicAutomationJobSchema, "state_transition", {
+    sources: ["runtime_api", "provider_tool_call", "surface_operation"]
+  }),
+  managementCommand("automation.job.manager_resume", PublicAutomationJobManagerResumeInputSchema, PublicAutomationJobSchema, "state_transition", {
+    sources: ["runtime_api", "provider_tool_call", "surface_operation"]
+  }),
+  managementCommand("automation.job.run_now", PublicAutomationRunNowInputSchema, PublicAutomationJobSchema, "append_or_unique")
+]);
+
+export function publicManagementContractFor(operationId: string): PublicManagementContractDefinition | undefined {
+  return publicManagementContractDefinitions.find((definition) => definition.id === operationId);
+}
+
 /** The normal Room-first public product slice. Keep legacy Session entry
  * points out of this list so a catalog consumer cannot discover them as the
  * supported way to start work. */
@@ -717,6 +1145,10 @@ export const publicDomainOperationIds = Object.freeze([
   "agent.backend.list", "agent.list", "agent.view", "agent.create", "agent.patch", "agent.backend.bind",
   "artifact.list", "artifact.view", "artifact.create", "artifact.revise", "artifact.restore_revision", "artifact.repair",
   "generated_surface.create", "generated_surface.revise", "generated_surface.action.run", "generated_surface.state", "generated_surface.export",
+  "completion.resource.list", "completion.resource.view", "completion.resource.body", "completion.knowledge.search", "completion.resource.create", "completion.resource.update", "completion.resource.archive", "completion.resource.fix",
+  "settings.view", "settings.patch",
+  "learning.settings.view", "learning.settings.patch",
+  "automation.job.list", "automation.run.list", "automation.job.save", "automation.job.manager_stop", "automation.job.manager_resume", "automation.job.run_now",
   "organization.list", "organization.view", "organization.create", "organization.patch", "organization.delete",
   "organization.member.list", "organization.member.invite", "organization.member.accept", "organization.member.role.change", "organization.member.remove", "organization.member.leave",
   "organization.invitation.list", "organization.invitation.revoke", "organization.invitation.reissue", "organization.invitation.extend",
@@ -768,24 +1200,91 @@ export const publicLegacyDomainOperationCompatibility: readonly PublicLegacyDoma
 ].map((entry) => PublicLegacyDomainOperationCompatibilitySchema.parse(entry)));
 export const legacyPublicDomainOperationCompatibility = publicLegacyDomainOperationCompatibility;
 
-const publicArtifactMutationOutputSchema = z.object({
-  artifact: ArtifactRecordSchema,
-  content: z.string().optional(),
-  content_bytes: z.array(z.number().int().min(0).max(255)).optional(),
+const publicArtifactContentInputSchema = z.union([
+  z.string(),
+  z.record(jsonValueSchema),
+  z.array(jsonValueSchema).max(50_000_000)
+]);
+const publicArtifactBase64InputSchema = z.string().max(12 * 1024 * 1024).refine(isCanonicalBase64, "artifact_content_base64_invalid");
+
+function refinePublicArtifactContentInput(value: { content?: unknown; content_base64?: string; encoding?: "utf8" | "binary" }, issue: z.RefinementCtx): void {
+  const hasContent = value.content !== undefined;
+  const hasBase64 = value.content_base64 !== undefined;
+  if (hasContent === hasBase64) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: [hasContent ? "content_base64" : "content"], message: "artifact_content_transport_required" });
+  }
+  if (hasBase64 && value.encoding !== "binary") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["encoding"], message: "artifact_binary_content_transport_required" });
+  }
+}
+
+const publicArtifactCreateInputSchema = z.object({
+  content: publicArtifactContentInputSchema.optional(),
+  content_base64: publicArtifactBase64InputSchema.optional(),
+  input_locale: SupportedLocaleSchema.optional(),
+  kind: z.enum(["markdown", "document", "table", "chart", "graph", "image", "pdf", "structured_draft", "generated_report", "note"]).optional(),
+  metadata: z.record(jsonValueSchema).default({}),
   mime_type: z.string().trim().min(1).max(255).optional(),
   encoding: ArtifactContentEncodingSchema.optional(),
+  output_locale: SupportedLocaleSchema.optional(),
+  title: z.string().trim().min(1).max(512)
+}).strict().superRefine(refinePublicArtifactContentInput);
+
+const publicArtifactReviseInputSchema = z.object({
+  artifact_id: z.string().trim().min(1),
+  base_revision_id: z.string().trim().min(1).optional(),
+  change_summary: z.string().trim().min(1).optional(),
+  content: publicArtifactContentInputSchema.optional(),
+  content_base64: publicArtifactBase64InputSchema.optional(),
+  editor_source: z.enum(["chat", "surface", "provider", "image_provider", "restore", "system"]).optional(),
+  expected_revision: z.number().int().positive().optional(),
+  extension: z.string().trim().min(1).optional(),
+  mime_type: z.string().trim().min(1).max(255).optional(),
+  encoding: ArtifactContentEncodingSchema.optional(),
+  provenance: z.record(jsonValueSchema).default({})
+}).strict().superRefine(refinePublicArtifactContentInput);
+
+const publicArtifactContentOutputFields = {
+  content: z.string().optional(),
+  content_base64: z.string().refine(isCanonicalBase64, "artifact_content_base64_invalid").optional(),
+  mime_type: z.string().trim().min(1).max(255).optional(),
+  encoding: ArtifactContentEncodingSchema.optional()
+} as const;
+
+const publicArtifactContentOutputSchema = z.object(publicArtifactContentOutputFields).strict().superRefine(refinePublicArtifactContentOutput);
+
+const publicArtifactMutationOutputSchema = z.object({
+  artifact: ArtifactRecordSchema,
+  ...publicArtifactContentOutputFields,
   revision: ArtifactRevisionRecordSchema.optional(),
   repair: z.object({ repaired: z.boolean() }).strict().optional(),
   replayed: z.boolean()
-}).strict();
+}).strict().superRefine((value, issue) => {
+  refinePublicArtifactContentOutput(value, issue);
+});
 
 const publicArtifactViewOutputSchema = z.object({
   artifact: ArtifactRecordSchema,
   content: z.string(),
-  content_bytes: z.array(z.number().int().min(0).max(255)).optional(),
+  content_base64: z.string().refine(isCanonicalBase64, "artifact_content_base64_invalid").optional(),
   mime_type: z.string().trim().min(1).max(255),
   encoding: ArtifactContentEncodingSchema,
   revision: ArtifactRevisionRecordSchema.optional()
+}).strict().superRefine((value, issue) => {
+  refinePublicArtifactContentOutput(value, issue);
+});
+
+export const PublicGeneratedSurfaceExportAssetSchema = z.object({
+  path: z.string().trim().min(1).max(1_024).refine(isSafePublicGeneratedSurfaceAssetPath, "generated_surface_asset_path_invalid"),
+  content_base64: z.string().refine(isCanonicalBase64, "generated_surface_asset_content_base64_invalid"),
+  mime_type: z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/, "generated_surface_asset_mime_type_invalid")
+}).strict();
+
+const publicGeneratedSurfaceExportBundleSchema = z.object({
+  html: z.string(),
+  css: z.string().optional(),
+  script: z.string().optional(),
+  assets: z.array(PublicGeneratedSurfaceExportAssetSchema)
 }).strict();
 
 const publicGeneratedSurfaceMutationOutputSchema = z.object({
@@ -796,15 +1295,17 @@ const publicGeneratedSurfaceMutationOutputSchema = z.object({
 
 const publicGeneratedSurfaceActionOutputSchema = z.object({
   surface: GeneratedSurfaceDefinitionSchema,
-  action: z.record(jsonValueSchema),
-  command: z.record(jsonValueSchema),
-  interaction: z.record(jsonValueSchema).optional(),
-  target_result: jsonValueSchema.optional()
+  action: GeneratedSurfaceActionDeclarationSchema,
+  command: z.object({ result: z.record(jsonValueSchema) }).strict(),
+  interaction: SurfaceInteractionRecordSchema,
+  target_result: jsonValueSchema
 }).strict();
 
 /** Output projections are part of the public contract. The PostgreSQL v1
  * adapter returns these projections instead of the internal legacy records. */
 export function publicOperationOutputSchemaFor(operationId: string, fallback: z.ZodTypeAny): z.ZodTypeAny {
+  const managementContract = publicManagementContractFor(operationId);
+  if (managementContract) return managementContract.output;
   if (operationId === "room.list") return z.array(PublicRoomRecordSchema);
   if (["room.view", "room.create", "room.patch"].includes(operationId)) return PublicRoomRecordSchema;
   if (operationId === "room.member.list") return PublicRoomMemberListRecordSchema;
@@ -830,7 +1331,7 @@ export function publicOperationOutputSchemaFor(operationId: string, fallback: z.
   if (operationId === "generated_surface.export") return z.object({
     surface: GeneratedSurfaceDefinitionSchema,
     revision: GeneratedSurfaceRevisionRecordSchema,
-    bundle: z.object({ html: z.string(), css: z.string().optional(), script: z.string().optional() }).strict(),
+    bundle: publicGeneratedSurfaceExportBundleSchema,
     format: z.enum(["html", "zip"]),
     file_name: z.string().trim().min(1)
   }).strict();
@@ -857,11 +1358,15 @@ export function publicOperationOutputSchemaFor(operationId: string, fallback: z.
  * operation definition. Keep the Room Agent membership commands on the same
  * versioned contract as the rest of the Room-first API. */
 export function publicOperationInputSchemaFor(operationId: string, fallback: z.ZodTypeAny): z.ZodTypeAny {
+  const managementContract = publicManagementContractFor(operationId);
+  if (managementContract) return managementContract.input;
   if (operationId === "room.member.list") return z.object({}).strict();
   if (operationId === "room.agent.permission.set") return PublicRoomAgentPermissionSetInputSchema;
   if (operationId === "room.agent.remove") return PublicRoomAgentRemoveInputSchema;
   if (operationId === "room.work.create") return PublicRoomWorkCreateInputSchema;
   if (operationId === "room.work.reply") return PublicRoomWorkReplyInputSchema;
+  if (operationId === "artifact.create") return publicArtifactCreateInputSchema;
+  if (operationId === "artifact.revise") return publicArtifactReviseInputSchema;
   return fallback;
 }
 
@@ -994,6 +1499,14 @@ const eventPayloadSchemas = {
   "workspace.agent.changed": z.object({ agent_id: z.string().trim().min(1), action: z.enum(["created", "patched", "backend_bound"]) }).strict(),
   "workspace.artifact.changed": z.object({ artifact_id: z.string().trim().min(1), action: z.enum(["created", "revised", "restored", "repaired"]), revision_id: z.string().trim().min(1).optional() }).strict(),
   "workspace.generated_surface.changed": z.object({ surface_id: z.string().trim().min(1), action: z.enum(["created", "revised", "action", "state_changed", "exported"]), revision_id: z.string().trim().min(1).optional() }).strict(),
+  "completion.resource.created": z.object({ resource_id: publicManagementId, kind: z.enum(["knowledge", "skill"]), version: z.number().int().positive() }).strict(),
+  "completion.resource.updated": z.object({ resource_id: publicManagementId, kind: z.enum(["knowledge", "skill"]), version: z.number().int().positive() }).strict(),
+  "completion.resource.archived": z.object({ resource_id: publicManagementId, kind: z.enum(["knowledge", "skill"]), version: z.number().int().positive(), archived: z.boolean() }).strict(),
+  "completion.resource.fixed": z.object({ resource_id: publicManagementId, kind: z.enum(["knowledge", "skill"]), version: z.number().int().positive(), fixed: z.boolean() }).strict(),
+  "workspace.settings.changed": z.object({ workspace_id: publicManagementId, action: z.literal("patched") }).strict(),
+  "learning.settings.updated": z.object({ scope_kind: z.enum(["workspace", "room"]), room_id: publicManagementId.optional(), version: z.number().int().nonnegative() }).strict(),
+  "automation.job.created": z.object({ job_id: publicManagementId, room_id: publicManagementId.optional(), kind: z.string().trim().min(1), status: z.string().trim().min(1), authorization_state: z.string().trim().min(1).optional() }).strict(),
+  "automation.job.management_changed": z.object({ job_id: publicManagementId, room_id: publicManagementId.optional(), management_state: z.enum(["allowed", "manager_stopped"]), status: z.string().trim().min(1) }).strict(),
   "workspace.interaction_request.changed": z.object({
     request_id: z.string().trim().min(1),
     kind: z.enum(["approval", "backend_input"]),
@@ -1029,6 +1542,14 @@ const eventResourceKinds: Record<keyof typeof eventPayloadSchemas, string[]> = {
   "workspace.agent.changed": ["agent"],
   "workspace.artifact.changed": ["artifact", "artifact_revision"],
   "workspace.generated_surface.changed": ["generated_surface", "generated_surface_revision"],
+  "completion.resource.created": ["completion_resource", "completion_resource_version"],
+  "completion.resource.updated": ["completion_resource", "completion_resource_version"],
+  "completion.resource.archived": ["completion_resource", "completion_resource_version"],
+  "completion.resource.fixed": ["completion_resource", "completion_resource_version"],
+  "workspace.settings.changed": ["settings"],
+  "learning.settings.updated": ["learning_settings", "room"],
+  "automation.job.created": ["automation_job", "room"],
+  "automation.job.management_changed": ["automation_job", "room"],
   "workspace.interaction_request.changed": ["interaction_request", "room", "backend_run", "generated_surface", "generated_surface_revision"],
   "organization.created": ["organization"],
   "organization.member.invited": ["organization", "organization_invitation"],
@@ -1188,7 +1709,7 @@ export function isEventVersionCompatible(actual: string, expectedMajor = 1): boo
 }
 
 export interface DomainApiTransportRequest {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PATCH";
   path: string;
   body?: unknown;
   operationId?: string;
@@ -1347,11 +1868,16 @@ export class DomainApiClient {
     });
   }
 
-  runArtifactSurfaceOperation<T = JsonValue>(workspaceId: string, roomId: string, operation: JsonValue, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+  async runArtifactSurfaceOperation<T = JsonValue>(workspaceId: string, roomId: string, operation: JsonValue, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    if (!isJsonObject(operation)) throw new Error("artifact_surface_operation_invalid");
     return this.transport<T>({
       method: "POST",
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/artifacts/surface/operations`,
-      body: { room_id: roomId, operation },
+      // The Server binds the public operation identity to the transport
+      // idempotency key.  Normalize a caller-provided operation copy here so
+      // a retry cannot be rejected merely because the renderer used a local
+      // operation ID.
+      body: { room_id: roomId, operation: { ...operation, id: options.operationId } },
       operationId: options.operationId,
       idempotencyKey: options.idempotencyKey ?? options.operationId
     });
@@ -1363,6 +1889,144 @@ export class DomainApiClient {
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/domain/queries/${encodeURIComponent(queryId)}`,
       body: request
     });
+  }
+
+  /** Completion management routes are the canonical v1 surface used by
+   * Native management clients. They intentionally return the same safe
+   * projections as the Domain Query/Operation contracts. */
+  listCompletionResources<T = z.infer<typeof PublicCompletionResourcePageSchema>>(workspaceId: string, input: PublicCompletionResourceListInput = {}): Promise<T> {
+    const query = new URLSearchParams();
+    if (input.scope_kind) query.set("scope_kind", input.scope_kind);
+    if (input.room_id) query.set("room_id", input.room_id);
+    if (input.kind) query.set("kind", input.kind);
+    if (input.include_archived !== undefined) query.set("include_archived", String(input.include_archived));
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    if (input.cursor) query.set("cursor", input.cursor);
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources${query.size ? `?${query.toString()}` : ""}`
+    });
+  }
+
+  searchCompletionKnowledge<T = z.infer<typeof PublicCompletionKnowledgeSearchPageSchema>>(workspaceId: string, input: PublicCompletionKnowledgeSearchInput): Promise<T> {
+    const query = new URLSearchParams({ room_id: input.room_id, q: input.q });
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    if (input.cursor) query.set("cursor", input.cursor);
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/knowledge/search?${query.toString()}`
+    });
+  }
+
+  getCompletionResource<T = z.infer<typeof PublicCompletionResourceDetailSchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; kind?: "knowledge" | "skill"; versions_limit?: number; evidence_limit?: number } = {}): Promise<T> {
+    const query = new URLSearchParams();
+    if (input.room_id) query.set("room_id", input.room_id);
+    if (input.kind) query.set("kind", input.kind);
+    if (input.versions_limit !== undefined) query.set("versions_limit", String(input.versions_limit));
+    if (input.evidence_limit !== undefined) query.set("evidence_limit", String(input.evidence_limit));
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}${query.size ? `?${query.toString()}` : ""}`
+    });
+  }
+
+  getCompletionResourceBody<T = z.infer<typeof PublicCompletionResourceBodySchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; kind?: "knowledge" | "skill"; version?: number } = {}): Promise<T> {
+    const query = new URLSearchParams();
+    if (input.room_id) query.set("room_id", input.room_id);
+    if (input.kind) query.set("kind", input.kind);
+    if (input.version !== undefined) query.set("version", String(input.version));
+    return this.transport<T>({
+      method: "GET",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}/body${query.size ? `?${query.toString()}` : ""}`
+    });
+  }
+
+  createCompletionResource<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, input: PublicCompletionResourceCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  updateCompletionResource<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: Omit<PublicCompletionResourceUpdateInput, "resource_id">, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "PATCH",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  setCompletionResourceArchived<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; archived: boolean; expected_version: number; reason: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}/archive`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  setCompletionResourceFixed<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; fixed: boolean; expected_version: number; reason: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "POST",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}/fix`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  getRuntimeSettings<T = z.infer<typeof PublicRuntimeSettingsSchema>>(workspaceId: string): Promise<T> {
+    return this.transport<T>({ method: "GET", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/settings` });
+  }
+
+  patchRuntimeSettings<T = { settings: z.infer<typeof PublicRuntimeSettingsSchema>; replayed: boolean }>(workspaceId: string, input: Record<string, JsonValue>, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "PATCH",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/settings`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  getLearningSettings<T = z.infer<typeof PublicLearningSettingsLayersSchema>>(workspaceId: string, roomId: string): Promise<T> {
+    return this.transport<T>({ method: "GET", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/learning/settings?room_id=${encodeURIComponent(roomId)}` });
+  }
+
+  patchLearningSettings<T = { settings: z.infer<typeof PublicLearningSettingsSchema>; replayed: boolean }>(workspaceId: string, input: z.input<typeof PublicLearningSettingsPatchInputSchema>, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({
+      method: "PATCH",
+      path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/learning/settings`,
+      body: input,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  listAutomationJobs<T = z.infer<typeof PublicAutomationJobListSchema>>(workspaceId: string, roomId?: string): Promise<T> {
+    const query = roomId ? `?room_id=${encodeURIComponent(roomId)}` : "";
+    return this.transport<T>({ method: "GET", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/automation/jobs${query}` });
+  }
+
+  createAutomationJob<T = { job: z.infer<typeof PublicAutomationJobSchema>; replayed: boolean }>(workspaceId: string, input: Record<string, JsonValue>, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({ method: "POST", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/automation/jobs`, body: input, operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  listAutomationRuns<T = { runs: z.infer<typeof PublicAutomationRunSchema>[] }>(workspaceId: string, input: { room_id?: string; job_id?: string }): Promise<T> {
+    const query = new URLSearchParams();
+    if (input.room_id) query.set("room_id", input.room_id);
+    if (input.job_id) query.set("job_id", input.job_id);
+    return this.transport<T>({ method: "GET", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/automation/runs?${query.toString()}` });
+  }
+
+  setAutomationManagement<T = { job: z.infer<typeof PublicAutomationJobSchema>; replayed: boolean }>(workspaceId: string, jobId: string, state: "allowed" | "manager_stopped", options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+    return this.transport<T>({ method: "POST", path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/automation/jobs/${encodeURIComponent(jobId)}/management`, body: { state }, operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
   }
 
   /** Fixed Room-scoped Artifact revision reads. Body bytes are returned as a
@@ -1533,6 +2197,39 @@ export class DomainApiClient {
       method: "GET",
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/events${query.size ? `?${query.toString()}` : ""}`
     });
+  }
+}
+
+function isJsonObject(value: JsonValue): value is Record<string, JsonValue> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCanonicalBase64(value: string): boolean {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  if (padding === 0) return true;
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const lastDataCharacter = value[value.length - padding - 1];
+  const sextet = lastDataCharacter === undefined ? -1 : alphabet.indexOf(lastDataCharacter);
+  if (sextet < 0) return false;
+  return (sextet & (padding === 1 ? 0b11 : 0b1111)) === 0;
+}
+
+function isSafePublicGeneratedSurfaceAssetPath(value: string): boolean {
+  if (value.startsWith("/") || value.includes("\\") || value.includes("//")) return false;
+  return value.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+    && /^[A-Za-z0-9._~/-]+$/.test(value);
+}
+
+function refinePublicArtifactContentOutput(
+  value: { content?: string; content_base64?: string; encoding?: "utf8" | "binary" },
+  issue: z.RefinementCtx
+): void {
+  if (value.content_base64 !== undefined && value.encoding !== "binary") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["encoding"], message: "artifact_binary_content_encoding_required" });
+  }
+  if (value.encoding === "binary" && value.content_base64 === undefined) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["content_base64"], message: "artifact_binary_content_base64_required" });
   }
 }
 

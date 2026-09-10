@@ -1,18 +1,22 @@
+import { workspaceTargetRequest, type WorkspaceTargetRequest } from "./workspace-room-requests.js";
+
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 type LearningScope = { scopeKind: "workspace"; roomId?: never } | { scopeKind: "room"; roomId: string };
 
 /** Guardrail settings are still Learning-owned; Knowledge resources use the
  * Completion request contract in workspace-completion-requests.ts. */
-export function workspaceLearningScopeRequest(input: unknown): LearningScope {
+export function workspaceLearningScopeRequest(input: unknown): LearningScope & { target?: WorkspaceTargetRequest } {
   const value = object(input);
-  if (value.scopeKind === "workspace") return { scopeKind: "workspace" };
-  if (value.scopeKind === "room") return { scopeKind: "room", roomId: requiredOpaque(value, "roomId") };
+  const target = workspaceTargetRequest(value.target);
+  if (value.scopeKind === "workspace") return { scopeKind: "workspace", ...(target ? { target } : {}) };
+  if (value.scopeKind === "room") return { scopeKind: "room", roomId: requiredOpaque(value, "roomId"), ...(target ? { target } : {}) };
   throw new Error("scopeKind_invalid");
 }
 
 export function workspaceLearningSettingsRequest(input: unknown): {
   operationId: string;
+  target?: WorkspaceTargetRequest;
   body: {
     scope_kind: "workspace" | "room";
     room_id?: string;
@@ -33,6 +37,7 @@ export function workspaceLearningSettingsRequest(input: unknown): {
 } {
   const value = object(input);
   const scope = workspaceLearningScopeRequest(value);
+  const target = workspaceTargetRequest(value.target);
   const engineId = optionalOpaque(value, "engineId");
   const secretRef = optionalSecretRef(value);
   const model = optionalText(value, "model", 512);
@@ -55,6 +60,7 @@ export function workspaceLearningSettingsRequest(input: unknown): {
   }
   return {
     operationId: requiredOpaque(value, "operationId"),
+    ...(target ? { target } : {}),
     body: {
       scope_kind: scope.scopeKind,
       ...(scope.scopeKind === "room" ? { room_id: scope.roomId } : {}),

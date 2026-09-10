@@ -1,8 +1,32 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, CreateDialog, nativeRoomResultResourceTarget, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey, patchAgentEditorState } from "./NativeApp";
+import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, createNativeDraftNavigationControllerRegistry, CreateDialog, nativeRoomResultResourceTarget, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey, patchAgentEditorState } from "./NativeApp";
+import { createNativeDraftNavigationController } from "./use-native-draft-navigation";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
+
+describe("Native draft navigation controller registry", () => {
+  it("detaches only its own instance and restores the underlying controller", () => {
+    const registry = createNativeDraftNavigationControllerRegistry();
+    const first = createNativeDraftNavigationController({ scopeKey: "room-a", label: "成果物", dirty: true, saving: false });
+    const second = createNativeDraftNavigationController({ scopeKey: "connection-settings", label: "接続設定", dirty: true, saving: false });
+    const detachFirst = registry.register(first);
+    const detachSecond = registry.register(second);
+
+    detachFirst();
+    expect(registry.getCurrent()).toBe(second);
+
+    detachSecond();
+    expect(registry.getCurrent()).toBeUndefined();
+
+    const underlyingDetach = registry.register(first);
+    const overlayDetach = registry.register(second);
+    overlayDetach();
+    expect(registry.getCurrent()).toBe(first);
+    underlyingDetach();
+    expect(registry.getCurrent()).toBeUndefined();
+  });
+});
 
 describe("Native Agent editor state", () => {
   it("applies captured field values without reading a SyntheticEvent in the updater", () => {

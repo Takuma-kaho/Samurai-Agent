@@ -152,13 +152,13 @@ describe("PostgreSQL Artifact transaction recovery", () => {
     expect(await adapter.artifacts.listRevisions(baseContext, "room-artifact", created.artifact.id)).toHaveLength(1);
     const detail = await adapter.artifacts.getRevisionDetail(baseContext, "room-artifact", created.artifact.id, created.revision!.id);
     expect(detail.content).toBe("");
-    expect(detail.content_bytes).toBeUndefined();
+    expect(detail).not.toHaveProperty("content_bytes");
     expect(detail.encoding).toBe("utf8");
   });
 
   it("keeps binary revision bytes and MIME without base64 conversion", async () => {
     const adapter = createAdapter({ failNext: false });
-    const bytes = new Uint8Array([0, 255, 16, 128]);
+    const bytes = new Uint8Array([...Buffer.from("%PDF-1.7\n"), 0, 255, 16, 128]);
     const created = await adapter.artifacts.create({ ...baseContext, operationId: "artifact-binary-create" }, {
       roomId: "room-artifact",
       title: "Binary artifact",
@@ -171,12 +171,92 @@ describe("PostgreSQL Artifact transaction recovery", () => {
     expect(created.mime_type).toBe("application/pdf");
     expect(created.encoding).toBe("binary");
     expect(created.content).toBe("");
-    expect(created.content_bytes).toEqual([...bytes]);
+    expect(created).not.toHaveProperty("content_bytes");
     const content = await adapter.artifacts.readContent(baseContext, "room-artifact", created.artifact.id);
     expect([...content.bytes]).toEqual([...bytes]);
     expect(content.mimeType).toBe("application/pdf");
     expect(content.encoding).toBe("binary");
     expect([...(await adapter.artifacts.readRevisionContent(baseContext, "room-artifact", created.revision!.id))]).toEqual([...bytes]);
+  });
+
+  it("infers a PNG MIME from its bytes and preserves binary revision bytes", async () => {
+    const adapter = createAdapter({ failNext: false });
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+    const created = await adapter.artifacts.create({ ...baseContext, operationId: "artifact-png-create" }, {
+      roomId: "room-artifact",
+      title: "PNG artifact",
+      content: bytes,
+      kind: "image"
+    });
+
+    expect(created.mime_type).toBe("image/png");
+    expect(created.encoding).toBe("binary");
+    expect([...((await adapter.artifacts.readContent(baseContext, "room-artifact", created.artifact.id)).bytes)]).toEqual([...bytes]);
+
+    const revisionBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+    const revised = await adapter.artifacts.revise({ ...baseContext, operationId: "artifact-png-revise" }, {
+      roomId: "room-artifact",
+      artifactId: created.artifact.id,
+      content: revisionBytes,
+      baseRevisionId: created.revision!.id,
+      expectedRevision: 1,
+      editorSource: "image_provider",
+      mimeType: "image/png",
+      encoding: "binary"
+    });
+    expect([...((await adapter.artifacts.readContent(baseContext, "room-artifact", created.artifact.id, revised.revision.id)).bytes)]).toEqual([...revisionBytes]);
+  });
+
+  it("rejects binary content with a text transport or a mismatched MIME before persistence", async () => {
+    const adapter = createAdapter({ failNext: false });
+
+    await expect(adapter.artifacts.create({ ...baseContext, operationId: "artifact-invalid-binary-text" }, {
+      roomId: "room-artifact",
+      title: "Invalid binary transport",
+      content: "%PDF-1.7\\nnot-bytes",
+      kind: "pdf",
+      mimeType: "application/pdf",
+      encoding: "binary"
+    })).rejects.toMatchObject({ code: "artifact_binary_content_transport_required", status: 400 });
+
+    await expect(adapter.artifacts.create({ ...baseContext, operationId: "artifact-invalid-binary-mime" }, {
+      roomId: "room-artifact",
+      title: "Invalid binary MIME",
+      content: new Uint8Array([...Buffer.from("%PDF-1.7\\n"), 1, 2, 3]),
+      kind: "pdf",
+      mimeType: "application/octet-stream",
+      encoding: "binary"
+    })).rejects.toMatchObject({ code: "artifact_content_mime_mismatch", status: 400 });
+
+    expect(adapter.commands.rows.size).toBe(0);
+  });
+
+  it("revises the selected Artifact instead of creating a second Artifact", async () => {
+    const adapter = createAdapter({ failNext: false });
+    const created = await adapter.artifacts.create({ ...baseContext, operationId: "surface-artifact-create" }, {
+      roomId: "room-artifact",
+      title: "Surface artifact",
+      content: "before",
+      kind: "markdown"
+    });
+    const operationId = "surface-artifact-revise";
+
+    const response = await adapter.artifacts.runSurfaceOperation({ ...baseContext, operationId }, "room-artifact", {
+      id: operationId,
+      kind: "artifact.request",
+      action: "revise",
+      artifact_id: created.artifact.id,
+      instruction: "after"
+    });
+
+    expect(response.result_kind).toBe("artifact");
+    expect(response.result).toMatchObject({
+      artifact: { id: created.artifact.id },
+      revision: { artifact_id: created.artifact.id, revision: 2 }
+    });
+    expect((await adapter.artifacts.get(baseContext, "room-artifact", created.artifact.id)).content).toBe("after");
+    expect(await adapter.artifacts.list(baseContext, "room-artifact")).toHaveLength(1);
+    expect(await adapter.artifacts.listRevisions(baseContext, "room-artifact", created.artifact.id)).toHaveLength(2);
   });
 
   it("migrates a legacy Artifact to revision one before creating revision two", async () => {
