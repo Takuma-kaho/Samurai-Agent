@@ -59,7 +59,7 @@
   color: var(--native-copy);
   display: grid;
   font-family: "Avenir Next", "Hiragino Sans", ui-sans-serif, sans-serif;
-  /* The OpenClaw reference keeps navigation compact so the Room conversation
+  /* The reference layout keeps navigation compact so the Room conversation
    * remains the dominant surface. */
   grid-template-columns: 252px minmax(0, 1fr);
   height: 100dvh;
@@ -2371,7 +2371,7 @@ button {
   cursor: pointer;
 }
 
-/* Keep the OpenClaw-style drawer behavior after the legacy narrow-width rules
+/* Keep the reference drawer behavior after the legacy narrow-width rules
  * above. The chat remains the only visible surface until the drawer opens. */
 @media (max-width: 700px) {
   .native-app-shell,
@@ -2434,7 +2434,7 @@ button {
 }
 
 /*
- * Native OpenClaw frame
+ * Native conversation frame
  *
  * The production UI intentionally takes its visual skeleton from the local
  * prototype: a quiet outer frame, a transparent navigation rail, and one
