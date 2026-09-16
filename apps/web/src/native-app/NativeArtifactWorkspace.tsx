@@ -279,7 +279,7 @@ export function nativeArtifactWorkspaceGateway(
   };
 }
 
-/** The React Room surface for Artifact preview/edit/history and isolated Generated Surface display. */
+/** The React Room surface for Artifact preview/edit/history and direct Surface display. */
 export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, initialResource: initialResourceProp, onClose, onRequestAgentRevision, onEditorControllerChange, onDraftNavigationControllerChange, onBusyStateChange }: NativeArtifactWorkspaceProps) {
   const bridge = (suppliedBridge ?? getWorkspaceClientBridge()) as NativeArtifactWorkspaceBridge | undefined;
   const targetKey = nativeArtifactWorkspaceTargetKey(target);
@@ -290,7 +290,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     ? [initialResource.kind, initialResource.id, initialResource.revisionId ?? "", initialResource.uri].join("\n")
     : initialResourceInvalid ? "invalid-initial-resource" : "no-initial-resource";
   const generation = useRef(0);
-  const surfaceListEpoch = useRef(0);
   const artifactEpoch = useRef(0);
   const [surface, setSurface] = useState<GeneratedSurfaceDetail>();
   const [surfaceBundle, setSurfaceBundle] = useState<GeneratedSurfaceBundleDetail>();
@@ -298,9 +297,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
   const [surfaceApprovalNotice, setSurfaceApprovalNotice] = useState<string>();
   const [surfaceApprovalResolution, setSurfaceApprovalResolution] = useState<GeneratedSurfaceApprovalResolution>();
   const [surfaceApprovalRecoveries, setSurfaceApprovalRecoveries] = useState<GeneratedSurfaceApprovalRecovery[]>([]);
-  const [surfaces, setSurfaces] = useState<GeneratedSurfaceDefinition[]>([]);
-  const [surfaceListLoading, setSurfaceListLoading] = useState(false);
-  const [surfaceListError, setSurfaceListError] = useState<string>();
   const [artifact, setArtifact] = useState<NativeArtifactDetail>();
   const [artifactRevisions, setArtifactRevisions] = useState<ArtifactRevisionRecord[]>([]);
   const [artifactComparison, setArtifactComparison] = useState<NativeArtifactRevisionDetail>();
@@ -343,7 +339,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
 
   useEffect(() => {
     generation.current += 1;
-    surfaceListEpoch.current += 1;
     artifactEpoch.current += 1;
     surfaceActionOperations.current.clear();
     surfaceApprovalOperations.current.clear();
@@ -361,9 +356,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     setSurfaceApprovalNotice(undefined);
     setSurfaceApprovalResolution(undefined);
     setSurfaceApprovalRecoveries([]);
-    setSurfaces([]);
-    setSurfaceListLoading(false);
-    setSurfaceListError(undefined);
     setArtifact(undefined);
     setArtifactRevisions([]);
     setArtifactComparison(undefined);
@@ -374,22 +366,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
   useEffect(() => () => {
     if (stableTarget) onBusyStateChange?.({ target: stableTarget, busy: false });
   }, [onBusyStateChange, stableTarget]);
-
-  const refreshSurfaceList = useCallback(async (): Promise<void> => {
-    if (!stableTarget || !bridge?.listWorkspaceGeneratedSurfaces) return;
-    const requestEpoch = ++surfaceListEpoch.current;
-    setSurfaceListLoading(true);
-    setSurfaceListError(undefined);
-    try {
-      const listed = await withNativeWorkspaceTarget(bridge, stableTarget, () => bridge.listWorkspaceGeneratedSurfaces!({ roomId: stableTarget.roomId, target: stableTarget }));
-      if (requestEpoch !== surfaceListEpoch.current) return;
-      setSurfaces(listed);
-    } catch (cause) {
-      if (requestEpoch === surfaceListEpoch.current) setSurfaceListError(nativeArtifactWorkspaceError(cause));
-    } finally {
-      if (requestEpoch === surfaceListEpoch.current) setSurfaceListLoading(false);
-    }
-  }, [bridge, stableTarget]);
 
   const openGeneratedSurface = useCallback(async (surfaceId: string, revisionId?: string): Promise<void> => {
     if (!stableTarget || !bridge) return;
@@ -563,8 +539,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       void openInitialArtifact(initialResource);
       return;
     }
-    void refreshSurfaceList();
-  }, [initialResource, initialResourceInvalid, openGeneratedSurface, openInitialArtifact, refreshSurfaceList]);
+  }, [initialResource, initialResourceInvalid, openGeneratedSurface, openInitialArtifact]);
 
   const loadBundle = useCallback(async (input: { surfaceId: string; revisionId: string }): Promise<GeneratedSurfaceBundleDetail> => {
     if (!stableTarget || !bridge?.getWorkspaceGeneratedSurfaceBundle) throw new Error("generated_surface_bundle_unavailable");
@@ -580,14 +555,10 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     const query = bridge.queryWorkspaceGeneratedSurface ?? bridge.getWorkspaceGeneratedSurface;
     if (!query) throw new Error("generated_surface_refresh_unavailable");
     const detailPromise = withNativeWorkspaceTarget(bridge, stableTarget, () => query({ roomId: stableTarget.roomId, surfaceId, target: stableTarget }));
-    const listPromise = bridge.listWorkspaceGeneratedSurfaces
-      ? withNativeWorkspaceTarget(bridge, stableTarget, () => bridge.listWorkspaceGeneratedSurfaces!({ roomId: stableTarget.roomId, target: stableTarget }))
-      : Promise.resolve(undefined);
-    const [nextDetail, nextList] = await Promise.all([detailPromise, listPromise]);
+    const nextDetail = await detailPromise;
     if (nextDetail.surface.id !== surfaceId) throw new Error("generated_surface_response_mismatch");
     if (generation.current !== requestGeneration || targetKeyRef.current !== targetKey || surfaceViewKeyRef.current?.split("\n", 1)[0] !== surfaceId) throw new Error("surface_navigation_changed");
     setSurface(nextDetail);
-    if (nextList) setSurfaces(nextList);
     const currentBundle = surfaceBundleRef.current;
     if (currentBundle?.surface.id === surfaceId && currentBundle.revision.id === nextDetail.surface.current_revision_id) {
       setSurfaceBundle(currentBundle);
@@ -1018,7 +989,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     if (generation.current !== requestGeneration || targetKeyRef.current !== targetKey || surfaceViewKeyRef.current !== requestedViewKey) throw new Error("surface_navigation_changed");
     if (returned.id !== input.surfaceId) throw new Error("generated_surface_state_response_mismatch");
     setSurface((previousSurface) => previousSurface?.surface.id === input.surfaceId ? { ...previousSurface, surface: returned } : previousSurface);
-    setSurfaces((previousSurfaces) => previousSurfaces.map((candidate) => candidate.id === returned.id ? returned : candidate));
     await refreshSurfaceAfterMutation(input.surfaceId, requestGeneration);
     surfaceStateCompletedOperations.current.add(operationKey);
     clearNativeSurfaceOperationLedger(surfaceStateOperations.current, operationKey, operation);
@@ -1072,9 +1042,9 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     draftNavigation.requestNavigation(() => performLeave(action));
   }, [draftNavigation, performLeave]);
 
-  return <section className="native-artifact-workspace" aria-label="Roomの成果物と操作画面">
+  return <section className="native-artifact-workspace" aria-label="Roomの成果物">
     <header className="native-artifact-workspace-header">
-      <div><span className="native-section-eyebrow">Room work</span><h1>成果物と操作画面</h1><p>現在のRoomで認可された版だけを確認・編集します。</p></div>
+      <div><h1>成果物</h1></div>
       {onClose ? <button type="button" className="native-button native-button-quiet" onClick={() => requestLeave("close")}>仕事へ戻る</button> : null}
     </header>
     <NativeDraftNavigationPrompt controller={draftNavigation} />
@@ -1122,14 +1092,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       {surfaceError ? <p className="native-inline-error" role="alert">{surfaceError}</p> : null}
       {!surfaceError ? <p className="native-inline-note" role="status">結果の操作画面を開いています…</p> : null}
     </section> : <>
-      <GeneratedSurfaceList
-        surfaces={surfaces}
-        loading={surfaceListLoading}
-        error={surfaceListError}
-        supported={Boolean(bridge?.listWorkspaceGeneratedSurfaces)}
-       onRefresh={() => void refreshSurfaceList()}
-        onOpen={(surfaceId) => requestLeave({ kind: "surface", surfaceId })}
-     />
       <ArtifactSurfacePanel
         roomId={stableTarget?.roomId}
         gateway={gateway}

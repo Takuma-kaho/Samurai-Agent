@@ -15,6 +15,7 @@
 - [artifact-surface.md](artifact-surface.md)：成果物の表示・直接編集・Agent修正、版と出所、型付きの入力保存、実データのグラフ、承認要求との接続、生成HTMLの隔離を扱う。製品範囲は合意済み、詳細は実装前の設計案。
 - [room-agent-work.md](room-agent-work.md)：RoomとAgentの共同作業設計。既定Agent、仕事と担当、依頼とコメントの区別、委譲・停止・指示変更、DMと共有を扱う。目標設計であり未実装部分を含む。
 - [agent-backends.md](agent-backends.md)：Samurai Native / Codex / Claude Codeの接続設計。provider選択・認証、共通契約、文脈の分離、継続・停止・承認、実行先と復旧、検証担当を扱う。目標設計であり実Agentの完成確認は別途必要。
+- [native-ui-migration.md](native-ui-migration.md)：試作品コードを骨格にしたNative AppのChat-first UI、3テーマ、実Workspace/Room/Agent導線、同一RoomのWork会話投影、成果物パネル、保留範囲を扱う。2026-09-16時点の現行実装を記録する。
 
 ## 作成候補
 

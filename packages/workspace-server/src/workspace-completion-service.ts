@@ -4393,7 +4393,10 @@ function validateActivityInput(input: WorkspaceCompletionActivityInput): void {
   if (input.episodeId) assertCompletionId(input.episodeId, "workspace_completion_episode_id_invalid");
   if (input.externalEpisodeKey) assertCompletionId(input.externalEpisodeKey, "workspace_completion_external_episode_key_invalid");
   if (input.correctionOfActivityId) assertCompletionId(input.correctionOfActivityId, "workspace_completion_activity_id_invalid");
-  if (input.operationId) assertCompletionId(input.operationId, "workspace_completion_operation_id_invalid");
+  // Activity operation IDs carry the verified outer operation context. Keep
+  // that boundary on the shared opaque-ID contract; Completion-owned IDs
+  // (Activity/Episode/Resource/etc.) remain strict completion IDs below.
+  if (input.operationId) assertOpaqueId(input.operationId, "workspace_completion_operation_id_invalid");
   assertSafeText(input.sourceApp, "workspace_completion_activity_source_invalid");
   assertSafeText(input.instructionSummary, "workspace_completion_activity_instruction_invalid");
   if (input.goal) assertSafeText(input.goal, "workspace_completion_episode_goal_invalid");

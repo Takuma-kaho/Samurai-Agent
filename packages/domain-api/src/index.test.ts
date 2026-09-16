@@ -6,6 +6,7 @@ import {
   DomainApiTransportRequest,
   DomainApiClient,
   PublicRoomCreateInputSchema,
+  PublicRoomRecordSchema,
   PublicRoomAgentPermissionSetInputSchema,
   PublicRoomAgentRemoveInputSchema,
   PublicRoomAgentPermissionRecordSchema,
@@ -58,6 +59,22 @@ const activityBase = {
 };
 
 describe("public Domain API contract", () => {
+  it("preserves the server-provided Room capabilities in the public record", () => {
+    const parsed = PublicRoomRecordSchema.safeParse({
+      id: "room_1",
+      workspace_id: "workspace_1",
+      name: "Room",
+      version: 1,
+      can_manage: false,
+      can_edit: false,
+      can_execute: false,
+      created_at: "2026-09-15T00:00:00.000Z",
+      updated_at: "2026-09-15T00:00:00.000Z"
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data).toMatchObject({ can_edit: false, can_execute: false });
+  });
+
   it("keeps authority out of the public request context", () => {
     expect(DomainApiRequestSchema.safeParse({
       context: { room_id: "room_1", actor_id: "spoofed" },

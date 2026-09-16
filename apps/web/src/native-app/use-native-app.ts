@@ -59,7 +59,7 @@ import type {
   OrganizationRole,
   NativeSelectionCandidate
 } from "./types";
-import { nativeWorkspaceTargetKey } from "./types";
+import { nativeWorkspaceTargetIdentityKey, nativeWorkspaceTargetKey, nativeWorkspaceTargetMatches } from "./types";
 
 const legacyOrganizationId = "__legacy_connection__";
 
@@ -226,6 +226,7 @@ export interface NativeRoomWorkListRequestStamp {
   roomOpenId: number;
   roomId: string;
   workspaceTargetKey?: string;
+  workspaceTargetIdentityKey?: string;
 }
 
 /** A late Work list response cannot overwrite a newer request or navigation. */
@@ -236,13 +237,37 @@ export function nativeRoomWorkListRequestIsCurrent(
   return request.sequence === current.sequence
     && request.roomOpenId === current.roomOpenId
     && request.roomId === current.roomId
-    && request.workspaceTargetKey === current.workspaceTargetKey;
+    && request.workspaceTargetKey === current.workspaceTargetKey
+    && (request.workspaceTargetIdentityKey === undefined
+      || current.workspaceTargetIdentityKey === undefined
+      || request.workspaceTargetIdentityKey === current.workspaceTargetIdentityKey);
+}
+
+export interface NativeRoomWorkDetailHydrationRequestStamp {
+  roomOpenId: number;
+  roomId: string;
+  workspaceTargetKey?: string;
+  workspaceTargetIdentityKey?: string;
+  workListSequence: number;
+}
+
+/** A late detail response must not repopulate another Room's conversation. */
+export function nativeRoomWorkDetailHydrationRequestIsCurrent(
+  request: NativeRoomWorkDetailHydrationRequestStamp,
+  current: NativeRoomWorkDetailHydrationRequestStamp
+): boolean {
+  return request.roomOpenId === current.roomOpenId
+    && request.roomId === current.roomId
+    && request.workspaceTargetKey === current.workspaceTargetKey
+    && request.workspaceTargetIdentityKey === current.workspaceTargetIdentityKey
+    && request.workListSequence === current.workListSequence;
 }
 
 export interface NativeWorkspaceContentRefreshRequestStamp {
   roomOpenId: number;
   roomId?: string;
   workspaceTargetKey?: string;
+  workspaceTargetIdentityKey?: string;
   workListSequence?: number;
 }
 
@@ -254,6 +279,9 @@ export function nativeWorkspaceContentRefreshRequestIsCurrent(
   return request.roomOpenId === current.roomOpenId
     && request.roomId === current.roomId
     && request.workspaceTargetKey === current.workspaceTargetKey
+    && (request.workspaceTargetIdentityKey === undefined
+      || current.workspaceTargetIdentityKey === undefined
+      || request.workspaceTargetIdentityKey === current.workspaceTargetIdentityKey)
     && (request.workListSequence === undefined || request.workListSequence === current.workListSequence);
 }
 
@@ -961,6 +989,17 @@ function nativeRoomWorkResultScope(item: Record<string, unknown>): Pick<NativeRo
   };
 }
 
+function nativeRoomWorkResultScopeMatches(
+  ref: Pick<NativeRoomWorkResultResourceRef, "connectionId" | "workspaceId" | "roomId">,
+  roomId: string,
+  target?: NativeWorkspaceTarget
+): boolean {
+  return (!ref.connectionId || !target?.connectionId || ref.connectionId === target.connectionId)
+    && (!ref.workspaceId || !target?.workspaceId || ref.workspaceId === target.workspaceId)
+    && (!ref.roomId || ref.roomId === roomId)
+    && (!target?.roomId || target.roomId === roomId);
+}
+
 /** Parse only result refs that have a direct Room Artifact/Surface opening path. */
 export function nativeRoomWorkResultResourceRefFromUnknown(value: unknown): NativeRoomWorkResultResourceRef | undefined {
   const item = record(value);
@@ -1010,24 +1049,52 @@ export function nativeRoomWorkResultResourceRefFromUnknown(value: unknown): Nati
 }
 
 function nativeRoomWorkResultSummary(item: Record<string, unknown>): string | undefined {
-  return optionalString(item.summary ?? item.result_summary ?? item.resultSummary ?? item.message);
+  const candidates = [
+    item.summary,
+    item.result_summary,
+    item.resultSummary,
+    item.output_summary,
+    item.outputSummary,
+    item.message,
+    item.answer,
+    typeof item.output === "string" ? item.output : undefined
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const normalized = candidate.trim();
+    if (normalized) return normalized;
+  }
+  return undefined;
 }
 
 /** Normalizes the persisted Assignment.result without making Session state part of the UI contract. */
 export function nativeRoomWorkAssignmentResultFromUnknown(value: unknown): NativeRoomWorkAssignmentResult | undefined {
   if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    const summary = value.trim();
+    return summary ? { summary } : undefined;
+  }
   const item = record(value);
+  const result = record(item.result);
   const output = record(item.output);
-  const rawRefs = item.resource_refs ?? item.resourceRefs ?? output.resource_refs ?? output.resourceRefs;
+  const rawRefs = item.resource_refs
+    ?? item.resourceRefs
+    ?? result.resource_refs
+    ?? result.resourceRefs
+    ?? output.resource_refs
+    ?? output.resourceRefs;
   const resourceRefs = Array.isArray(rawRefs)
     ? rawRefs.flatMap((entry) => {
       const parsed = nativeRoomWorkResultResourceRefFromUnknown(entry);
       return parsed ? [parsed] : [];
     })
     : undefined;
-  const summary = nativeRoomWorkResultSummary(item) ?? nativeRoomWorkResultSummary(output);
+  const summary = nativeRoomWorkResultSummary(item)
+    ?? nativeRoomWorkResultSummary(result)
+    ?? nativeRoomWorkResultSummary(output);
   const state = nativeRoomWorkResultState(
     item.state ?? item.action ?? item.operation ?? item.change_type ?? item.changeType
+      ?? result.state ?? result.action ?? result.operation ?? result.change_type ?? result.changeType
       ?? output.state ?? output.action ?? output.operation ?? output.change_type ?? output.changeType
   ) ?? nativeRoomWorkResultState(summary);
   if (!resourceRefs?.length && !summary && !state) return undefined;
@@ -1044,7 +1111,9 @@ function nativeAssignee(value: unknown): NativeRoomWorkAssignee | undefined {
   const workId = optionalString(item.work_id ?? item.workId);
   const agentId = optionalString(item.agent_id ?? item.agentId);
   if (!id || !workId || !agentId) return undefined;
-  const result = nativeRoomWorkAssignmentResultFromUnknown(item.result);
+  // Public bridges normally expose `result`, while a direct Desktop bridge
+  // may still return the completion fields on the assignment itself.
+  const result = nativeRoomWorkAssignmentResultFromUnknown(item.result ?? item.output ?? item);
   return {
     id,
     workId,
@@ -1220,27 +1289,149 @@ function nativeControl(value: unknown): NativeRoomWorkControl | undefined {
   };
 }
 
-export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
+interface NativeRoomWorkVersionedRecord {
+  id: string;
+  version: number;
+  generation?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+function nativeRoomWorkRecordTimestamp(value: NativeRoomWorkVersionedRecord): number {
+  const updated = value.updatedAt ? Date.parse(value.updatedAt) : Number.NaN;
+  if (Number.isFinite(updated)) return updated;
+  const created = value.createdAt ? Date.parse(value.createdAt) : Number.NaN;
+  return Number.isFinite(created) ? created : Number.NEGATIVE_INFINITY;
+}
+
+/** Keep the newest server projection when a replay or aggregate response repeats an ID. */
+function dedupeNativeRoomWorkRecords<T extends NativeRoomWorkVersionedRecord>(rows: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const row of rows) {
+    const current = byId.get(row.id);
+    if (!current) {
+      byId.set(row.id, row);
+      continue;
+    }
+    const rowGeneration = row.generation ?? 0;
+    const currentGeneration = current.generation ?? 0;
+    const rowTimestamp = nativeRoomWorkRecordTimestamp(row);
+    const currentTimestamp = nativeRoomWorkRecordTimestamp(current);
+    if (row.version > current.version
+      || (row.version === current.version && rowGeneration > currentGeneration)
+      || (row.version === current.version && rowGeneration === currentGeneration && rowTimestamp > currentTimestamp)
+      || (row.version === current.version && rowGeneration === currentGeneration && rowTimestamp === currentTimestamp && JSON.stringify(row).localeCompare(JSON.stringify(current)) > 0)) {
+      byId.set(row.id, row);
+    }
+  }
+  return [...byId.values()];
+}
+
+function latestNativeRoomWorkResultSummary(assignees: NativeRoomWorkAssignee[]): string | undefined {
+  const candidates = assignees
+    .flatMap((assignee) => assignee.result?.summary ? [{ assignee, summary: assignee.result.summary }] : [])
+    .sort((left, right) => {
+      const rightTimestamp = nativeRoomWorkRecordTimestamp(right.assignee);
+      const leftTimestamp = nativeRoomWorkRecordTimestamp(left.assignee);
+      if (rightTimestamp !== leftTimestamp) {
+        if (rightTimestamp === Number.NEGATIVE_INFINITY) return -1;
+        if (leftTimestamp === Number.NEGATIVE_INFINITY) return 1;
+        return rightTimestamp - leftTimestamp;
+      }
+      return right.assignee.id.localeCompare(left.assignee.id);
+    });
+  return candidates[0]?.summary;
+}
+
+function assertNativeRoomWorkResponseScope(
+  work: NativeRoomWork,
+  roomId: string,
+  expectedWorkId?: string,
+  target?: NativeWorkspaceTarget
+): void {
+  if (work.roomId !== roomId || (target?.roomId !== undefined && target.roomId !== roomId)) {
+    throw new Error("room_work_room_scope_invalid");
+  }
+  if (expectedWorkId !== undefined && work.id !== expectedWorkId) throw new Error("room_work_scope_invalid");
+  for (const assignee of work.assignees) {
+    if (assignee.workId !== work.id) throw new Error("room_work_assignee_scope_invalid");
+    for (const ref of assignee.result?.resourceRefs ?? []) {
+      if (!nativeRoomWorkResultScopeMatches(ref, roomId, target)) throw new Error("room_work_result_resource_scope_invalid");
+    }
+  }
+  for (const instruction of work.instructions ?? []) {
+    if (instruction.workId !== work.id) throw new Error("room_work_instruction_scope_invalid");
+  }
+  for (const comment of work.comments ?? []) {
+    if (comment.workId !== work.id) throw new Error("room_work_comment_scope_invalid");
+  }
+  for (const reaction of work.reactions ?? []) {
+    if (reaction.workId !== work.id) throw new Error("room_work_reaction_scope_invalid");
+  }
+  for (const control of work.controls ?? []) {
+    if (control.workId !== work.id) throw new Error("room_work_control_scope_invalid");
+  }
+}
+
+function assertNativeRoomWorkMutationGeneration(actual: number, expected: number | undefined): void {
+  if (expected !== undefined && actual < expected) throw new Error("room_work_response_generation_stale");
+}
+
+function roomWorkResponseRoomId(value: unknown): string | undefined {
+  const body = record(value);
+  return optionalString(body.room_id ?? body.roomId);
+}
+
+export function nativeRoomWorkFromUnknown(value: unknown, expectedTarget?: NativeWorkspaceTarget, expectedWorkId?: string): NativeRoomWork {
   const item = roomWorkPayload(value);
   const id = optionalString(item.id ?? item.work_id ?? item.workId);
   const roomId = optionalString(item.room_id ?? item.roomId);
   const requesterId = optionalString(item.requester_id ?? item.requesterId);
   const defaultAgentId = optionalString(item.default_agent_id ?? item.defaultAgentId);
   if (!id || !roomId || !requesterId || !defaultAgentId) throw new Error("room_work_response_invalid");
+  if (expectedWorkId !== undefined && id !== expectedWorkId) throw new Error("room_work_scope_invalid");
+  if (expectedTarget?.roomId !== undefined && roomId !== expectedTarget.roomId) throw new Error("room_work_room_scope_invalid");
+  const responseConnectionId = optionalString(item.connection_id ?? item.connectionId);
+  const responseWorkspaceId = optionalString(item.workspace_id ?? item.workspaceId);
+  if (expectedTarget?.connectionId !== undefined
+    && responseConnectionId !== undefined
+    && responseConnectionId !== expectedTarget.connectionId) throw new Error("room_work_connection_scope_invalid");
+  if (expectedTarget?.workspaceId !== undefined
+    && responseWorkspaceId !== undefined
+    && responseWorkspaceId !== expectedTarget.workspaceId) throw new Error("room_work_workspace_scope_invalid");
   const assigneeRows = Array.isArray(item.assignees) ? item.assignees : Array.isArray(item.assignments) ? item.assignments : [];
-  const assignees = assigneeRows.flatMap((entry) => { const parsed = nativeAssignee(entry); return parsed ? [parsed] : []; });
+  const assignees = dedupeNativeRoomWorkRecords(assigneeRows.flatMap((entry) => { const parsed = nativeAssignee(entry); return parsed ? [parsed] : []; }));
   const workspaceId = optionalString(item.workspace_id ?? item.workspaceId);
   for (const assignee of assignees) {
-    if (assignee.result?.resourceRefs?.some((ref) => (ref.roomId && ref.roomId !== roomId) || (workspaceId && ref.workspaceId && ref.workspaceId !== workspaceId))) {
+    if (assignee.workId !== id) throw new Error("room_work_assignee_scope_invalid");
+    if (assignee.result?.resourceRefs?.some((ref) => !nativeRoomWorkResultScopeMatches(
+      ref,
+      roomId,
+      expectedTarget ?? (workspaceId ? { connectionId: ref.connectionId ?? "", workspaceId } : undefined)
+    ))) {
       throw new Error("room_work_result_resource_scope_invalid");
     }
   }
   const resourceRefs = nativeRoomWorkResourceRefs(item.resource_refs ?? item.resourceRefs);
-  const instructions = Array.isArray(item.instructions) ? item.instructions.flatMap((entry) => { const parsed = nativeInstruction(entry); return parsed ? [parsed] : []; }) : undefined;
-  const comments = Array.isArray(item.comments) ? item.comments.flatMap((entry) => { const parsed = nativeComment(entry); return parsed ? [parsed] : []; }) : undefined;
-  const reactions = Array.isArray(item.reactions) ? item.reactions.flatMap((entry) => { const parsed = nativeReaction(entry); return parsed ? [parsed] : []; }) : undefined;
-  const controls = Array.isArray(item.controls) ? item.controls.flatMap((entry) => { const parsed = nativeControl(entry); return parsed ? [parsed] : []; }) : undefined;
-  const resultSummary = optionalString(item.result_summary ?? item.resultSummary ?? item.output ?? item.answer);
+  const instructions = Array.isArray(item.instructions) ? dedupeNativeRoomWorkRecords(item.instructions.flatMap((entry) => { const parsed = nativeInstruction(entry); return parsed ? [parsed] : []; })) : undefined;
+  const comments = Array.isArray(item.comments) ? dedupeNativeRoomWorkRecords(item.comments.flatMap((entry) => { const parsed = nativeComment(entry); return parsed ? [parsed] : []; })) : undefined;
+  const reactions = Array.isArray(item.reactions) ? dedupeNativeRoomWorkRecords(item.reactions.flatMap((entry) => { const parsed = nativeReaction(entry); return parsed ? [parsed] : []; })) : undefined;
+  const controls = Array.isArray(item.controls) ? dedupeNativeRoomWorkRecords(item.controls.flatMap((entry) => { const parsed = nativeControl(entry); return parsed ? [parsed] : []; })) : undefined;
+  for (const instruction of instructions ?? []) {
+    if (instruction.workId !== id) throw new Error("room_work_instruction_scope_invalid");
+  }
+  for (const comment of comments ?? []) {
+    if (comment.workId !== id) throw new Error("room_work_comment_scope_invalid");
+  }
+  for (const reaction of reactions ?? []) {
+    if (reaction.workId !== id) throw new Error("room_work_reaction_scope_invalid");
+  }
+  for (const control of controls ?? []) {
+    if (control.workId !== id) throw new Error("room_work_control_scope_invalid");
+  }
+  const resultSummary = nativeRoomWorkResultSummary(item)
+    ?? nativeRoomWorkResultSummary(record(item.result))
+    ?? latestNativeRoomWorkResultSummary(assignees);
   const stopState = item.stop_state === "requested" || item.stopState === "requested"
     ? "requested"
     : item.stop_state === "confirmed" || item.stopState === "confirmed"
@@ -1270,6 +1461,95 @@ export function nativeRoomWorkFromUnknown(value: unknown): NativeRoomWork {
     ...(optionalString(item.created_at ?? item.createdAt) ? { createdAt: optionalString(item.created_at ?? item.createdAt) } : {}),
     ...(optionalString(item.updated_at ?? item.updatedAt) ? { updatedAt: optionalString(item.updated_at ?? item.updatedAt) } : {})
   };
+}
+
+function compareNativeRoomWorkSnapshots(left: NativeRoomWork, right: NativeRoomWork): number {
+  if (left.generation !== right.generation) return left.generation - right.generation;
+  if (left.version !== right.version) return left.version - right.version;
+  const leftTime = nativeRoomWorkRecordTimestamp(left);
+  const rightTime = nativeRoomWorkRecordTimestamp(right);
+  if (leftTime !== rightTime) {
+    if (leftTime === Number.NEGATIVE_INFINITY) return -1;
+    if (rightTime === Number.NEGATIVE_INFINITY) return 1;
+    return leftTime - rightTime;
+  }
+  return 0;
+}
+
+function nativeRoomWorkSnapshotDetailScore(work: NativeRoomWork): number {
+  return (work.instructions?.length ?? 0)
+    + (work.comments?.length ?? 0)
+    + (work.reactions?.length ?? 0)
+    + (work.controls?.length ?? 0)
+    + work.assignees.reduce((score, assignee) => score + (assignee.result ? 2 : 1), 0)
+    + (work.resourceRefs?.length ?? 0)
+    + (work.resultSummary ? 1 : 0);
+}
+
+function mergeNativeRoomWorkRecords<T extends NativeRoomWorkVersionedRecord>(left: T[], right: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const row of [...left, ...right]) {
+    const current = byId.get(row.id);
+    if (!current) {
+      byId.set(row.id, row);
+      continue;
+    }
+    const rowGeneration = row.generation ?? 0;
+    const currentGeneration = current.generation ?? 0;
+    const rowTimestamp = nativeRoomWorkRecordTimestamp(row);
+    const currentTimestamp = nativeRoomWorkRecordTimestamp(current);
+    if (row.version > current.version
+      || (row.version === current.version && rowGeneration > currentGeneration)
+      || (row.version === current.version && rowGeneration === currentGeneration && rowTimestamp > currentTimestamp)
+      || (row.version === current.version && rowGeneration === currentGeneration && rowTimestamp === currentTimestamp && JSON.stringify(row).length > JSON.stringify(current).length)) {
+      byId.set(row.id, row);
+    }
+  }
+  return [...byId.values()];
+}
+
+/**
+ * Keep a list projection current while retaining detail already fetched for
+ * the same Work. The list is authoritative for membership/order; detail is
+ * merged only for the matching Work ID and never creates a local message.
+ */
+export function mergeNativeRoomWorkDetail(current: NativeRoomWork, incoming: NativeRoomWork): NativeRoomWork {
+  if (current.id !== incoming.id || current.roomId !== incoming.roomId) return incoming;
+  // A fetched detail response is passed as `incoming`; on an equal snapshot
+  // it is the freshest authoritative projection. The union below still keeps
+  // already-fetched history when a later list only contains summary fields.
+  const preferred = compareNativeRoomWorkSnapshots(current, incoming) > 0 ? current : incoming;
+  const other = preferred === current ? incoming : current;
+  const instructions = mergeNativeRoomWorkRecords(current.instructions ?? [], incoming.instructions ?? []);
+  const comments = mergeNativeRoomWorkRecords(current.comments ?? [], incoming.comments ?? []);
+  const reactions = mergeNativeRoomWorkRecords(current.reactions ?? [], incoming.reactions ?? []);
+  const controls = mergeNativeRoomWorkRecords(current.controls ?? [], incoming.controls ?? []);
+  const assignees = mergeNativeRoomWorkRecords(current.assignees, incoming.assignees);
+  const hasInstructions = current.instructions !== undefined || incoming.instructions !== undefined;
+  const hasComments = current.comments !== undefined || incoming.comments !== undefined;
+  const hasReactions = current.reactions !== undefined || incoming.reactions !== undefined;
+  const hasControls = current.controls !== undefined || incoming.controls !== undefined;
+  const resourceRefs = preferred.resourceRefs ?? other.resourceRefs;
+  const resultSummary = preferred.resultSummary ?? other.resultSummary;
+  return {
+    ...preferred,
+    assignees,
+    ...(hasInstructions ? { instructions } : {}),
+    ...(hasComments ? { comments } : {}),
+    ...(hasReactions ? { reactions } : {}),
+    ...(hasControls ? { controls } : {}),
+    ...(resourceRefs?.length ? { resourceRefs } : {}),
+    ...(resultSummary ? { resultSummary } : {})
+  };
+}
+
+/** Merge fetched detail into the current list without resurrecting old Works. */
+export function mergeNativeRoomWorkList(current: NativeRoomWork[], listed: NativeRoomWork[]): NativeRoomWork[] {
+  const currentById = new Map(current.map((work) => [work.id, work]));
+  return listed.map((work) => {
+    const previous = currentById.get(work.id);
+    return previous && previous.roomId === work.roomId ? mergeNativeRoomWorkDetail(previous, work) : work;
+  });
 }
 
 function nativeDefaultAgentFromUnknown(value: unknown): NativeRoomDefaultAgent | undefined {
@@ -1517,16 +1797,38 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
   const generic = roomWorkOperation(candidate);
   const hasRead = Boolean(candidate.listWorkspaceRoomWorks || candidate.getWorkspaceRoomWork || generic);
   if (!hasRead) return undefined;
-  const call = (operation: string, roomId: string, payload: Record<string, unknown>, operationId: string, target?: NativeWorkspaceTarget, specific?: () => Promise<unknown>): Promise<unknown> => specific ? specific() : generic ? generic(operation, roomId, payload, operationId, target) : Promise.reject(new Error("room_work_api_unavailable"));
+  const call = (operation: string, roomId: string, payload: Record<string, unknown>, operationId: string, target?: NativeWorkspaceTarget, specific?: () => Promise<unknown>): Promise<unknown> => {
+    if (target?.roomId !== undefined && target.roomId !== roomId) return Promise.reject(new Error("room_work_room_scope_invalid"));
+    return specific ? specific() : generic ? generic(operation, roomId, payload, operationId, target) : Promise.reject(new Error("room_work_api_unavailable"));
+  };
   return {
-    list: async (roomId, target) => roomWorkRows(await call("room.work.list", roomId, { limit: 100 }, createIdempotencyKey(), target, candidate.listWorkspaceRoomWorks ? () => candidate.listWorkspaceRoomWorks!({ roomId, limit: 100, ...(target ? { target } : {}) }) : undefined)).map(nativeRoomWorkFromUnknown),
-    view: async (roomId, workId, target) => nativeRoomWorkFromUnknown(await call("room.work.view", roomId, { work_id: workId }, createIdempotencyKey(), target, candidate.getWorkspaceRoomWork ? () => candidate.getWorkspaceRoomWork!({ roomId, workId, ...(target ? { target } : {}) }) : undefined)),
-    create: async (input) => nativeRoomWorkFromUnknown(await call("room.work.create", input.roomId, {
-      ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
-      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-      ...(input.resourceRefs?.length ? { resource_refs: input.resourceRefs.map(({ kind, id, version }) => ({ kind, id, version })) } : {}),
-      ...(input.agentId ? { agent_id: input.agentId } : {})
-    }, input.operationId, input.target, candidate.createWorkspaceRoomWork ? () => candidate.createWorkspaceRoomWork!(input) : undefined)),
+    list: async (roomId, target) => {
+      const value = await call("room.work.list", roomId, { limit: 100 }, createIdempotencyKey(), target, candidate.listWorkspaceRoomWorks ? () => candidate.listWorkspaceRoomWorks!({ roomId, limit: 100, ...(target ? { target } : {}) }) : undefined);
+      const responseRoomId = roomWorkResponseRoomId(value);
+      if (responseRoomId && responseRoomId !== roomId) throw new Error("room_work_room_scope_invalid");
+      const works = dedupeNativeRoomWorkRecords(roomWorkRows(value).map((entry) => nativeRoomWorkFromUnknown(entry, target)));
+      works.forEach((work) => assertNativeRoomWorkResponseScope(work, roomId, undefined, target));
+      return works;
+    },
+    view: async (roomId, workId, target) => {
+      const work = nativeRoomWorkFromUnknown(
+        await call("room.work.view", roomId, { work_id: workId }, createIdempotencyKey(), target, candidate.getWorkspaceRoomWork ? () => candidate.getWorkspaceRoomWork!({ roomId, workId, ...(target ? { target } : {}) }) : undefined),
+        target,
+        workId
+      );
+      assertNativeRoomWorkResponseScope(work, roomId, workId, target);
+      return work;
+    },
+    create: async (input) => {
+      const work = nativeRoomWorkFromUnknown(await call("room.work.create", input.roomId, {
+        ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.resourceRefs?.length ? { resource_refs: input.resourceRefs.map(({ kind, id, version }) => ({ kind, id, version })) } : {}),
+        ...(input.agentId ? { agent_id: input.agentId } : {})
+      }, input.operationId, input.target, candidate.createWorkspaceRoomWork ? () => candidate.createWorkspaceRoomWork!(input) : undefined), input.target);
+      assertNativeRoomWorkResponseScope(work, input.roomId, undefined, input.target);
+      return work;
+    },
     reply: async (input) => {
       const value = await call("room.work.reply", input.roomId, {
         work_id: input.workId,
@@ -1540,6 +1842,9 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
       const item = roomWorkPayload(value);
       const parsed = nativeInstruction(item);
       if (!parsed) throw new Error("room_work_reply_response_invalid");
+      if (parsed.workId !== input.workId) throw new Error("room_work_scope_invalid");
+      if (input.assigneeId !== undefined && parsed.assigneeId !== undefined && parsed.assigneeId !== input.assigneeId) throw new Error("room_work_assignee_scope_invalid");
+      assertNativeRoomWorkMutationGeneration(parsed.generation, input.expectedGeneration);
       return parsed;
     },
     comment: async (input) => {
@@ -1551,6 +1856,7 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
       }, input.operationId, input.target, candidate.createWorkspaceRoomWorkComment ? () => candidate.createWorkspaceRoomWorkComment!(input) : undefined);
       const parsed = nativeComment(value);
       if (!parsed) throw new Error("room_work_comment_response_invalid");
+      if (parsed.workId !== input.workId) throw new Error("room_work_scope_invalid");
       return parsed;
     },
     applyComment: async (input) => {
@@ -1564,15 +1870,23 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
       }, input.operationId, input.target, candidate.applyWorkspaceRoomWorkComment ? () => candidate.applyWorkspaceRoomWorkComment!(input) : undefined);
       const parsed = nativeInstruction(roomWorkPayload(value));
       if (!parsed) throw new Error("room_work_comment_apply_response_invalid");
+      if (parsed.workId !== input.workId) throw new Error("room_work_scope_invalid");
+      if (input.assigneeId !== undefined && parsed.assigneeId !== undefined && parsed.assigneeId !== input.assigneeId) throw new Error("room_work_assignee_scope_invalid");
+      assertNativeRoomWorkMutationGeneration(parsed.generation, input.expectedGeneration);
       return parsed;
     },
-    reactComment: (input) => call("room.work.comment.reaction.set", input.roomId, {
-      work_id: input.workId,
-      comment_id: input.commentId,
-      reaction: "like",
-      enabled: true,
-      ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion })
-    }, input.operationId, input.target, candidate.reactWorkspaceRoomWorkComment ? () => candidate.reactWorkspaceRoomWorkComment!({ ...input, reaction: "like", enabled: true }) : undefined),
+    reactComment: async (input) => {
+      const value = await call("room.work.comment.reaction.set", input.roomId, {
+        work_id: input.workId,
+        comment_id: input.commentId,
+        reaction: "like",
+        enabled: true,
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion })
+      }, input.operationId, input.target, candidate.reactWorkspaceRoomWorkComment ? () => candidate.reactWorkspaceRoomWorkComment!({ ...input, reaction: "like", enabled: true }) : undefined);
+      const parsed = nativeReaction(value);
+      if (parsed && (parsed.workId !== input.workId || parsed.commentId !== input.commentId)) throw new Error("room_work_comment_response_scope_invalid");
+      return value;
+    },
     setDefaultAgent: async (input) => {
       const value = await call("room.default_agent.set", input.roomId, {
         agent_id: input.agentId,
@@ -1588,18 +1902,24 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
       const value = await call("room.work.stop", input.roomId, { work_id: input.workId, ...(input.reason ? { reason: input.reason } : {}), ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }), ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }) }, input.operationId, input.target, candidate.stopWorkspaceRoomWork ? () => candidate.stopWorkspaceRoomWork!(input) : undefined);
       const parsed = nativeControl(value);
       if (!parsed) throw new Error("room_work_stop_response_invalid");
+      if (parsed.workId !== input.workId) throw new Error("room_work_scope_invalid");
+      assertNativeRoomWorkMutationGeneration(parsed.generation, input.expectedGeneration);
       return parsed;
     },
     stopAssignee: async (input) => {
       const value = await call("room.work.assignee.stop", input.roomId, { work_id: input.workId, assignee_id: input.assigneeId, ...(input.reason ? { reason: input.reason } : {}), ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }), ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }) }, input.operationId, input.target, candidate.stopWorkspaceRoomWorkAssignee ? () => candidate.stopWorkspaceRoomWorkAssignee!(input) : undefined);
       const parsed = nativeControl(value);
       if (!parsed) throw new Error("room_work_assignee_stop_response_invalid");
+      if (parsed.workId !== input.workId || parsed.assigneeId !== input.assigneeId) throw new Error("room_work_assignee_scope_invalid");
+      assertNativeRoomWorkMutationGeneration(parsed.generation, input.expectedGeneration);
       return parsed;
     },
     reassign: async (input) => {
       const value = await call("room.work.assignee.reassign", input.roomId, { work_id: input.workId, assignee_id: input.assigneeId, agent_id: input.agentId, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }), ...(input.expectedGeneration === undefined ? {} : { expected_generation: input.expectedGeneration }) }, input.operationId, input.target, candidate.reassignWorkspaceRoomWorkAssignee ? () => candidate.reassignWorkspaceRoomWorkAssignee!(input) : undefined);
       const parsed = nativeAssignee(roomWorkPayload(value));
       if (!parsed) throw new Error("room_work_reassign_response_invalid");
+      if (parsed.workId !== input.workId || parsed.id !== input.assigneeId || parsed.agentId !== input.agentId) throw new Error("room_work_assignee_scope_invalid");
+      assertNativeRoomWorkMutationGeneration(parsed.generation, input.expectedGeneration);
       return parsed;
     },
     delegate: async (input) => {
@@ -1625,6 +1945,7 @@ export function createNativeRoomWorkClient(bridge: unknown): NativeRoomWorkClien
         || parsed.parentAssigneeId !== undefined && parsed.parentAssigneeId !== input.assigneeId) {
         throw new Error("room_work_delegate_response_scope_invalid");
       }
+      assertNativeRoomWorkMutationGeneration(parsed.generation, input.expectedGeneration);
       return parsed;
     },
     openDm: async (agentId, operationId, target) => {
@@ -1832,12 +2153,16 @@ export function useNativeApp() {
     : selectedWorkspaceTarget;
   const chatContextTargetKey = selectedWorkspaceTargetKey
     ?? (selectedWorkspaceTarget ? nativeWorkspaceTargetKey(selectedWorkspaceTarget) : undefined);
-  const chatContextRef = useRef<{ workspaceTargetKey?: string; roomId?: string }>({});
+  const chatContextTargetIdentityKey = selectedWorkspaceTargetRef.current
+    ? nativeWorkspaceTargetIdentityKey(selectedWorkspaceTargetRef.current)
+    : undefined;
+  const chatContextRef = useRef<{ workspaceTargetKey?: string; workspaceTargetIdentityKey?: string; roomId?: string }>({});
   chatContextRef.current = {
     workspaceTargetKey: chatContextTargetKey,
+    workspaceTargetIdentityKey: chatContextTargetIdentityKey,
     roomId: selectedRoomId
   };
-  const workContextKey = `${chatContextTargetKey ?? "unknown"}\n${selectedRoomId ?? "none"}`;
+  const workContextKey = `${chatContextTargetIdentityKey ?? chatContextTargetKey ?? "unknown"}\n${selectedRoomId ?? "none"}`;
   const workDraftContextKey = `${workContextKey}\n${replyWorkId ?? "new"}`;
   const workCommentDraftContextKey = `${workContextKey}\ncomment\n${selectedWorkId ?? "none"}`;
   const draftContextRoomOpenId = roomOpenSequence.current;
@@ -2235,8 +2560,14 @@ export function useNativeApp() {
 
   const loadWorkspaceAgents = useCallback(async (expectedActivationId?: number, expectedTarget?: NativeWorkspaceTarget): Promise<void> => {
     const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const isCurrentTarget = (): boolean => {
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return false;
+      if (!expectedTarget) return true;
+      const currentTarget = selectedWorkspaceTargetRef.current;
+      return Boolean(currentTarget && nativeWorkspaceTargetMatches(expectedTarget, currentTarget));
+    };
     if (!roomWorkBridge?.listWorkspaceAgents) {
-      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      if (!isCurrentTarget()) return;
       setAgents([]);
       setAgentError(null);
       return;
@@ -2245,14 +2576,14 @@ export function useNativeApp() {
     setAgentError(null);
     try {
       const listed = nativeAgentsFromUnknown(await roomWorkBridge.listWorkspaceAgents({ target: expectedTarget ?? selectedWorkspaceTargetRef.current }));
-      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      if (!isCurrentTarget()) return;
       setAgents(listed);
     } catch (error) {
-      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
+      if (!isCurrentTarget()) return;
       setAgents([]);
       setAgentError(userFacingError(error, "Agent一覧を確認できませんでした。"));
     } finally {
-      if (expectedActivationId === undefined || expectedActivationId === activationSequence.current) setAgentLoading(false);
+      if (isCurrentTarget()) setAgentLoading(false);
     }
   }, [bridge]);
 
@@ -2262,7 +2593,7 @@ export function useNativeApp() {
       if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return false;
       if (!expectedTarget) return true;
       const currentTarget = selectedWorkspaceTargetRef.current;
-      return Boolean(currentTarget && nativeWorkspaceTargetKey(currentTarget) === nativeWorkspaceTargetKey(expectedTarget));
+      return Boolean(currentTarget && nativeWorkspaceTargetMatches(expectedTarget, currentTarget));
     };
     if (!roomWorkBridge?.listWorkspaceAgentBackends) {
       if (!isCurrentTarget()) return;
@@ -2289,24 +2620,28 @@ export function useNativeApp() {
 
   const loadRoomAgentMembers = useCallback(async (roomId: string, expectedActivationId?: number, expectedTarget?: NativeWorkspaceTarget): Promise<void> => {
     const roomWorkBridge = bridge as NativeRoomWorkBridge | undefined;
+    const isCurrentTarget = (): boolean => {
+      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return false;
+      if (!expectedTarget) return true;
+      const currentTarget = selectedWorkspaceTargetRef.current;
+      return Boolean(currentTarget && nativeWorkspaceTargetMatches(expectedTarget, currentTarget));
+    };
     if (!roomWorkBridge?.listWorkspaceRoomAgentMembers) {
-      if (expectedActivationId === undefined || expectedActivationId === activationSequence.current) setRoomAgentMembers([]);
+      if (isCurrentTarget()) setRoomAgentMembers([]);
       return;
     }
     setRoomAgentMembersLoading(true);
     setRoomAgentMembersError(null);
     try {
       const listed = nativeRoomAgentMembersFromUnknown(await roomWorkBridge.listWorkspaceRoomAgentMembers({ roomId, target: expectedTarget ?? selectedWorkspaceTargetRef.current }), roomId);
-      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
-      if (chatContextRef.current.roomId !== roomId) return;
+      if (!isCurrentTarget() || chatContextRef.current.roomId !== roomId) return;
       setRoomAgentMembers(listed);
     } catch (error) {
-      if (expectedActivationId !== undefined && expectedActivationId !== activationSequence.current) return;
-      if (chatContextRef.current.roomId !== roomId) return;
+      if (!isCurrentTarget() || chatContextRef.current.roomId !== roomId) return;
       setRoomAgentMembers([]);
       setRoomAgentMembersError(userFacingError(error, "RoomのAgent設定を確認できませんでした。"));
     } finally {
-      if (expectedActivationId === undefined || expectedActivationId === activationSequence.current) setRoomAgentMembersLoading(false);
+      if (isCurrentTarget() && chatContextRef.current.roomId === roomId) setRoomAgentMembersLoading(false);
     }
   }, [bridge]);
 
@@ -2408,15 +2743,56 @@ export function useNativeApp() {
     }
   }, [bridge, invalidateChatStream, invalidateWorkspaceDirectory, loadRoomAgentMembers, loadWorkspaceAgentBackends, loadWorkspaceAgents]);
 
+  const hydrateRoomWorkDetails = useCallback(async (
+    roomId: string,
+    listed: NativeRoomWork[],
+    request: NativeRoomWorkDetailHydrationRequestStamp,
+    target?: NativeWorkspaceTarget
+  ): Promise<void> => {
+    if (!roomWorkClient || !listed.length) return;
+    const currentRequest = (): NativeRoomWorkDetailHydrationRequestStamp => {
+      const currentTarget = selectedWorkspaceTargetRef.current;
+      return {
+        roomOpenId: roomOpenSequence.current,
+        roomId: request.roomId,
+        workspaceTargetKey: currentTarget ? nativeWorkspaceTargetKey(currentTarget) : request.workspaceTargetKey,
+        workspaceTargetIdentityKey: currentTarget ? nativeWorkspaceTargetIdentityKey(currentTarget) : request.workspaceTargetIdentityKey,
+        workListSequence: roomWorkListSequence.current
+      };
+    };
+    await Promise.allSettled(listed.map(async (summary) => {
+      try {
+        const detail = await roomWorkClient.view(roomId, summary.id, target);
+        if (!nativeRoomWorkDetailHydrationRequestIsCurrent(request, currentRequest())) return;
+        setWorks((current) => current.map((work) => work.id === detail.id && work.roomId === roomId
+          ? mergeNativeRoomWorkDetail(work, detail)
+          : work));
+        setSelectedWorkDetail((current) => current?.id === detail.id
+          ? mergeNativeRoomWorkDetail(current, detail)
+          : current);
+      } catch {
+        // The summary remains visible. The selected Work's existing detail
+        // request owns the user-facing error state; a non-selected detail
+        // failure must not turn an otherwise readable Room into an error.
+      }
+    }));
+  }, [roomWorkClient]);
+
   const loadRoomWorks = useCallback(async (roomId: string, activationId?: number, preserveExistingOnError = false): Promise<NativeRoomWork[]> => {
     if (!roomWorkClient) return [];
-    const requestTargetKey = chatContextRef.current.workspaceTargetKey;
     const requestTarget = selectedWorkspaceTargetRef.current;
+    const requestTargetKey = requestTarget
+      ? nativeWorkspaceTargetKey(requestTarget)
+      : chatContextRef.current.workspaceTargetKey;
+    const requestTargetIdentityKey = requestTarget
+      ? nativeWorkspaceTargetIdentityKey(requestTarget)
+      : chatContextRef.current.workspaceTargetIdentityKey;
     const request: NativeRoomWorkListRequestStamp = {
       sequence: ++roomWorkListSequence.current,
       roomOpenId: roomOpenSequence.current,
       roomId,
-      workspaceTargetKey: requestTargetKey
+      workspaceTargetKey: requestTargetKey,
+      workspaceTargetIdentityKey: requestTargetIdentityKey
     };
     setWorkLoading(true);
     setWorkError(null);
@@ -2427,12 +2803,24 @@ export function useNativeApp() {
           sequence: roomWorkListSequence.current,
           roomOpenId: roomOpenSequence.current,
           roomId: chatContextRef.current.roomId ?? "",
-          workspaceTargetKey: chatContextRef.current.workspaceTargetKey
-        });
+          workspaceTargetKey: chatContextRef.current.workspaceTargetKey,
+          workspaceTargetIdentityKey: chatContextRef.current.workspaceTargetIdentityKey
+      });
       if (!isCurrent()) return [];
-      setWorks(listed);
-      setSelectedWorkDetail((current) => current && listed.some((work) => work.id === current.id && work.version === current.version) ? current : undefined);
+      setWorks((current) => mergeNativeRoomWorkList(current, listed));
+      setSelectedWorkDetail((current) => {
+        if (!current || current.roomId !== roomId) return undefined;
+        const summary = listed.find((work) => work.id === current.id && work.roomId === roomId);
+        return summary ? mergeNativeRoomWorkDetail(current, summary) : undefined;
+      });
       setSelectedWorkId((current) => listed.some((work) => work.id === current) ? current : listed[0]?.id);
+      void hydrateRoomWorkDetails(roomId, listed, {
+        roomOpenId: request.roomOpenId,
+        roomId,
+        workspaceTargetKey: request.workspaceTargetKey,
+        workspaceTargetIdentityKey: request.workspaceTargetIdentityKey,
+        workListSequence: request.sequence
+      }, requestTarget);
       return listed;
     } catch (error) {
       if ((activationId === undefined || activationId === activationSequence.current)
@@ -2440,7 +2828,8 @@ export function useNativeApp() {
           sequence: roomWorkListSequence.current,
           roomOpenId: roomOpenSequence.current,
           roomId: chatContextRef.current.roomId ?? "",
-          workspaceTargetKey: chatContextRef.current.workspaceTargetKey
+          workspaceTargetKey: chatContextRef.current.workspaceTargetKey,
+          workspaceTargetIdentityKey: chatContextRef.current.workspaceTargetIdentityKey
         })) {
         if (!preserveExistingOnError) {
           setWorks([]);
@@ -2456,10 +2845,11 @@ export function useNativeApp() {
           sequence: roomWorkListSequence.current,
           roomOpenId: roomOpenSequence.current,
           roomId: chatContextRef.current.roomId ?? "",
-          workspaceTargetKey: chatContextRef.current.workspaceTargetKey
+          workspaceTargetKey: chatContextRef.current.workspaceTargetKey,
+          workspaceTargetIdentityKey: chatContextRef.current.workspaceTargetIdentityKey
         })) setWorkLoading(false);
     }
-  }, [roomWorkClient]);
+  }, [hydrateRoomWorkDetails, roomWorkClient]);
 
   const preflightWorkspaceTransfer = useCallback(async (workspace: NativeWorkspace, destination: NativeWorkspace): Promise<NativeWorkspaceTransferPreflight> => {
     if (!bridge?.preflightWorkspaceTransfer) throw new Error("workspace_transfer_unavailable");
@@ -2567,6 +2957,7 @@ export function useNativeApp() {
     invalidateChatStream();
     setSending(false);
     const roomOpenId = ++roomOpenSequence.current;
+    const activationId = activationSequence.current;
     const target = targetForWorkspace(selectedWorkspace, connectionRef.current);
     const roomTarget = target ? { ...target, roomId: room.id } : undefined;
     const targetConnection = target ? connectionForTarget(connectionStateRef.current, target) ?? connectionRef.current : connectionRef.current;
@@ -2595,12 +2986,20 @@ export function useNativeApp() {
       if (bridge.selectRoomCandidate) {
         await bridge.selectRoomCandidate({ roomId: room.id, ...(roomTarget ? { target: roomTarget } : {}) });
       }
-      void loadRoomAgentMembers(room.id, undefined, roomTarget);
+      void loadRoomAgentMembers(room.id, activationId, roomTarget);
       if (roomWorkClient) {
+        const workListSequence = ++roomWorkListSequence.current;
         const listed = await roomWorkClient.list(room.id, roomTarget);
-        if (roomOpenId !== roomOpenSequence.current) return;
-        setWorks(listed);
+        if (roomOpenId !== roomOpenSequence.current || workListSequence !== roomWorkListSequence.current) return;
+        setWorks((current) => mergeNativeRoomWorkList(current, listed));
         setSelectedWorkId(listed[0]?.id);
+        void hydrateRoomWorkDetails(room.id, listed, {
+          roomOpenId,
+          roomId: room.id,
+          workspaceTargetKey: roomTarget ? nativeWorkspaceTargetKey(roomTarget) : undefined,
+          workspaceTargetIdentityKey: roomTarget ? nativeWorkspaceTargetIdentityKey(roomTarget) : undefined,
+          workListSequence
+        }, roomTarget);
         setTransportState("connected");
         return;
       }
@@ -2629,7 +3028,7 @@ export function useNativeApp() {
     } finally {
       if (roomOpenId === roomOpenSequence.current) setChatLoading(false);
     }
-  }, [bridge, invalidateChatStream, loadRoomAgentMembers, roomWorkClient, selectedWorkspace]);
+  }, [bridge, hydrateRoomWorkDetails, invalidateChatStream, loadRoomAgentMembers, roomWorkClient, selectedWorkspace]);
 
   useEffect(() => {
     const room = rooms.find((candidate) => candidate.id === selectedRoomId);
@@ -2657,6 +3056,7 @@ export function useNativeApp() {
     const roomId = selectedRoom?.id;
     const workId = selectedWorkSummary?.id;
     const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const requestTargetIdentityKey = chatContextRef.current.workspaceTargetIdentityKey;
     const requestId = ++workDetailSequence.current;
     if (!roomWorkClient || !roomId || !workId) {
       setSelectedWorkDetail(undefined);
@@ -2669,18 +3069,26 @@ export function useNativeApp() {
     void roomWorkClient.view(roomId, workId, selectedWorkspaceTargetRef.current).then((detail) => {
       if (requestId !== workDetailSequence.current
         || chatContextRef.current.roomId !== roomId
-        || chatContextRef.current.workspaceTargetKey !== requestTargetKey) return;
-      setSelectedWorkDetail(detail);
+        || chatContextRef.current.workspaceTargetKey !== requestTargetKey
+        || chatContextRef.current.workspaceTargetIdentityKey !== requestTargetIdentityKey) return;
+      setWorks((current) => current.map((work) => work.id === detail.id && work.roomId === roomId
+        ? mergeNativeRoomWorkDetail(work, detail)
+        : work));
+      setSelectedWorkDetail((current) => current && current.id === detail.id
+        ? mergeNativeRoomWorkDetail(current, detail)
+        : detail);
     }).catch((error) => {
       if (requestId !== workDetailSequence.current
         || chatContextRef.current.roomId !== roomId
-        || chatContextRef.current.workspaceTargetKey !== requestTargetKey) return;
+        || chatContextRef.current.workspaceTargetKey !== requestTargetKey
+        || chatContextRef.current.workspaceTargetIdentityKey !== requestTargetIdentityKey) return;
       setSelectedWorkDetail(undefined);
       setWorkDetailError(userFacingError(error, "この仕事の詳細を読み込めませんでした。"));
     }).finally(() => {
       if (requestId === workDetailSequence.current
         && chatContextRef.current.roomId === roomId
-        && chatContextRef.current.workspaceTargetKey === requestTargetKey) setWorkDetailLoading(false);
+        && chatContextRef.current.workspaceTargetKey === requestTargetKey
+        && chatContextRef.current.workspaceTargetIdentityKey === requestTargetIdentityKey) setWorkDetailLoading(false);
     });
   }, [roomWorkClient, selectedRoom?.id, selectedWorkSummary?.id, selectedWorkSummary?.version]);
 
@@ -2708,6 +3116,9 @@ export function useNativeApp() {
     const target = activeWorkspace ? targetForWorkspace(activeWorkspace, connectionRef.current) : undefined;
     if (!bridge || !activeWorkspace || activeWorkspace.access !== "granted" || !target) return;
     const targetKey = nativeWorkspaceTargetKey(target);
+    const targetIdentityKey = selectedWorkspaceTargetRef.current
+      ? nativeWorkspaceTargetIdentityKey(selectedWorkspaceTargetRef.current)
+      : nativeWorkspaceTargetIdentityKey(target);
     const roomId = selectedRoomId;
     const requestRoomOpenId = roomOpenSequence.current;
     let requestWorkListSequence: number | undefined;
@@ -2716,12 +3127,14 @@ export function useNativeApp() {
         roomOpenId: requestRoomOpenId,
         roomId,
         workspaceTargetKey: targetKey,
+        workspaceTargetIdentityKey: targetIdentityKey,
         workListSequence: requestWorkListSequence
       },
       {
         roomOpenId: roomOpenSequence.current,
         roomId: chatContextRef.current.roomId,
         workspaceTargetKey: chatContextRef.current.workspaceTargetKey,
+        workspaceTargetIdentityKey: chatContextRef.current.workspaceTargetIdentityKey,
         workListSequence: roomWorkListSequence.current
       }
     );
@@ -2729,7 +3142,8 @@ export function useNativeApp() {
       const listed = bridge.listWorkspaceRooms
         ? (await bridge.listWorkspaceRooms({ target })).rooms.map(nativeRoom)
         : undefined;
-      if (chatContextRef.current.workspaceTargetKey !== targetKey) return;
+      if (chatContextRef.current.workspaceTargetKey !== targetKey
+        || chatContextRef.current.workspaceTargetIdentityKey !== targetIdentityKey) return;
       if (listed) {
         const roomStillAvailable = !roomId || listed.some((room) => room.id === roomId);
         setRooms((current) => sameNativeRoomList(current, listed) ? current : listed);
@@ -2789,6 +3203,7 @@ export function useNativeApp() {
     const requestRoomId = selectedRoom.id;
     const requestTarget = selectedWorkspaceTargetRef.current;
     const requestTargetKey = chatContextRef.current.workspaceTargetKey;
+    const requestTargetIdentityKey = chatContextRef.current.workspaceTargetIdentityKey;
     const requestOpenId = roomOpenSequence.current;
     const requestOperationId = operationId || createIdempotencyKey();
     setSending(true);
@@ -2829,7 +3244,8 @@ export function useNativeApp() {
       } catch (error) {
         if (requestOpenId === roomOpenSequence.current
           && chatContextRef.current.roomId === requestRoomId
-          && chatContextRef.current.workspaceTargetKey === requestTargetKey) {
+          && chatContextRef.current.workspaceTargetKey === requestTargetKey
+          && chatContextRef.current.workspaceTargetIdentityKey === requestTargetIdentityKey) {
           setWorkError(userFacingError(error, "仕事を送信できませんでした。送信済みかを確認してから再試行してください。"));
           setChatError(userFacingError(error, "仕事を送信できませんでした。送信済みかを確認してから再試行してください。"));
         }
@@ -2837,7 +3253,8 @@ export function useNativeApp() {
       }
       if (requestOpenId !== roomOpenSequence.current
         || chatContextRef.current.roomId !== requestRoomId
-        || chatContextRef.current.workspaceTargetKey !== requestTargetKey) {
+        || chatContextRef.current.workspaceTargetKey !== requestTargetKey
+        || chatContextRef.current.workspaceTargetIdentityKey !== requestTargetIdentityKey) {
         return { operationId: requestOperationId, refreshed: false };
       }
       // The work record returned by create/reply is authoritative only after
@@ -2850,11 +3267,13 @@ export function useNativeApp() {
           refreshed: requestOpenId === roomOpenSequence.current
             && chatContextRef.current.roomId === requestRoomId
             && chatContextRef.current.workspaceTargetKey === requestTargetKey
+            && chatContextRef.current.workspaceTargetIdentityKey === requestTargetIdentityKey
         };
       } catch (error) {
         if (requestOpenId === roomOpenSequence.current
           && chatContextRef.current.roomId === requestRoomId
-          && chatContextRef.current.workspaceTargetKey === requestTargetKey) {
+          && chatContextRef.current.workspaceTargetKey === requestTargetKey
+          && chatContextRef.current.workspaceTargetIdentityKey === requestTargetIdentityKey) {
           setChatError(userFacingError(error, "仕事は受付済みかもしれませんが、一覧を再取得できませんでした。同じ操作で再試行してください。"));
         }
         return { operationId: requestOperationId, refreshed: false };
@@ -2862,7 +3281,8 @@ export function useNativeApp() {
     } finally {
       if (requestOpenId === roomOpenSequence.current
         && chatContextRef.current.roomId === requestRoomId
-        && chatContextRef.current.workspaceTargetKey === requestTargetKey) setSending(false);
+        && chatContextRef.current.workspaceTargetKey === requestTargetKey
+        && chatContextRef.current.workspaceTargetIdentityKey === requestTargetIdentityKey) setSending(false);
     }
   }, [agentBackends, agents, refreshRoomWorkList, roomAgentMembers, roomWorkClient, selectedRoom, selectedWork, selectedWorkspace, works]);
 
@@ -3555,15 +3975,28 @@ export function useNativeApp() {
       return;
     }
     if (workspace.access !== "granted") {
+      roomOpenSequence.current += 1;
+      workDetailSequence.current += 1;
+      roomWorkListSequence.current += 1;
       setSelectedWorkspaceId(undefined);
       setSelectedWorkspaceTargetKey(undefined);
       setSelectedRoomId(undefined);
       setRooms([]);
       setActiveWorkspaceRoomId(undefined);
+      setWorks([]);
+      setSelectedWorkId(undefined);
+      setSelectedWorkDetail(undefined);
       setWorkspaceError("このWorkspaceへのアクセス権限がありません。");
       clearNativeSelectionCandidate(undefined, target);
       return;
     }
+    // Invalidate Room/Work responses synchronously at the click boundary. A
+    // slow detail request must not win the short interval before the
+    // workspace activation effect runs.
+    roomOpenSequence.current += 1;
+    workDetailSequence.current += 1;
+    roomWorkListSequence.current += 1;
+    invalidateChatStream();
     setWorkspaceError(null);
     setSelectedWorkspaceId(workspace.id);
     setSelectedWorkspaceTargetKey(nativeWorkspaceTargetKey(target));
@@ -3571,6 +4004,9 @@ export function useNativeApp() {
     setRooms([]);
     setActiveWorkspaceRoomId(undefined);
     setMessages([]);
+    setWorks([]);
+    setSelectedWorkId(undefined);
+    setSelectedWorkDetail(undefined);
     setSessionId(undefined);
     setEvidence({ activity: [], backendRuns: [], artifacts: [], memories: [] });
     const targetConnection = connectionForTarget(connectionStateRef.current, target) ?? connectionRef.current;
@@ -3579,7 +4015,7 @@ export function useNativeApp() {
       ...(workspace.organizationId ? { organizationId: workspace.organizationId } : {}),
       workspaceId: target.workspaceId
     }, targetConnection);
-  }, [invalidateWorkspaceDirectory]);
+  }, [invalidateChatStream, invalidateWorkspaceDirectory]);
 
   const createOrganization = useCallback(async (input: { name: string; description?: string }): Promise<void> => {
     const created = await organizationApi.createOrganization(input);

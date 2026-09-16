@@ -71,6 +71,8 @@ export interface RoomWorkSurfaceProps {
   onSetDefaultAgent?: (agentId: string) => void | Promise<void>;
   onOpenAgentDm?: (agentId: string) => void | Promise<void>;
   onOpenAgentSettings?: () => void;
+  /** The selected Room's minimal header-level tool entry. */
+  roomToolLinks?: ReactNode;
   onOpenResultResource?: (resource: NativeArtifactWorkspaceInitialResource) => void;
   onReconnect: () => void | Promise<void>;
 }
@@ -150,6 +152,18 @@ export function roomWorkInstructionStatusLabel(status: NativeRoomWorkInstruction
   return instructionStatusLabels[status];
 }
 
+function roomWorkConversationStatusLabel(entry: NativeRoomWorkConversationEntry): string | undefined {
+  if (entry.side === "human") {
+    const status = entry.status as NativeRoomWorkInstructionStatus;
+    if (status === "delivered" || status === "applied") return undefined;
+    return roomWorkInstructionStatusLabel(status);
+  }
+
+  const status = entry.status as NativeRoomWorkAssigneeStatus;
+  if (status === "completed") return undefined;
+  return roomWorkStatusLabel(status);
+}
+
 export function roomWorkControlStatusLabel(status: NativeRoomWorkControl["status"]): string {
   return controlStatusLabels[status];
 }
@@ -166,21 +180,46 @@ export interface NativeRoomWorkResultCard {
   stateLabel: "作成済み" | "更新済み" | "結果を記録";
 }
 
+export interface NativeRoomWorkConversationEntry {
+  id: string;
+  workId: string;
+  side: "human" | "agent";
+  kind: "instruction" | "assignment-result" | "assignment-state";
+  /** Agent ID is present only for the Agent-side entries. */
+  agentId?: string;
+  /** The Server-issued creator ID for human instructions. */
+  authorId?: string;
+  assigneeId?: string;
+  text: string;
+  version: number;
+  generation: number;
+  status: NativeRoomWorkInstructionStatus | NativeRoomWorkAssigneeStatus;
+  createdAt?: string;
+  attachments: ResourceRef[];
+  resourceRefs: ResourceRef[];
+  resultCards: NativeRoomWorkResultCard[];
+}
+
 /** Builds direct-open entries from validated Assignment result refs only. */
 export function nativeRoomWorkResultCards(work: NativeRoomWork, room?: Pick<NativeRoom, "id" | "workspaceId">): NativeRoomWorkResultCard[] {
+  if (room && work.roomId !== room.id) return [];
   const cards: NativeRoomWorkResultCard[] = [];
   const seen = new Set<string>();
   for (const assignee of work.assignees) {
+    if (assignee.workId !== work.id) continue;
     const result = assignee.result;
     if (!result?.resourceRefs?.length) continue;
     for (const ref of result.resourceRefs) {
       if (ref.kind !== "artifact" && ref.kind !== "generated_surface") continue;
-      if ((ref.roomId && ref.roomId !== work.roomId) || (room && ref.workspaceId && ref.workspaceId !== room.workspaceId)) continue;
+      if ((ref.roomId && ref.roomId !== work.roomId)
+        || (room && ref.workspaceId && ref.workspaceId !== room.workspaceId)) continue;
       const key = `${ref.kind}\n${ref.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const typeLabel = ref.kind === "artifact" ? "Artifact" : "Generated Surface";
-      const revisionRefs = result.resourceRefs.filter((candidate) => candidate.parentId === ref.id);
+      const revisionRefs = result.resourceRefs.filter((candidate) => candidate.parentId === ref.id
+        && (!candidate.roomId || candidate.roomId === work.roomId)
+        && (!room || !candidate.workspaceId || candidate.workspaceId === room.workspaceId));
       // A single, Server-linked revision can be opened exactly. If one work
       // changed the same resource multiple times, open the current durable
       // version instead of guessing which historical revision the person wants.
@@ -203,6 +242,284 @@ export function nativeRoomWorkResultCards(work: NativeRoomWork, room?: Pick<Nati
     }
   }
   return cards;
+}
+
+function nonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Assignment results have appeared in a few Server projections over time.
+ * The normalizer usually gives the UI `summary`, but keeping this small
+ * fallback here means a persisted output body is never silently dropped if a
+ * bridge forwards the result shape directly.
+ */
+function roomWorkAssignmentResultText(result: NativeRoomWorkAssignee["result"]): string | undefined {
+  if (!result) return undefined;
+  const record = result as unknown as Record<string, unknown>;
+  const output = record.output;
+  const outputRecord = output && typeof output === "object" && !Array.isArray(output)
+    ? output as Record<string, unknown>
+    : undefined;
+  return nonEmptyText(result.summary)
+    ?? nonEmptyText(record.output_summary)
+    ?? nonEmptyText(record.result_summary)
+    ?? nonEmptyText(record.message)
+    ?? nonEmptyText(output)
+    ?? nonEmptyText(outputRecord?.summary)
+    ?? nonEmptyText(outputRecord?.output_summary)
+    ?? nonEmptyText(outputRecord?.result_summary)
+    ?? nonEmptyText(outputRecord?.message);
+}
+
+function conversationEntryTime(entry: NativeRoomWorkConversationEntry): number | undefined {
+  if (!entry.createdAt) return undefined;
+  const timestamp = Date.parse(entry.createdAt);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function compareAssigneeSnapshot(left: NativeRoomWorkAssignee, right: NativeRoomWorkAssignee): number {
+  if (left.generation !== right.generation) return left.generation - right.generation;
+  if (left.version !== right.version) return left.version - right.version;
+  const leftTime = left.updatedAt ? Date.parse(left.updatedAt) : Number.NaN;
+  const rightTime = right.updatedAt ? Date.parse(right.updatedAt) : Number.NaN;
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? 1 : -1;
+  return 0;
+}
+
+function compareInstructionSnapshot(left: NativeRoomWorkInstruction, right: NativeRoomWorkInstruction): number {
+  if (left.generation !== right.generation) return left.generation - right.generation;
+  if (left.version !== right.version) return left.version - right.version;
+  const leftTime = left.updatedAt ? Date.parse(left.updatedAt) : Number.NaN;
+  const rightTime = right.updatedAt ? Date.parse(right.updatedAt) : Number.NaN;
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? 1 : -1;
+  return 0;
+}
+
+function compareWorkSnapshot(left: NativeRoomWork, right: NativeRoomWork): number {
+  if (left.generation !== right.generation) return left.generation - right.generation;
+  if (left.version !== right.version) return left.version - right.version;
+  const leftTime = left.updatedAt ? Date.parse(left.updatedAt) : Number.NaN;
+  const rightTime = right.updatedAt ? Date.parse(right.updatedAt) : Number.NaN;
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? 1 : -1;
+  return 0;
+}
+
+function conversationWorkDetailScore(work: NativeRoomWork): number {
+  return (work.instructions?.length ?? 0)
+    + work.assignees.length
+    + (work.resultSummary ? 1 : 0)
+    + (work.resourceRefs?.length ?? 0);
+}
+
+function conversationWorkTime(work: NativeRoomWork): number | undefined {
+  const createdAt = work.createdAt ? Date.parse(work.createdAt) : Number.NaN;
+  if (Number.isFinite(createdAt)) return createdAt;
+  const updatedAt = work.updatedAt ? Date.parse(work.updatedAt) : Number.NaN;
+  return Number.isFinite(updatedAt) ? updatedAt : undefined;
+}
+
+/**
+ * Keeps one newest, same-Room Work snapshot per Work ID while retaining a
+ * richer detail response when its version is equal to the list projection.
+ * The selected Work is only an additional source for that existing Work; it
+ * does not make the conversation depend on a single selected item.
+ */
+export function nativeRoomWorkConversationWorks(
+  works: NativeRoomWork[],
+  room?: Pick<NativeRoom, "id" | "workspaceId">,
+  selectedWork?: NativeRoomWork
+): NativeRoomWork[] {
+  const rows = new Map<string, NativeRoomWork>();
+  const add = (candidate: NativeRoomWork, preferEqualSnapshot = false): void => {
+    if (room && candidate.roomId !== room.id) return;
+    const current = rows.get(candidate.id);
+    if (!current) {
+      rows.set(candidate.id, candidate);
+      return;
+    }
+    const snapshotOrder = compareWorkSnapshot(candidate, current);
+    if (snapshotOrder > 0 || (snapshotOrder === 0 && (preferEqualSnapshot || conversationWorkDetailScore(candidate) > conversationWorkDetailScore(current)))) {
+      rows.set(candidate.id, candidate);
+    }
+  };
+  works.forEach((work) => add(work));
+  if (selectedWork) add(selectedWork, true);
+
+  return [...rows.values()].sort((left, right) => {
+    const leftTime = conversationWorkTime(left);
+    const rightTime = conversationWorkTime(right);
+    if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) return leftTime - rightTime;
+    if (leftTime !== undefined && rightTime === undefined) return -1;
+    if (leftTime === undefined && rightTime !== undefined) return 1;
+    const snapshotOrder = compareWorkSnapshot(left, right);
+    if (snapshotOrder !== 0) return snapshotOrder;
+    return left.id.localeCompare(right.id);
+  });
+}
+
+function resultCardsForAssignee(
+  work: NativeRoomWork,
+  assignee: NativeRoomWorkAssignee,
+  room?: Pick<NativeRoom, "id" | "workspaceId">
+): NativeRoomWorkResultCard[] {
+  return nativeRoomWorkResultCards({ ...work, assignees: [assignee] }, room);
+}
+
+/**
+ * Projects one Room Work into the Chat-first message stream.
+ *
+ * Work/Assignment IDs are deliberately part of the projection key. This
+ * keeps a stale detail response or a duplicate list row from becoming a new
+ * visible message, while preserving the existing Work detail fetch boundary.
+ */
+export function nativeRoomWorkConversationEntries(
+  work: NativeRoomWork,
+  room?: Pick<NativeRoom, "id" | "workspaceId">,
+  agents: Pick<NativeAgent, "id">[] = []
+): NativeRoomWorkConversationEntry[] {
+  if (room && work.roomId !== room.id) return [];
+
+  const entries: NativeRoomWorkConversationEntry[] = [];
+  const agentIds = new Set(agents.map((agent) => agent.id));
+
+  const latestInstructions = new Map<string, NativeRoomWorkInstruction>();
+  for (const instruction of work.instructions ?? []) {
+    if (instruction.workId !== work.id) continue;
+    const current = latestInstructions.get(instruction.id);
+    if (!current || compareInstructionSnapshot(instruction, current) > 0) latestInstructions.set(instruction.id, instruction);
+  }
+
+  for (const instruction of latestInstructions.values()) {
+    const text = nonEmptyText(instruction.instruction)
+      ?? (instruction.attachments.length > 0 ? "添付のみの指示"
+        : instruction.resourceRefs?.length ? "Knowledge/Skillのみの指示" : "本文なしの指示");
+    const isAgentInstruction = agentIds.has(instruction.createdBy);
+    entries.push({
+      id: `instruction:${work.id}:${instruction.id}`,
+      workId: work.id,
+      side: isAgentInstruction ? "agent" : "human",
+      kind: "instruction",
+      ...(isAgentInstruction ? { agentId: instruction.createdBy } : {}),
+      ...(!isAgentInstruction ? { authorId: instruction.createdBy } : {}),
+      text,
+      version: instruction.version,
+      generation: instruction.generation,
+      status: instruction.status,
+      ...(instruction.createdAt ? { createdAt: instruction.createdAt } : {}),
+      attachments: instruction.attachments,
+      resourceRefs: instruction.resourceRefs ?? [],
+      resultCards: []
+    });
+  }
+
+  // A list refresh can contain the same assignment more than once. Keep the
+  // newest generation/version before turning it into a Chat message.
+  const latestAssignees = new Map<string, NativeRoomWorkAssignee>();
+  for (const assignee of work.assignees) {
+    if (assignee.workId !== work.id) continue;
+    const current = latestAssignees.get(assignee.id);
+    if (!current || compareAssigneeSnapshot(assignee, current) > 0) latestAssignees.set(assignee.id, assignee);
+  }
+
+  const resultTexts = new Set<string>();
+  for (const assignee of latestAssignees.values()) {
+    const result = assignee.result;
+    const resultCards = resultCardsForAssignee(work, assignee, room);
+    const resultText = roomWorkAssignmentResultText(result);
+    if (resultText) resultTexts.add(resultText);
+    const displayStatus = work.stopState && work.stopState !== "none" ? workDisplayStatus(work) : assignee.status;
+    const text = resultText ?? (resultCards.length > 0 ? "成果物を記録しました。" : `担当作業: ${roomWorkStatusLabel(displayStatus)}`);
+    const hasResult = Boolean(resultText || resultCards.length);
+    entries.push({
+      id: `${hasResult ? "result" : "state"}:${work.id}:${assignee.id}:${assignee.generation}:${assignee.version}`,
+      workId: work.id,
+      side: "agent",
+      kind: hasResult ? "assignment-result" : "assignment-state",
+      agentId: assignee.agentId,
+      assigneeId: assignee.id,
+      text,
+      version: assignee.version,
+      generation: assignee.generation,
+      status: displayStatus,
+      ...(assignee.updatedAt ?? assignee.createdAt ? { createdAt: assignee.updatedAt ?? assignee.createdAt } : {}),
+      attachments: [],
+      resourceRefs: [],
+      resultCards
+    });
+  }
+
+  // Some current Server responses expose the final body on Work rather than
+  // on Assignment.result. Show it once, but do not duplicate an Assignment
+  // result carrying the same body.
+  const workResultText = nonEmptyText(work.resultSummary);
+  if (workResultText && !resultTexts.has(workResultText)) {
+    entries.push({
+      id: `result:${work.id}:work:${work.version}:${work.generation}`,
+      workId: work.id,
+      side: "agent",
+      kind: "assignment-result",
+      agentId: work.defaultAgentId,
+      text: workResultText,
+      version: work.version,
+      generation: work.generation,
+      status: work.status,
+      ...(work.updatedAt ?? work.createdAt ? { createdAt: work.updatedAt ?? work.createdAt } : {}),
+      attachments: [],
+      resourceRefs: [],
+      resultCards: nativeRoomWorkResultCards(work, room)
+    });
+  }
+
+  return entries
+    .map((entry, index) => ({ entry, index, time: conversationEntryTime(entry) }))
+    .sort((left, right) => {
+      if (left.time !== undefined && right.time !== undefined && left.time !== right.time) return left.time - right.time;
+      if (left.time !== undefined && right.time === undefined) return -1;
+      if (left.time === undefined && right.time !== undefined) return 1;
+      return left.index - right.index;
+    })
+    .map(({ entry }) => entry);
+}
+
+/** Projects all available same-Room Work histories into one chronological stream. */
+export function nativeRoomWorkConversationEntriesForRoom(
+  works: NativeRoomWork[],
+  room?: Pick<NativeRoom, "id" | "workspaceId">,
+  agents: Pick<NativeAgent, "id">[] = [],
+  selectedWork?: NativeRoomWork
+): NativeRoomWorkConversationEntry[] {
+  const conversationWorks = nativeRoomWorkConversationWorks(works, room, selectedWork);
+  const entries = conversationWorks.flatMap((work, workIndex) => nativeRoomWorkConversationEntries(work, room, agents)
+    .map((entry, entryIndex) => ({
+      entry,
+      workIndex,
+      entryIndex,
+      workTime: conversationWorkTime(work)
+    })));
+  const seen = new Set<string>();
+  return entries
+    .filter(({ entry }) => {
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    })
+    .sort((left, right) => {
+      const leftTime = conversationEntryTime(left.entry) ?? left.workTime;
+      const rightTime = conversationEntryTime(right.entry) ?? right.workTime;
+      if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) return leftTime - rightTime;
+      if (leftTime !== undefined && rightTime === undefined) return -1;
+      if (leftTime === undefined && rightTime !== undefined) return 1;
+      if (left.workIndex !== right.workIndex) return left.workIndex - right.workIndex;
+      if (left.entry.generation !== right.entry.generation) return left.entry.generation - right.entry.generation;
+      if (left.entry.version !== right.entry.version) return left.entry.version - right.entry.version;
+      if (left.entryIndex !== right.entryIndex) return left.entryIndex - right.entryIndex;
+      return left.entry.id.localeCompare(right.entry.id);
+    })
+    .map(({ entry }) => entry);
 }
 
 function roomWorkControlLabel(control: NativeRoomWorkControl): string {
@@ -229,6 +546,10 @@ function actorLabel(value: string | undefined, currentAccountId: string | undefi
 function agentLabel(agentId: string, agents: NativeAgent[]): string {
   const agent = agents.find((item) => item.id === agentId);
   return agent ? agent.displayName : "Agent " + shortId(agentId);
+}
+
+function actorInitial(label: string): string {
+  return label.trim().slice(0, 1) || "?";
 }
 
 function roomCapability(room: NativeRoom | undefined, capability: "canEdit" | "canExecute" | "canManage" | "canStop"): boolean {
@@ -411,32 +732,85 @@ function renderSavedRoomWorkResourceRefs(refs: ResourceRef[]): ReactNode {
 
 const roomWorkStyles = [
   ".native-work-surface { min-height: 0; }",
-  ".native-work-surface .native-chat-header { gap: 20px; }",
-  ".native-work-header-meta { align-items: flex-end; display: flex; flex-direction: column; gap: 7px; min-width: min(340px, 45%); }",
+  ".native-work-surface .native-chat-header { align-items: center; gap: 14px; min-height: 78px; padding: 0 30px; }",
+  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: 18px; } }",
+  ".native-work-surface .native-chat-header .native-section-eyebrow { display: none; }",
+  ".native-work-surface .native-chat-header h1 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; line-height: 1.25; margin: 0; }",
+  ".native-work-surface .native-chat-header h1::before { color: var(--native-dim); content: '#'; font-size: 20px; font-weight: 400; margin-right: 10px; }",
+  ".native-work-header-artifact-link.native-room-tool-links { border: 0; display: block; padding: 0; }",
+  ".native-work-header-meta { align-items: center; display: flex; flex: 0 1 auto; flex-direction: row; flex-wrap: wrap; gap: 8px; justify-content: flex-end; min-width: 0; }",
   ".native-work-default { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }",
+  ".native-work-default-avatar { align-items: center; background: var(--native-panel-soft); border-radius: 8px; color: var(--native-copy); display: inline-flex; font-size: 10px; font-weight: 600; height: 25px; justify-content: center; width: 25px; }",
   ".native-work-default-label { color: var(--native-dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }",
   ".native-work-default-value { color: var(--native-copy); font-size: 12px; }",
   ".native-work-default-value.is-missing, .native-work-default-value.is-invalid { color: var(--native-accent); }",
-  ".native-work-default-select { background: rgba(255,255,255,.055); border: 1px solid var(--native-line); border-radius: 7px; color: var(--native-copy); font: inherit; font-size: 11px; max-width: 180px; min-height: 28px; padding: 0 8px; }",
+  ".native-work-default-select { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; color: var(--native-copy); font: inherit; font-size: 11px; max-width: 180px; min-height: 28px; padding: 0 8px; }",
   ".native-work-default-select:focus-visible { border-color: var(--native-accent); outline: 2px solid var(--native-accent); outline-offset: 2px; }",
-  ".native-work-reply-target { align-items: center; background: rgba(241,166,92,.065); border: 1px solid rgba(241,166,92,.24); border-radius: 9px; display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; padding: 10px 12px; }",
+  ".native-work-reply-target { align-items: center; background: var(--native-accent-soft); border: 1px solid var(--native-line-strong); border-radius: 9px; display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 10px 0; padding: 8px 10px; }",
+  ".native-work-reply-icon { color: var(--native-accent); flex: 0 0 auto; font-size: 14px; }",
+  ".native-work-reply-context { display: grid; gap: 2px; min-width: 0; flex: 1 1 180px; }",
+  ".native-work-reply-context small { color: var(--native-dim); font-size: 9px; }",
+  ".native-work-reply-context strong { color: var(--native-copy); font-size: 10px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-reply-clear { align-items: center; background: transparent; border: 0; border-radius: 5px; color: var(--native-dim); cursor: pointer; display: inline-flex; font: inherit; font-size: 17px; height: 24px; justify-content: center; padding: 0; width: 24px; }",
+  ".native-work-reply-clear:hover { background: var(--native-panel-soft); color: var(--native-copy); }",
   ".native-work-reply-target label { align-items: center; color: var(--native-copy); display: flex; flex-wrap: wrap; font-size: 10px; gap: 8px; }",
   ".native-work-reply-target label span { color: var(--native-accent); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }",
-  ".native-work-reply-select { background: rgba(0,0,0,.16); border: 1px solid var(--native-line-strong); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 11px; min-height: 28px; padding: 0 8px; }",
+  ".native-work-reply-select { background: var(--native-panel); border: 1px solid var(--native-line-strong); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 11px; min-height: 28px; padding: 0 8px; }",
   ".native-work-reply-select:focus-visible { border-color: var(--native-accent); outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-reply-note { color: var(--native-muted); font-size: 10px; line-height: 1.5; }",
   ".native-work-reply-note.is-required { color: var(--native-accent); }",
   ".native-work-private-note { color: var(--native-muted); font-size: 10px; line-height: 1.5; text-align: right; }",
-  ".native-work-body { display: grid; flex: 1; grid-template-columns: minmax(225px, .76fr) minmax(360px, 1.34fr); min-height: 0; overflow: hidden; }",
+  ".native-work-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }",
+  ".native-work-conversation { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }",
+  ".native-work-thread-switcher { align-items: center; border-bottom: 1px solid var(--native-line); display: flex; flex-wrap: nowrap; gap: 7px; height: 52px; max-height: 52px; overflow-x: auto; overflow-y: hidden; padding: 8px 30px; }",
+  ".native-work-thread-switcher-label { color: var(--native-dim); flex: 0 0 auto; font-size: 9px; letter-spacing: .1em; margin-right: 4px; text-transform: uppercase; }",
+  ".native-work-thread-switcher button { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 999px; color: var(--native-muted); cursor: pointer; display: inline-flex; flex: 0 0 auto; font: inherit; font-size: 10px; gap: 7px; max-width: min(240px, 100%); min-height: 28px; padding: 0 10px; }",
+  ".native-work-thread-switcher button:hover:not(:disabled) { border-color: var(--native-line-strong); color: var(--native-copy); }",
+  ".native-work-thread-switcher button.is-selected { background: var(--native-accent-soft); border-color: var(--native-accent); color: var(--native-copy); }",
+  ".native-work-thread-switcher button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-thread-switcher button:disabled { cursor: default; opacity: .6; }",
+  ".native-work-thread-switcher-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-conversation-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin: 14px auto 0; max-width: 800px; padding: 0 30px; width: 100%; }",
+  ".native-work-conversation-header.is-compact { align-items: center; justify-content: flex-end; margin-top: 10px; min-height: 26px; }",
+  ".native-work-conversation-heading { min-width: 0; }",
+  ".native-work-conversation-heading h2 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; margin: 0; }",
+  ".native-work-conversation-heading p { color: var(--native-muted); font-size: 12px; line-height: 1.65; margin: 6px 0 0; max-width: 650px; white-space: pre-wrap; }",
+  ".native-work-conversation-actions { align-items: center; display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }",
+  ".native-work-conversation-status { align-items: center; display: flex; gap: 8px; }",
+  ".native-work-message-list { gap: 17px; padding-top: 22px; }",
+  ".native-work-message { max-width: 770px; position: relative; width: min(100%, 770px); }",
+  ".native-work-message-self { align-self: flex-end; max-width: min(76%, 560px); width: auto; }",
+  ".native-work-message-peer, .native-work-message-agent { align-self: flex-start; display: grid; gap: 11px; grid-template-columns: 31px minmax(0, 1fr); }",
+  ".native-work-message-peer .native-message-content, .native-work-message-agent .native-message-content { text-align: left; }",
+  ".native-work-message-avatar { align-items: center; background: var(--native-panel-soft); border-radius: 10px; color: var(--native-copy); display: inline-flex; flex: 0 0 auto; font-size: 11px; font-weight: 600; height: 31px; justify-content: center; width: 31px; }",
+  ".native-work-message-main { min-width: 0; }",
+  ".native-work-message-bubble { min-width: 0; }",
+  ".native-work-message-peer .native-message-meta { color: var(--native-dim); font-size: 10px; letter-spacing: 0; margin-bottom: 6px; }",
+  ".native-work-message-agent .native-message-meta { flex-wrap: wrap; margin-bottom: 6px; }",
+  ".native-work-message-status { color: var(--native-dim); font-size: 9px; font-weight: 400; letter-spacing: 0; }",
+  ".native-work-message-agent .native-message-content { max-width: 720px; }",
+  ".native-work-message-peer .native-work-message-reply, .native-work-message-agent .native-work-message-reply { grid-column: 2; grid-row: 2; justify-self: start; }",
+  ".native-work-message-self .native-work-message-reply { display: block; margin-left: auto; }",
+  ".native-work-message-state { color: var(--native-muted); font-size: 10px; line-height: 1.5; margin-top: 8px; }",
+  ".native-work-message-state.is-live { color: var(--native-accent); }",
+  ".native-work-message-state.is-complete { color: var(--native-success); }",
+  ".native-work-message-state.is-alert { color: var(--native-danger); }",
+  ".native-work-message-time { color: var(--native-dim); font-size: 9px; font-weight: 400; letter-spacing: 0; }",
+  ".native-work-message-reply { color: var(--native-muted); font-size: 10px; margin-top: 8px; }",
+  ".native-work-message-reply:hover:not(:disabled) { color: var(--native-copy); }",
+  ".native-work-message-result-card { margin-top: 10px; max-width: 560px; }",
+  ".native-work-conversation-loading { color: var(--native-muted); margin: auto; text-align: center; }",
+  ".native-work-conversation-empty { color: var(--native-muted); margin: auto; max-width: 420px; padding: 36px 22px; text-align: center; }",
+  ".native-work-conversation-empty p { line-height: 1.7; margin: 9px 0 0; }",
   ".native-work-list { border-right: 1px solid var(--native-line); min-height: 0; overflow: auto; padding: 20px; }",
   ".native-work-list-heading { align-items: baseline; display: flex; justify-content: space-between; margin: 0 0 14px; }",
   ".native-work-list-heading h2, .native-work-detail-heading h2 { color: var(--native-copy); font-family: Georgia, Times New Roman, serif; font-size: 20px; font-weight: 400; letter-spacing: -.025em; margin: 0; }",
   ".native-work-list-count { color: var(--native-dim); font-size: 10px; letter-spacing: .08em; }",
   ".native-work-list-items { display: grid; gap: 9px; list-style: none; margin: 0; padding: 0; }",
-  ".native-work-card { background: rgba(255,255,255,.028); border: 1px solid var(--native-line); border-radius: 10px; color: inherit; cursor: pointer; display: block; padding: 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
-  ".native-work-card:hover:not(:disabled) { background: rgba(255,255,255,.06); border-color: var(--native-line-strong); transform: translateY(-1px); }",
+  ".native-work-card { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 10px; color: inherit; cursor: pointer; display: block; padding: 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
+  ".native-work-card:hover:not(:disabled) { background: var(--native-panel); border-color: var(--native-line-strong); transform: translateY(-1px); }",
   ".native-work-card:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
-  ".native-work-card.is-selected { background: linear-gradient(135deg, rgba(241,166,92,.12), rgba(255,255,255,.035)); border-color: rgba(241,166,92,.55); box-shadow: inset 3px 0 0 var(--native-accent); }",
+  ".native-work-card.is-selected { background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel-soft)); border-color: var(--native-accent); box-shadow: inset 3px 0 0 var(--native-accent); }",
   ".native-work-card:disabled { cursor: default; }",
   ".native-work-card-top, .native-work-card-meta, .native-work-assignee-row, .native-work-control-row, .native-work-comment-head, .native-work-detail-actions { align-items: center; display: flex; gap: 8px; }",
   ".native-work-card-top { justify-content: space-between; }",
@@ -444,13 +818,13 @@ const roomWorkStyles = [
   ".native-work-card-objective { color: var(--native-muted); display: -webkit-box; font-size: 11px; line-height: 1.5; margin: 7px 0 10px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }",
   ".native-work-card-meta { color: var(--native-dim); flex-wrap: wrap; font-size: 9px; justify-content: space-between; letter-spacing: .04em; }",
   ".native-work-status, .native-work-instruction-status, .native-work-control-status { border: 1px solid var(--native-line); border-radius: 999px; display: inline-flex; font-size: 9px; line-height: 1; padding: 5px 7px; white-space: nowrap; }",
-  ".native-work-status.is-live, .native-work-instruction-status.is-live, .native-work-control-status.is-live { border-color: rgba(241,166,92,.5); color: var(--native-accent); }",
-  ".native-work-status.is-complete, .native-work-instruction-status.is-complete, .native-work-control-status.is-complete { border-color: rgba(123,190,147,.42); color: #9bd3ad; }",
-  ".native-work-status.is-stop { border-color: rgba(238,137,129,.4); color: #efaaa2; }",
-  ".native-work-status.is-alert, .native-work-instruction-status.is-alert, .native-work-control-status.is-alert { border-color: rgba(238,137,129,.5); color: var(--native-danger); }",
+  ".native-work-status.is-live, .native-work-instruction-status.is-live, .native-work-control-status.is-live { border-color: var(--native-accent); color: var(--native-accent); }",
+  ".native-work-status.is-complete, .native-work-instruction-status.is-complete, .native-work-control-status.is-complete { border-color: var(--native-success); color: var(--native-success); }",
+  ".native-work-status.is-stop { border-color: var(--native-danger); color: var(--native-danger); }",
+  ".native-work-status.is-alert, .native-work-instruction-status.is-alert, .native-work-control-status.is-alert { border-color: var(--native-danger); color: var(--native-danger); }",
   ".native-work-status.is-neutral, .native-work-instruction-status.is-neutral, .native-work-control-status.is-neutral { color: var(--native-muted); }",
   ".native-work-assignee-row { color: var(--native-muted); flex-wrap: wrap; font-size: 10px; margin-top: 10px; }",
-  ".native-work-assignee-chip { background: rgba(255,255,255,.045); border: 1px solid var(--native-line); border-radius: 999px; color: var(--native-muted); padding: 4px 7px; }",
+  ".native-work-assignee-chip { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 999px; color: var(--native-muted); padding: 4px 7px; }",
   ".native-work-empty { color: var(--native-muted); font-size: 12px; line-height: 1.7; margin: 24px auto; max-width: 280px; text-align: center; }",
   ".native-work-detail { min-height: 0; overflow: auto; padding: 27px clamp(22px, 4vw, 62px) 36px; }",
   ".native-work-detail-heading { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; }",
@@ -460,49 +834,49 @@ const roomWorkStyles = [
   ".native-work-subheading h3 { color: var(--native-copy); font-size: 11px; letter-spacing: .1em; margin: 0; text-transform: uppercase; }",
   ".native-work-subheading span { color: var(--native-dim); font-size: 9px; }",
   ".native-work-assignees { display: grid; gap: 8px; }",
-  ".native-work-assignee-card { background: rgba(255,255,255,.028); border: 1px solid var(--native-line); border-radius: 9px; padding: 11px; }",
+  ".native-work-assignee-card { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 9px; padding: 11px; }",
   ".native-work-assignee-row { justify-content: space-between; margin: 0; }",
   ".native-work-assignee-main { align-items: center; display: flex; gap: 8px; min-width: 0; }",
   ".native-work-assignee-main strong { color: var(--native-copy); font-size: 11px; font-weight: 600; }",
   ".native-work-assignee-main span { color: var(--native-dim); font-size: 9px; }",
   ".native-work-assignee-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; }",
-  ".native-work-assignee-actions select { background: rgba(255,255,255,.05); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 10px; min-height: 26px; padding: 0 6px; }",
-  ".native-work-delegation { background: linear-gradient(135deg, rgba(241,166,92,.08), rgba(255,255,255,.022)); border: 1px solid rgba(241,166,92,.24); border-radius: 10px; display: grid; gap: 12px; padding: 14px; }",
+  ".native-work-assignee-actions select { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 10px; min-height: 26px; padding: 0 6px; }",
+  ".native-work-delegation { background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel-soft)); border: 1px solid var(--native-line-strong); border-radius: 10px; display: grid; gap: 12px; padding: 14px; }",
   ".native-work-delegation-help { color: var(--native-muted); font-size: 10px; line-height: 1.6; margin: -4px 0 0; }",
   ".native-work-delegation-grid { display: grid; gap: 10px; grid-template-columns: minmax(150px, .85fr) minmax(210px, 1.15fr); }",
   ".native-work-delegation-field { display: grid; gap: 6px; }",
   ".native-work-delegation-field > span { color: var(--native-dim); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }",
-  ".native-work-delegation-select { background: rgba(0,0,0,.16); border: 1px solid var(--native-line-strong); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 11px; min-height: 29px; padding: 0 8px; width: 100%; }",
+  ".native-work-delegation-select { background: var(--native-panel); border: 1px solid var(--native-line-strong); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 11px; min-height: 29px; padding: 0 8px; width: 100%; }",
   ".native-work-delegation-select:focus-visible { border-color: var(--native-accent); outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-delegation-agents, .native-work-delegation-dependencies { display: grid; gap: 7px; }",
   ".native-work-delegation-agents { grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); }",
-  ".native-work-delegation-check { align-items: flex-start; background: rgba(255,255,255,.035); border: 1px solid var(--native-line); border-radius: 7px; color: var(--native-copy); display: flex; font-size: 10px; gap: 7px; line-height: 1.4; padding: 8px; }",
-  ".native-work-delegation-check:has(input:checked) { border-color: rgba(241,166,92,.56); background: rgba(241,166,92,.1); }",
+  ".native-work-delegation-check { align-items: flex-start; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; color: var(--native-copy); display: flex; font-size: 10px; gap: 7px; line-height: 1.4; padding: 8px; }",
+  ".native-work-delegation-check:has(input:checked) { border-color: var(--native-accent); background: var(--native-accent-soft); }",
   ".native-work-delegation-check:has(input:disabled) { color: var(--native-dim); cursor: not-allowed; }",
   ".native-work-delegation-check input { accent-color: var(--native-accent); margin: 2px 0 0; }",
   ".native-work-delegation-dependency { align-items: center; color: var(--native-muted); display: flex; font-size: 10px; gap: 7px; }",
   ".native-work-delegation-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 9px; justify-content: space-between; }",
   ".native-work-delegation-status { color: var(--native-muted); font-size: 10px; line-height: 1.5; }",
-  ".native-work-delegation-status.is-complete { color: #9bd3ad; }",
+  ".native-work-delegation-status.is-complete { color: var(--native-success); }",
   ".native-work-delegation-status.is-alert { color: var(--native-danger); }",
-  ".native-work-timeline { border-left: 1px solid rgba(241,166,92,.36); display: grid; gap: 11px; margin-left: 7px; padding-left: 18px; }",
-  ".native-work-instruction { background: rgba(255,255,255,.028); border: 1px solid var(--native-line); border-radius: 9px; padding: 12px; position: relative; }",
-  ".native-work-instruction::before { background: var(--native-accent); border: 3px solid var(--native-bg, #0e1110); border-radius: 50%; content: ''; height: 7px; left: -23px; position: absolute; top: 14px; width: 7px; }",
+  ".native-work-timeline { border-left: 1px solid var(--native-accent); display: grid; gap: 11px; margin-left: 7px; padding-left: 18px; }",
+  ".native-work-instruction { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 9px; padding: 12px; position: relative; }",
+  ".native-work-instruction::before { background: var(--native-accent); border: 3px solid var(--native-bg); border-radius: 50%; content: ''; height: 7px; left: -23px; position: absolute; top: 14px; width: 7px; }",
   ".native-work-instruction-head { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; justify-content: space-between; }",
   ".native-work-instruction-kind { color: var(--native-dim); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }",
   ".native-work-instruction-body { color: var(--native-copy); font-size: 12px; line-height: 1.7; margin: 8px 0 0; white-space: pre-wrap; }",
   ".native-work-instruction-foot { color: var(--native-dim); display: flex; flex-wrap: wrap; font-size: 9px; gap: 10px; margin-top: 8px; }",
   ".native-work-comments { display: grid; gap: 9px; }",
-  ".native-work-comment { background: rgba(255,255,255,.04); border: 1px solid var(--native-line); border-radius: 9px; padding: 12px; }",
+  ".native-work-comment { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 9px; padding: 12px; }",
   ".native-work-comment-head { justify-content: space-between; }",
   ".native-work-comment-author { color: var(--native-copy); font-size: 11px; font-weight: 600; }",
   ".native-work-comment-time { color: var(--native-dim); font-size: 9px; }",
   ".native-work-comment-body { color: var(--native-muted); font-size: 12px; line-height: 1.7; margin: 8px 0 11px; white-space: pre-wrap; }",
   ".native-work-comment-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; }",
-  ".native-work-comment-actions select { background: rgba(255,255,255,.04); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-muted); font: inherit; font-size: 10px; min-height: 27px; padding: 0 6px; }",
-  ".native-work-comment-applied { color: #9bd3ad; font-size: 10px; }",
+  ".native-work-comment-actions select { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-muted); font: inherit; font-size: 10px; min-height: 27px; padding: 0 6px; }",
+  ".native-work-comment-applied { color: var(--native-success); font-size: 10px; }",
   ".native-work-controls { display: grid; gap: 7px; }",
-  ".native-work-control-row { border-bottom: 1px solid rgba(255,255,255,.045); color: var(--native-muted); font-size: 10px; justify-content: space-between; padding: 7px 0; }",
+  ".native-work-control-row { border-bottom: 1px solid var(--native-line); color: var(--native-muted); font-size: 10px; justify-content: space-between; padding: 7px 0; }",
   ".native-work-control-row:last-child { border-bottom: 0; }",
   ".native-work-control-row span:first-child { color: var(--native-copy); }",
   ".native-work-control-warning { color: var(--native-danger); font-size: 10px; line-height: 1.6; margin: 7px 0 0; }",
@@ -510,27 +884,27 @@ const roomWorkStyles = [
   ".native-work-composer-label { color: var(--native-accent); display: block; font-size: 10px; letter-spacing: .1em; margin-bottom: 9px; text-transform: uppercase; }",
   ".native-work-composer-help { color: var(--native-dim); font-size: 10px; line-height: 1.6; margin: 8px 0 0; }",
   ".native-work-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 3px; }",
-  ".native-work-attachment { align-items: center; background: rgba(255,255,255,.04); border: 1px solid var(--native-line); border-radius: 7px; display: inline-flex; gap: 7px; max-width: 100%; padding: 6px 8px; }",
+  ".native-work-attachment { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; display: inline-flex; gap: 7px; max-width: 100%; padding: 6px 8px; }",
   ".native-work-attachment-name { color: var(--native-copy); font-size: 10px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-attachment-state { color: var(--native-dim); font-size: 9px; }",
   ".native-work-resource-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 3px; }",
-  ".native-work-resource-item { align-items: center; background: rgba(125,177,221,.08); border: 1px solid rgba(125,177,221,.32); border-radius: 7px; color: var(--native-copy); display: inline-flex; font-size: 10px; gap: 6px; max-width: 100%; padding: 6px 8px; }",
-  ".native-work-resource-item > span:first-child { color: #a8cdec; font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }",
+  ".native-work-resource-item { align-items: center; background: var(--native-accent-soft); border: 1px solid var(--native-line-strong); border-radius: 7px; color: var(--native-copy); display: inline-flex; font-size: 10px; gap: 6px; max-width: 100%; padding: 6px 8px; }",
+  ".native-work-resource-item > span:first-child { color: var(--native-accent); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }",
   ".native-work-resource-version { color: var(--native-dim); font-size: 9px; }",
   ".native-work-result-cards { display: grid; gap: 9px; margin-top: 10px; }",
-  ".native-work-result-card { align-items: center; background: linear-gradient(135deg, rgba(123,190,147,.09), rgba(255,255,255,.028)); border: 1px solid rgba(123,190,147,.34); border-radius: 10px; color: inherit; cursor: pointer; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; padding: 12px 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
-  ".native-work-result-card:hover { background: linear-gradient(135deg, rgba(123,190,147,.16), rgba(255,255,255,.05)); border-color: rgba(123,190,147,.58); transform: translateY(-1px); }",
+  ".native-work-result-card { align-items: center; background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel-soft)); border: 1px solid var(--native-success); border-radius: 10px; color: inherit; cursor: pointer; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; padding: 12px 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
+  ".native-work-result-card:hover { background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel)); border-color: var(--native-success); transform: translateY(-1px); }",
   ".native-work-result-card:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-result-card-main { display: grid; gap: 5px; min-width: 0; }",
   ".native-work-result-card-title { color: var(--native-copy); font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-result-card-meta { align-items: center; color: var(--native-muted); display: flex; flex-wrap: wrap; font-size: 9px; gap: 7px; }",
-  ".native-work-result-card-state { border: 1px solid rgba(123,190,147,.46); border-radius: 999px; color: #9bd3ad; font-size: 9px; padding: 5px 7px; white-space: nowrap; }",
+  ".native-work-result-card-state { border: 1px solid var(--native-success); border-radius: 999px; color: var(--native-success); font-size: 9px; padding: 5px 7px; white-space: nowrap; }",
   ".native-work-result-card-open { color: var(--native-accent); font-size: 10px; white-space: nowrap; }",
   ".native-work-resource-remove { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 12px; line-height: 1; padding: 0 0 0 2px; }",
   ".native-work-resource-remove:hover { color: var(--native-copy); }",
-  ".native-work-attachment.is-ready { border-color: rgba(123,190,147,.42); }",
-  ".native-work-attachment.is-ready .native-work-attachment-state { color: #9bd3ad; }",
-  ".native-work-attachment.is-failed { border-color: rgba(238,137,129,.5); }",
+  ".native-work-attachment.is-ready { border-color: var(--native-success); }",
+  ".native-work-attachment.is-ready .native-work-attachment-state { color: var(--native-success); }",
+  ".native-work-attachment.is-failed { border-color: var(--native-danger); }",
   ".native-work-attachment.is-failed .native-work-attachment-state { color: var(--native-danger); }",
   ".native-work-attachment button { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; padding: 2px; }",
   ".native-work-attachment button:hover { color: var(--native-copy); }",
@@ -538,13 +912,13 @@ const roomWorkStyles = [
   ".native-work-attachment-item { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; font-size: 10px; }",
   ".native-work-attachment-item::before { color: var(--native-accent); content: '↳'; }",
   ".native-work-attachment-action { color: var(--native-accent); font-size: 9px; }",
-  ".native-work-attachment-button { background: rgba(255,255,255,.045); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; min-height: 27px; padding: 0 9px; }",
+  ".native-work-attachment-button { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; min-height: 27px; padding: 0 9px; }",
   ".native-work-attachment-button:hover:not(:disabled) { border-color: var(--native-line-strong); color: var(--native-copy); }",
   ".native-work-attachment-button:disabled { cursor: default; opacity: .55; }",
   ".native-work-reconnect { margin-left: auto; }",
   ".native-work-surface .native-banner { margin-inline: clamp(22px, 5vw, 72px); }",
-  "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-body { grid-template-columns: 1fr; overflow: auto; } .native-work-list { border-bottom: 1px solid var(--native-line); border-right: 0; max-height: 38vh; } .native-work-detail { overflow: visible; } }",
-  "@media (max-width: 560px) { .native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; } .native-work-detail-heading { flex-direction: column; } .native-work-detail-actions { justify-content: flex-start; } .native-work-list, .native-work-detail { padding-inline: 18px; } .native-work-delegation-grid { grid-template-columns: 1fr; } }"
+  "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-thread-switcher { max-height: 112px; } .native-work-conversation-header { align-items: flex-start; flex-direction: column; } .native-work-conversation-actions { align-items: flex-start; flex-direction: row; } }",
+  "@media (max-width: 560px) { .native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; } .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list { padding-inline: 18px; } }"
 ].join("\n");
 
 export function RoomWorkSurface({
@@ -560,7 +934,7 @@ export function RoomWorkSurface({
   workDetailLoading = false,
   workError,
   workDetailError,
-  selectedWork,
+  selectedWork: selectedWorkProp,
   selectedWorkId,
   onSelectWork,
   replyWorkId,
@@ -590,6 +964,7 @@ export function RoomWorkSurface({
   onSetDefaultAgent,
   onOpenAgentDm,
   onOpenAgentSettings,
+  roomToolLinks,
   onOpenResultResource,
   onReconnect
 }: RoomWorkSurfaceProps) {
@@ -614,16 +989,38 @@ export function RoomWorkSurface({
   const attachmentContextGenerationRef = useRef(0);
 
   const roomIsDm = room?.kind === "agent_dm";
+  const roomWorks = (() => {
+    if (!room) return [];
+    const rows = new Map<string, NativeRoomWork>();
+    for (const work of works) {
+      if (work.roomId !== room.id) continue;
+      const current = rows.get(work.id);
+      if (!current || compareWorkSnapshot(work, current) > 0) rows.set(work.id, work);
+    }
+    return [...rows.values()];
+  })();
+  const selectedWorkSummary = selectedWorkId ? roomWorks.find((work) => work.id === selectedWorkId) : undefined;
+  const selectedWork = room && selectedWorkProp
+    && selectedWorkProp.roomId === room.id
+    && (!selectedWorkId || selectedWorkProp.id === selectedWorkId)
+    && (!selectedWorkSummary || compareWorkSnapshot(selectedWorkProp, selectedWorkSummary) >= 0)
+    ? selectedWorkProp
+    : selectedWorkSummary;
+  const conversationWorks = nativeRoomWorkConversationWorks(roomWorks, room, selectedWork);
+  const conversationWorkById = new Map(conversationWorks.map((work) => [work.id, work]));
+  const replyTargetWork = replyWorkId
+    ? conversationWorkById.get(replyWorkId) ?? (selectedWork?.id === replyWorkId ? selectedWork : undefined)
+    : undefined;
   const defaultAgentId = room?.defaultAgentId;
   const defaultAgent = defaultAgentId ? agents.find((agent) => agent.id === defaultAgentId) : undefined;
   const defaultAgentKnown = Boolean(defaultAgentId && defaultAgent && defaultAgent.status !== undefined && (roomIsDm || roomCapabilityKnown(room, "canExecute")));
   const defaultAgentReady = Boolean(defaultAgentKnown && roomExecutionAllowed(room) && agentIsAvailable(defaultAgent, agentBackends, roomAgentMembers));
   const writeBlocked = archived || readOnly || connectionState === "offline";
   const executeBlocked = writeBlocked || !roomExecutionAllowed(room);
-  const replyActive = Boolean(replyWorkId && selectedWork?.id === replyWorkId);
-  const replyEnabled = Boolean(selectedWork && roomWorkCanReceiveReply(selectedWork));
-  const replyAllowed = Boolean(selectedWork && roomWorkControlAllowed(room, selectedWork, currentAccountId));
-  const replyAssignees = replyActive ? (selectedWork?.assignees.filter((assignee) => !assigneeIsTerminal(assignee)) ?? []) : [];
+  const replyActive = Boolean(replyTargetWork);
+  const replyEnabled = Boolean(replyTargetWork && roomWorkCanReceiveReply(replyTargetWork));
+  const replyAllowed = Boolean(replyTargetWork && roomWorkControlAllowed(room, replyTargetWork, currentAccountId));
+  const replyAssignees = replyActive ? (replyTargetWork?.assignees.filter((assignee) => !assigneeIsTerminal(assignee)) ?? []) : [];
   const replyAssigneeSignature = replyAssignees.map((assignee) => `${assignee.id}:${assignee.status}:${assignee.generation}`).join("|");
   const replyAssigneeRequired = replyAssignees.length > 1;
   const replyAssigneeSelected = replyAssignees.some((assignee) => assignee.id === replyAssigneeId);
@@ -697,7 +1094,8 @@ export function RoomWorkSurface({
     || !delegateInstruction.trim()
     || delegateAgentIds.length === 0
     || !delegateDependencyIds.every((dependencyId) => delegateDependencyAssignees.some((assignee) => assignee.id === dependencyId));
-  const resultCards = selectedWork ? nativeRoomWorkResultCards(selectedWork, room) : [];
+  const conversationEntries = nativeRoomWorkConversationEntriesForRoom(conversationWorks, room, agents);
+  const hasConversationEntries = conversationEntries.length > 0;
 
   if (attachmentContextRef.current !== attachmentContextKey) {
     attachmentContextRef.current = attachmentContextKey;
@@ -714,7 +1112,7 @@ export function RoomWorkSurface({
 
   useEffect(() => {
     setReplyOperation(undefined);
-  }, [replyWorkId, room?.id, room?.workspaceId, selectedWork?.id]);
+  }, [replyWorkId, room?.id, room?.workspaceId, replyTargetWork?.id]);
 
   useEffect(() => {
     setApplyOperationIds({});
@@ -740,8 +1138,6 @@ export function RoomWorkSurface({
     setDelegateDependencyIds([]);
     setDelegateInstruction("");
   }, [room?.id, room?.workspaceId, selectedWork?.id]);
-
-  const statusText = connectionState === "reconnecting" ? "再接続中" : connectionState === "offline" ? "オフライン" : "接続済み";
 
   const runAction = async <T,>(key: string, action: () => T | Promise<T>, onError?: (error: unknown) => void): Promise<RoomWorkActionOutcome<T>> => {
     setActionError(undefined);
@@ -1212,39 +1608,86 @@ export function RoomWorkSurface({
     );
   };
 
+  const renderConversationReply = (work: NativeRoomWork) => (
+    <button
+      type="button"
+      className="native-text-button native-work-message-reply"
+      data-work-id={work.id}
+      disabled={Boolean(busyAction) || !roomWorkCanReceiveReply(work) || executeBlocked || !roomWorkControlAllowed(room, work, currentAccountId)}
+      onClick={() => onSetReplyWorkId(work.id)}
+    >
+      {replyWorkId === work.id ? "返信対象" : "返信"}
+    </button>
+  );
+
+  const renderConversationEntry = (entry: NativeRoomWorkConversationEntry) => {
+    const isAgent = entry.side === "agent";
+    const isSelf = !isAgent && Boolean(currentAccountId && entry.authorId === currentAccountId);
+    if (entry.kind === "assignment-state" && entry.status === "completed") return null;
+    const entryStatus = roomWorkConversationStatusLabel(entry);
+    const author = isAgent
+      ? agentLabel(entry.agentId ?? conversationWorkById.get(entry.workId)?.defaultAgentId ?? selectedWork?.defaultAgentId ?? "", agents)
+      : actorLabel(entry.authorId, currentAccountId);
+    return (
+      <article
+        className={`native-message native-work-message ${isSelf ? "native-message-user native-work-message-self" : isAgent ? "native-message-agent native-work-message-agent" : "native-message-agent native-work-message-peer"}`}
+        data-work-id={entry.workId}
+        data-conversation-entry-id={entry.id}
+        {...(entry.authorId ? { "data-author-id": entry.authorId } : {})}
+        key={entry.id}
+      >
+        {!isSelf ? <span className="native-work-message-avatar" aria-hidden="true">{actorInitial(author)}</span> : null}
+        <div className="native-work-message-main">
+          {!isSelf ? <div className="native-message-meta">
+            <span>{author}</span>
+            {entryStatus ? <span className="native-work-message-status">{entryStatus}</span> : null}
+            {formatTimestamp(entry.createdAt) ? <span className="native-work-message-time">{formatTimestamp(entry.createdAt)}</span> : null}
+          </div> : null}
+          <div className="native-work-message-bubble">
+            <div className="native-message-content">{entry.text}</div>
+            {renderSavedAttachmentRefs(entry.attachments)}
+            {renderSavedRoomWorkResourceRefs(entry.resourceRefs)}
+            {entry.resultCards.length ? (
+              <div className="native-work-result-cards native-work-message-result-card" aria-label="仕事の成果物">
+                {entry.resultCards.map((card) => (
+                  <button
+                    key={`${entry.id}:${card.resource.kind}:${card.resource.id}`}
+                    type="button"
+                    className="native-work-result-card"
+                    onClick={() => onOpenResultResource?.(card.resource)}
+                    disabled={!onOpenResultResource}
+                  >
+                    <span className="native-work-result-card-main">
+                      <strong className="native-work-result-card-title">{card.title}</strong>
+                      <span className="native-work-result-card-meta"><span>{card.typeLabel}</span><span>同じRoomで開く</span></span>
+                    </span>
+                    <span className="native-work-result-card-state">{card.stateLabel}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+        {conversationWorkById.get(entry.workId) ? renderConversationReply(conversationWorkById.get(entry.workId)!) : null}
+      </article>
+    );
+  };
+
   return (
     <section className="native-chat-surface native-work-surface" aria-labelledby="native-work-heading">
       <style>{roomWorkStyles}</style>
       <header className="native-chat-header">
-        <div>
-          <div className="native-section-eyebrow">{roomIsDm ? "Private Agent DM" : "Room workbench"}</div>
+        <div className="native-room-heading">
+          <div className="native-section-eyebrow">{roomIsDm ? "Private Agent DM" : "Room"}</div>
           <h1 id="native-work-heading">{room?.name ?? "Roomを選択"}</h1>
         </div>
         <div className="native-work-header-meta">
-          <div className={"native-connection-status is-" + connectionState} role="status">
-            <span className="native-status-dot" aria-hidden="true" />
-            {statusText}
-          </div>
           <div className="native-work-default">
-            <span className="native-work-default-label">{roomIsDm ? "担当Agent" : "既定Agent"}</span>
-            {renderDefaultAgentState()}
-            {renderDefaultAgentSelector()}
-            {!roomIsDm && defaultAgentReady && onOpenAgentDm ? (
-              <button
-                type="button"
-                className="native-text-button"
-                disabled={Boolean(busyAction) || executeBlocked}
-                onClick={() => {
-                  if (!defaultAgentId) return;
-                  void runAction("agent-dm:" + defaultAgentId, () => onOpenAgentDm(defaultAgentId));
-                }}
-              >
-                {busyAction === "agent-dm:" + defaultAgentId ? "DMを開いています…" : "このAgentとDM"}
-              </button>
-            ) : null}
+            <span className="native-work-default-avatar" aria-hidden="true">{actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}</span>
+            <span className="native-work-default-value" data-agent-id={defaultAgentId ?? undefined}>{defaultAgent ? agentLabel(defaultAgent.id, agents) : "Agent"}</span>
           </div>
           {roomIsDm ? <div className="native-work-private-note">Private Room · あなたとこのAgentだけが参加できます</div> : null}
-          {!roomIsDm && onOpenAgentSettings ? <button type="button" className="native-text-button" onClick={onOpenAgentSettings}>Agent設定</button> : null}
+          {roomToolLinks}
         </div>
       </header>
 
@@ -1258,194 +1701,26 @@ export function RoomWorkSurface({
       ) : null}
 
       <div className="native-work-body">
-        <aside className="native-work-list" aria-label="Roomの仕事一覧">
-          <div className="native-work-list-heading">
-            <h2>仕事</h2>
-            <span className="native-work-list-count">{works.length}件</span>
-          </div>
-          {workLoading || loading ? <div className="native-work-empty" role="status">仕事の一覧を確認しています…</div> : null}
-          {!workLoading && !loading && works.length === 0 ? <div className="native-work-empty"><span className="native-placeholder-kicker">NO WORK YET</span><p>このRoomにはまだ仕事がありません。下の入力欄から新しい依頼を送れます。</p></div> : null}
-          <ul className="native-work-list-items">
-            {works.map((work) => (
-              <li key={work.id}>
-                <button type="button" className={"native-work-card" + (work.id === selectedWorkId ? " is-selected" : "")} onClick={() => onSelectWork(work.id)} aria-current={work.id === selectedWorkId ? "true" : undefined}>
-                  <div className="native-work-card-top">
-                    <span className="native-work-card-title">{work.title}</span>
-                    <span className={"native-work-status " + statusTone(workDisplayStatus(work))}>{roomWorkStatusLabel(workDisplayStatus(work))}</span>
-                  </div>
-                  <p className="native-work-card-objective">{work.objective}</p>
-                  <div className="native-work-card-meta">
-                    <span>依頼者 {actorLabel(work.requesterId, currentAccountId)}</span>
-                    <span>指示 v{work.instructionVersion}</span>
-                  </div>
-                  <div className="native-work-assignee-row">
-                    {work.assignees.length === 0 ? <span>担当未割当</span> : work.assignees.slice(0, 3).map((assignee) => <span className="native-work-assignee-chip" key={assignee.id}>{agentLabel(assignee.agentId, agents)}</span>)}
-                    {work.assignees.length > 3 ? <span>+{work.assignees.length - 3}</span> : null}
-                  </div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
-
-        <div className="native-work-detail">
-          {!selectedWork ? (
-            <div className="native-work-empty"><span className="native-placeholder-kicker">SELECT A WORK</span><p>左の仕事を選ぶと、担当・指示・コメントの履歴を確認できます。</p></div>
-          ) : (
+        <div className="native-work-conversation">
+          {workLoading || loading ? <div className="native-work-conversation-loading" role="status">仕事の会話を確認しています…</div> : null}
+          {!workLoading && !loading && roomWorks.length === 0 ? (
+            <div className="native-work-conversation-empty"><span className="native-placeholder-kicker">NO WORK YET</span><p>このRoomにはまだ仕事がありません。下の入力欄から新しい依頼を送れます。</p></div>
+          ) : null}
+          {roomWorks.length > 0 ? (
             <>
-              <div className="native-work-detail-heading">
-                <div>
-                  <div className="native-section-eyebrow">Work detail</div>
+              {selectedWork && !hasConversationEntries ? <header className="native-work-conversation-header">
+                <div className="native-work-conversation-heading">
                   <h2>{selectedWork.title}</h2>
                   <p>{selectedWork.objective}</p>
                 </div>
-                <div className="native-work-detail-actions">
-                  <span className={"native-work-status " + statusTone(workDisplayStatus(selectedWork))}>{roomWorkStatusLabel(workDisplayStatus(selectedWork))}</span>
-              <button
-                type="button"
-                className="native-button"
-                disabled={Boolean(busyAction) || !replyEnabled || executeBlocked || !replyAllowed}
-                onClick={() => onSetReplyWorkId(selectedWork.id)}
-                  >
-                    {replyActive ? "返信対象" : "この仕事に返信"}
-                  </button>
-              <button
-                type="button"
-                className="native-button native-button-danger"
-                    disabled={Boolean(busyAction) || workIsTerminal(selectedWork) || stopBlocked}
-                    onClick={() => void runAction("stop-work:" + selectedWork.id, () => onStopWork(selectedWork))}
-                  >
-                    {busyAction === "stop-work:" + selectedWork.id ? "停止要求中…" : "停止を要求"}
-                  </button>
-                </div>
+              </header> : null}
+              <div className="native-message-list native-work-message-list" aria-label="Roomの会話">
+                {workDetailLoading ? <div className="native-work-conversation-loading" role="status">会話の詳細をServerから確認しています…</div> : null}
+                {!workDetailLoading && !conversationEntries.length ? <div className="native-work-conversation-empty"><p>このRoomの会話詳細はまだServerから返されていません。</p></div> : null}
+                {conversationEntries.map(renderConversationEntry)}
               </div>
-              {replyActive ? (
-                <div className="native-work-reply-target" aria-live="polite">
-                  {replyAssigneeRequired ? (
-                    <label htmlFor="native-work-reply-assignee">
-                      <span>返信先担当 · 必須</span>
-                      <select
-                        id="native-work-reply-assignee"
-                        className="native-work-reply-select"
-                        value={replyAssigneeId}
-                        disabled={Boolean(busyAction) || executeBlocked || !replyEnabled || !replyAllowed}
-                        onChange={(event) => setReplyAssigneeId(event.currentTarget.value)}
-                        aria-describedby="native-work-reply-assignee-help"
-                      >
-                        <option value="">返信先を選択してください</option>
-                        {replyAssignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{agentLabel(assignee.agentId, agents)} · {roomWorkStatusLabel(assignee.status)}</option>)}
-                      </select>
-                    </label>
-                  ) : (
-                    <span className="native-work-reply-note">
-                      {replyAssignees.length > 0
-                        ? `返信先担当: Serverが自動選択（未終端担当 ${replyAssignees.length}件）`
-                        : "返信先担当: 前回の担当をServerが引き継ぎます（未終端担当なし）"}
-                    </span>
-                  )}
-                  {replyAssigneeRequired ? <span id="native-work-reply-assignee-help" className="native-work-reply-note is-required">未終端の担当が複数あるため、返信先を指定してから送信してください。</span> : null}
-                </div>
-              ) : null}
-
-              <div className="native-work-subheading"><h3>担当一覧</h3><span>{selectedWork.assignees.length}件</span></div>
-              {selectedWork.assignees.length === 0 ? <p className="native-work-empty">担当Agentはまだ割り当てられていません。</p> : (
-                <div className="native-work-assignees">
-                  {selectedWork.assignees.map((assignee) => {
-                    const actionKey = "assignee:" + assignee.id;
-                    const selectableAgents = agents.filter((agent) => agentIsAvailable(agent, agentBackends, roomAgentMembers));
-                    return (
-                      <div className="native-work-assignee-card" key={assignee.id}>
-                        <div className="native-work-assignee-row">
-                          <div className="native-work-assignee-main">
-                            <strong>{agentLabel(assignee.agentId, agents)}</strong>
-                            <span>{roomWorkStatusLabel(assignee.status)} · 指示 v{assignee.instructionVersion}</span>
-                          </div>
-                          <div className="native-work-assignee-actions">
-                            {selectableAgents.length > 0 ? (
-                              <select
-                                value={reassignAgentIds[assignee.id] ?? ""}
-                                disabled={Boolean(busyAction) || assigneeIsTerminal(assignee) || executeBlocked || !replyAllowed}
-                                onChange={(event) => {
-                                  const agentId = event.currentTarget.value;
-                                  setReassignAgentIds((current) => ({ ...current, [assignee.id]: agentId }));
-                                  if (agentId) void runAction(actionKey + ":reassign", async () => {
-                                    await onReassignAssignee(selectedWork, assignee, agentId);
-                                    setReassignAgentIds((current) => ({ ...current, [assignee.id]: "" }));
-                                  });
-                                }}
-                                aria-label={agentLabel(assignee.agentId, agents) + "の担当変更"}
-                              >
-                                <option value="">担当変更</option>
-                                {selectableAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.displayName}</option>)}
-                              </select>
-                            ) : null}
-                            <button type="button" className="native-button native-button-danger native-button-quiet" disabled={Boolean(busyAction) || assigneeIsTerminal(assignee) || stopBlocked} onClick={() => void runAction(actionKey + ":stop", () => onStopAssignee(selectedWork, assignee))}>
-                              {busyAction === actionKey + ":stop" ? "要求中…" : "担当停止"}
-                            </button>
-                          </div>
-                        </div>
-                        {selectedWork.controls?.filter((control) => control.assigneeId === assignee.id && (control.status === "requested" || control.status === "accepted" || control.status === "running" || control.status === "unconfirmed")).map((control) => <div className="native-work-control-warning" key={control.id}>{roomWorkControlLabel(control)}</div>)}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {renderDelegation()}
-
-              <div className="native-work-subheading"><h3>指示履歴</h3><span>{workDetailLoading ? "詳細を確認中…" : (selectedWork.instructions?.length ?? 0) + "件"}</span></div>
-              {!workDetailLoading && !(selectedWork.instructions?.length) ? <p className="native-work-empty">指示履歴はServerからまだ返されていません。</p> : null}
-              {selectedWork.instructions?.length ? <div className="native-work-timeline">{selectedWork.instructions.map(renderInstruction)}</div> : null}
-
-              {selectedWork.resultSummary || resultCards.length ? (
-                <>
-                  <div className="native-work-subheading"><h3>結果</h3><span>Serverの記録</span></div>
-                  {selectedWork.resultSummary ? <p className="native-work-instruction-body">{selectedWork.resultSummary}</p> : null}
-                  {resultCards.length ? <div className="native-work-result-cards" aria-label="仕事の結果">
-                    {resultCards.map((card) => <button
-                      key={`${card.resource.kind}:${card.resource.id}`}
-                      type="button"
-                      className="native-work-result-card"
-                      onClick={() => onOpenResultResource?.(card.resource)}
-                      disabled={!onOpenResultResource}
-                    >
-                      <span className="native-work-result-card-main">
-                        <strong className="native-work-result-card-title">{card.title}</strong>
-                        <span className="native-work-result-card-meta"><span>{card.typeLabel}</span><span>同じRoomで開く</span></span>
-                      </span>
-                      <span className="native-work-result-card-state">{card.stateLabel}</span>
-                    </button>)}
-                  </div> : null}
-                </>
-              ) : null}
-
-              <div className="native-work-subheading"><h3>コメント</h3><span>コメントは仕事の記録です</span></div>
-              {workDetailLoading ? <p className="native-work-empty" role="status">コメントをServerから確認しています…</p> : !selectedWork.comments?.length ? <p className="native-work-empty">コメントはまだありません。コメント投稿だけではAgentは起動しません。</p> : <div className="native-work-comments">{selectedWork.comments.map(renderComment)}</div>}
-              <form className="native-composer native-work-composer-block" onSubmit={handleComment}>
-                <label className="native-work-composer-label" htmlFor="native-work-comment">コメントを投稿</label>
-                <textarea id="native-work-comment" rows={2} value={workCommentDraft} onChange={(event) => onSetWorkCommentDraft(event.currentTarget.value)} placeholder="仕事に関するメモや確認事項…" disabled={commentsBlocked || Boolean(busyAction)} />
-                {renderAttachmentDrafts(commentAttachmentDrafts, setCommentAttachmentDrafts)}
-                <input
-                  ref={commentAttachmentInputRef}
-                  className="native-visually-hidden"
-                  type="file"
-                  multiple
-                  onChange={(event) => selectAttachments(event, setCommentAttachmentDrafts)}
-                  aria-label="コメントに添付"
-                />
-                <div className="native-composer-footer">
-                  <span>
-                    コメント投稿はAgentへの指示になりません
-                    <button type="button" className="native-work-attachment-button" disabled={commentsBlocked || Boolean(busyAction)} onClick={() => commentAttachmentInputRef.current?.click()}>ファイルを添付</button>
-                  </span>
-                  <button className="native-send-button" type="submit" disabled={commentsBlocked || Boolean(busyAction) || !commentComposerHasInput}>{busyAction === "comment" ? "投稿中…" : "コメントを投稿"} <span aria-hidden="true">↗</span></button>
-                </div>
-              </form>
-
-              <div className="native-work-subheading"><h3>制御の記録</h3><span>Serverの確認状態</span></div>
-              {workDetailLoading ? <p className="native-work-empty" role="status">制御状態をServerから確認しています…</p> : renderControls(selectedWork)}
             </>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -1453,8 +1728,37 @@ export function RoomWorkSurface({
         {sending ? <div className="native-streaming-row" role="status"><span className="native-streaming-bars" aria-hidden="true"><i /><i /><i /></span>Serverが依頼を受け付けています</div> : null}
         <form className="native-composer" onSubmit={(event) => void handleSend(event)}>
           <label className="native-visually-hidden" htmlFor="native-room-work-input">新しい依頼または同じ仕事への返信</label>
-          {replyActive ? <div className="native-work-composer-label">同じ仕事に返信 · {selectedWork?.title}</div> : null}
-          <textarea id="native-room-work-input" rows={2} value={workDraft} onChange={(event) => onSetWorkDraft(event.currentTarget.value)} onKeyDown={handleComposerKeyDown} placeholder={replyActive ? "この仕事への追加指示…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "新しい仕事をAgentに依頼する…"} disabled={composerBlocked} />
+          {replyActive && replyTargetWork ? (
+            <div className="native-work-reply-target" aria-live="polite">
+              <span className="native-work-reply-icon" aria-hidden="true">↩</span>
+              <span className="native-work-reply-context"><small>返信先</small><strong>{replyTargetWork.title}</strong></span>
+              <button type="button" className="native-work-reply-clear" aria-label="返信対象を解除" onClick={() => onSetReplyWorkId(undefined)}>×</button>
+              {replyAssigneeRequired ? (
+                <label htmlFor="native-work-reply-assignee">
+                  <span>返信先担当 · 必須</span>
+                  <select
+                    id="native-work-reply-assignee"
+                    className="native-work-reply-select"
+                    value={replyAssigneeId}
+                    disabled={Boolean(busyAction) || executeBlocked || !replyEnabled || !replyAllowed}
+                    onChange={(event) => setReplyAssigneeId(event.currentTarget.value)}
+                    aria-describedby="native-work-reply-assignee-help"
+                  >
+                    <option value="">返信先を選択してください</option>
+                    {replyAssignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{agentLabel(assignee.agentId, agents)} · {roomWorkStatusLabel(assignee.status)}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <span className="native-work-reply-note">
+                  {replyAssignees.length > 0
+                    ? `返信先担当: Serverが自動選択（未終端担当 ${replyAssignees.length}件）`
+                    : "返信先担当: 前回の担当をServerが引き継ぎます（未終端担当なし）"}
+                </span>
+              )}
+              {replyAssigneeRequired ? <span id="native-work-reply-assignee-help" className="native-work-reply-note is-required">未終端の担当が複数あるため、返信先を指定してから送信してください。</span> : null}
+            </div>
+          ) : null}
+          <textarea id="native-room-work-input" rows={2} value={workDraft} onChange={(event) => onSetWorkDraft(event.currentTarget.value)} onKeyDown={handleComposerKeyDown} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
           {renderAttachmentDrafts(workAttachmentDrafts, setWorkAttachmentDrafts)}
           {workResourceRefsForSend.length ? (
             <div className="native-work-resource-list" aria-label="仕事で使うKnowledgeとSkill">
@@ -1478,10 +1782,10 @@ export function RoomWorkSurface({
           />
           <div className="native-composer-footer">
             <span>
-              ⌘/Ctrl + Enter で送信 {replyActive ? <button type="button" className="native-text-button" onClick={() => onSetReplyWorkId(undefined)}>返信をやめる</button> : null}
-              <button type="button" className="native-work-attachment-button" disabled={writeBlocked || Boolean(busyAction) || sending} onClick={() => workAttachmentInputRef.current?.click()}>ファイルを添付</button>
+              ⌘/Ctrl + Enter で送信
+              <button type="button" className="native-work-attachment-button" aria-label="ファイルを添付" title="ファイルを添付" disabled={writeBlocked || Boolean(busyAction) || sending} onClick={() => workAttachmentInputRef.current?.click()}><span aria-hidden="true">▤</span></button>
             </span>
-            <button className="native-send-button" type="submit" disabled={composerBlocked || !workComposerHasInput}>{busyAction === "send" ? "Server確認中…" : replyActive ? "返信を送信" : "依頼を送信"} <span aria-hidden="true">↗</span></button>
+            <button className="native-send-button" type="submit" aria-label={busyAction === "send" ? "Server確認中" : replyActive ? "返信を送信" : "依頼を送信"} disabled={composerBlocked || !workComposerHasInput}><span aria-hidden="true">↑</span></button>
           </div>
         </form>
       </footer>

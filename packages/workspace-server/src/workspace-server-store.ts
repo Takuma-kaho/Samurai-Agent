@@ -1562,6 +1562,7 @@ export class WorkspaceServerStore {
       const result = await sql.query<RoomRow>(
         `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at,
                 samurai_can_room(workspace_id, id, 'manage') AS can_manage,
+                samurai_can_room(workspace_id, id, 'edit') AS can_edit,
                 samurai_can_room(workspace_id, id, 'execute') AS can_execute
          FROM rooms WHERE workspace_id = $1 ORDER BY created_at`,
         [context.workspaceId]
@@ -1670,6 +1671,7 @@ export class WorkspaceServerStore {
       const result = await sql.query<RoomRow>(
         `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at,
                 samurai_can_room(workspace_id, id, 'manage') AS can_manage,
+                samurai_can_room(workspace_id, id, 'edit') AS can_edit,
                 samurai_can_room(workspace_id, id, 'execute') AS can_execute
          FROM rooms WHERE workspace_id = $1 AND id = $2`,
         [context.workspaceId, roomId]
@@ -3912,7 +3914,11 @@ export class WorkspaceServerStore {
         }
       }
       const result = await sql.query<RoomRow>(
-        "SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at FROM rooms WHERE workspace_id = $1 AND id = $2",
+        `SELECT workspace_id, id, parent_room_id, name, room_kind, default_agent_id, default_agent_version, dm_account_id, version, created_at, updated_at,
+                samurai_can_room(workspace_id, id, 'manage') AS can_manage,
+                samurai_can_room(workspace_id, id, 'edit') AS can_edit,
+                samurai_can_room(workspace_id, id, 'execute') AS can_execute
+         FROM rooms WHERE workspace_id = $1 AND id = $2`,
         [context.workspaceId, id]
       );
       const room = result.rows[0];
@@ -5534,6 +5540,7 @@ interface RoomRow {
   name: string;
   version: number | string;
   can_manage?: boolean;
+  can_edit?: boolean;
   can_execute?: boolean;
   created_at: Date | string;
   updated_at: Date | string;
@@ -6121,6 +6128,7 @@ function roomFromRow(row: RoomRow): WorkspaceRoom {
     name: row.name,
     version: Number(row.version),
     ...(row.can_manage === undefined ? {} : { canManage: row.can_manage === true }),
+    ...(row.can_edit === undefined ? {} : { canEdit: row.can_edit === true }),
     ...(row.can_execute === undefined ? {} : { canExecute: row.can_execute === true }),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)

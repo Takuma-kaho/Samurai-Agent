@@ -37,6 +37,50 @@ afterEach(() => {
 });
 
 describe("Browser Room Work resource-ref transport", () => {
+  it.each([
+    ["public summary", { summary: "Geminiの実結果" }, "Geminiの実結果"],
+    ["legacy output_summary", { output_summary: "旧形式の実結果" }, "旧形式の実結果"],
+    ["nested result.output", { output: { output_summary: "ネストされた実結果" } }, "ネストされた実結果"]
+  ])("preserves Agent completion text in the Native work projection (%s)", async (_label, assignmentResult, expectedSummary) => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({
+      result: [{
+        id: "work_result_projection",
+        room_id: "room_1",
+        requester_id: "account_1",
+        default_agent_id: "agent_1",
+        title: "実結果",
+        objective: "実結果を表示する",
+        status: "completed",
+        instruction_version: 1,
+        generation: 0,
+        version: 2,
+        resource_refs: [],
+        assignees: [{
+          id: "assignee_result_projection",
+          work_id: "work_result_projection",
+          agent_id: "agent_1",
+          status: "completed",
+          instruction_version: 1,
+          generation: 0,
+          version: 2,
+          result: assignmentResult,
+          created_at: "2026-09-15T00:00:00.000Z",
+          updated_at: "2026-09-15T00:00:01.000Z"
+        }],
+        created_at: "2026-09-15T00:00:00.000Z",
+        updated_at: "2026-09-15T00:00:01.000Z"
+      }]
+    } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    const projected = await bridge.listWorkspaceRoomWorks!({ roomId: "room_1" });
+
+    expect(projected.works[0]?.assignees[0]).toMatchObject({
+      result: { summary: expectedSummary }
+    });
+    expect(JSON.stringify(projected)).not.toContain("output_summary");
+  });
+
   it("sends only Knowledge/Skill selectors and never client display metadata", async () => {
     vi.mocked(browserWorkspaceRequest).mockResolvedValue({
       result: {
@@ -217,6 +261,58 @@ describe("Browser Room Work resource-ref transport", () => {
       path: "/api/v1/workspaces/workspace_1/automation/jobs?room_id=room_1",
       connectionId: "connection_1"
     });
+  });
+});
+
+describe("Browser Room capability projection", () => {
+  it("preserves the server-provided Room edit capability", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({
+      result: [{
+        id: "room_edit_capability",
+        workspace_id: "workspace_1",
+        name: "Editable Room",
+        version: 1,
+        can_manage: false,
+        can_edit: false,
+        can_execute: true,
+        created_at: "2026-09-15T00:00:00.000Z",
+        updated_at: "2026-09-15T00:00:00.000Z"
+      }]
+    } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    const result = await bridge.listWorkspaceRooms!();
+
+    expect(result.rooms[0]).toMatchObject({ canManage: false, canEdit: false, canExecute: true });
+  });
+
+  it("preserves a false Server-provided execute capability on a newly created Room", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({
+      result: {
+        id: "room_created_capability",
+        workspace_id: "workspace_1",
+        name: "Created Room",
+        version: 1,
+        can_manage: true,
+        can_edit: false,
+        can_execute: false,
+        created_at: "2026-09-15T00:00:00.000Z",
+        updated_at: "2026-09-15T00:00:00.000Z"
+      },
+      replayed: false
+    } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    const result = await bridge.createWorkspaceRoom!({
+      name: "Created Room",
+      target: { connectionId: "connection_1", workspaceId: "workspace_1" },
+      expectedWorkspaceVersion: 1,
+      defaultAgentId: "agent_1",
+      agentPermission: { canView: true, canEdit: false, canExecute: true },
+      operationId: "room_create_capability"
+    } as never);
+
+    expect(result.room).toMatchObject({ canManage: true, canEdit: false, canExecute: false });
   });
 });
 

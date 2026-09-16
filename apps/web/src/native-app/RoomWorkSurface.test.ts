@@ -3,6 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
   RoomWorkSurface,
+  nativeRoomWorkConversationEntries,
+  nativeRoomWorkConversationEntriesForRoom,
+  nativeRoomWorkConversationWorks,
   nativeRoomWorkResultCards,
   roomWorkControlStatusLabel,
   roomWorkInstructionStatusLabel,
@@ -150,23 +153,301 @@ describe("RoomWorkSurface", () => {
     // Two revisions for the Artifact make the historical target ambiguous, so
     // the UI intentionally opens the current durable version instead.
     expect(cards[0]?.resource.revisionId).toBeUndefined();
+    expect(nativeRoomWorkResultCards(completedWork, { ...room, id: "room_other" })).toEqual([]);
   });
 
-  it("uses public work vocabulary and renders server-confirmed progress", () => {
+  it("projects human Instructions right and current Assignment results left", () => {
+    const currentAssignee = {
+      ...work.assignees[0]!,
+      version: 5,
+      updatedAt: "2026-09-15T10:04:00.000Z",
+      result: {
+        state: "updated" as const,
+        summary: "実返答本文がここに入る",
+        resourceRefs: [{ kind: "artifact" as const, id: "artifact_current", uri: "artifacts/artifact_current" }]
+      }
+    };
+    const staleDuplicate = {
+      ...currentAssignee,
+      version: 4,
+      updatedAt: "2026-09-15T10:03:00.000Z",
+      result: { summary: "古い返答を表示してはいけない" }
+    };
+    const wrongRoomAssignee = {
+      ...currentAssignee,
+      id: "assignment_wrong_room",
+      workId: "work_other_room",
+      result: { summary: "別Roomの結果を混ぜない" }
+    };
+    const conversationWork: NativeRoomWork = {
+      ...work,
+      resultSummary: "実返答本文がここに入る",
+      assignees: [currentAssignee, staleDuplicate, wrongRoomAssignee]
+    };
+
+    const entries = nativeRoomWorkConversationEntries(conversationWork, room, [{ id: "agent_research" }]);
+
+    expect(entries.filter((entry) => entry.side === "human")).toHaveLength(2);
+    expect(entries.filter((entry) => entry.side === "human").every((entry) => entry.kind === "instruction")).toBe(true);
+    expect(entries.filter((entry) => entry.side === "human").map((entry) => entry.authorId)).toEqual(["account_owner", "account_owner"]);
+    expect(entries.filter((entry) => entry.side === "agent")).toHaveLength(1);
+    expect(entries.find((entry) => entry.side === "agent")?.text).toBe("実返答本文がここに入る");
+    expect(entries.find((entry) => entry.side === "agent")?.resultCards).toHaveLength(1);
+    expect(entries.map((entry) => entry.text)).not.toContain("古い返答を表示してはいけない");
+    expect(entries.map((entry) => entry.text)).not.toContain("別Roomの結果を混ぜない");
+    expect(nativeRoomWorkConversationEntries({ ...conversationWork, roomId: "room_other" }, room)).toEqual([]);
+  });
+
+  it("keeps another human author's identity available for the left-side message", () => {
+    const otherHumanWork: NativeRoomWork = {
+      ...work,
+      instructions: [{ ...work.instructions![0]!, createdBy: "account_other", instruction: "別メンバーの依頼" }]
+    };
+
+    const entries = nativeRoomWorkConversationEntries(otherHumanWork, room, [{ id: "agent_research" }]);
+
+    expect(entries[0]).toMatchObject({ side: "human", authorId: "account_other", text: "別メンバーの依頼" });
+  });
+
+  it("keeps an output body when a bridge forwards the current result shape directly", () => {
+    const directOutputWork: NativeRoomWork = {
+      ...work,
+      assignees: [{
+        ...work.assignees[0]!,
+        result: { output_summary: "Serverから返った実行本文" } as unknown as NonNullable<NativeRoomWork["assignees"][number]["result"]>
+      }]
+    };
+
+    const entries = nativeRoomWorkConversationEntries(directOutputWork, room, [{ id: "agent_research" }]);
+
+    expect(entries.some((entry) => entry.side === "agent" && entry.text === "Serverから返った実行本文")).toBe(true);
+  });
+
+  it("merges same-Room Work histories and ignores stale or foreign snapshots", () => {
+    const staleWork: NativeRoomWork = {
+      ...work,
+      version: 8,
+      createdAt: "2026-09-15T10:00:00.000Z",
+      updatedAt: "2026-09-15T10:01:00.000Z",
+      instructions: [{
+        ...work.instructions![0]!,
+        instruction: "古い依頼本文",
+        version: 1,
+        generation: 0,
+        createdAt: "2026-09-15T10:00:01.000Z"
+      }],
+      assignees: [{
+        ...work.assignees[0]!,
+        version: 1,
+        result: { summary: "古い結果本文" },
+        updatedAt: "2026-09-15T10:00:02.000Z"
+      }]
+    };
+    const currentWork: NativeRoomWork = {
+      ...work,
+      version: 9,
+      createdAt: "2026-09-15T10:00:00.000Z",
+      updatedAt: "2026-09-15T10:03:00.000Z",
+      instructions: [{
+        ...work.instructions![0]!,
+        instruction: "新しい依頼本文",
+        version: 2,
+        generation: 1,
+        createdAt: "2026-09-15T10:00:01.000Z"
+      }],
+      assignees: [{
+        ...work.assignees[0]!,
+        version: 2,
+        result: { summary: "新しい結果本文" },
+        updatedAt: "2026-09-15T10:03:02.000Z"
+      }]
+    };
+    const otherWork: NativeRoomWork = {
+      ...work,
+      id: "work_other_same_list",
+      roomId: "room_other",
+      title: "別の依頼",
+      version: 1,
+      createdAt: "2026-09-15T10:02:00.000Z",
+      updatedAt: "2026-09-15T10:02:00.000Z",
+      instructions: [{
+        ...work.instructions![0]!,
+        id: "instruction_other_same_list",
+        workId: "work_other_same_list",
+        instruction: "別のRoomの依頼",
+        createdAt: "2026-09-15T10:02:01.000Z"
+      }]
+    };
+    const followupWork: NativeRoomWork = {
+      ...work,
+      id: "work_followup",
+      title: "続きの依頼",
+      version: 1,
+      createdAt: "2026-09-15T10:04:00.000Z",
+      updatedAt: "2026-09-15T10:04:00.000Z",
+      instructions: [{
+        ...work.instructions![0]!,
+        id: "instruction_followup",
+        workId: "work_followup",
+        instruction: "続きの依頼本文",
+        createdAt: "2026-09-15T10:04:01.000Z"
+      }],
+      assignees: [{
+        ...work.assignees[0]!,
+        id: "assignment_followup",
+        workId: "work_followup",
+        version: 1,
+        result: { summary: "続きの結果本文" },
+        updatedAt: "2026-09-15T10:04:02.000Z"
+      }]
+    };
+
+    const conversationWorks = nativeRoomWorkConversationWorks([followupWork, staleWork, currentWork, otherWork], room, currentWork);
+    expect(conversationWorks.map((item) => item.id)).toEqual(["work_public", "work_followup"]);
+
+    const entries = nativeRoomWorkConversationEntriesForRoom([followupWork, staleWork, currentWork, otherWork], room, [{ id: "agent_research" }], currentWork);
+    expect(entries.map((entry) => entry.workId)).toEqual([
+      "work_public",
+      "work_public",
+      "work_followup",
+      "work_followup"
+    ]);
+    expect(entries.map((entry) => entry.text)).not.toContain("古い依頼本文");
+    expect(entries.map((entry) => entry.text)).not.toContain("古い結果本文");
+    expect(entries.map((entry) => entry.text)).not.toContain("別のRoomの依頼");
+    expect(entries.map((entry) => entry.text)).toEqual(expect.arrayContaining(["新しい依頼本文", "新しい結果本文", "続きの依頼本文", "続きの結果本文"]));
+    expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
+  });
+
+  it("renders a Chat-first Room conversation while keeping deferred controls out", () => {
     const html = renderSurface();
 
-    expect(html).toContain("Room workbench");
+    expect(html).not.toContain("Room workbench");
     expect(html).toContain("Research Agent");
-    expect(html).toContain("仕事");
-    expect(html).toContain("調査メモを整理");
-    expect(html).toContain("受付済み");
-    expect(html).toContain("配送済み");
-    expect(html).toContain("Agentに反映");
-    expect(html).toContain("要求中");
-    expect(html).toContain("停止未確認");
-    expect(html).toContain("停止未確認の担当: Research Agent");
-    expect(html).toContain("コメント投稿はAgentへの指示になりません");
+    expect(html).not.toContain("調査メモを整理");
+    expect(html).toContain("native-work-message-avatar");
+    expect(html).toContain('data-author-id="account_owner"');
+    expect(html).toContain("native-work-conversation");
+    expect(html).toContain("native-work-message-agent");
+    expect(html).toContain("grid-column: 2; grid-row: 2; justify-self: start;");
+    expect(html).toContain("display: block; margin-left: auto;");
+    expect(html).not.toContain("Assignment結果");
+    expect(html).not.toContain("Assignment状態");
+    expect(html).not.toContain("既定Agentを変更");
+    expect(html).not.toContain('aria-label="Roomの仕事"');
+    expect(html).not.toContain('class="native-work-list"');
+    expect(html).not.toContain('class="native-work-detail"');
+    expect(html).not.toContain("Agentに反映");
+    expect(html).not.toContain("停止を要求");
+    expect(html).not.toContain("コメント投稿");
     expect(html).not.toMatch(/session/i);
+  });
+
+  it("renders every available Room Work and binds each reply to its own Work", () => {
+    const secondWork: NativeRoomWork = {
+      ...work,
+      id: "work_second",
+      title: "二つ目の依頼",
+      version: 1,
+      createdAt: "2026-09-15T11:00:00.000Z",
+      updatedAt: "2026-09-15T11:00:00.000Z",
+      instructions: [{
+        ...work.instructions![0]!,
+        id: "instruction_second",
+        workId: "work_second",
+        instruction: "二つ目の依頼本文",
+        createdAt: "2026-09-15T11:00:01.000Z"
+      }],
+      assignees: [{
+        ...work.assignees[0]!,
+        id: "assignment_second",
+        workId: "work_second",
+        version: 1,
+        updatedAt: "2026-09-15T11:00:02.000Z"
+      }]
+    };
+    const html = renderSurface({
+      works: [work, secondWork],
+      selectedWork: work,
+      selectedWorkId: work.id
+    });
+
+    expect(html).toContain("二つ目の依頼本文");
+    expect(html).toContain('class="native-text-button native-work-message-reply" data-work-id="work_public"');
+    expect(html).toContain('class="native-text-button native-work-message-reply" data-work-id="work_second"');
+
+    const replyHtml = renderSurface({
+      works: [work, secondWork],
+      selectedWork: work,
+      selectedWorkId: work.id,
+      replyWorkId: secondWork.id,
+      workDraft: "二つ目への返信"
+    });
+    expect(replyHtml).toContain("二つ目の依頼");
+    expect(replyHtml).toContain("返信対象");
+    expect(replyHtml).toContain('id="native-room-work-input"');
+  });
+
+  it("hides terminal success labels while keeping action-needed status labels", () => {
+    const terminalWork: NativeRoomWork = {
+      ...work,
+      status: "completed",
+      instructions: work.instructions!.map((instruction, index) => ({
+        ...instruction,
+        createdBy: "account_other",
+        status: index === 0 ? "delivered" : "applied"
+      })),
+      assignees: [{ ...work.assignees[0]!, status: "completed" }]
+    };
+    const terminalHtml = renderSurface({
+      works: [terminalWork],
+      selectedWork: terminalWork,
+      selectedWorkId: terminalWork.id
+    });
+
+    expect(nativeRoomWorkConversationEntries(terminalWork, room, [{ id: "agent_research" }]))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ kind: "assignment-state", status: "completed" })]));
+    expect(terminalHtml).not.toContain("完了確認済み");
+    expect(terminalHtml).not.toContain("配送済み");
+    expect(terminalHtml).not.toContain("反映済み");
+
+    const actionableWork: NativeRoomWork = {
+      ...work,
+      instructions: work.instructions!.map((instruction, index) => ({
+        ...instruction,
+        createdBy: "account_other",
+        status: index === 0 ? "queued" : "failed"
+      })),
+      assignees: [{ ...work.assignees[0]!, status: "waiting" }]
+    };
+    const actionableHtml = renderSurface({
+      works: [actionableWork],
+      selectedWork: actionableWork,
+      selectedWorkId: actionableWork.id
+    });
+
+    expect(actionableHtml).toContain("反映待ち");
+    expect(actionableHtml).toContain("反映失敗");
+    expect(actionableHtml).toContain("確認待ち");
+  });
+
+  it("renders the selected Room's artifact entry in the Chat header", () => {
+    const html = renderSurface({
+      roomToolLinks: createElement("button", { type: "button" }, "成果物")
+    });
+
+    expect(html).toContain("成果物");
+    expect(html).toContain("native-chat-header");
+  });
+
+  it("uses shared native theme tokens for work status and resource colors", () => {
+    const html = renderSurface();
+
+    expect(html).toContain("var(--native-success)");
+    expect(html).toContain("var(--native-danger)");
+    expect(html).toContain("var(--native-accent-soft)");
+    expect(html).not.toMatch(/#9bd3ad|#efaaa2|#a8cdec/i);
+    expect(html).not.toMatch(/rgba\(/i);
   });
 
   it("shows Knowledge/Skill selections separately from uploaded file attachments", () => {
@@ -270,7 +551,7 @@ describe("RoomWorkSurface", () => {
       selectedWork: completedWork,
       selectedWorkId: completedWork.id
     });
-    const replyButtonIndex = replyButtonHtml.indexOf(">この仕事に返信</button>");
+    const replyButtonIndex = replyButtonHtml.indexOf(">返信</button>");
     expect(replyButtonIndex).toBeGreaterThan(0);
     expect(replyButtonHtml.slice(replyButtonHtml.lastIndexOf("<button", replyButtonIndex), replyButtonIndex)).not.toContain("disabled");
 
@@ -318,7 +599,7 @@ describe("RoomWorkSurface", () => {
     expect(unauthorizedHtml.slice(unauthorizedComposerIndex, unauthorizedComposerIndex + 520)).toContain("disabled");
   });
 
-  it("offers only active assignees for comment application and requires a target when there are several", () => {
+  it("keeps comment application out of the Chat projection", () => {
     const multiAssigneeWork: NativeRoomWork = {
       ...work,
       assignees: [
@@ -353,17 +634,14 @@ describe("RoomWorkSurface", () => {
       selectedWorkId: multiAssigneeWork.id
     });
 
-    expect(html).toContain('aria-label="コメントの反映先"');
-    expect(html).toContain('option value="assignment_public"');
-    expect(html).toContain('option value="assignment_specialist"');
-    expect(html).not.toContain('option value="assignment_completed"');
-    expect(html).toContain("未終端の担当が複数あるため、反映先を指定してください。");
-    const applyIndex = html.indexOf(">Agentに反映</button>");
-    expect(applyIndex).toBeGreaterThan(0);
-    expect(html.slice(html.lastIndexOf("<button", applyIndex), applyIndex)).toContain("disabled");
+    expect(html).not.toContain('aria-label="コメントの反映先"');
+    expect(html).not.toContain("Agentに反映");
+    expect(html).not.toContain("コメントを投稿");
+    expect(html).toContain("Research Agent");
+    expect(html).toContain("Specialist Agent");
   });
 
-  it("uses automatic application for one active assignee and blocks terminal-only work", () => {
+  it("does not render comment application for active or terminal assignments", () => {
     const oneActive = {
       ...work,
       assignees: [
@@ -387,14 +665,13 @@ describe("RoomWorkSurface", () => {
     } satisfies NativeRoomWork;
     const terminalOnlyHtml = renderSurface({ works: [terminalOnly], selectedWork: terminalOnly });
 
-    expect(oneActiveHtml).toContain("反映先: Serverが自動選択（未終端担当 1件）");
+    expect(oneActiveHtml).not.toContain("反映先: Serverが自動選択");
     expect(oneActiveHtml).not.toContain('aria-label="コメントの反映先"');
-    expect(terminalOnlyHtml).toContain("未終端の担当がないため、コメントをAgentに反映できません。");
-    const terminalApplyIndex = terminalOnlyHtml.indexOf(">Agentに反映</button>");
-    expect(terminalOnlyHtml.slice(terminalOnlyHtml.lastIndexOf("<button", terminalApplyIndex), terminalApplyIndex)).toContain("disabled");
+    expect(terminalOnlyHtml).not.toContain("コメントをAgentに反映");
+    expect(terminalOnlyHtml).not.toContain("Agentに反映");
   });
 
-  it("offers explicit multi-Agent delegation with only eligible Room specialists", () => {
+  it("does not move delegation controls into the Chat stream", () => {
     const delegatedWork: NativeRoomWork = {
       ...work,
       assignees: [
@@ -428,14 +705,10 @@ describe("RoomWorkSurface", () => {
       onDelegateAssignee: vi.fn()
     });
 
-    expect(html).toContain("専門Agentへ明示委譲");
-    expect(html).toContain("委譲先Agent · 複数選択可");
-    expect(html).toContain("Specialist Agent");
-    expect(html).toContain("完了を待つ担当 · 任意");
-    expect(html).toContain("Review Agent · 確認待ち");
-    const delegationStart = html.indexOf("専門Agentへ明示委譲");
-    const delegationEnd = html.indexOf("指示履歴", delegationStart);
-    expect(html.slice(delegationStart, delegationEnd)).not.toContain("Disabled Agent");
+    expect(html).not.toContain("専門Agentへ明示委譲");
+    expect(html).not.toContain("委譲先Agent · 複数選択可");
+    expect(html).not.toContain("完了を待つ担当 · 任意");
+    expect(html).toContain("Review Agent");
     expect(html).not.toContain("session_id");
   });
 
@@ -452,7 +725,7 @@ describe("RoomWorkSurface", () => {
     expect(html).not.toContain("専門Agentへ明示委譲");
   });
 
-  it("keeps stop available to the requester without granting execution, while restricting work controls", () => {
+  it("keeps execution status visible without moving stop controls into Chat", () => {
     const requesterStop = renderSurface({
       room: { ...room, canExecute: false, canStop: true }
     });
@@ -460,25 +733,18 @@ describe("RoomWorkSurface", () => {
       room: { ...room, canManage: false, canStop: false },
       currentAccountId: "account_other"
     });
-    const stopIndex = requesterStop.indexOf(">停止を要求</button>");
-    const otherStopIndex = otherMember.indexOf(">停止を要求</button>");
-
-    expect(stopIndex).toBeGreaterThan(0);
-    expect(requesterStop.slice(requesterStop.lastIndexOf("<button", stopIndex), stopIndex)).not.toContain("disabled");
-    expect(otherStopIndex).toBeGreaterThan(0);
-    expect(otherMember.slice(otherMember.lastIndexOf("<button", otherStopIndex), otherStopIndex)).toContain("disabled");
-    expect(otherMember).toContain("この仕事に返信");
+    expect(requesterStop).not.toContain(">停止を要求</button>");
+    expect(otherMember).not.toContain(">停止を要求</button>");
+    expect(requesterStop).toContain("実行中");
+    expect(otherMember).toContain(">返信</button>");
   });
 
-  it("requires edit capability for comments and execute capability for applying them", () => {
+  it("does not expose comment capability controls in the Chat-first surface", () => {
     const readOnlyComment = renderSurface({ room: { ...room, canEdit: false } });
     const noExecuteApply = renderSurface({ room: { ...room, canExecute: false } });
 
-    expect(readOnlyComment).toContain("id=\"native-work-comment\"");
-    const commentIndex = readOnlyComment.indexOf("id=\"native-work-comment\"");
-    expect(readOnlyComment.slice(commentIndex, commentIndex + 260)).toContain("disabled=\"\"");
-    const applyIndex = noExecuteApply.indexOf(">Agentに反映</button>");
-    expect(noExecuteApply.slice(Math.max(0, applyIndex - 180), applyIndex)).toContain("disabled");
+    expect(readOnlyComment).not.toContain('id="native-work-comment"');
+    expect(noExecuteApply).not.toContain("Agentに反映");
   });
 
   it("keeps an Agent DM explicitly private", () => {
@@ -544,7 +810,8 @@ describe("RoomWorkSurface", () => {
 
     expect(html).toContain("attachments/brief.pdf");
     expect(html).toContain("添付のみの指示");
-    expect(html).toContain("添付のみのコメント");
+    expect(html).not.toContain("添付のみのコメント");
+    expect(html).not.toContain('class="native-work-comments"');
     expect(html).not.toContain("/Users/");
     expect(html).not.toContain("data:");
   });

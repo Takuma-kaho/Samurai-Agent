@@ -39,40 +39,53 @@
 
 /* React Native App surface shared by the sole web UI runtime. */
 .native-app-shell {
-  --native-bg: #0b0d0e;
-  --native-panel: rgba(17, 20, 20, 0.88);
-  --native-panel-soft: rgba(25, 29, 28, 0.72);
-  --native-line: rgba(204, 218, 209, 0.12);
-  --native-line-strong: rgba(204, 218, 209, 0.24);
-  --native-copy: #edf2eb;
-  --native-muted: #a4afa7;
-  --native-dim: #6f7a73;
-  --native-accent: #f1a65c;
-  --native-accent-soft: rgba(241, 166, 92, 0.14);
-  --native-success: #8ad8b2;
-  --native-danger: #ee8981;
-  background:
-    radial-gradient(circle at 76% 10%, rgba(241, 166, 92, 0.08), transparent 28rem),
-    radial-gradient(circle at 48% 94%, rgba(121, 178, 190, 0.06), transparent 32rem),
-    var(--native-bg);
+  --native-bg: #181818;
+  --native-panel: #383838;
+  --native-panel-soft: #2d2d2d;
+  --native-line: rgba(232, 232, 232, 0.18);
+  --native-line-strong: rgba(245, 245, 245, 0.32);
+  --native-copy: #f1f1f1;
+  --native-muted: #c1c1c1;
+  --native-dim: #969696;
+  --native-accent: #e2e2e2;
+  --native-accent-rgb: 226, 226, 226;
+  --native-accent-soft: rgba(226, 226, 226, 0.14);
+  --native-accent-ink: #181818;
+  --native-success: #c8c8c8;
+  --native-danger: #f0b0b0;
+  --native-warning-copy: #e2e2e2;
+  --native-danger-copy: #f0b0b0;
+  background: var(--native-bg);
   color: var(--native-copy);
   display: grid;
   font-family: "Avenir Next", "Hiragino Sans", ui-sans-serif, sans-serif;
-  grid-template-columns: 286px minmax(0, 1fr);
+  /* The reference layout keeps navigation compact so the Room conversation
+   * remains the dominant surface. */
+  grid-template-columns: 252px minmax(0, 1fr);
   height: 100dvh;
-  min-height: 560px;
+  min-height: 0;
   overflow: hidden;
   position: relative;
   width: 100%;
 }
 
 .native-app-shell.has-evidence {
-  grid-template-columns: 286px minmax(0, 1fr) 344px;
+  grid-template-columns: 252px minmax(0, 1fr) 344px;
+}
+
+/* Artifact results stay beside the active Room Work conversation. The class
+ * is applied only while the artifact tool is open, so ordinary chat and the
+ * other workbenches keep their full-width surface. */
+.native-app-shell.has-artifact-panel {
+  grid-template-columns: 252px minmax(0, 1fr) minmax(320px, 42vw);
+}
+
+.native-app-shell.has-evidence.has-artifact-panel {
+  grid-template-columns: 252px minmax(0, 1fr) minmax(290px, 31vw) minmax(290px, 31vw);
 }
 
 .native-app-shell::before {
-  background-image: radial-gradient(rgba(255, 255, 255, 0.075) 0.6px, transparent 0.6px);
-  background-size: 5px 5px;
+  background: transparent;
   content: "";
   inset: 0;
   opacity: 0.14;
@@ -82,14 +95,15 @@
 
 .native-sidebar,
 .native-main,
-.native-evidence-inspector {
+.native-evidence-inspector,
+.native-artifact-panel {
   min-height: 0;
   position: relative;
   z-index: 1;
 }
 
 .native-sidebar {
-  background: linear-gradient(165deg, rgba(26, 31, 29, 0.86), rgba(10, 13, 13, 0.96) 62%);
+  background: var(--native-panel);
   border-right: 1px solid var(--native-line);
   display: flex;
   flex-direction: column;
@@ -102,7 +116,7 @@
 }
 
 .native-sidebar::after {
-  background: linear-gradient(180deg, rgba(241, 166, 92, 0.18), transparent 30%);
+  background: var(--native-line-strong);
   content: "";
   height: 1px;
   left: 16px;
@@ -123,7 +137,7 @@
   align-items: center;
   background: var(--native-accent);
   border-radius: 9px 9px 9px 2px;
-  color: #21160e;
+  color: var(--native-accent-ink);
   display: inline-flex;
   font-family: Georgia, serif;
   font-size: 20px;
@@ -189,7 +203,7 @@
 .native-member-avatar {
   align-items: center;
   background: var(--native-accent-soft);
-  border: 1px solid rgba(241, 166, 92, 0.28);
+  border: 1px solid rgba(var(--native-accent-rgb), 0.28);
   border-radius: 9px;
   color: var(--native-accent);
   display: inline-flex;
@@ -518,9 +532,21 @@
 }
 
 .native-main {
-  background: linear-gradient(180deg, rgba(19, 23, 22, 0.66), rgba(9, 11, 11, 0.86));
+  background: var(--native-bg);
   min-width: 0;
   overflow: hidden;
+}
+
+.native-artifact-panel {
+  background: var(--native-bg);
+  border-left: 1px solid var(--native-line);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.native-artifact-panel > .native-artifact-workspace {
+  height: 100%;
+  min-height: 0;
 }
 
 .native-chat-surface,
@@ -588,15 +614,15 @@
 }
 
 .native-banner-warning {
-  background: rgba(241, 166, 92, 0.08);
+  background: rgba(var(--native-accent-rgb), 0.08);
   border-left: 2px solid var(--native-accent);
-  color: #e7c39a;
+  color: var(--native-warning-copy);
 }
 
 .native-banner-error {
-  background: rgba(238, 137, 129, 0.08);
+  background: rgba(240, 176, 176, 0.08);
   border-left: 2px solid var(--native-danger);
-  color: #f0b0aa;
+  color: var(--native-danger-copy);
 }
 
 .native-message-list {
@@ -617,8 +643,8 @@
 
 .native-message-user {
   align-self: flex-end;
-  background: rgba(241, 166, 92, 0.11);
-  border: 1px solid rgba(241, 166, 92, 0.18);
+  background: rgba(var(--native-accent-rgb), 0.11);
+  border: 1px solid rgba(var(--native-accent-rgb), 0.18);
   border-radius: 14px 14px 3px 14px;
   padding: 13px 15px;
 }
@@ -752,8 +778,8 @@
 }
 
 .native-composer:focus-within {
-  border-color: rgba(241, 166, 92, 0.6);
-  box-shadow: 0 0 0 3px rgba(241, 166, 92, 0.08), 0 14px 40px rgba(0, 0, 0, 0.2);
+  border-color: rgba(var(--native-accent-rgb), 0.6);
+  box-shadow: 0 0 0 3px rgba(var(--native-accent-rgb), 0.08), 0 14px 40px rgba(0, 0, 0, 0.2);
 }
 
 .native-composer textarea,
@@ -794,8 +820,8 @@
 .native-restore-form select:focus,
 .native-form-grid select:focus,
 .native-managed-workspace-list select:focus {
-  border-color: rgba(241, 166, 92, 0.62);
-  box-shadow: 0 0 0 2px rgba(241, 166, 92, 0.1);
+  border-color: rgba(var(--native-accent-rgb), 0.62);
+  box-shadow: 0 0 0 2px rgba(var(--native-accent-rgb), 0.1);
 }
 
 .native-composer textarea::placeholder,
@@ -828,14 +854,14 @@
 .native-send-button {
   background: var(--native-accent);
   border-color: var(--native-accent);
-  color: #26190e;
+  color: var(--native-accent-ink);
   font-weight: 700;
 }
 
 .native-button-primary {
   background: var(--native-accent);
   border-color: var(--native-accent);
-  color: #26190e;
+  color: var(--native-accent-ink);
   font-weight: 700;
 }
 
@@ -893,7 +919,7 @@ input:disabled {
 }
 
 .native-loading-orbit {
-  border: 1px solid rgba(241, 166, 92, 0.2);
+  border: 1px solid rgba(var(--native-accent-rgb), 0.2);
   border-left-color: var(--native-accent);
   border-radius: 50%;
   display: block;
@@ -949,7 +975,7 @@ input:disabled {
 }
 
 .native-dialog {
-  background: #171c1b;
+  background: var(--native-panel-soft);
   border: 1px solid var(--native-line-strong);
   border-radius: 14px;
   box-shadow: 0 26px 80px rgba(0, 0, 0, 0.45);
@@ -1286,8 +1312,8 @@ input:disabled {
 }
 
 .native-token-reveal {
-  background: rgba(241, 166, 92, 0.08);
-  border: 1px solid rgba(241, 166, 92, 0.24);
+  background: rgba(var(--native-accent-rgb), 0.08);
+  border: 1px solid rgba(var(--native-accent-rgb), 0.24);
   border-radius: 9px;
   margin-top: 15px;
   padding: 14px;
@@ -1335,8 +1361,8 @@ input:disabled {
 }
 
 .native-move-preview {
-  background: rgba(241, 166, 92, 0.07);
-  border: 1px solid rgba(241, 166, 92, 0.2);
+  background: rgba(var(--native-accent-rgb), 0.07);
+  border: 1px solid rgba(var(--native-accent-rgb), 0.2);
   border-radius: 8px;
   display: grid;
   flex-basis: 100%;
@@ -1375,8 +1401,8 @@ input:disabled {
 }
 
 .native-transfer-unavailable {
-  background: rgba(241, 166, 92, 0.08);
-  border-left: 2px solid #f1a65c;
+  background: rgba(var(--native-accent-rgb), 0.08);
+  border-left: 2px solid var(--native-accent);
   color: var(--native-muted);
   font-size: 11px;
   line-height: 1.6;
@@ -1447,7 +1473,7 @@ input:disabled {
 }
 
 .native-evidence-inspector {
-  background: rgba(14, 18, 17, 0.96);
+  background: var(--native-panel-soft);
   border-left: 1px solid var(--native-line);
   display: flex;
   flex-direction: column;
@@ -1539,6 +1565,460 @@ input:disabled {
   width: 1px;
 }
 
+/* The profile trigger is the single user-facing entry point for themes. */
+.native-profile-menu-wrap {
+  margin-top: auto;
+  position: relative;
+  z-index: 31;
+}
+
+.native-profile-menu-wrap + .native-sidebar-footer { margin-top: 0; }
+
+.native-profile-trigger {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--native-copy);
+  display: flex;
+  gap: 9px;
+  min-height: 49px;
+  padding: 7px 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.native-profile-trigger:hover,
+.native-profile-trigger:focus-visible,
+.native-profile-trigger[aria-expanded="true"] {
+  background: rgba(var(--native-accent-rgb), 0.1);
+  border-color: var(--native-line);
+  outline: none;
+}
+
+.native-profile-avatar {
+  align-items: center;
+  background: var(--native-accent);
+  border-radius: 9px;
+  color: var(--native-accent-ink);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  height: 29px;
+  justify-content: center;
+  width: 29px;
+}
+
+.native-profile-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.native-profile-copy strong {
+  font-size: 12px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-profile-copy small {
+  color: var(--native-dim);
+  font-size: 10px;
+}
+
+.native-profile-chevron {
+  color: var(--native-dim);
+  font-size: 15px;
+  margin-left: auto;
+}
+
+.native-profile-menu {
+  background: var(--native-panel-soft);
+  border: 1px solid var(--native-line-strong);
+  border-radius: 11px;
+  bottom: calc(100% + 8px);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+  display: grid;
+  gap: 5px;
+  left: 0;
+  max-height: min(70dvh, 520px);
+  min-width: min(270px, calc(100vw - 32px));
+  overflow: auto;
+  padding: 9px;
+  position: absolute;
+  width: 100%;
+}
+
+.native-profile-menu-heading {
+  color: var(--native-dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  padding: 4px 7px 2px;
+  text-transform: uppercase;
+}
+
+.native-profile-workspaces,
+.native-profile-themes {
+  display: grid;
+  gap: 2px;
+}
+
+.native-profile-workspace,
+.native-profile-theme {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--native-muted);
+  display: flex;
+  font: inherit;
+  gap: 8px;
+  min-height: 37px;
+  padding: 6px 7px;
+  text-align: left;
+  width: 100%;
+}
+
+.native-profile-workspace:hover:not(:disabled),
+.native-profile-workspace:focus-visible,
+.native-profile-theme:hover,
+.native-profile-theme:focus-visible,
+.native-profile-workspace.is-selected,
+.native-profile-theme.is-selected {
+  background: rgba(var(--native-accent-rgb), 0.12);
+  border-color: var(--native-line);
+  color: var(--native-copy);
+  outline: none;
+}
+
+.native-profile-workspace > span:last-child,
+.native-profile-theme > span:nth-child(2) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.native-profile-workspace strong,
+.native-profile-theme strong {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.native-profile-workspace small,
+.native-profile-theme small {
+  color: var(--native-dim);
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-profile-workspace-mark {
+  color: var(--native-accent);
+  flex: 0 0 auto;
+  font-size: 12px;
+  text-align: center;
+  width: 15px;
+}
+
+.native-profile-theme-dot {
+  background: var(--native-dim);
+  border: 1px solid var(--native-line-strong);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 13px;
+  width: 13px;
+}
+
+.native-profile-theme-dot.is-dark { background: #303030; }
+.native-profile-theme-dot.is-light { background: #f4f4f4; }
+.native-profile-theme-dot.is-special { background: #050505; box-shadow: inset 0 0 0 3px #777; }
+.native-profile-theme-check { color: var(--native-accent); font-size: 12px; margin-left: auto; }
+.native-profile-menu-divider { border-top: 1px solid var(--native-line); margin: 4px 0; }
+.native-profile-menu-empty { color: var(--native-dim); font-size: 10px; margin: 5px 7px; }
+
+.native-mobile-nav-toggle,
+.native-mobile-nav-backdrop {
+  display: none;
+}
+
+/* C = standard dark, B = standard light, A = special. The structure and
+ * component geometry remain shared; only opaque surface tokens change. */
+.native-app-shell[data-native-theme="dark"] {
+  color-scheme: dark;
+}
+
+.native-app-shell[data-native-theme="light"] {
+  --native-bg: #ffffff;
+  --native-panel: #e7e7e7;
+  --native-panel-soft: #f4f4f4;
+  --native-line: rgba(40, 40, 40, 0.18);
+  --native-line-strong: rgba(40, 40, 40, 0.32);
+  --native-copy: #242424;
+  --native-muted: #555555;
+  --native-dim: #707070;
+  --native-accent: #3d3d3d;
+  --native-accent-rgb: 61, 61, 61;
+  --native-accent-soft: rgba(61, 61, 61, 0.12);
+  --native-accent-ink: #ffffff;
+  --native-success: #444444;
+  --native-danger: #8b3f3f;
+  --native-warning-copy: #4d4d4d;
+  --native-danger-copy: #8b3f3f;
+  color-scheme: light;
+}
+
+.native-app-shell[data-native-theme="special"] {
+  --native-bg: #000000;
+  --native-panel: #1a1a1a;
+  --native-panel-soft: #242424;
+  --native-line: rgba(245, 245, 245, 0.2);
+  --native-line-strong: rgba(245, 245, 245, 0.36);
+  --native-copy: #f4f4f4;
+  --native-muted: #b8b8b8;
+  --native-dim: #858585;
+  --native-accent: #f0f0f0;
+  --native-accent-rgb: 240, 240, 240;
+  --native-accent-soft: rgba(240, 240, 240, 0.13);
+  --native-accent-ink: #000000;
+  --native-success: #d0d0d0;
+  --native-danger: #e5aaaa;
+  --native-warning-copy: #e2e2e2;
+  --native-danger-copy: #e5aaaa;
+  color-scheme: dark;
+}
+
+.native-app-shell[data-native-theme="special"]::after {
+  background-image: radial-gradient(circle at 8% 13%, rgba(255,255,255,.8) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 24% 44%, rgba(255,255,255,.55) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 43% 18%, rgba(255,255,255,.68) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 71% 31%, rgba(255,255,255,.62) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 88% 73%, rgba(255,255,255,.72) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 56% 86%, rgba(255,255,255,.45) 0 1px, transparent 1.4px);
+  content: "";
+  inset: 0;
+  opacity: .35;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+
+/* The shell children are opaque, so the special edition's decoration must be
+ * painted on the conversation surface itself. It remains a non-interactive
+ * background, never a new control layer. */
+.native-app-shell[data-native-theme="special"] .native-main {
+  background-color: #000000;
+  background-image:
+    radial-gradient(circle at 8% 13%, rgba(255, 255, 255, .8) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 14% 62%, rgba(255, 255, 255, .42) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 24% 44%, rgba(255, 255, 255, .55) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 31% 9%, rgba(255, 255, 255, .38) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 43% 18%, rgba(255, 255, 255, .68) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 49% 55%, rgba(255, 255, 255, .44) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 56% 86%, rgba(255, 255, 255, .45) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 63% 12%, rgba(255, 255, 255, .5) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 71% 31%, rgba(255, 255, 255, .62) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 77% 66%, rgba(255, 255, 255, .4) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 88% 73%, rgba(255, 255, 255, .72) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 93% 21%, rgba(255, 255, 255, .36) 0 1px, transparent 1.4px);
+}
+
+.native-app-shell[data-native-theme="special"]::after {
+  animation: native-star-twinkle 7s ease-in-out infinite alternate;
+}
+
+@keyframes native-star-twinkle {
+  from { opacity: .24; }
+  to { opacity: .42; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .native-app-shell[data-native-theme="special"]::after { animation: none; }
+}
+
+@media (min-width: 701px) {
+  .native-mobile-nav-toggle,
+  .native-mobile-nav-backdrop { display: none; }
+}
+
+@media (max-width: 700px) {
+  .native-app-shell,
+  .native-app-shell.has-evidence {
+    display: block;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .native-sidebar {
+    bottom: 0;
+    box-shadow: 18px 0 44px rgba(0, 0, 0, 0.42);
+    left: 0;
+    max-height: none;
+    position: absolute;
+    top: 0;
+    transform: translateX(-105%);
+    transition: transform 180ms ease;
+    width: min(300px, calc(100vw - 28px));
+    z-index: 30;
+  }
+
+  .native-sidebar.is-mobile-open { transform: translateX(0); }
+
+  .native-main {
+    height: 100%;
+    min-height: 0;
+    width: 100%;
+  }
+
+  .native-chat-header,
+  .native-management-header { padding-left: 56px; }
+
+  .native-mobile-nav-backdrop {
+    background: rgba(0, 0, 0, 0.56);
+    border: 0;
+    display: block;
+    inset: 0;
+    position: absolute;
+    z-index: 25;
+  }
+
+  .native-mobile-nav-toggle {
+    align-items: center;
+    background: var(--native-panel-soft);
+    border: 1px solid var(--native-line-strong);
+    border-radius: 7px;
+    color: var(--native-copy);
+    display: inline-flex;
+    font-size: 17px;
+    height: 34px;
+    justify-content: center;
+    left: 14px;
+    padding: 0;
+    position: absolute;
+    top: 13px;
+    width: 34px;
+    z-index: 12;
+  }
+
+  .native-mobile-nav-toggle:focus-visible {
+    outline: 2px solid var(--native-accent);
+    outline-offset: 2px;
+  }
+
+  .native-profile-menu {
+    bottom: auto;
+    left: 0;
+    max-height: min(60dvh, 440px);
+    position: fixed;
+    top: 12px;
+    width: min(290px, calc(100vw - 40px));
+  }
+}
+
+/* The Room work renderer keeps a small, scoped style block for its data
+ * states.  Give its ordinary transcript the same visual geometry as the
+ * prototype without changing those state transitions. */
+.native-app-shell .native-work-surface .native-work-message-list {
+  gap: 0;
+  max-width: 800px;
+  padding-bottom: 30px;
+  padding-top: 25px;
+}
+
+.native-app-shell .native-work-surface .native-work-message {
+  animation: none;
+  margin-bottom: 25px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-self {
+  max-width: min(78%, 560px);
+}
+
+.native-app-shell .native-work-surface .native-work-message-self .native-work-message-bubble {
+  background: var(--native-surface-raised);
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 14px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-self .native-message-content {
+  background: transparent;
+  padding: 0;
+}
+
+.native-app-shell .native-work-surface .native-work-message-peer .native-work-message-bubble {
+  background: var(--native-surface-raised);
+  border-radius: 14px 14px 14px 4px;
+  padding: 9px 12px;
+  width: fit-content;
+}
+
+.native-app-shell .native-work-surface .native-work-message-agent .native-work-message-bubble {
+  max-width: 720px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-avatar {
+  background: var(--native-surface-raised);
+  border-radius: 11px;
+  height: 32px;
+  width: 32px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-agent .native-message-meta,
+.native-app-shell .native-work-surface .native-work-message-peer .native-message-meta {
+  color: var(--native-copy);
+  font-size: 13px;
+  font-weight: 600;
+  gap: 7px;
+  line-height: 1.4;
+  margin-bottom: 5px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-time,
+.native-app-shell .native-work-surface .native-work-message-status {
+  color: var(--native-dim);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.native-app-shell .native-work-surface .native-work-message-reply {
+  background: transparent;
+  border: 0;
+  color: var(--native-muted);
+  margin: 5px 0 0 43px;
+  min-height: 0;
+  padding: 3px 0;
+}
+
+.native-app-shell .native-work-surface .native-work-message-self .native-work-message-reply {
+  align-self: flex-end;
+  margin-left: 0;
+}
+
+.native-app-shell .native-work-surface .native-work-result-card {
+  background: var(--native-surface-raised);
+  border-color: var(--native-line);
+  border-radius: 11px;
+  box-shadow: none;
+}
+
+.native-app-shell .native-work-surface .native-work-conversation-empty,
+.native-app-shell .native-work-surface .native-work-conversation-loading {
+  color: var(--native-muted);
+}
+
+@media (max-width: 700px) {
+  .native-app-shell .native-work-surface .native-work-message-list {
+    padding: 18px 18px 22px;
+  }
+
+  .native-app-shell .native-work-surface .native-work-message-self { max-width: 88%; }
+}
+
 @media (max-width: 980px) {
   .native-app-shell,
   .native-app-shell.has-evidence {
@@ -1546,7 +2026,7 @@ input:disabled {
   }
 
   .native-evidence-inspector {
-    background: #121716;
+    background: var(--native-panel-soft);
     border: 1px solid var(--native-line-strong);
     bottom: 15px;
     box-shadow: 0 22px 60px rgba(0, 0, 0, 0.46);
@@ -1647,14 +2127,30 @@ input:disabled {
 .native-generated-surface,
 .native-custom-view,
 .native-interaction-request-card {
-  background: rgba(15, 19, 18, 0.74);
+  background: var(--native-panel-soft);
   border: 1px solid var(--native-line);
   border-radius: 13px;
   min-width: 0;
 }
 
-.native-artifact-surface { padding: 18px; }
-.native-artifact-surface-header h2 { font-size: 20px; margin: 5px 0; }
+.native-artifact-surface {
+  container: native-artifact-surface / inline-size;
+  padding: 18px;
+}
+
+.native-artifact-surface-header {
+  align-items: center;
+  min-width: 0;
+}
+
+.native-artifact-surface-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+  min-width: 0;
+  width: 100%;
+}
 
 .native-artifact-layout {
   display: grid;
@@ -1667,6 +2163,7 @@ input:disabled {
   align-content: start;
   display: grid;
   gap: 7px;
+  min-width: 0;
 }
 
 .native-artifact-list-item {
@@ -1686,7 +2183,7 @@ input:disabled {
 .native-artifact-list-item:focus-visible,
 .native-artifact-list-item.is-active {
   background: var(--native-accent-soft);
-  border-color: rgba(241, 166, 92, .34);
+  border-color: rgba(var(--native-accent-rgb), .34);
 }
 
 .native-artifact-list-item strong { font-size: 12px; overflow-wrap: anywhere; }
@@ -1707,8 +2204,8 @@ input:disabled {
 .native-artifact-markdown,
 .native-artifact-raw,
 .native-artifact-comparison pre {
-  background: rgba(0, 0, 0, .24);
-  border: 1px solid rgba(204, 218, 209, .08);
+  background: var(--native-bg);
+  border: 1px solid var(--native-line);
   border-radius: 8px;
   color: var(--native-copy);
   font-size: 13px;
@@ -1720,10 +2217,10 @@ input:disabled {
 
 .native-artifact-markdown :first-child { margin-top: 0; }
 .native-artifact-markdown :last-child { margin-bottom: 0; }
-.native-artifact-markdown code { color: #f7c78c; }
+.native-artifact-markdown code { color: var(--native-accent); }
 .native-artifact-text textarea,
 .native-artifact-agent-request textarea {
-  background: rgba(0, 0, 0, .25);
+  background: var(--native-panel);
   border: 1px solid var(--native-line-strong);
   border-radius: 8px;
   color: var(--native-copy);
@@ -1762,7 +2259,7 @@ input:disabled {
 .native-artifact-history ul { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; }
 .native-artifact-history li { align-items: center; background: rgba(255,255,255,.025); border-radius: 6px; display: flex; flex-wrap: wrap; gap: 6px 9px; padding: 7px; }
 .native-artifact-history li > span { font-size: 11px; }
-.native-artifact-comparison { background: rgba(241, 166, 92, .06); border: 1px solid rgba(241, 166, 92, .2); border-radius: 8px; display: grid; gap: 10px; margin-top: 10px; padding: 11px; }
+.native-artifact-comparison { background: rgba(var(--native-accent-rgb), .06); border: 1px solid rgba(var(--native-accent-rgb), .2); border-radius: 8px; display: grid; gap: 10px; margin-top: 10px; padding: 11px; }
 .native-artifact-comparison-grid { display: grid; gap: 9px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .native-artifact-comparison-grid label { color: var(--native-muted); display: grid; font-size: 10px; gap: 5px; }
 .native-artifact-comparison pre { font-size: 10px; margin: 0; min-height: 100px; }
@@ -1789,7 +2286,7 @@ input:disabled {
 .native-interaction-request-card > p { color: var(--native-muted); font-size: 12px; line-height: 1.6; margin: 0; }
 .native-interaction-request-card__kind,
 .native-interaction-request-card__status { border: 1px solid var(--native-line); border-radius: 999px; color: var(--native-muted); display: inline-block; font-size: 10px; padding: 3px 7px; }
-.native-interaction-request-card__kind.is-approval { border-color: rgba(241,166,92,.4); color: var(--native-accent); }
+.native-interaction-request-card__kind.is-approval { border-color: rgba(var(--native-accent-rgb),.4); color: var(--native-accent); }
 .native-interaction-request-card__status.is-failed { border-color: rgba(238,137,129,.4); color: var(--native-danger); }
 .native-interaction-request-card__context { display: grid; gap: 6px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 0; }
 .native-interaction-request-card__context div { background: rgba(255,255,255,.025); border-radius: 6px; padding: 7px; }
@@ -1820,8 +2317,17 @@ input:disabled {
 
 @media (max-width: 820px) {
   .native-artifact-layout { grid-template-columns: 1fr; }
-  .native-artifact-list { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .native-artifact-list { grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); }
   .native-artifact-comparison-grid { grid-template-columns: 1fr; }
+}
+
+/* The right panel is narrower than the viewport at normal desktop sizes.
+ * Use its own width as the breakpoint so the empty/detail message never gets
+ * squeezed into one-character lines beside the Artifact list. */
+@container native-artifact-surface (max-width: 560px) {
+  .native-artifact-surface { padding: 14px; }
+  .native-artifact-layout { grid-template-columns: minmax(0, 1fr); }
+  .native-artifact-list { grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); }
 }
 
 * {
@@ -1863,4 +2369,707 @@ option {
 
 button {
   cursor: pointer;
+}
+
+/* Keep the reference drawer behavior after the legacy narrow-width rules
+ * above. The chat remains the only visible surface until the drawer opens. */
+@media (max-width: 700px) {
+  .native-app-shell,
+  .native-app-shell.has-evidence {
+    display: block;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .native-sidebar {
+    border-bottom: 0;
+    border-right: 1px solid var(--native-line);
+    bottom: 0;
+    max-height: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 14px 14px 10px;
+    position: absolute;
+    top: 0;
+    transform: translateX(-105%);
+    transition: transform 180ms ease;
+    width: min(300px, calc(100vw - 28px));
+    z-index: 30;
+  }
+
+  .native-sidebar.is-mobile-open { transform: translateX(0); }
+  .native-main { height: 100%; min-height: 0; width: 100%; }
+  .native-chat-header,
+  .native-management-header { padding-left: 56px; padding-right: 18px; }
+  .native-mobile-nav-backdrop { display: block; }
+  .native-mobile-nav-toggle { display: inline-flex; }
+  .native-profile-menu { bottom: auto; left: 0; position: fixed; top: 12px; width: min(290px, calc(100vw - 40px)); }
+}
+
+/* Keep the artifact pane usable on tablet widths after the legacy narrow
+ * shell rule above. Evidence remains an overlay at this breakpoint. */
+@media (min-width: 701px) and (max-width: 980px) {
+  .native-app-shell.has-artifact-panel {
+    grid-template-columns: 238px minmax(0, 1fr) minmax(300px, 42vw);
+  }
+
+  .native-app-shell.has-evidence.has-artifact-panel {
+    grid-template-columns: 238px minmax(0, 1fr) minmax(280px, 32vw) minmax(280px, 32vw);
+  }
+}
+
+@media (max-width: 700px) {
+  /* On a phone the artifact panel is a temporary right-side overlay; the
+   * navigation drawer remains the only left-side overlay. */
+  .native-artifact-panel {
+    bottom: 0;
+    box-shadow: -18px 0 44px rgba(0, 0, 0, 0.42);
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: min(100%, 520px);
+    z-index: 20;
+  }
+}
+
+/*
+ * Native conversation frame
+ *
+ * The production UI intentionally takes its visual skeleton from the local
+ * prototype: a quiet outer frame, a transparent navigation rail, and one
+ * rounded conversation window.  These rules live last so legacy management
+ * styles cannot leak back into the ordinary Room experience.  They do not
+ * create any prototype-only controls or data.
+ */
+.native-app-shell {
+  --native-frame: #383838;
+  --native-surface: #181818;
+  --native-surface-raised: #232323;
+  --native-surface-soft: #202020;
+  --native-sidebar-text: #dedede;
+  --native-sidebar-muted: #b8b8b8;
+  --native-sidebar-selected: rgba(255, 255, 255, .11);
+  --native-bg: var(--native-surface);
+  --native-panel: var(--native-frame);
+  --native-panel-soft: var(--native-surface-raised);
+  --native-copy: #ededed;
+  --native-muted: #b5b5b5;
+  --native-dim: #898989;
+  --native-accent: #d6d6d6;
+  --native-accent-rgb: 214, 214, 214;
+  --native-accent-soft: rgba(214, 214, 214, .12);
+  --native-accent-ink: #202020;
+  --native-line: rgba(255, 255, 255, .1);
+  --native-line-strong: rgba(255, 255, 255, .2);
+  background: var(--native-frame);
+  color: var(--native-copy);
+  display: block;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px 18px 18px 0;
+}
+
+.native-app-shell.has-evidence,
+.native-app-shell.has-artifact-panel,
+.native-app-shell.has-evidence.has-artifact-panel {
+  display: block;
+}
+
+.native-workspace-shell {
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.native-sidebar {
+  background: transparent;
+  border: 0;
+  color: var(--native-sidebar-text);
+  gap: 0;
+  padding: 10px 15px 2px;
+}
+
+.native-sidebar::after { display: none; }
+
+.native-brand {
+  gap: 10px;
+  margin: 5px 11px 27px;
+  padding: 0;
+}
+
+.native-brand-mark {
+  background: var(--native-accent);
+  border-radius: 8px;
+  color: var(--native-accent-ink);
+  font-family: "Avenir Next", "Hiragino Sans", sans-serif;
+  font-size: 19px;
+  height: 27px;
+  transform: none;
+  width: 27px;
+}
+
+.native-brand strong {
+  color: var(--native-sidebar-text);
+  font-family: "Avenir Next", "Hiragino Sans", sans-serif;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.8px;
+}
+
+.native-sidebar-agent-link {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--native-sidebar-text);
+  display: flex;
+  font: inherit;
+  font-size: 14px;
+  gap: 11px;
+  margin: 0 0 8px;
+  min-height: 42px;
+  padding: 8px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.native-sidebar-agent-link:hover:not(:disabled),
+.native-sidebar-agent-link:focus-visible {
+  background: rgba(255, 255, 255, .06);
+  outline: 2px solid var(--native-accent);
+  outline-offset: 2px;
+}
+
+.native-room-navigator {
+  border: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 5px 16px;
+}
+
+.native-subsection-heading {
+  flex: 0 0 auto;
+  margin: 20px 0 7px;
+  padding: 0 5px;
+}
+
+.native-section-eyebrow {
+  color: var(--native-sidebar-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .04em;
+  text-transform: none;
+}
+
+.native-icon-button-small {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--native-sidebar-muted);
+  font-size: 19px;
+  height: 24px;
+  min-width: 24px;
+}
+
+.native-icon-button-small:hover:not(:disabled),
+.native-icon-button-small:focus-visible {
+  background: rgba(255, 255, 255, .07);
+  color: var(--native-sidebar-text);
+}
+
+.native-room-list {
+  gap: 2px;
+}
+
+.native-room-item {
+  border: 0;
+  border-radius: 7px;
+  color: var(--native-sidebar-text);
+  font-size: 14px;
+  min-height: 42px;
+  padding-bottom: 8px;
+  padding-right: 12px;
+  padding-top: 8px;
+}
+
+.native-room-item:hover:not(:disabled),
+.native-room-item.is-selected {
+  background: var(--native-sidebar-selected);
+  border-color: transparent;
+  color: var(--native-sidebar-text);
+}
+
+.native-room-item.is-selected { font-weight: 600; }
+
+.native-room-mark,
+.native-room-dm-mark {
+  color: var(--native-sidebar-muted);
+  flex: 0 0 auto;
+  font-size: 19px;
+  font-weight: 400;
+  line-height: 1;
+  text-align: center;
+  width: 18px;
+}
+
+.native-room-dm-mark {
+  background: rgba(255, 255, 255, .1);
+  border-radius: 9px;
+  font-size: 10px;
+  height: 22px;
+  line-height: 22px;
+  width: 22px;
+}
+
+.native-room-item.is-selected .native-room-mark,
+.native-room-item.is-selected .native-room-dm-mark { color: var(--native-sidebar-text); }
+
+.native-room-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-room-dm-section { margin-top: 25px; }
+
+.native-room-section-heading {
+  color: var(--native-sidebar-muted);
+  font-size: 12px;
+  letter-spacing: .04em;
+  margin: 0 5px 7px;
+}
+
+.native-room-children {
+  border-left: 1px solid rgba(255, 255, 255, .14);
+  margin: 3px 0 2px 17px;
+  padding-left: 7px;
+}
+
+.native-app-shell[data-native-theme="light"] .native-room-children { border-left-color: rgba(30, 30, 30, .14); }
+
+.native-room-children-mark {
+  color: var(--native-sidebar-muted);
+  font-size: 14px;
+  line-height: 1;
+  margin-left: auto;
+}
+
+.native-empty-copy,
+.native-loading-line {
+  color: var(--native-sidebar-muted);
+  font-size: 12px;
+  line-height: 1.65;
+  margin: 6px 5px;
+}
+
+.native-profile-menu-wrap { margin-top: auto; }
+
+.native-profile-trigger {
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, .15);
+  border-radius: 0;
+  color: var(--native-sidebar-text);
+  gap: 11px;
+  min-height: 72px;
+  padding: 15px 7px 6px;
+}
+
+.native-profile-trigger:hover,
+.native-profile-trigger:focus-visible,
+.native-profile-trigger[aria-expanded="true"] {
+  background: transparent;
+  border-color: rgba(255, 255, 255, .15);
+  color: var(--native-sidebar-text);
+}
+
+.native-profile-avatar {
+  background: #555;
+  border-radius: 13px;
+  color: #f5f5f5;
+  font-size: 13px;
+  height: 38px;
+  width: 38px;
+}
+
+.native-profile-copy { gap: 1px; }
+.native-profile-copy strong { color: var(--native-sidebar-text); font-size: 14px; font-weight: 600; }
+.native-profile-copy small { color: var(--native-sidebar-muted); font-size: 12px; }
+.native-profile-workspace-name { align-items: center; display: inline-flex; gap: 5px; }
+.native-profile-workspace-icon { font-size: 11px; }
+.native-profile-chevron { color: var(--native-sidebar-muted); }
+
+.native-profile-menu {
+  background: var(--native-surface-raised);
+  border: 1px solid var(--native-line-strong);
+  border-radius: 12px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .34);
+}
+
+.native-profile-menu-account {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  padding: 7px;
+}
+
+.native-profile-menu-account > span:last-child { display: grid; gap: 2px; min-width: 0; }
+.native-profile-menu-account strong { font-size: 12px; }
+.native-profile-menu-account small { color: var(--native-dim); font-size: 10px; }
+
+.native-main-window {
+  background: var(--native-surface);
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 18px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .08);
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.native-main {
+  background: var(--native-surface);
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.native-artifact-panel {
+  background: var(--native-surface-soft);
+  border-left: 1px solid var(--native-line);
+  display: flex;
+  flex: 0 1 410px;
+  flex-direction: column;
+  max-width: 45%;
+  min-height: 0;
+  min-width: 360px;
+  overflow: hidden;
+}
+
+.native-evidence-inspector {
+  background: var(--native-surface-raised);
+  border: 1px solid var(--native-line-strong);
+  border-radius: 12px;
+  bottom: 34px;
+  box-shadow: 0 18px 52px rgba(0, 0, 0, .4);
+  position: absolute;
+  right: 34px;
+  top: 34px;
+  width: min(344px, calc(100vw - 68px));
+  z-index: 20;
+}
+
+.native-chat-header,
+.native-management-header {
+  border-bottom: 1px solid var(--native-line);
+  min-height: 78px;
+  padding: 0 30px;
+}
+
+.native-chat-header h1,
+.native-management-header h1,
+.native-main-empty h1,
+.native-connection-gate h1 {
+  font-family: "Avenir Next", "Hiragino Sans", sans-serif;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.native-chat-header .native-section-eyebrow,
+.native-management-header .native-section-eyebrow { display: none; }
+
+.native-chat-header .native-room-heading p,
+.native-room-description {
+  color: var(--native-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 5px 0 0;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-work-header-meta { align-items: center; display: flex; gap: 8px; margin-left: auto; }
+.native-work-header-meta .native-connection-status,
+.native-work-header-meta .native-work-private-note { display: none; }
+
+/* This is the existing Room's actual default Agent, presented as the compact
+ * prototype-style identity pill rather than an Agent-setting control. */
+.native-work-header-meta .native-work-default {
+  align-items: center;
+  background: var(--native-surface-raised);
+  border-radius: 20px;
+  display: flex;
+  gap: 7px;
+  padding: 5px 9px 5px 5px;
+}
+
+.native-work-default-avatar {
+  align-items: center;
+  background: rgba(255, 255, 255, .1);
+  border-radius: 50%;
+  color: var(--native-copy);
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 600;
+  height: 25px;
+  justify-content: center;
+  width: 25px;
+}
+
+.native-work-default-value { color: var(--native-muted); font-size: 12px; }
+
+.native-room-tool-links,
+.native-work-header-artifact-link { border: 0; padding: 0; }
+
+.native-work-header-artifact-link .native-text-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--native-muted);
+  display: inline-flex;
+  font-size: 12px;
+  min-height: 32px;
+  padding: 6px 9px;
+}
+
+.native-work-header-artifact-link .native-text-button:hover,
+.native-work-header-artifact-link .native-text-button:focus-visible {
+  background: rgba(255, 255, 255, .07);
+  color: var(--native-copy);
+}
+
+.native-work-body,
+.native-work-conversation,
+.native-chat-surface { background: transparent; }
+
+.native-message-list {
+  gap: 0;
+  margin: 0 auto;
+  max-width: 800px;
+  padding: 25px 32px 30px;
+  width: 100%;
+}
+
+.native-message {
+  animation: none;
+  margin: 0 0 25px;
+  max-width: 100%;
+}
+
+.native-message-content { font-size: 15px; line-height: 1.85; }
+.native-message-meta { font-size: 13px; letter-spacing: 0; margin-bottom: 5px; text-transform: none; }
+.native-message-state { color: var(--native-dim); font-size: 10px; }
+.native-message-user { background: transparent; border: 0; border-radius: 0; padding: 0; }
+.native-message-user .native-message-content { background: var(--native-surface-raised); border-radius: 16px 16px 4px 16px; padding: 10px 14px; }
+.native-message-agent,
+.native-message-system { padding-left: 0; }
+
+.native-composer-wrap {
+  border: 0;
+  margin: 0 auto;
+  max-width: 864px;
+  padding: 12px 32px 19px;
+  width: 100%;
+}
+
+.native-composer {
+  background: var(--native-surface-raised);
+  border: 1px solid rgba(120, 130, 126, .52);
+  border-radius: 14px;
+  box-shadow: none;
+  padding: 10px 12px 8px;
+}
+
+.native-composer:focus-within { border-color: var(--native-accent); box-shadow: none; }
+.native-composer textarea { background: transparent; color: var(--native-copy); font-size: 14px; min-height: 58px; padding: 5px 6px; }
+.native-composer-footer { color: var(--native-dim); font-size: 10px; padding-top: 7px; }
+.native-send-button { border-radius: 10px; min-height: 33px; padding: 0; width: 33px; }
+
+.native-artifact-workspace {
+  background: var(--native-surface-soft);
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.native-artifact-workspace-header {
+  align-items: center;
+  border-bottom: 1px solid var(--native-line);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 78px;
+  padding: 0 20px;
+}
+
+.native-artifact-workspace-header h1 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.native-artifact-workspace-header .native-section-eyebrow,
+.native-artifact-workspace-header p { display: none; }
+
+.native-artifact-workspace .native-button-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--native-muted);
+}
+
+.native-artifact-layout,
+.native-artifact-detail,
+.native-artifact-direct {
+  background: var(--native-surface-soft);
+}
+
+.native-app-shell[data-native-theme="light"] {
+  --native-frame: #e7e7e7;
+  --native-surface: #ffffff;
+  --native-surface-raised: #f2f2f2;
+  --native-surface-soft: #f7f7f7;
+  --native-sidebar-text: #383838;
+  --native-sidebar-muted: #686868;
+  --native-sidebar-selected: #dadada;
+  --native-copy: #242424;
+  --native-muted: #5e5e5e;
+  --native-dim: #7b7b7b;
+  --native-accent: #3d3d3d;
+  --native-accent-rgb: 61, 61, 61;
+  --native-accent-soft: rgba(61, 61, 61, .12);
+  --native-accent-ink: #ffffff;
+  --native-line: rgba(30, 30, 30, .13);
+  --native-line-strong: rgba(30, 30, 30, .22);
+}
+
+.native-app-shell[data-native-theme="light"] .native-main-window { border-color: rgba(0, 0, 0, .04); }
+.native-app-shell[data-native-theme="light"] .native-profile-trigger { border-top-color: rgba(20, 20, 20, .14); }
+.native-app-shell[data-native-theme="light"] .native-profile-trigger:hover,
+.native-app-shell[data-native-theme="light"] .native-profile-trigger:focus-visible,
+.native-app-shell[data-native-theme="light"] .native-profile-trigger[aria-expanded="true"] { border-color: rgba(20, 20, 20, .14); }
+.native-app-shell[data-native-theme="light"] .native-composer { border-color: #d4d4d4; }
+
+.native-app-shell[data-native-theme="special"] {
+  --native-frame: #1a1a1a;
+  --native-surface: #000000;
+  --native-surface-raised: #1e1e1e;
+  --native-surface-soft: #202020;
+  --native-sidebar-text: #dedede;
+  --native-sidebar-muted: #a6a6a6;
+  --native-sidebar-selected: rgba(255, 255, 255, .12);
+  --native-copy: #f2f2f2;
+  --native-muted: #b8b8b8;
+  --native-dim: #858585;
+  --native-accent: #eeeeee;
+  --native-accent-rgb: 238, 238, 238;
+  --native-accent-soft: rgba(238, 238, 238, .12);
+  --native-accent-ink: #111111;
+  --native-line: rgba(255, 255, 255, .13);
+  --native-line-strong: rgba(255, 255, 255, .24);
+}
+
+.native-app-shell[data-native-theme="special"] .native-main {
+  background-color: #000;
+  background-image:
+    radial-gradient(circle at 8% 13%, rgba(255,255,255,.8) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 14% 62%, rgba(255,255,255,.42) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 24% 44%, rgba(255,255,255,.55) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 31% 9%, rgba(255,255,255,.38) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 43% 18%, rgba(255,255,255,.68) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 49% 55%, rgba(255,255,255,.44) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 56% 86%, rgba(255,255,255,.45) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 63% 12%, rgba(255,255,255,.5) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 71% 31%, rgba(255,255,255,.62) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 77% 66%, rgba(255,255,255,.4) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 88% 73%, rgba(255,255,255,.72) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 93% 21%, rgba(255,255,255,.36) 0 1px, transparent 1.4px);
+}
+
+.native-app-shell[data-native-theme="special"] .native-main-window,
+.native-app-shell[data-native-theme="special"] .native-chat-surface,
+.native-app-shell[data-native-theme="special"] .native-work-body,
+.native-app-shell[data-native-theme="special"] .native-work-conversation { background-color: transparent; }
+
+@media (max-width: 980px) {
+  .native-app-shell { padding: 12px 12px 12px 0; }
+  .native-workspace-shell { grid-template-columns: 238px minmax(0, 1fr); }
+  .native-artifact-panel { min-width: 300px; }
+}
+
+@media (max-width: 700px) {
+  .native-app-shell,
+  .native-app-shell.has-evidence,
+  .native-app-shell.has-artifact-panel,
+  .native-app-shell.has-evidence.has-artifact-panel {
+    display: block;
+    padding: 8px;
+  }
+
+  .native-workspace-shell { display: block; }
+  .native-main-window { border-radius: 14px; height: 100%; width: 100%; }
+  .native-sidebar {
+    background: var(--native-frame);
+    bottom: 8px;
+    box-shadow: 18px 0 44px rgba(0, 0, 0, .42);
+    left: 8px;
+    padding: 10px 15px 2px;
+    position: absolute;
+    top: 8px;
+    transform: translateX(calc(-100% - 16px));
+    width: min(252px, calc(100vw - 36px));
+    z-index: 30;
+  }
+
+  .native-sidebar.is-mobile-open { transform: translateX(0); }
+  .native-mobile-nav-backdrop { z-index: 25; }
+  .native-mobile-nav-toggle {
+    background: var(--native-surface-raised);
+    border: 1px solid var(--native-line-strong);
+    left: 20px;
+    top: 20px;
+    z-index: 12;
+  }
+
+  .native-chat-header,
+  .native-management-header { min-height: 70px; padding: 0 18px 0 58px; }
+  .native-message-list { padding: 18px 18px 22px; }
+  .native-composer-wrap { padding: 9px 12px 13px; }
+  .native-artifact-panel {
+    border-left: 1px solid var(--native-line);
+    bottom: 0;
+    max-width: none;
+    min-width: 0;
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: min(100%, 520px);
+    z-index: 20;
+  }
+
+  .native-evidence-inspector {
+    bottom: 16px;
+    right: 16px;
+    top: 16px;
+    width: min(344px, calc(100vw - 32px));
+  }
 }

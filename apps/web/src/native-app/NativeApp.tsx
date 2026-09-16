@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import OrganizationSwitcher from "../components/OrganizationSwitcher";
-import WorkspaceNavigator from "../components/WorkspaceNavigator";
 import RoomNavigator from "../components/RoomNavigator";
 import ChatSurface from "../components/ChatSurface";
 import RoomWorkSurface, { roomWorkCanReceiveReply, roomWorkControlAllowed } from "./RoomWorkSurface";
@@ -9,17 +7,18 @@ import NativeKnowledgeTools from "./NativeKnowledgeTools";
 import NativeRoomAdministration from "./NativeRoomAdministration";
 import NativeArtifactWorkspace, { nativeArtifactWorkspaceInitialResourceFromUnknown } from "./NativeArtifactWorkspace";
 import NativeCollectionPanel from "./NativeCollectionPanel";
+import NativeProfileMenu from "./NativeProfileMenu";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
-import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
 import OrganizationManagement from "../components/OrganizationManagement";
 import EvidenceInspector from "../components/EvidenceInspector";
 import ConnectionRequired from "../components/ConnectionRequired";
 import WorkspaceConnectionSettings from "../components/WorkspaceConnectionSettings";
 import { createIdempotencyKey } from "../lib/api";
+import { readNativeThemePreference, writeNativeThemePreference, type NativeTheme } from "../lib/native-app-theme-preferences";
 import { nativeRoomAgentIsAvailable, nativeRoomCreateErrorIsExplicitServerFailure, useNativeApp } from "./use-native-app";
-import { useNativeDraftNavigation, type NativeDraftNavigationController, type NativeDraftNavigationTarget } from "./use-native-draft-navigation";
+import { type NativeDraftNavigationController, type NativeDraftNavigationTarget } from "./use-native-draft-navigation";
 import type { NativeRoomSearchResult } from "./use-native-knowledge-tools";
-import type { NativeAgent, NativeAgentBackend, NativeArtifactWorkspaceInitialResource, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspaceTarget } from "./types";
+import type { NativeAgent, NativeAgentBackend, NativeArtifactWorkspaceInitialResource, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspace, NativeWorkspaceTarget } from "./types";
 
 export interface NativeCreateDialogValue {
   name: string;
@@ -31,6 +30,8 @@ export interface NativeCreateDialogValue {
   newAgent?: NativeRoomNewAgentInput;
   agentPermission?: NativeRoomAgentPermission;
 }
+
+export type NativeRoomCreateMode = "existing-only" | "full";
 
 export type NativeRoomTool = "knowledge" | "administration" | "artifacts" | "collections" | "interactions";
 export type NativeRoomToolTarget = NativeWorkspaceTarget & { roomId: string };
@@ -97,12 +98,8 @@ export function NativeRoomToolLinks({ target, onOpen }: {
   onOpen: (tool: NativeRoomTool) => void;
 }) {
   if (!target) return null;
-  return <div className="native-room-tool-links" aria-label="現在のRoomの補助操作">
-    <button type="button" className="native-text-button" onClick={() => onOpen("knowledge")}>知識・検索・設定</button>
-    <button type="button" className="native-text-button" onClick={() => onOpen("administration")}>Room管理</button>
-    <button type="button" className="native-text-button" onClick={() => onOpen("artifacts")}>成果物・操作画面</button>
-    <button type="button" className="native-text-button" onClick={() => onOpen("collections")}>Collection</button>
-    <button type="button" className="native-text-button" onClick={() => onOpen("interactions")}>確認待ち</button>
+  return <div className="native-room-tool-links native-work-header-artifact-link" aria-label="現在のRoomの成果物操作">
+    <button type="button" className="native-text-button" onClick={() => onOpen("artifacts")}>成果物</button>
   </div>;
 }
 
@@ -174,7 +171,8 @@ export function CreateDialog({
   agentBackendLoading = false,
   agentError,
   agentBackendError,
-  workspaceTarget
+  workspaceTarget,
+  roomCreateMode = "full"
 }: {
   kind: "organization" | "workspace" | "room";
   onClose: () => void;
@@ -188,10 +186,12 @@ export function CreateDialog({
   agentError?: string | null;
   agentBackendError?: string | null;
   workspaceTarget?: NativeWorkspaceTarget;
+  /** The ordinary Room navigator intentionally exposes only existing Agents. */
+  roomCreateMode?: NativeRoomCreateMode;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [agentMode, setAgentMode] = useState<"existing" | "new">(agents.length ? "existing" : "new");
+  const [agentMode, setAgentMode] = useState<"existing" | "new">(roomCreateMode === "existing-only" || agents.length ? "existing" : "new");
   const [defaultAgentId, setDefaultAgentId] = useState("");
   const [newAgentName, setNewAgentName] = useState("");
   const [newAgentRole, setNewAgentRole] = useState("");
@@ -206,14 +206,14 @@ export function CreateDialog({
   useEffect(() => {
     if (kind !== "room") return;
     if (!availableAgents.length) {
-      setAgentMode("new");
+      setAgentMode(roomCreateMode === "existing-only" ? "existing" : "new");
     } else if (!defaultAgentId || !availableAgents.some((agent) => agent.id === defaultAgentId)) {
       setDefaultAgentId(availableAgents[0]?.id ?? "");
     }
     if (!newAgentBackendId || !availableBackends.some((backend) => backend.id === newAgentBackendId)) {
       setNewAgentBackendId(availableBackends[0]?.id ?? "");
     }
-  }, [availableAgents, availableBackends, defaultAgentId, kind, newAgentBackendId]);
+  }, [availableAgents, availableBackends, defaultAgentId, kind, newAgentBackendId, roomCreateMode]);
   const title = kind === "organization" ? "Organizationを作成" : kind === "workspace" ? "Workspaceを作成" : "Roomを作成";
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -239,7 +239,7 @@ export function CreateDialog({
         setRoomOperationId(createIdempotencyKey());
         return;
       }
-      if (!agentPermission.canView || !agentPermission.canExecute) {
+      if (roomCreateMode === "full" && (!agentPermission.canView || !agentPermission.canExecute)) {
         setValidationError("既定Agentには閲覧と実行権限が必要です。");
         setRoomOperationId(createIdempotencyKey());
         return;
@@ -251,7 +251,7 @@ export function CreateDialog({
           operationId: roomOperationId,
           defaultAgentId: selectedAgent.id,
           ...(selectedAgent.version === undefined ? {} : { defaultAgentVersion: selectedAgent.version }),
-          agentPermission
+          ...(roomCreateMode === "full" ? { agentPermission } : {})
         });
       } catch (error) {
         if (nativeRoomCreateErrorIsExplicitServerFailure(error)) setRoomOperationId(createIdempotencyKey());
@@ -303,9 +303,10 @@ export function CreateDialog({
               <legend>既定Agent</legend>
               <label className="native-radio-label"><input type="radio" name="room-agent-mode" checked={agentMode === "existing"} disabled={!availableAgents.length || agentLoading} onChange={() => setAgentMode("existing")} /><span>既存Agentを選ぶ</span></label>
               {agentMode === "existing" ? <label><span>Agent</span><select value={defaultAgentId} onChange={(event) => setDefaultAgentId(event.currentTarget.value)} disabled={!availableAgents.length || agentLoading} required><option value="">選択してください</option>{availableAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.displayName}{agent.backendId ? ` · ${agent.backendId}` : ""}</option>)}</select></label> : null}
-              <label className="native-radio-label"><input type="radio" name="room-agent-mode" checked={agentMode === "new"} onChange={() => setAgentMode("new")} /><span>新しいAgentを同時に作る</span></label>
             </fieldset>
-            {agentMode === "new" ? <div className="native-form-subsection">
+            {roomCreateMode === "full" ? <label className="native-radio-label"><input type="radio" name="room-agent-mode" checked={agentMode === "new"} onChange={() => setAgentMode("new")} /><span>新しいAgentを同時に作る</span></label> : null}
+            {roomCreateMode === "existing-only" && !availableAgents.length ? <p className="native-inline-error">利用できる既存Agentがないため、Roomを作成できません。</p> : null}
+            {roomCreateMode === "full" && agentMode === "new" ? <div className="native-form-subsection">
               <label><span>Agent名</span><input value={newAgentName} onChange={(event) => setNewAgentName(event.currentTarget.value)} maxLength={200} required /></label>
               <label><span>役割</span><input value={newAgentRole} onChange={(event) => setNewAgentRole(event.currentTarget.value)} maxLength={500} required /></label>
               <label><span>指示</span><textarea value={newAgentInstructions} onChange={(event) => setNewAgentInstructions(event.currentTarget.value)} rows={4} maxLength={20_000} required /></label>
@@ -314,12 +315,12 @@ export function CreateDialog({
               {!agentBackendLoading && !availableBackends.length ? <p className="native-inline-error">利用可能なBackendがありません。Server設定を確認してください。</p> : null}
               {agentBackendError ? <p className="native-inline-error">{agentBackendError}</p> : null}
             </div> : null}
-            <fieldset className="native-form-fieldset">
+            {roomCreateMode === "full" ? <fieldset className="native-form-fieldset">
               <legend>Room権限</legend>
               <label className="native-checkbox-label"><input type="checkbox" checked={agentPermission.canView} onChange={(event) => { const checked = event.currentTarget.checked; setAgentPermission((current) => ({ ...current, canView: checked })); }} /><span>閲覧</span></label>
               <label className="native-checkbox-label"><input type="checkbox" checked={agentPermission.canEdit} onChange={(event) => { const checked = event.currentTarget.checked; setAgentPermission((current) => ({ ...current, canEdit: checked })); }} /><span>編集</span></label>
               <label className="native-checkbox-label"><input type="checkbox" checked={agentPermission.canExecute} onChange={(event) => { const checked = event.currentTarget.checked; setAgentPermission((current) => ({ ...current, canExecute: checked })); }} /><span>実行</span></label>
-            </fieldset>
+            </fieldset> : null}
             {agentLoading && agentMode === "existing" ? <p className="native-inline-note">Agent一覧を確認しています…</p> : null}
             {agentError ? <p className="native-inline-error">{agentError}</p> : null}
           </> : null}
@@ -338,48 +339,6 @@ export function EmptyMainState({ kind, onCreate, hasWorkspaces = false }: { kind
   return <section className="native-main-empty" aria-labelledby="native-empty-heading"><span className="native-placeholder-kicker">ONE ROOM AT A TIME</span><h1 id="native-empty-heading">Roomを選ぶと会話を始められます</h1><p>このWorkspaceにはまだRoomがありません。Roomを作成するか、管理者にアクセスを依頼してください。</p>{onCreate ? <button type="button" className="native-button native-button-primary" onClick={onCreate}>Roomを作成</button> : null}</section>;
 }
 
-type AgentEditorState = {
-  mode: "create" | "edit";
-  agentId?: string;
-  name: string;
-  role: string;
-  instructions: string;
-  enabled: boolean;
-  backendId: string;
-  version?: number;
-};
-
-function agentEditorSnapshot(editor: AgentEditorState | undefined): string {
-  if (!editor) return "";
-  return JSON.stringify({
-    mode: editor.mode,
-    agentId: editor.agentId ?? "",
-    name: editor.name,
-    role: editor.role,
-    instructions: editor.instructions,
-    enabled: editor.enabled,
-    backendId: editor.backendId
-  });
-}
-
-function agentPermissionDraftsAreDirty(
-  members: readonly NativeRoomAgentMember[],
-  drafts: Record<string, NativeRoomAgentPermission>
-): boolean {
-  return members.some((member) => {
-    if (member.removed) return false;
-    const draft = drafts[member.agentId];
-    return Boolean(draft && (draft.canView !== member.canView || draft.canEdit !== member.canEdit || draft.canExecute !== member.canExecute));
-  });
-}
-
-export function patchAgentEditorState(
-  current: AgentEditorState | undefined,
-  patch: Partial<Pick<AgentEditorState, "name" | "role" | "instructions" | "enabled" | "backendId">>
-): AgentEditorState | undefined {
-  return current ? { ...current, ...patch } : current;
-}
-
 function agentOperationError(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   if (message.includes("workspace_default_agent_remove_required") || message.includes("default_agent_remove_required")) {
@@ -390,326 +349,132 @@ function agentOperationError(error: unknown, fallback: string): string {
   return message || fallback;
 }
 
+/** Keep an opened profile tied to the authorized Workspace/Room and Agent list scope. */
+export function nativeAgentDirectoryScopeKey(
+  workspaceTargetKey: string | undefined,
+  workspaceName: string | undefined,
+  roomId: string | undefined,
+  agents: readonly Pick<NativeAgent, "id" | "version">[]
+): string {
+  return JSON.stringify([
+    workspaceTargetKey ?? null,
+    workspaceName ?? null,
+    roomId ?? null,
+    agents.map((agent) => JSON.stringify([agent.id, agent.version ?? null])).sort()
+  ]);
+}
+
+/** Do not render a profile fetched for a previous navigation/list scope. */
+export function nativeAgentProfileForScope(
+  profile: NativeAgent | undefined,
+  profileScopeKey: string | undefined,
+  scopeKey: string
+): NativeAgent | undefined {
+  return profile && profileScopeKey === scopeKey ? profile : undefined;
+}
+
 export function AgentDirectoryPanel({
   workspaceName,
-  room,
+  workspaceTargetKey,
   agents,
   agentBackends,
   agentLoading,
   agentError,
-  roomAgentMembers,
-  roomAgentMembersLoading,
-  roomAgentMembersError,
   onClose,
   onViewAgent,
-  onCreateAgent,
-  onPatchAgent,
-  onBindBackend,
-  onSetRoomAgentPermission,
-  onRemoveRoomAgent,
-  onSetDefaultAgent,
-  onOpenAgentDm,
-  onDraftNavigationControllerChange
+  onOpenAgentDm
 }: {
   workspaceName?: string;
+  workspaceTargetKey?: string;
+  /** Kept in the public props for the parent wiring; management is intentionally not rendered here. */
+  readOnly?: boolean;
   room?: NativeRoom;
   agents: NativeAgent[];
   agentBackends: NativeAgentBackend[];
   agentLoading?: boolean;
   agentError?: string | null;
-  roomAgentMembers: NativeRoomAgentMember[];
+  roomAgentMembers?: NativeRoomAgentMember[];
   roomAgentMembersLoading?: boolean;
   roomAgentMembersError?: string | null;
   onClose: () => void;
   onViewAgent: (agentId: string) => Promise<NativeAgent>;
-  onCreateAgent: (input: { name: string; role: string; instructions: string; backendId: string; enabled: boolean }) => Promise<NativeAgent>;
-  onPatchAgent: (input: { agentId: string; name?: string; role?: string; instructions?: string; enabled?: boolean; expectedVersion?: number }) => Promise<NativeAgent>;
-  onBindBackend: (input: { agentId: string; backendId: string; expectedVersion?: number }) => Promise<NativeAgent>;
-  onSetRoomAgentPermission: (input: { agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean }) => Promise<NativeRoomAgentMember>;
-  onRemoveRoomAgent: (agentId: string) => Promise<NativeRoomAgentMember>;
+  onCreateAgent?: (input: { name: string; role: string; instructions: string; backendId: string; enabled: boolean }) => Promise<NativeAgent>;
+  onPatchAgent?: (input: { agentId: string; name?: string; role?: string; instructions?: string; enabled?: boolean; expectedVersion?: number }) => Promise<NativeAgent>;
+  onBindBackend?: (input: { agentId: string; backendId: string; expectedVersion?: number }) => Promise<NativeAgent>;
+  onSetRoomAgentPermission?: (input: { agentId: string; canView: boolean; canEdit: boolean; canExecute: boolean }) => Promise<NativeRoomAgentMember>;
+  onRemoveRoomAgent?: (agentId: string) => Promise<NativeRoomAgentMember>;
   onSetDefaultAgent?: (agentId: string) => Promise<void> | void;
   onOpenAgentDm?: (agentId: string) => Promise<void> | void;
   onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
 }) {
-  const readyBackends = useMemo(
-    () => agentBackends.filter((backend) => backend.configured && backend.enabled && backend.connectionState === "ready"),
-    [agentBackends]
-  );
   const backendLabels = useMemo(() => new Map(agentBackends.map((backend) => [backend.id, backend.label])), [agentBackends]);
   const availableAgent = (agent: NativeAgent): boolean => nativeRoomAgentIsAvailable(agent, agentBackends);
-  const availableAgentInRoom = (agent: NativeAgent | undefined): boolean => Boolean(agent && availableAgent(agent)
-    && (!room || roomAgentMembers.some((member) => member.agentId === agent.id && !member.removed && member.canExecute)));
-  const roomIsDm = room?.kind === "agent_dm";
-  const [editor, setEditor] = useState<AgentEditorState>();
-  const [editorBaseline, setEditorBaseline] = useState<AgentEditorState>();
-  const [editorBusy, setEditorBusy] = useState(false);
-  const [editorLoadingId, setEditorLoadingId] = useState<string>();
-  const [editorError, setEditorError] = useState<string | null>(null);
-  const [roomError, setRoomError] = useState<string | null>(null);
-  const [roomBusyKey, setRoomBusyKey] = useState<string>();
-  const [permissionDrafts, setPermissionDrafts] = useState<Record<string, NativeRoomAgentPermission>>({});
-  const [addAgentId, setAddAgentId] = useState("");
-
-  const activeMembers = roomAgentMembers.filter((member) => !member.removed);
-  const editorDirty = Boolean(editor && agentEditorSnapshot(editor) !== agentEditorSnapshot(editorBaseline));
-  const directoryDirty = editorDirty || agentPermissionDraftsAreDirty(activeMembers, permissionDrafts) || Boolean(addAgentId);
-  const directorySaving = editorBusy || Boolean(editorLoadingId) || Boolean(roomBusyKey);
+  const directoryScopeKey = nativeAgentDirectoryScopeKey(workspaceTargetKey, workspaceName, undefined, agents);
+  const [profile, setProfile] = useState<NativeAgent>();
+  const [profileScopeKey, setProfileScopeKey] = useState<string>();
+  const [profileLoadingId, setProfileLoadingId] = useState<string>();
+  const [profileLoadingScopeKey, setProfileLoadingScopeKey] = useState<string>();
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileErrorScopeKey, setProfileErrorScopeKey] = useState<string>();
+  const [dmLoadingId, setDmLoadingId] = useState<string>();
+  const [dmError, setDmError] = useState<string | null>(null);
+  const profileRequestGenerationRef = useRef(0);
+  const currentProfileScopeRef = useRef(directoryScopeKey);
+  currentProfileScopeRef.current = directoryScopeKey;
+  const visibleProfile = nativeAgentProfileForScope(profile, profileScopeKey, directoryScopeKey);
+  const visibleProfileError = profileErrorScopeKey === directoryScopeKey ? profileError : null;
+  const visibleProfileLoadingId = profileLoadingScopeKey === directoryScopeKey ? profileLoadingId : undefined;
 
   useEffect(() => {
-    setPermissionDrafts((current) => {
-      const next = { ...current };
-      for (const member of roomAgentMembers) {
-        if (member.removed) continue;
-        if (!next[member.agentId]) next[member.agentId] = {
-          canView: member.canView,
-          canEdit: member.canEdit,
-          canExecute: member.canExecute
-        };
-      }
-      return next;
-    });
-  }, [room?.id, roomAgentMembers]);
+    profileRequestGenerationRef.current += 1;
+    setProfile(undefined);
+    setProfileScopeKey(undefined);
+    setProfileError(null);
+    setProfileErrorScopeKey(undefined);
+    setProfileLoadingId(undefined);
+    setProfileLoadingScopeKey(undefined);
+  }, [directoryScopeKey]);
 
-  const startCreate = () => {
-    draftNavigation.requestNavigation(() => {
-      setEditorError(null);
-      const next: AgentEditorState = {
-        mode: "create",
-        name: "",
-        role: "",
-        instructions: "",
-        enabled: true,
-        backendId: readyBackends[0]?.id ?? ""
-      };
-      setEditor(next);
-      setEditorBaseline(next);
-    });
-  };
-
-  const loadAgentForEdit = async (agent: NativeAgent): Promise<void> => {
-    setEditorError(null);
-    setEditorLoadingId(agent.id);
+  const loadAgentProfile = async (agent: NativeAgent): Promise<void> => {
+    const requestGeneration = profileRequestGenerationRef.current + 1;
+    const requestScopeKey = directoryScopeKey;
+    profileRequestGenerationRef.current = requestGeneration;
+    setProfile(undefined);
+    setProfileScopeKey(undefined);
+    setProfileError(null);
+    setProfileErrorScopeKey(undefined);
+    setProfileLoadingId(agent.id);
+    setProfileLoadingScopeKey(requestScopeKey);
+    const isCurrentRequest = (): boolean => profileRequestGenerationRef.current === requestGeneration
+      && currentProfileScopeRef.current === requestScopeKey;
     try {
       const detail = await onViewAgent(agent.id);
-      const loaded: AgentEditorState = {
-        mode: "edit",
-        agentId: detail.id,
-        name: detail.displayName,
-        role: detail.role ?? "",
-        instructions: detail.instructions ?? "",
-        enabled: detail.enabled,
-        backendId: detail.backendId ?? "",
-        version: detail.version
-      };
-      setEditor(loaded);
-      setEditorBaseline(loaded);
+      if (!isCurrentRequest()) return;
+      setProfile(detail);
+      setProfileScopeKey(requestScopeKey);
     } catch (error) {
-      setEditorError(agentOperationError(error, "Agentの詳細を取得できませんでした。編集権限を確認してください。"));
+      if (!isCurrentRequest()) return;
+      setProfileError(agentOperationError(error, "Agentのプロフィールを取得できませんでした。"));
+      setProfileErrorScopeKey(requestScopeKey);
     } finally {
-      setEditorLoadingId(undefined);
-    }
-  };
-
-  const startEdit = (agent: NativeAgent): void => {
-    draftNavigation.requestNavigation(() => {
-      void loadAgentForEdit(agent);
-    });
-  };
-
-  const saveEditor = async (): Promise<boolean> => {
-    if (!editor) return true;
-    setEditorError(null);
-    if (!editor.name.trim() || !editor.role.trim() || !editor.instructions.trim()) {
-      setEditorError("名前、役割、指示を入力してください。");
-      return false;
-    }
-    if (!editor.backendId || !readyBackends.some((backend) => backend.id === editor.backendId)) {
-      setEditorError("準備済みのBackendを選択してください。");
-      return false;
-    }
-    setEditorBusy(true);
-    try {
-      if (editor.mode === "create") {
-        await onCreateAgent({
-          name: editor.name.trim(),
-          role: editor.role.trim(),
-          instructions: editor.instructions.trim(),
-          backendId: editor.backendId,
-          enabled: editor.enabled
-        });
-      } else if (editor.agentId) {
-        const updated = await onPatchAgent({
-          agentId: editor.agentId,
-          name: editor.name.trim(),
-          role: editor.role.trim(),
-          instructions: editor.instructions.trim(),
-          enabled: editor.enabled,
-          ...(editor.version === undefined ? {} : { expectedVersion: editor.version })
-        });
-        if (updated.backendId !== editor.backendId) {
-          await onBindBackend({
-            agentId: editor.agentId,
-            backendId: editor.backendId,
-            ...(updated.version === undefined ? {} : { expectedVersion: updated.version })
-          });
-        }
+      if (isCurrentRequest()) {
+        setProfileLoadingId(undefined);
+        setProfileLoadingScopeKey(undefined);
       }
-      setEditor(undefined);
-      setEditorBaseline(undefined);
-      return true;
-    } catch (error) {
-      setEditorError(agentOperationError(error, "Agentを保存できませんでした。"));
-      return false;
-    } finally {
-      setEditorBusy(false);
     }
   };
 
-  const submitEditor = (event: FormEvent<HTMLFormElement>): void => {
-    event.preventDefault();
-    void saveEditor();
-  };
-
-  const memberIds = new Set(activeMembers.map((member) => member.agentId));
-  const roomCandidates = agents.filter((agent) => availableAgent(agent) && !memberIds.has(agent.id));
-  const canManageRoom = room?.canManage === true || room?.capabilities?.canManage === true;
-  const updatePermissionDraft = (agentId: string, key: keyof NativeRoomAgentPermission, checked: boolean) => {
-    setPermissionDrafts((current) => {
-      const previous = current[agentId] ?? { canView: true, canEdit: false, canExecute: false };
-      if (key === "canView" && !checked) return { ...current, [agentId]: { canView: false, canEdit: false, canExecute: false } };
-      return { ...current, [agentId]: { ...previous, [key]: checked, ...(key !== "canView" && checked ? { canView: true } : {}) } };
-    });
-  };
-  const savePermission = async (agentId: string, permission: NativeRoomAgentPermission): Promise<boolean> => {
-    setRoomError(null);
-    setRoomBusyKey(`permission:${agentId}`);
-    try {
-      await onSetRoomAgentPermission({ agentId, ...permission });
-      setPermissionDrafts((current) => ({ ...current, [agentId]: permission }));
-      return true;
-    } catch (error) {
-      setRoomError(agentOperationError(error, "Room権限を保存できませんでした。"));
-      return false;
-    } finally {
-      setRoomBusyKey(undefined);
-    }
-  };
-  const addRoomAgent = async () => {
-    const agent = agents.find((candidate) => candidate.id === addAgentId);
-    if (!agent || !availableAgent(agent)) {
-      setRoomError("追加できるのは有効かつ準備済みのAgentだけです。");
-      return;
-    }
-    if (await savePermission(agent.id, { canView: true, canEdit: false, canExecute: true })) setAddAgentId("");
-  };
-
-  const saveDraftAndNavigate = async (): Promise<boolean> => {
-    if (editorDirty && !await saveEditor()) return false;
-
-    const pendingPermissions = activeMembers.filter((member) => {
-      const draft = permissionDrafts[member.agentId];
-      return Boolean(draft && (draft.canView !== member.canView || draft.canEdit !== member.canEdit || draft.canExecute !== member.canExecute));
-    });
-    for (const member of pendingPermissions) {
-      const permission = permissionDrafts[member.agentId];
-      if (!permission || !await savePermission(member.agentId, permission)) return false;
-    }
-
-    if (addAgentId) {
-      const agent = roomCandidates.find((candidate) => candidate.id === addAgentId);
-      if (!agent) {
-        setRoomError("追加できるAgentを確認できません。最新のRoom権限を確認してください。");
-        return false;
-      }
-      if (!await savePermission(agent.id, { canView: true, canEdit: false, canExecute: true })) return false;
-      setAddAgentId("");
-    }
-    return true;
-  };
-
-  const discardDraft = (): void => {
-    setEditor(undefined);
-    setEditorBaseline(undefined);
-    setEditorError(null);
-    setPermissionDrafts(Object.fromEntries(activeMembers.map((member) => [member.agentId, {
-      canView: member.canView,
-      canEdit: member.canEdit,
-      canExecute: member.canExecute
-    }])));
-    setAddAgentId("");
-    setRoomError(null);
-  };
-
-  const draftNavigation = useNativeDraftNavigation({
-    scopeKey: "agent-directory\n" + (workspaceName ?? "") + "\n" + (room?.id ?? ""),
-    label: "Agent設定",
-    dirty: directoryDirty,
-    saving: directorySaving,
-    canSave: true,
-    save: saveDraftAndNavigate,
-    discard: discardDraft,
-    onControllerChange: onDraftNavigationControllerChange
-  });
-
-  const removeRoomAgent = async (agentId: string) => {
-    setRoomError(null);
-    setRoomBusyKey(`remove:${agentId}`);
-    try {
-      await onRemoveRoomAgent(agentId);
-      setPermissionDrafts((current) => {
-        const next = { ...current };
-        delete next[agentId];
-        return next;
-      });
-    } catch (error) {
-      setRoomError(agentOperationError(error, "RoomからAgentを解除できませんでした。"));
-    } finally {
-      setRoomBusyKey(undefined);
-    }
-  };
-  const setDefaultAgent = async (agentId: string) => {
-    if (!onSetDefaultAgent) return;
-    setRoomError(null);
-    setRoomBusyKey(`default:${agentId}`);
-    try {
-      await onSetDefaultAgent(agentId);
-    } catch (error) {
-      setRoomError(agentOperationError(error, "既定Agentを変更できませんでした。"));
-    } finally {
-      setRoomBusyKey(undefined);
-    }
-  };
-  const openAgentDmNow = async (agentId: string): Promise<void> => {
+  const openAgentDm = async (agentId: string): Promise<void> => {
     if (!onOpenAgentDm) return;
-    setRoomError(null);
-    setRoomBusyKey(`dm:${agentId}`);
+    setDmLoadingId(agentId);
+    setDmError(null);
     try {
       await onOpenAgentDm(agentId);
     } catch (error) {
-      setRoomError(agentOperationError(error, "Agent DMを開けませんでした。"));
+      setDmError(agentOperationError(error, "Agent DMを開けませんでした。"));
     } finally {
-      setRoomBusyKey(undefined);
+      setDmLoadingId(undefined);
     }
-  };
-
-  const openAgentDm = (agentId: string): void => {
-    draftNavigation.requestNavigation(() => {
-      void openAgentDmNow(agentId);
-    });
-  };
-
-  const closeEditor = (): void => {
-    if (editorBusy) return;
-    draftNavigation.requestNavigation(() => {
-      setEditor(undefined);
-      setEditorBaseline(undefined);
-      setEditorError(null);
-    });
-  };
-
-  const requestClose = (): void => {
-    if (directorySaving) return;
-    draftNavigation.requestNavigation(onClose);
   };
 
   return (
@@ -722,92 +487,55 @@ export function AgentDirectoryPanel({
         ".native-agent-directory-header p { color: var(--native-muted); margin: 0; }",
         ".native-agent-directory-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }",
         ".native-agent-directory-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }",
-        ".native-agent-directory-row { align-items: center; border: 1px solid var(--native-line); border-radius: 14px; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) auto auto auto; padding: 15px 17px; }",
+        ".native-agent-directory-row { align-items: center; border: 1px solid var(--native-line); border-radius: 14px; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) auto auto auto auto; padding: 15px 17px; }",
         ".native-agent-directory-name { font-weight: 700; min-width: 0; }",
         ".native-agent-directory-name small { color: var(--native-muted); display: block; font-weight: 500; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
         ".native-agent-directory-meta { color: var(--native-muted); font-size: .88rem; }",
         ".native-agent-directory-status { border-radius: 999px; font-size: .76rem; padding: 4px 8px; white-space: nowrap; }",
-        ".native-agent-directory-status.is-ready { background: color-mix(in srgb, #56c596 16%, transparent); color: #8ae0b9; }",
-        ".native-agent-directory-status.is-unavailable { background: color-mix(in srgb, #eb9b65 16%, transparent); color: #f0b084; }",
-        ".native-agent-editor, .native-room-agent-settings { border-top: 1px solid var(--native-line); margin-top: 28px; padding-top: 25px; }",
-        ".native-agent-editor h2, .native-room-agent-settings h2 { margin: 0 0 15px; }",
-        ".native-agent-editor-form { display: grid; gap: 14px; max-width: 760px; }",
-        ".native-agent-editor-form label { display: grid; gap: 6px; }",
-        ".native-agent-editor-form textarea { min-height: 150px; }",
-        ".native-agent-editor-actions { display: flex; flex-wrap: wrap; gap: 10px; }",
-        ".native-room-agent-settings > p { color: var(--native-muted); margin-top: 0; }",
-        ".native-room-agent-add { align-items: end; display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }",
-        ".native-room-agent-add label { display: grid; gap: 6px; min-width: min(320px, 100%); }",
-        ".native-room-agent-list { display: grid; gap: 12px; }",
-        ".native-room-agent-row { border: 1px solid var(--native-line); border-radius: 14px; padding: 15px 17px; }",
-        ".native-room-agent-row-head { align-items: center; display: flex; gap: 10px; justify-content: space-between; }",
-        ".native-room-agent-permissions { display: flex; flex-wrap: wrap; gap: 12px; margin: 13px 0; }",
-        ".native-room-agent-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; }",
-        ".native-room-agent-default { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; margin: 17px 0 0; }",
+        ".native-agent-directory-status.is-ready { background: color-mix(in srgb, var(--native-success) 16%, transparent); color: var(--native-success); }",
+        ".native-agent-directory-status.is-unavailable { background: color-mix(in srgb, var(--native-warning-copy) 16%, transparent); color: var(--native-warning-copy); }",
+        ".native-agent-profile { border: 1px solid var(--native-line); border-radius: 14px; margin-top: 20px; padding: 18px 20px; }",
+        ".native-agent-profile h2 { margin: 0 0 14px; }",
+        ".native-agent-profile dl { display: grid; gap: 9px 16px; grid-template-columns: minmax(100px, max-content) minmax(0, 1fr); margin: 0; }",
+        ".native-agent-profile dt { color: var(--native-muted); }",
+        ".native-agent-profile dd { margin: 0; min-width: 0; }",
+        ".native-agent-profile-description, .native-agent-profile-instructions { color: var(--native-muted); margin: 16px 0 0; white-space: pre-wrap; }",
         "@media (max-width: 760px) { .native-agent-directory-header { flex-direction: column; } .native-agent-directory-actions { justify-content: flex-start; } .native-agent-directory-row { grid-template-columns: minmax(0, 1fr) auto; } .native-agent-directory-meta { grid-column: 1 / -1; } .native-agent-directory-row > .native-agent-directory-status { grid-column: 2; grid-row: 1; } }",
-        "@media (max-width: 460px) { .native-agent-directory-inner { padding: 20px 17px; } .native-agent-directory-row { align-items: start; } .native-room-agent-add { align-items: stretch; flex-direction: column; } }"
+        "@media (max-width: 460px) { .native-agent-directory-inner { padding: 20px 17px; } .native-agent-directory-row { align-items: start; } }"
       ].join("\n")}</style>
       <div className="native-agent-directory-inner">
-        <NativeDraftNavigationPrompt controller={draftNavigation} />
         <header className="native-agent-directory-header">
-          <div><span className="native-section-eyebrow">Workspace Agents</span><h1 id="native-agent-directory-heading">Agent一覧</h1><p>{workspaceName ?? "現在のWorkspace"} · 名前・役割・Backend・利用可否を表示しています</p></div>
-          <div className="native-agent-directory-actions"><button type="button" className="native-button native-button-primary" onClick={startCreate} disabled={directorySaving}>Agentを作成</button><button type="button" className="native-button" onClick={requestClose} disabled={directorySaving}>戻る</button></div>
+          <div><h1 id="native-agent-directory-heading">Agent</h1><p>{workspaceName ?? "現在のWorkspace"}</p></div>
+          <div className="native-agent-directory-actions"><button type="button" className="native-button" onClick={onClose}>戻る</button></div>
         </header>
 
         {agentLoading ? <p className="native-inline-note" role="status">Agent一覧を確認しています…</p> : null}
         {agentError ? <p className="native-inline-error" role="alert">{agentError}</p> : null}
+        {dmError ? <p className="native-inline-error" role="alert">{dmError}</p> : null}
         {!agentLoading && agents.length === 0 ? <p className="native-inline-note">このWorkspaceにはAgentがありません。</p> : null}
-        <ul className="native-agent-directory-list" aria-label="WorkspaceのAgent一覧">
+        <ul className="native-agent-directory-list" aria-label="Agent一覧">
           {agents.map((agent) => {
             const ready = availableAgent(agent);
             return <li className="native-agent-directory-row" key={agent.id}>
               <div className="native-agent-directory-name">{agent.displayName}<small>{agent.role ?? "役割未設定"}</small></div>
               <span className="native-agent-directory-meta">{agent.backendId ? (backendLabels.get(agent.backendId) ?? agent.backendId) : "Backend未設定"}</span>
               <span className={`native-agent-directory-status ${ready ? "is-ready" : "is-unavailable"}`}>{ready ? "利用可能" : agent.enabled ? "利用不可" : "無効"}</span>
-              {onOpenAgentDm ? <button type="button" className="native-text-button" onClick={() => void openAgentDm(agent.id)} disabled={!ready || Boolean(roomBusyKey)}>{roomBusyKey === `dm:${agent.id}` ? "DMを開いています…" : "DM"}</button> : null}
-              <button type="button" className="native-text-button" onClick={() => void startEdit(agent)} disabled={editorLoadingId === agent.id || Boolean(roomBusyKey)}>{editorLoadingId === agent.id ? "確認中…" : "編集"}</button>
+              {onOpenAgentDm ? <button type="button" className="native-text-button" onClick={() => void openAgentDm(agent.id)} disabled={!ready || Boolean(dmLoadingId)}>{dmLoadingId === agent.id ? "DMを開いています…" : "DM"}</button> : null}
+              <button type="button" className="native-text-button" onClick={() => void loadAgentProfile(agent)} disabled={visibleProfileLoadingId === agent.id || Boolean(dmLoadingId)} aria-controls={visibleProfile ? "native-agent-profile-heading" : undefined}>{visibleProfileLoadingId === agent.id ? "読込中…" : "プロフィール"}</button>
             </li>;
           })}
         </ul>
 
-        {editorError ? <p className="native-inline-error" role="alert">{editorError}</p> : null}
-        {editor ? <section className="native-agent-editor" aria-labelledby="native-agent-editor-heading">
-          <h2 id="native-agent-editor-heading">{editor.mode === "create" ? "Agentを作成" : "Agentを編集"}</h2>
-          <form className="native-agent-editor-form" onSubmit={(event) => void submitEditor(event)}>
-            <label><span>名前</span><input value={editor.name} onChange={(event) => { const value = event.currentTarget.value; setEditor((current) => patchAgentEditorState(current, { name: value })); }} maxLength={200} required /></label>
-            <label><span>役割</span><input value={editor.role} onChange={(event) => { const value = event.currentTarget.value; setEditor((current) => patchAgentEditorState(current, { role: value })); }} maxLength={500} required /></label>
-            <label><span>指示</span><textarea value={editor.instructions} onChange={(event) => { const value = event.currentTarget.value; setEditor((current) => patchAgentEditorState(current, { instructions: value })); }} maxLength={20_000} required /></label>
-            <label><span>Backend（準備済みのみ）</span><select value={editor.backendId} onChange={(event) => { const value = event.currentTarget.value; setEditor((current) => patchAgentEditorState(current, { backendId: value })); }} disabled={!readyBackends.length || editorBusy} required><option value="">選択してください</option>{readyBackends.map((backend) => <option key={backend.id} value={backend.id}>{backend.label}</option>)}</select></label>
-            <label className="native-checkbox-label"><input type="checkbox" checked={editor.enabled} onChange={(event) => { const checked = event.currentTarget.checked; setEditor((current) => patchAgentEditorState(current, { enabled: checked })); }} disabled={editorBusy} /><span>利用可能にする</span></label>
-            {!readyBackends.length ? <p className="native-inline-error">準備済みのBackendがないため、保存できません。</p> : null}
-            <div className="native-agent-editor-actions"><button type="submit" className="native-button native-button-primary" disabled={editorBusy || !readyBackends.length}>{editorBusy ? "保存中…" : "保存"}</button><button type="button" className="native-button" onClick={closeEditor} disabled={editorBusy}>閉じる</button></div>
-          </form>
-        </section> : null}
-
-        {room && !roomIsDm ? <section className="native-room-agent-settings" aria-labelledby="native-room-agent-settings-heading">
-          <h2 id="native-room-agent-settings-heading">Room設定 · {room.name}</h2>
-          {!canManageRoom ? <p>Room管理権限がないため、Agentの状態だけ表示します。</p> : <>
-            <div className="native-room-agent-default"><strong>既定Agent</strong><span>{room.defaultAgentId ? (agents.find((agent) => agent.id === room.defaultAgentId)?.displayName ?? room.defaultAgentId) : "未設定"}</span>{room.defaultAgentId && onOpenAgentDm && availableAgentInRoom(agents.find((agent) => agent.id === room.defaultAgentId)) ? <button type="button" className="native-text-button" onClick={() => void openAgentDm(room.defaultAgentId!)} disabled={Boolean(roomBusyKey)}>{roomBusyKey === `dm:${room.defaultAgentId}` ? "DMを開いています…" : "このAgentとDM"}</button> : null}</div>
-            {onSetDefaultAgent && (room.canExecute === true || room.capabilities?.canExecute === true) ? <label className="native-room-agent-default"><span>既定Agentを変更</span><select value={room.defaultAgentId ?? ""} onChange={(event) => { const id = event.currentTarget.value; if (id) void setDefaultAgent(id); }} disabled={Boolean(roomBusyKey)}><option value="">選択してください</option>{agents.map((agent) => <option key={agent.id} value={agent.id} disabled={!availableAgentInRoom(agent)}>{agent.displayName}{availableAgentInRoom(agent) ? "" : "（利用不可）"}</option>)}</select></label> : null}
-            <div className="native-room-agent-add"><label><span>RoomにAgentを追加</span><select value={addAgentId} onChange={(event) => setAddAgentId(event.currentTarget.value)} disabled={!roomCandidates.length || Boolean(roomBusyKey)}><option value="">Agentを選択</option>{roomCandidates.map((agent) => <option key={agent.id} value={agent.id}>{agent.displayName} · {agent.role ?? "役割未設定"}</option>)}</select></label><button type="button" className="native-button" onClick={() => void addRoomAgent()} disabled={!addAgentId || Boolean(roomBusyKey)}>追加</button></div>
-          </>}
-          {roomAgentMembersLoading ? <p className="native-inline-note" role="status">RoomのAgent権限を確認しています…</p> : null}
-          {roomAgentMembersError ? <p className="native-inline-error" role="alert">{roomAgentMembersError}</p> : null}
-          {roomError ? <p className="native-inline-error" role="alert">{roomError}</p> : null}
-          <div className="native-room-agent-list">
-            {activeMembers.length === 0 ? <p className="native-inline-note">このRoomに追加されたAgentはありません。</p> : activeMembers.map((member) => {
-              const agent = agents.find((candidate) => candidate.id === member.agentId);
-              const permission = permissionDrafts[member.agentId] ?? { canView: member.canView, canEdit: member.canEdit, canExecute: member.canExecute };
-              return <article className="native-room-agent-row" key={member.agentId}>
-                <div className="native-room-agent-row-head"><strong>{agent?.displayName ?? member.agentId}</strong>{room.defaultAgentId === member.agentId ? <span className="native-agent-directory-status is-ready">既定Agent</span> : null}</div>
-                {!canManageRoom ? <p className="native-inline-note">閲覧 {member.canView ? "可" : "不可"} · 編集 {member.canEdit ? "可" : "不可"} · 実行 {member.canExecute ? "可" : "不可"}</p> : <>
-                  <div className="native-room-agent-permissions"><label className="native-checkbox-label"><input type="checkbox" checked={permission.canView} onChange={(event) => updatePermissionDraft(member.agentId, "canView", event.currentTarget.checked)} disabled={Boolean(roomBusyKey)} /><span>閲覧</span></label><label className="native-checkbox-label"><input type="checkbox" checked={permission.canEdit} onChange={(event) => updatePermissionDraft(member.agentId, "canEdit", event.currentTarget.checked)} disabled={Boolean(roomBusyKey)} /><span>編集</span></label><label className="native-checkbox-label"><input type="checkbox" checked={permission.canExecute} onChange={(event) => updatePermissionDraft(member.agentId, "canExecute", event.currentTarget.checked)} disabled={Boolean(roomBusyKey)} /><span>実行</span></label></div>
-                  <div className="native-room-agent-actions"><button type="button" className="native-button native-button-quiet" onClick={() => void savePermission(member.agentId, permission)} disabled={Boolean(roomBusyKey)}>{roomBusyKey === `permission:${member.agentId}` ? "保存中…" : "権限を保存"}</button><button type="button" className="native-text-button" onClick={() => void removeRoomAgent(member.agentId)} disabled={Boolean(roomBusyKey) || room.defaultAgentId === member.agentId} aria-describedby={room.defaultAgentId === member.agentId ? `native-room-agent-default-note-${member.agentId}` : undefined}>{roomBusyKey === `remove:${member.agentId}` ? "解除中…" : room.defaultAgentId === member.agentId ? "既定Agentを変更後に解除" : "Roomから解除"}</button></div>
-                  {room.defaultAgentId === member.agentId ? <p className="native-inline-note" id={`native-room-agent-default-note-${member.agentId}`}>既定Agentは先に別のAgentへ変更してから解除できます。</p> : null}
-                </>}
-              </article>;
-            })}
-          </div>
+        {visibleProfileError ? <p className="native-inline-error" role="alert">{visibleProfileError}</p> : null}
+        {visibleProfile ? <section className="native-agent-profile" aria-labelledby="native-agent-profile-heading">
+          <h2 id="native-agent-profile-heading">{visibleProfile.displayName}</h2>
+          <dl>
+            <dt>役割</dt><dd>{visibleProfile.role ?? "役割未設定"}</dd>
+            <dt>Backend</dt><dd>{visibleProfile.backendId ? (backendLabels.get(visibleProfile.backendId) ?? visibleProfile.backendId) : "Backend未設定"}</dd>
+            <dt>利用可否</dt><dd>{availableAgent(visibleProfile) ? "利用可能" : visibleProfile.enabled ? "利用不可" : "無効"}</dd>
+          </dl>
+          {visibleProfile.description ? <p className="native-agent-profile-description">{visibleProfile.description}</p> : null}
+          {visibleProfile.instructions ? <p className="native-agent-profile-instructions">{visibleProfile.instructions}</p> : null}
         </section> : null}
       </div>
     </section>
@@ -816,7 +544,12 @@ export function AgentDirectoryPanel({
 
 export function NativeApp() {
   const model = useNativeApp();
+  const [theme, setTheme] = useState<NativeTheme>(() => readNativeThemePreference());
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileViewport, setMobileViewport] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 700px)").matches === true);
   const [createKind, setCreateKind] = useState<"organization" | "workspace" | "room">();
+  const [roomCreateMode, setRoomCreateMode] = useState<NativeRoomCreateMode>("full");
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [managementScope, setManagementScope] = useState<"organization" | "workspace">("organization");
@@ -830,7 +563,31 @@ export function NativeApp() {
     draftNavigationControllerRegistryRef.current = createNativeDraftNavigationControllerRegistry();
   }
 
- const roomToolTarget = nativeRoomToolTarget(model.selectedWorkspaceTarget, model.selectedRoom);
+  const roomToolTarget = nativeRoomToolTarget(model.selectedWorkspaceTarget, model.selectedRoom);
+
+  const changeTheme = useCallback((nextTheme: NativeTheme): void => {
+    // Keep the UI responsive even when localStorage is disabled or full. The
+    // preference module normalizes the value and absorbs storage failures.
+    setTheme(writeNativeThemePreference(nextTheme));
+  }, []);
+
+  const closeMobileSidebar = useCallback((): void => {
+    setMobileSidebarOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const query = window.matchMedia("(max-width: 700px)");
+    const syncViewport = (): void => setMobileViewport(query.matches);
+    syncViewport();
+    query.addEventListener("change", syncViewport);
+    return () => query.removeEventListener("change", syncViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileViewport) setMobileSidebarOpen(false);
+  }, [mobileViewport]);
+
   const onDraftNavigationControllerChange = useCallback((controller: NativeDraftNavigationController | undefined): (() => void) | undefined => {
     if (!controller) return undefined;
     return draftNavigationControllerRegistryRef.current?.register(controller);
@@ -846,6 +603,13 @@ export function NativeApp() {
     }
     return true;
   }, []);
+
+  const selectWorkspaceFromProfile = useCallback((workspace: NativeWorkspace): void => {
+    requestNativeNavigation(() => {
+      model.selectWorkspace(workspace);
+      closeMobileSidebar();
+    });
+  }, [closeMobileSidebar, model.selectWorkspace, requestNativeNavigation]);
 
   useEffect(() => {
     const preventDraftLoss = (event: BeforeUnloadEvent): void => {
@@ -866,9 +630,10 @@ export function NativeApp() {
    setArtifactWorkspaceInitialResource(undefined);
  }, [model.selectedRoomId, model.selectedWorkspaceTargetKey]);
 
-  const startCreate = (kind: "organization" | "workspace" | "room") => {
+  const startCreate = (kind: "organization" | "workspace" | "room", nextRoomCreateMode: NativeRoomCreateMode = "full") => {
     requestNativeNavigation(() => {
       setCreateError(null);
+      setRoomCreateMode(kind === "room" ? nextRoomCreateMode : "full");
       setCreateKind(kind);
     });
   };
@@ -919,6 +684,8 @@ export function NativeApp() {
   const onInspect = (message: NativeChatMessage) => model.openEvidence(message);
   const targetOrganizations = model.organizations.filter((organization) => organization.id !== model.selectedOrganizationId && organization.id !== "__legacy_connection__");
   const selectedOrganization = model.selectedOrganization;
+  const accountLabel = model.members.find((member) => member.accountId === model.connection?.accountId)?.displayName?.trim()
+    || "本人";
   const selectedWorkspaceConnectionId = model.selectedWorkspace?.target?.connectionId ?? model.selectedWorkspace?.connectionId;
   const organizationForCurrentTarget = selectedOrganization
     && (!selectedWorkspaceConnectionId || !selectedOrganization.connectionId || selectedOrganization.connectionId === selectedWorkspaceConnectionId)
@@ -986,6 +753,7 @@ export function NativeApp() {
     requestNativeNavigation(() => {
       setArtifactWorkspaceInitialResource(undefined);
       setRoomToolOpen(tool);
+      closeMobileSidebar();
     });
   };
   const openResultResource = (resource: NativeArtifactWorkspaceInitialResource): void => {
@@ -1068,6 +836,16 @@ export function NativeApp() {
     });
   };
 
+  // The artifact surface is the only Room tool that stays alongside the
+  // conversation. Other Room tools continue to replace the main surface so
+  // the existing workbench navigation and draft lifecycle remain unchanged.
+  const artifactPanelTarget = model.connection
+    && !model.managementOpen
+    && !agentDirectoryOpen
+    && roomToolOpen === "artifacts"
+    ? roomToolTarget
+    : undefined;
+
   const main = !model.connection
     ? model.connectionLoading
       ? <section className="native-main-empty" role="status"><span className="native-loading-orbit" aria-hidden="true" /><h1>接続を確認しています</h1><p>ServerとAccountの状態を確認しています…</p></section>
@@ -1114,7 +892,9 @@ export function NativeApp() {
       : agentDirectoryOpen && model.selectedWorkspace
         ? <AgentDirectoryPanel
           workspaceName={model.selectedWorkspace.name}
+          workspaceTargetKey={model.selectedWorkspaceTargetKey}
           room={model.selectedRoom}
+          readOnly
           agents={model.agents}
           agentBackends={model.agentBackends}
           agentLoading={model.agentLoading}
@@ -1165,24 +945,6 @@ export function NativeApp() {
           onClose={() => setRoomToolOpen(undefined)}
           onDraftNavigationControllerChange={onDraftNavigationControllerChange}
        />
-      : roomToolOpen === "artifacts" && roomToolTarget
-        ? <NativeArtifactWorkspace
-          target={roomToolTarget}
-          initialResource={artifactWorkspaceInitialResource}
-          canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
-          canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
-          bridge={model.bridge}
-          onClose={() => { setArtifactWorkspaceInitialResource(undefined); setRoomToolOpen(undefined); }}
-          onDraftNavigationControllerChange={onDraftNavigationControllerChange}
-         onRequestAgentRevision={async (target) => {
-           const sourceWork = target.sourceWorkId ? model.works.find((work) => work.id === target.sourceWorkId) : undefined;
-            const replyWorkId = sourceWork && roomWorkCanReceiveReply(sourceWork) && roomWorkControlAllowed(model.selectedRoom, sourceWork, model.connection?.accountId)
-              ? sourceWork.id
-              : undefined;
-            model.appendWorkDraft(artifactRevisionRequestDraft(target), replyWorkId);
-            setRoomToolOpen(undefined);
-          }}
-        />
       : roomToolOpen === "collections" && roomToolTarget
         ? <NativeCollectionPanel
           target={roomToolTarget}
@@ -1197,7 +959,7 @@ export function NativeApp() {
         : !model.selectedWorkspace
           ? <EmptyMainState kind="workspace" hasWorkspaces={model.workspaces.length > 0} onCreate={() => startCreate("workspace")} />
           : model.selectedWorkspace && !model.roomLoading && model.rooms.length === 0 && !model.roomError
-            ? <EmptyMainState kind="room" onCreate={model.selectedWorkspace.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room") : undefined} />
+            ? <EmptyMainState kind="room" onCreate={model.selectedWorkspace.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room", "existing-only") : undefined} />
             : model.roomWorkSupported
               ? <RoomWorkSurface
                 room={model.selectedRoom}
@@ -1242,6 +1004,7 @@ export function NativeApp() {
                 onSetDefaultAgent={model.setRoomDefaultAgent}
                 onOpenAgentDm={model.openAgentDm}
                 onOpenAgentSettings={() => requestNativeNavigation(() => setAgentDirectoryOpen(true))}
+                roomToolLinks={<NativeRoomToolLinks target={roomToolTarget} onOpen={openRoomTool} />}
                 onOpenResultResource={openResultResource}
                 onReconnect={model.reconnect}
               />
@@ -1263,17 +1026,49 @@ export function NativeApp() {
               />;
 
   return (
-    <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}`}>
-      <aside className="native-sidebar" aria-label="Samurai navigation">
-        <div className="native-brand"><span className="native-brand-mark" aria-hidden="true">S</span><div><strong>Samurai</strong><small>WORKSPACE</small></div></div>
-        <WorkspaceNavigator workspaces={model.workspaces} selectedWorkspaceId={model.selectedWorkspaceId} selectedWorkspaceTargetKey={model.selectedWorkspaceTargetKey} organizationRole={model.selectedOrganization?.role} canCreate={Boolean(model.connection)} loading={model.workspaceLoading} disabled={!model.connection} error={model.workspaceError} directoryErrors={model.workspaceDirectoryErrors} onSelect={(workspace) => { requestNativeNavigation(() => model.selectWorkspace(workspace)); }} onCreate={() => startCreate("workspace")} onManage={openWorkspaceManagement} />
-        <RoomNavigator rooms={model.rooms} selectedRoomId={model.selectedRoomId} loading={model.roomLoading} disabled={!model.connection || !model.selectedWorkspace} archived={model.selectedWorkspace?.state !== "active"} error={model.roomError} onSelect={(roomId) => { requestNativeNavigation(() => model.openRoom(roomId)); }} onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room") : undefined} />
-        <NativeRoomToolLinks target={roomToolTarget} onOpen={openRoomTool} />
-        {model.selectedWorkspace ? <button type="button" className="native-text-button" onClick={() => { requestNativeNavigation(() => setAgentDirectoryOpen(true)); }} disabled={model.agentLoading}>Agent一覧・設定</button> : null}
-        <OrganizationSwitcher organizations={model.organizations} selectedOrganizationId={model.selectedOrganizationId} loading={model.organizationLoading} disabled={!model.connection} error={model.organizationError} onSelect={(organizationId) => { requestNativeNavigation(() => model.selectOrganization(organizationId)); }} onCreate={() => startCreate("organization")} onManage={openManagement} />
-        <footer className="native-sidebar-footer"><span className={`native-connection-pip is-${model.transportState}`} aria-hidden="true" /><span>{model.connection ? model.connection.label : "未接続"}</span>{model.connection ? <button type="button" className="native-text-button" onClick={() => void model.reconnect()}>再確認</button> : null}{!model.browserMode ? <button type="button" className="native-text-button" onClick={() => setConnectionSettingsOpen(true)}>接続設定</button> : null}</footer>
-      </aside>
-      <main className="native-main">{main}</main>
+    <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
+      <div className="native-workspace-shell">
+        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}`} aria-hidden={mobileViewport && !mobileSidebarOpen ? true : undefined} inert={mobileViewport && !mobileSidebarOpen} aria-label="Samurai navigation">
+          <div className="native-brand"><span className="native-brand-mark" aria-hidden="true">S</span><div><strong>samurai</strong></div></div>
+          {model.selectedWorkspace ? <button type="button" className="native-sidebar-agent-link" onClick={() => { requestNativeNavigation(() => { setAgentDirectoryOpen(true); closeMobileSidebar(); }); }} disabled={model.agentLoading}>✦<span>Agent</span></button> : null}
+          <RoomNavigator rooms={model.rooms} selectedRoomId={model.selectedRoomId} loading={model.roomLoading} disabled={!model.connection || !model.selectedWorkspace} archived={model.selectedWorkspace?.state !== "active"} error={model.roomError} onSelect={(roomId) => { requestNativeNavigation(() => { model.openRoom(roomId); closeMobileSidebar(); }); }} onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room", "existing-only") : undefined} />
+          <NativeProfileMenu
+            accountLabel={accountLabel}
+            open={profileMenuOpen}
+            theme={theme}
+            workspaces={model.workspaces}
+            selectedWorkspaceTargetKey={model.selectedWorkspaceTargetKey}
+            onToggle={() => setProfileMenuOpen((open) => !open)}
+            onClose={() => setProfileMenuOpen(false)}
+            onThemeChange={changeTheme}
+            onSelectWorkspace={selectWorkspaceFromProfile}
+          />
+        </aside>
+        <section className="native-main-window" aria-label="現在のRoom">
+          <main className="native-main">{main}</main>
+          {artifactPanelTarget ? <aside className="native-artifact-panel" aria-label="成果物">
+            <NativeArtifactWorkspace
+              target={artifactPanelTarget}
+              initialResource={artifactWorkspaceInitialResource}
+              canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
+              canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
+              bridge={model.bridge}
+              onClose={() => { setArtifactWorkspaceInitialResource(undefined); setRoomToolOpen(undefined); }}
+              onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+              onRequestAgentRevision={async (target) => {
+                const sourceWork = target.sourceWorkId ? model.works.find((work) => work.id === target.sourceWorkId) : undefined;
+                const replyWorkId = sourceWork && roomWorkCanReceiveReply(sourceWork) && roomWorkControlAllowed(model.selectedRoom, sourceWork, model.connection?.accountId)
+                  ? sourceWork.id
+                  : undefined;
+                model.appendWorkDraft(artifactRevisionRequestDraft(target), replyWorkId);
+                setRoomToolOpen(undefined);
+              }}
+            />
+          </aside> : null}
+        </section>
+      </div>
+      {mobileSidebarOpen ? <button type="button" className="native-mobile-nav-backdrop" aria-label="ナビゲーションを閉じる" onClick={closeMobileSidebar} /> : null}
+      <button type="button" className="native-mobile-nav-toggle" aria-label="ナビゲーションを開く" aria-expanded={mobileSidebarOpen} onClick={() => setMobileSidebarOpen((open) => !open)}>☰</button>
       {model.evidenceOpen ? <EvidenceInspector message={model.evidenceMessage} evidence={model.evidence} onClose={() => model.setEvidenceOpen(false)} /> : null}
       {createKind ? <CreateDialog
         kind={createKind}
@@ -1288,6 +1083,7 @@ export function NativeApp() {
         agentError={model.agentError}
         agentBackendError={model.agentBackendError}
         workspaceTarget={model.selectedWorkspaceTarget}
+        roomCreateMode={roomCreateMode}
       /> : null}
       {connectionSettingsOpen && !model.browserMode ? <WorkspaceConnectionSettings
         connections={model.connectionState.connections}
