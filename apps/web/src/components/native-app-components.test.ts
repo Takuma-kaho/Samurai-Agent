@@ -288,6 +288,28 @@ describe("Native App component states", () => {
     expect(markup).toContain("閲覧不可");
   });
 
+  it("keeps nested Rooms beside their parent, separates Agent DM, and uses Room markers", () => {
+    const markup = renderToStaticMarkup(createElement(RoomNavigator, {
+      rooms: [
+        { id: "child", workspaceId: "workspace_1", name: "Child", parentRoomId: "parent" },
+        { id: "agent_dm", workspaceId: "workspace_1", name: "Research", kind: "agent_dm" },
+        { id: "parent", workspaceId: "workspace_1", name: "Parent" }
+      ],
+      onSelect: vi.fn()
+    }));
+
+    expect(markup.indexOf(">Parent</span>")).toBeLessThan(markup.indexOf(">Child</span>"));
+    expect(markup).toContain("native-room-item-parent");
+    expect(markup).toContain('aria-expanded="true"');
+    expect(markup).toContain("native-room-children");
+    expect(markup).toContain('aria-label="Room"');
+    expect(markup).toContain('aria-label="ダイレクトメッセージ"');
+    expect(markup).toContain('class="native-room-mark" aria-hidden="true">#</span>');
+    expect(markup).toContain('class="native-room-dm-mark" aria-hidden="true">◉</span>');
+    expect(markup).toContain("Agent DM");
+    expect(markup).toContain("Agent DM・非公開");
+  });
+
   it("offers reconnect and retry affordances after an Agent failure", () => {
     const markup = renderToStaticMarkup(createElement(ChatSurface, {
       roomName: "Main",

@@ -98,11 +98,47 @@ export interface ArtifactSurfacePanelProps {
   canEdit?: boolean;
   /** Captured Renderer navigation scope for Agent revision hand-offs. */
   workspaceTarget?: NativeWorkspaceTarget;
+  /**
+   * Optional result-card selection. The host supplies only the durable
+   * Artifact identity and the revision that was recorded for the Room Work;
+   * the panel resolves the content through its already scoped gateway.
+   */
+  initialArtifact?: ArtifactSurfaceInitialArtifact;
   /** Leaves sending to the existing Room Work path; this component never invents a Session. */
   onRequestAgentRevision?: ArtifactRevisionRequestHandler;
   onOpenGeneratedSurface?: (surfaceId: string) => void;
   onClose?: () => void;
   onEditorControllerChange?: (controller: NativeArtifactEditorController | undefined) => void;
+}
+
+export interface ArtifactSurfaceInitialArtifact {
+  artifactId: string;
+  revisionId?: string;
+  /** Optional scope copied from a validated Room Work result ref. */
+  connectionId?: string;
+  workspaceId?: string;
+  roomId?: string;
+}
+
+const resourceIdentityPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+/**
+ * Rejects a result-card selection that belongs to another authorized scope.
+ * The gateway remains the authority; this is a renderer-side stale-result
+ * guard so a delayed host update cannot silently select a different Room.
+ */
+export function artifactSurfaceInitialArtifactIsCurrent(
+  resource: ArtifactSurfaceInitialArtifact | undefined,
+  input: { roomId?: string; workspaceTarget?: NativeWorkspaceTarget }
+): boolean {
+  if (!resource) return true;
+  if (!resourceIdentityPattern.test(resource.artifactId)) return false;
+  if (resource.revisionId !== undefined && !resourceIdentityPattern.test(resource.revisionId)) return false;
+  const target = input.workspaceTarget;
+  return !(resource.connectionId && target?.connectionId && resource.connectionId !== target.connectionId)
+    && !(resource.workspaceId && target?.workspaceId && resource.workspaceId !== target.workspaceId)
+    && !(resource.roomId && input.roomId && resource.roomId !== input.roomId)
+    && !(resource.roomId && target?.roomId && resource.roomId !== target.roomId);
 }
 
 /** Keeps a failed retry on the same logical payload and therefore the same operation ID. */
@@ -111,7 +147,11 @@ export function operationForArtifactSnapshot(
   snapshot: string
 ): { operationId: string; snapshot: string } {
   if (previous?.snapshot === snapshot) return previous;
-  return { operationId: createIdempotencyKey(), snapshot };
+  // Workspace completion IDs are opaque IDs, not arbitrary UUIDs: the server
+  // requires a lowercase ASCII letter as the first character. Keep the
+  // generic API idempotency key unchanged and scope this normalization to
+  // Artifact save/restore operations only.
+  return { operationId: `artifact_operation_${createIdempotencyKey()}`, snapshot };
 }
 
 export function artifactRestoreOperationSnapshot(input: Pick<ArtifactRestoreRequest, "artifactId" | "revisionId" | "baseRevisionId" | "expectedRevision">): string {
@@ -158,7 +198,7 @@ export function nativeArtifactDetailFromMutation(
 }
 
 type ArtifactPanelNavigation =
-  | { kind: "artifact"; artifactId: string }
+  | { kind: "artifact"; artifactId: string; revisionId?: string }
   | { kind: "surface"; surfaceId: string }
   | { kind: "close" };
 
@@ -167,7 +207,7 @@ type ArtifactPanelNavigation =
  * fixed gateway supplied by the active connection; this component contains no
  * cache keyed only by Artifact ID.
  */
-export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspaceTarget, onRequestAgentRevision, onOpenGeneratedSurface, onClose, onEditorControllerChange }: ArtifactSurfacePanelProps) {
+export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspaceTarget, initialArtifact, onRequestAgentRevision, onOpenGeneratedSurface, onClose, onEditorControllerChange }: ArtifactSurfacePanelProps) {
   const listEpoch = useRef(0);
   const detailEpoch = useRef(0);
   const selectedArtifactIdRef = useRef<string | undefined>(undefined);
@@ -207,7 +247,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     discard: () => editorControllerRef.current?.discard()
   });
 
-  const refresh = async (): Promise<void> => {
+  const refresh = useCallback(async (): Promise<void> => {
     if (!roomId || !gateway) return;
     const epoch = ++listEpoch.current;
     setLoading(true);
@@ -231,7 +271,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     } finally {
       if (epoch === listEpoch.current) setLoading(false);
     }
-  };
+  }, [gateway, roomId]);
 
   useEffect(() => {
     setArtifacts([]);
@@ -241,10 +281,9 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     void refresh();
     return () => { listEpoch.current += 1; detailEpoch.current += 1; };
   // A new connection/Room must discard old, authorized-but-wrong results.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, gateway]);
+  }, [refresh]);
 
-  const loadArtifact = async (artifactId: string): Promise<void> => {
+  const loadArtifact = async (artifactId: string, revisionId?: string): Promise<void> => {
     if (!roomId || !gateway) return;
     const epoch = ++detailEpoch.current;
     if (selectedArtifactIdRef.current !== artifactId) {
@@ -264,7 +303,23 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
         gateway.listRevisions(roomId, artifactId)
       ]);
       if (epoch !== detailEpoch.current || detail.artifact.id !== artifactId) return;
-      setSelected(detail);
+      let nextDetail = detail;
+      if (revisionId) {
+        const historical = await gateway.getRevision(roomId, artifactId, revisionId);
+        if (epoch !== detailEpoch.current
+          || historical.revision.id !== revisionId
+          || historical.revision.artifact_id !== artifactId) {
+          throw new Error("artifact_revision_response_mismatch");
+        }
+        nextDetail = {
+          ...detail,
+          content: historical.content,
+          ...(historical.contentEncoding ? { contentEncoding: historical.contentEncoding } : {}),
+          ...(historical.contentType ? { contentType: historical.contentType } : {}),
+          revision: historical.revision
+        };
+      }
+      setSelected(nextDetail);
       setRevisions([...history].sort((left, right) => right.revision - left.revision));
     } catch (cause) {
       if (epoch === detailEpoch.current) setError(errorMessage(cause, "成果物を開けませんでした。"));
@@ -275,7 +330,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
 
   const proceedArtifactNavigation = (navigation: ArtifactPanelNavigation): void => {
     if (navigation.kind === "artifact") {
-      void loadArtifact(navigation.artifactId);
+      void loadArtifact(navigation.artifactId, navigation.revisionId);
     } else if (navigation.kind === "surface") {
       onOpenGeneratedSurface?.(navigation.surfaceId);
     } else {
@@ -286,6 +341,26 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
   const requestArtifactNavigation = (navigation: ArtifactPanelNavigation): void => {
     draftNavigation.requestNavigation(() => proceedArtifactNavigation(navigation));
   };
+
+  const initialArtifactKey = initialArtifact
+    ? `${initialArtifact.artifactId}\n${initialArtifact.revisionId ?? ""}\n${initialArtifact.connectionId ?? ""}\n${initialArtifact.workspaceId ?? ""}\n${initialArtifact.roomId ?? ""}`
+    : "no-initial-artifact";
+
+  useEffect(() => {
+    if (!initialArtifact) return;
+    if (!artifactSurfaceInitialArtifactIsCurrent(initialArtifact, { roomId, workspaceTarget })) {
+      setError("結果の成果物参照が現在のRoomまたはWorkspaceに属していません。");
+      return;
+    }
+    requestArtifactNavigation({
+      kind: "artifact",
+      artifactId: initialArtifact.artifactId,
+      ...(initialArtifact.revisionId ? { revisionId: initialArtifact.revisionId } : {})
+    });
+    // The selection key intentionally controls this effect. A new gateway or
+    // Room also replays the selection, while theme-only renders do not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialArtifactKey, roomId, gateway]);
 
   const loadComparison = async (revisionId: string): Promise<void> => {
     if (!roomId || !gateway || !selected) return;
@@ -304,7 +379,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     }
   };
 
-  const save = async (input: ArtifactSaveRequest): Promise<ArtifactMutationResult> => {
+  const save = useCallback(async (input: ArtifactSaveRequest): Promise<ArtifactMutationResult> => {
     if (!roomId || !gateway || !selected) throw new Error("artifact_save_unavailable");
     if (selectedArtifactIdRef.current !== input.artifactId) throw new Error("artifact_navigation_changed");
     const epoch = ++detailEpoch.current;
@@ -323,7 +398,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     await refresh();
     if (!artifactRequestIsCurrent({ requestEpoch: epoch, currentEpoch: detailEpoch.current, artifactId: input.artifactId, currentArtifactId: selectedArtifactIdRef.current })) throw new Error("artifact_navigation_changed");
     return mutation;
-  };
+  }, [gateway, refresh, roomId, selected]);
 
   const restore = async (input: ArtifactRestoreRequest): Promise<ArtifactMutationResult> => {
     if (!roomId || !gateway || !selected || selectedArtifactIdRef.current !== input.artifactId) throw new Error("artifact_restore_unavailable");
@@ -354,8 +429,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
   };
 
   return <section className="native-artifact-surface" aria-label="Roomの成果物">
-    <header className="native-artifact-surface-header">
-      <div><span className="native-section-eyebrow">Artifacts</span><h2>成果物</h2><p>このRoomで認可された文書・表・画像・PDF・操作画面を確認します。</p></div>
+    <header className="native-artifact-surface-header" aria-label="成果物操作">
       <div className="native-artifact-surface-header-actions"><button type="button" className="native-button native-button-quiet" onClick={() => void refresh()} disabled={unavailable || loading}>{loading ? "再読込中…" : "再読込"}</button>{onClose ? <button type="button" className="native-button native-button-quiet" onClick={() => requestArtifactNavigation({ kind: "close" })}>閉じる</button> : null}</div>
     </header>
     {unavailable ? <p className="native-inline-note">Roomを選択すると、認可された成果物を表示します。</p> : null}

@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { io, type Socket } from "socket.io-client";
-import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkAttachmentSchema, PublicRoomWorkResourceRefSchema, type DomainApiRequest, type DomainApiTransportRequest, type PublicAgentRecord, type PublicRoomRecord } from "@samurai-agent/domain-api";
+import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkAttachmentSchema, PublicRoomWorkResourceRefSchema, PublicRoomWorkResultResourceRefSchema, type DomainApiRequest, type DomainApiTransportRequest, type PublicAgentRecord, type PublicRoomRecord } from "@samurai-agent/domain-api";
 import {
   app,
   BrowserWindow,
@@ -5036,6 +5036,7 @@ function sanitizeEvidencePayload(value: unknown): unknown {
 const roomWorkPublicPayloadKeys = new Set([
   "id", "room_id", "workspace_id", "work_id", "requester_id", "default_agent_id", "agent_id", "target_agent_id",
   "parent_assignee_id", "assignee_id", "title", "objective", "status", "kind", "instruction", "body", "attachments", "resource_refs",
+  "result", "summary",
   "assignees", "instructions", "comments", "controls", "operation_id", "source_comment_id", "created_by", "action",
   "enabled", "can_execute", "agent_version", "instruction_version", "generation", "version", "reaction_count",
   "applied_instruction_ids", "unconfirmed_assignee_ids", "reaction", "created_at", "updated_at", "completed_at",
@@ -5096,7 +5097,7 @@ function sanitizeRoomWorkPayload(value: unknown, depth = 0, keys = roomWorkPubli
     const sanitized = key === "attachments" || key === "resources"
       ? sanitizeRoomWorkResources(item)
       : key === "resource_refs"
-        ? sanitizeRoomWorkResourceRefs(item)
+        ? fieldKey === "result" ? sanitizeRoomWorkResultResourceRefs(item) : sanitizeRoomWorkResourceRefs(item)
         : sanitizeRoomWorkPayload(item, depth + 1, keys, key);
     if (sanitized !== undefined) output[key] = sanitized;
   }
@@ -5139,6 +5140,16 @@ function sanitizeRoomWorkResourceRefs(value: unknown): unknown {
   return value.map((item) => {
     const parsed = PublicRoomWorkResourceRefSchema.safeParse(item);
     if (!parsed.success) throw new Error("workspace_room_resource_ref_response_invalid");
+    return parsed.data;
+  });
+}
+
+function sanitizeRoomWorkResultResourceRefs(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  if (value.length > 32) throw new Error("workspace_room_work_result_resource_ref_count_response_invalid");
+  return value.map((item) => {
+    const parsed = PublicRoomWorkResultResourceRefSchema.safeParse(item);
+    if (!parsed.success) throw new Error("workspace_room_work_result_resource_ref_response_invalid");
     return parsed.data;
   });
 }
@@ -5448,6 +5459,7 @@ function toDesktopWorkspaceRoom(room: PublicRoomRecord): {
   defaultAgentEnabled?: boolean;
   defaultAgentCanExecute?: boolean;
   canManage?: boolean;
+  canEdit?: boolean;
   canExecute?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -5478,6 +5490,7 @@ function toDesktopWorkspaceRoom(room: PublicRoomRecord): {
     ...(defaultAgentEnabled === undefined ? {} : { defaultAgentEnabled }),
     ...(defaultAgentCanExecute === undefined ? {} : { defaultAgentCanExecute }),
     ...(room.can_manage === undefined ? {} : { canManage: room.can_manage }),
+    ...(room.can_edit === undefined ? {} : { canEdit: room.can_edit }),
     ...(room.can_execute === undefined ? {} : { canExecute: room.can_execute }),
     createdAt: room.created_at,
     updatedAt: room.updated_at

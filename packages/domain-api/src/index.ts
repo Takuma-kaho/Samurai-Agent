@@ -88,6 +88,7 @@ export const PublicRoomRecordSchema = z.object({
   default_agent_version: z.number().int().positive().optional(),
   version: z.number().int().nonnegative(),
   can_manage: z.boolean().optional(),
+  can_edit: z.boolean().optional(),
   can_execute: z.boolean().optional(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()

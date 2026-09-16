@@ -168,3 +168,15 @@ export function nativeSelectionPreferenceKey(): string {
 export function nativeSelectionTargetKey(target: NativeWorkspaceTarget): string {
   return targetKey(target);
 }
+
+// Kept as a convenience export for callers that already use the Native App
+// preference module. Theme storage remains a separate, allowlisted setting.
+export {
+  nativeThemeDefault,
+  nativeThemePreferenceKey,
+  nativeThemes,
+  normalizeNativeTheme,
+  readNativeThemePreference,
+  writeNativeThemePreference
+} from "./native-app-theme-preferences";
+export type { NativeTheme } from "./native-app-theme-preferences";

@@ -56,6 +56,31 @@ describe("Desktop Room work and Agent bridge", () => {
     expect(mainSource).toContain("defaultAgentCanExecute");
   });
 
+  it("projects the public Room edit capability without changing its authorization value", () => {
+    const start = mainSource.indexOf("function toDesktopWorkspaceRoom");
+    const end = mainSource.indexOf("\n\n/** Main owns Socket.IO authentication", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const runnableSource = mainSource
+      .slice(start, end)
+      .replace(/function toDesktopWorkspaceRoom\(room: PublicRoomRecord\): \{[\s\S]*?\n\} \{/, "function toDesktopWorkspaceRoom(room) {")
+      .replace(/const extendedRoom = room as PublicRoomRecord & \{[\s\S]*?\n  \};/, "const extendedRoom = room;")
+      .replace(/\s+as Record<string, unknown>/g, "");
+    const projectRoom = new Function(`${runnableSource}; return toDesktopWorkspaceRoom;`)() as (room: Record<string, unknown>) => Record<string, unknown>;
+    const baseRoom = {
+      id: "room_a",
+      workspace_id: "workspace_a",
+      name: "General",
+      version: 1,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z"
+    };
+
+    expect(projectRoom({ ...baseRoom, can_edit: true })).toMatchObject({ canEdit: true });
+    expect(projectRoom({ ...baseRoom, can_edit: false })).toMatchObject({ canEdit: false });
+  });
+
   it("pins default-Agent and DM operations to the active target snapshot", () => {
     const defaultStart = mainSource.indexOf('ipcMain.handle("samurai:workspace-server:room:default-agent:set"');
     const dmStart = mainSource.indexOf('ipcMain.handle("samurai:workspace-server:agent:dm:open"');
@@ -140,5 +165,17 @@ describe("Desktop Room work and Agent bridge", () => {
     expect(sanitize([{ kind: "artifact", id: "artifact-1", uri: "runtime://artifact-1", version: "1" }])).toEqual([{
       kind: "artifact", id: "artifact-1", uri: "runtime://artifact-1", version: "1"
     }]);
+  });
+
+  it("passes only the public Room Work result summary and durable resource refs", () => {
+    expect(mainSource).toContain('"result", "summary"');
+    const start = mainSource.indexOf("function sanitizeRoomWorkPayload");
+    const end = mainSource.indexOf("function sanitizeAgentDmPayload", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const sanitizerSource = mainSource.slice(start, end);
+    expect(sanitizerSource).toContain("PublicRoomWorkResultResourceRefSchema.safeParse");
+    expect(sanitizerSource).toContain('fieldKey === "result" ? sanitizeRoomWorkResultResourceRefs(item)');
+    expect(sanitizerSource).not.toMatch(/private_key|credential|password|session_id|sessionId/);
   });
 });

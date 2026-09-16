@@ -7,7 +7,9 @@ import {
   assertNativeGeneratedSurfaceApprovalResponse,
   clearNativeSurfaceOperationLedger,
   GeneratedSurfaceList,
+  NativeArtifactWorkspace,
   nativeArtifactDetailFromApi,
+  nativeArtifactWorkspaceInitialResourceFromUnknown,
   nativeArtifactWorkspaceGateway,
   nativeArtifactWorkspaceRequestIsCurrent,
   nativeArtifactWorkspaceTargetKey,
@@ -98,6 +100,63 @@ function artifactDetail(overrides: Partial<ArtifactDetail> = {}): ArtifactDetail
 }
 
 describe("NativeArtifactWorkspace", () => {
+  it("opens the regular entry on the Room-scoped Artifact panel without a Surface management list", () => {
+    const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
+      target,
+      bridge: {
+        listWorkspaceConnections: vi.fn(async () => connectionState()),
+        listWorkspaceArtifacts: vi.fn(async () => ({ artifacts: [] })),
+        getWorkspaceArtifact: vi.fn(),
+        listWorkspaceArtifactRevisions: vi.fn(),
+        getWorkspaceArtifactRevision: vi.fn(),
+        reviseWorkspaceArtifact: vi.fn(),
+        restoreWorkspaceArtifactRevision: vi.fn()
+      }
+    }));
+
+    expect(html).toContain('aria-label="Roomの成果物"');
+    expect(html).toContain(">成果物<");
+    expect(html.match(/>成果物</g) ?? []).toHaveLength(1);
+    expect(html).toContain('aria-label="成果物一覧"');
+    expect(html).not.toContain('native-artifact-workspace-header"><div><span class="native-section-eyebrow">Artifacts');
+    expect(html).not.toContain("現在のRoomで認可された文書を確認・編集します。");
+    expect(html).not.toContain("Generated surfaces");
+    expect(html).not.toContain("保存済みの操作画面");
+  });
+
+  it("keeps a Room Work result tied to its authorized resource and revision", () => {
+    const resource = nativeArtifactWorkspaceInitialResourceFromUnknown({
+      kind: "artifact",
+      id: "artifact-a",
+      uri: "artifacts/artifact-a/revisions/2-note.md",
+      revisionId: "revision-a",
+      connectionId: target.connectionId,
+      workspaceId: target.workspaceId,
+      roomId: target.roomId,
+      label: "結果文書"
+    }, target);
+
+    expect(resource).toEqual({
+      kind: "artifact",
+      id: "artifact-a",
+      uri: "artifacts/artifact-a/revisions/2-note.md",
+      revisionId: "revision-a",
+      connectionId: target.connectionId,
+      workspaceId: target.workspaceId,
+      roomId: target.roomId,
+      label: "結果文書"
+    });
+    expect(nativeArtifactWorkspaceInitialResourceFromUnknown({
+      kind: "artifact",
+      id: "artifact-a",
+      uri: "artifacts/artifact-a/revisions/2-note.md",
+      revisionId: "revision-a",
+      connectionId: "connection-b",
+      workspaceId: target.workspaceId,
+      roomId: target.roomId
+    }, target)).toBeUndefined();
+  });
+
   it("keeps binary bytes out of text rendering and converts only valid bytes at the boundary", () => {
     expect(nativeArtifactDetailFromApi(artifactDetail())).toMatchObject({ content: "AQID", contentEncoding: "base64", contentType: "image/png" });
     expect(() => nativeArtifactDetailFromApi(artifactDetail({ content_bytes: [999] }))).toThrow("artifact_binary_content_invalid");

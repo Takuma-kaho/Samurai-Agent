@@ -10,7 +10,7 @@ import {
   selectBrowserWorkspaceCandidate,
   subscribeBrowserWorkspaceRealtime
 } from "./workspace-browser-auth";
-import { DomainApiClient, PublicAgentBackendRecordSchema, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
+import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkResultResourceRefSchema, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
 import { beginActiveWorkspaceRoomSelection, currentActiveWorkspaceRoomId, isCurrentActiveWorkspaceRoomSelection } from "./workspace-navigation-state";
 import type {
   AgentBackendAvailability,
@@ -127,6 +127,22 @@ type RoomWorkDelegateInput = {
 
 type RoomWorkDelegateBridge = {
   delegateWorkspaceRoomWorkAssignee: (input: RoomWorkDelegateInput) => Promise<DesktopWorkspaceRoomWorkAssignee & { replayed: boolean }>;
+};
+
+type DesktopWorkspaceRoomWorkAssignmentResult = {
+  summary?: string;
+  resource_refs?: Array<{
+    kind: string;
+    id: string;
+    uri: string;
+    parent_id?: string;
+    version?: string;
+    label?: string;
+  }>;
+};
+
+type DesktopWorkspaceRoomWorkAssigneeWithResult = DesktopWorkspaceRoomWorkAssignee & {
+  result?: DesktopWorkspaceRoomWorkAssignmentResult;
 };
 
 /** Durable operation evidence used to recover a logical UI retry after restart. */
@@ -1956,6 +1972,7 @@ function toDesktopWorkspaceRoom(room: PublicRoomRecord): DesktopWorkspaceRoom {
     ...(defaultAgentEnabled === undefined ? {} : { defaultAgentEnabled }),
     ...(defaultAgentCanExecute === undefined ? {} : { defaultAgentCanExecute }),
     ...(room.can_manage === undefined ? {} : { canManage: room.can_manage }),
+    ...(room.can_edit === undefined ? {} : { canEdit: room.can_edit }),
     ...(room.can_execute === undefined ? {} : { canExecute: room.can_execute }),
     createdAt: room.created_at,
     updatedAt: room.updated_at
@@ -2183,8 +2200,56 @@ const desktopRoomWorkControlStatuses = ["accepted", "pending", "requested", "run
 const desktopRoomWorkStopRequestStatuses = ["requested", "accepted", "rejected"] as const;
 const desktopRoomWorkTerminalStatuses = ["pending", "confirmed", "unconfirmed"] as const;
 
-function toDesktopRoomWorkAssignee(value: unknown): DesktopWorkspaceRoomWorkAssignee {
+function roomWorkAssignmentResultSummary(value: unknown, depth = 0): string | undefined {
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized || undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 3) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["summary", "result_summary", "resultSummary", "output_summary", "outputSummary", "message", "answer"]) {
+    const summary = roomWorkAssignmentResultSummary(record[key], depth + 1);
+    if (summary) return summary;
+  }
+  return roomWorkAssignmentResultSummary(record.output, depth + 1);
+}
+
+function roomWorkAssignmentResultRefs(value: unknown): DesktopWorkspaceRoomWorkAssignmentResult["resource_refs"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const rawRefs = record.resource_refs ?? record.resourceRefs;
+  if (rawRefs === undefined || rawRefs === null) return undefined;
+  if (!Array.isArray(rawRefs)) throw new Error("room_work_result_resource_refs_response_invalid");
+  const refs = rawRefs.map((entry, index) => {
+    const parsed = PublicRoomWorkResultResourceRefSchema.safeParse(entry);
+    if (!parsed.success) throw new Error(`room_work_result_resource_refs_${index}_response_invalid`);
+    return {
+      kind: parsed.data.kind,
+      id: parsed.data.id,
+      uri: parsed.data.uri,
+      ...(parsed.data.parent_id ? { parent_id: parsed.data.parent_id } : {}),
+      ...(parsed.data.version ? { version: parsed.data.version } : {}),
+      ...(parsed.data.label ? { label: parsed.data.label } : {})
+    };
+  });
+  return refs.length ? refs : undefined;
+}
+
+/** Preserve only the public completion evidence needed by the Native work surface. */
+function toDesktopRoomWorkAssignmentResult(value: unknown): DesktopWorkspaceRoomWorkAssignmentResult | undefined {
+  const source = value === undefined || value === null ? undefined : value;
+  const summary = roomWorkAssignmentResultSummary(source);
+  const resourceRefs = roomWorkAssignmentResultRefs(source);
+  if (!summary && !resourceRefs?.length) return undefined;
+  return {
+    ...(summary ? { summary } : {}),
+    ...(resourceRefs?.length ? { resource_refs: resourceRefs } : {})
+  };
+}
+
+function toDesktopRoomWorkAssignee(value: unknown): DesktopWorkspaceRoomWorkAssigneeWithResult {
   const record = publicRecord(value, "room_work_assignee");
+  const result = toDesktopRoomWorkAssignmentResult(record.result ?? record.output ?? record);
   return {
     id: publicString(record, "id", "room_work_assignee"),
     workId: publicString(record, "work_id", "room_work_assignee"),
@@ -2196,6 +2261,7 @@ function toDesktopRoomWorkAssignee(value: unknown): DesktopWorkspaceRoomWorkAssi
     ...(typeof record.agent_configuration_version === "number" ? { agentConfigurationVersion: publicNumber(record, "agent_configuration_version", "room_work_assignee") } : {}),
     ...(typeof record.attempt === "number" ? { attempt: publicNumber(record, "attempt", "room_work_assignee") } : {}),
     version: publicNumber(record, "version", "room_work_assignee"),
+    ...(result ? { result } : {}),
     createdAt: publicString(record, "created_at", "room_work_assignee"),
     updatedAt: publicString(record, "updated_at", "room_work_assignee")
   };

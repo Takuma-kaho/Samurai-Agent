@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, createNativeDraftNavigationControllerRegistry, CreateDialog, nativeRoomResultResourceTarget, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey, patchAgentEditorState } from "./NativeApp";
+import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, createNativeDraftNavigationControllerRegistry, CreateDialog, nativeAgentDirectoryScopeKey, nativeAgentProfileForScope, nativeRoomResultResourceTarget, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey } from "./NativeApp";
 import { createNativeDraftNavigationController } from "./use-native-draft-navigation";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 
@@ -25,23 +25,6 @@ describe("Native draft navigation controller registry", () => {
     expect(registry.getCurrent()).toBe(first);
     underlyingDetach();
     expect(registry.getCurrent()).toBeUndefined();
-  });
-});
-
-describe("Native Agent editor state", () => {
-  it("applies captured field values without reading a SyntheticEvent in the updater", () => {
-    const current = {
-      mode: "create" as const,
-      name: "旧名",
-      role: "役割",
-      instructions: "指示",
-      enabled: true,
-      backendId: "samurai-native"
-    };
-
-    expect(patchAgentEditorState(current, { name: "新しい名前" })).toEqual({ ...current, name: "新しい名前" });
-    expect(patchAgentEditorState(current, { enabled: false })).toEqual({ ...current, enabled: false });
-    expect(patchAgentEditorState(undefined, { name: "入力" })).toBeUndefined();
   });
 });
 
@@ -86,17 +69,17 @@ describe("Native Room tool entry", () => {
   const target = { connectionId: "connection_a", workspaceId: "workspace_a" };
   const room = { id: "room_a", workspaceId: "workspace_a" };
 
-  it("renders the confirmation entry together with the existing Room tools", () => {
+  it("renders only the selected Room's artifact entry", () => {
     const markup = renderToStaticMarkup(createElement(NativeRoomToolLinks, {
       target: nativeRoomToolTarget(target, room),
       onOpen: vi.fn()
     }));
 
-    expect(markup).toContain("確認待ち");
-    expect(markup).toContain("知識・検索・設定");
-    expect(markup).toContain("Room管理");
-    expect(markup).toContain("成果物・操作画面");
-    expect(markup).toContain("Collection");
+    expect(markup).toContain(">成果物</button>");
+    expect(markup).not.toContain("確認待ち");
+    expect(markup).not.toContain("知識・検索・設定");
+    expect(markup).not.toContain("Room管理");
+    expect(markup).not.toContain("Collection");
   });
 
   it("binds the tool target to the selected Workspace and Room", () => {
@@ -144,6 +127,26 @@ describe("Native Room creation dialog", () => {
     expect(markup).not.toContain("must-not-reach-renderer");
   });
 
+  it("limits the ordinary Room navigator flow to an existing Agent", () => {
+    const markup = renderToStaticMarkup(createElement(CreateDialog, {
+      kind: "room",
+      roomCreateMode: "existing-only",
+      onClose: vi.fn(),
+      onSubmit: vi.fn(),
+      agents: [{ id: "agent_research", displayName: "Research Agent", backendId: "samurai-native", enabled: true, status: "active", version: 3 }],
+      agentBackends: [{ id: "samurai-native", label: "Samurai Native", configured: true, enabled: true, connectionState: "ready" }]
+    }));
+
+    expect(markup).toContain("既存Agentを選ぶ");
+    expect(markup).toContain("Research Agent");
+    expect(markup).not.toContain("新しいAgentを同時に作る");
+    expect(markup).not.toContain("Agent名");
+    expect(markup).not.toContain("<span>役割</span>");
+    expect(markup).not.toContain("<span>指示</span>");
+    expect(markup).not.toContain("Room権限");
+    expect(markup).not.toContain("<span>Backend</span>");
+  });
+
   it("offers the new Agent flow and backend selection when no Agent exists", () => {
     const markup = renderToStaticMarkup(createElement(CreateDialog, {
       kind: "room",
@@ -176,7 +179,44 @@ describe("Native Room creation dialog", () => {
 });
 
 describe("Native Agent directory", () => {
-  it("keeps instructions out of the list until an explicit edit is opened", () => {
+  it("does not expose a profile fetched for a previous Workspace or Agent list scope", () => {
+    const agent = { id: "agent_a", displayName: "Research Agent", enabled: true };
+    const workspaceA = nativeAgentDirectoryScopeKey("connection_a\nworkspace_a", "調査Workspace", "room_a", [{ id: agent.id, version: 1 }]);
+    const workspaceB = nativeAgentDirectoryScopeKey("connection_b\nworkspace_b", "調査Workspace", "room_a", [{ id: agent.id, version: 1 }]);
+    const refreshedList = nativeAgentDirectoryScopeKey("connection_a\nworkspace_a", "調査Workspace", "room_a", [{ id: agent.id, version: 2 }]);
+
+    expect(workspaceB).not.toBe(workspaceA);
+    expect(refreshedList).not.toBe(workspaceA);
+    expect(nativeAgentProfileForScope(agent, workspaceA, workspaceB)).toBeUndefined();
+    expect(nativeAgentProfileForScope(agent, workspaceA, refreshedList)).toBeUndefined();
+    expect(nativeAgentProfileForScope(agent, workspaceA, workspaceA)).toBe(agent);
+  });
+
+  it("supports the new sidebar's read-only Agent list and DM entry", () => {
+    const markup = renderToStaticMarkup(createElement(AgentDirectoryPanel, {
+      workspaceName: "調査Workspace",
+      readOnly: true,
+      agents: [{ id: "agent_a", displayName: "Research Agent", role: "調査担当", backendId: "native", enabled: true, status: "active" }],
+      agentBackends: [{ id: "native", label: "Native", configured: true, enabled: true, connectionState: "ready" }],
+      roomAgentMembers: [],
+      onClose: vi.fn(),
+      onViewAgent: vi.fn(),
+      onCreateAgent: vi.fn(),
+      onPatchAgent: vi.fn(),
+      onBindBackend: vi.fn(),
+      onSetRoomAgentPermission: vi.fn(),
+      onRemoveRoomAgent: vi.fn(),
+      onOpenAgentDm: vi.fn()
+    }));
+
+    expect(markup).toContain("Research Agent");
+    expect(markup).toContain(">DM</button>");
+    expect(markup).toContain(">プロフィール</button>");
+    expect(markup).not.toContain("Agentを作成");
+    expect(markup).not.toContain(">編集</button>");
+  });
+
+  it("keeps instructions out of the list until an explicit profile is opened", () => {
     const markup = renderToStaticMarkup(createElement(AgentDirectoryPanel, {
       workspaceName: "調査Workspace",
       room: { id: "room_a", workspaceId: "workspace_a", name: "Research", canManage: false, canExecute: true, defaultAgentId: "agent_a", version: 1 },
@@ -197,17 +237,24 @@ describe("Native Agent directory", () => {
     expect(markup).toContain("調査担当");
     expect(markup).toContain("Native");
     expect(markup).toContain(">DM</button>");
-    expect(markup).toContain("Room管理権限がないため、Agentの状態だけ表示します。");
+    expect(markup).toContain(">プロフィール</button>");
+    expect(markup).not.toContain("Workspace Agents");
+    expect(markup).not.toContain("Agentを作成");
+    expect(markup).not.toContain(">編集</button>");
+    expect(markup).not.toContain("Room設定");
+    expect(markup).not.toContain("既定Agent");
+    expect(markup).not.toContain("RoomにAgentを追加");
+    expect(markup).not.toContain("権限を保存");
     expect(markup).not.toContain("secret instructions must not be listed");
   });
 
-  it("disables removing the current default Agent before the Server rejects it", () => {
+  it("keeps profile viewing available for a writable Agent directory", () => {
     const markup = renderToStaticMarkup(createElement(AgentDirectoryPanel, {
       workspaceName: "調査Workspace",
-      room: { id: "room_a", workspaceId: "workspace_a", name: "Research", canManage: true, canExecute: true, defaultAgentId: "agent_a", version: 1 },
+      readOnly: false,
       agents: [{ id: "agent_a", displayName: "Research Agent", role: "調査担当", backendId: "native", enabled: true, status: "active" }],
       agentBackends: [{ id: "native", label: "Native", configured: true, enabled: true, connectionState: "ready" }],
-      roomAgentMembers: [{ id: "membership_a", roomId: "room_a", agentId: "agent_a", canView: true, canEdit: false, canExecute: true, version: 1, removed: false }],
+      roomAgentMembers: [],
       onClose: vi.fn(),
       onViewAgent: vi.fn(),
       onCreateAgent: vi.fn(),
@@ -215,13 +262,16 @@ describe("Native Agent directory", () => {
       onBindBackend: vi.fn(),
       onSetRoomAgentPermission: vi.fn(),
       onRemoveRoomAgent: vi.fn(),
-      onSetDefaultAgent: vi.fn(),
       onOpenAgentDm: vi.fn()
     }));
 
-    expect(markup).toContain("既定Agentは先に別のAgentへ変更してから解除できます。");
-    expect(markup).toContain("既定Agentを変更後に解除");
-    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>既定Agentを変更後に解除<\/button>/);
+    expect(markup).toContain(">プロフィール</button>");
+    expect(markup).not.toContain("Agentを作成");
+    expect(markup).not.toContain(">編集</button>");
+    expect(markup).not.toContain("Room設定");
+    expect(markup).not.toContain("既定Agent");
+    expect(markup).not.toContain("RoomにAgentを追加");
+    expect(markup).not.toContain("権限を保存");
   });
 
   it("hides Room Agent management controls inside an Agent DM", () => {
@@ -247,6 +297,7 @@ describe("Native Agent directory", () => {
     expect(markup).not.toContain("既定Agentを変更");
     expect(markup).not.toContain("権限を保存");
     expect(markup).not.toContain("Roomから解除");
+    expect(markup).toContain(">プロフィール</button>");
     expect(markup).toContain(">DM</button>");
   });
 });

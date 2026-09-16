@@ -140,6 +140,18 @@ describe("Workspace completion Activity projection identity", () => {
     expect(state.activityRow.principal_account_id).not.toBe(context.accountId);
   });
 
+  it("accepts an opaque Activity operation ID that starts with a digit", async () => {
+    const state = createCompletionSqlState();
+    const service = new WorkspaceCompletionService(createCompletionStore(state) as never);
+    const operationId = "0f06d1a5-3e88-4f20-9c0b-8e0e9a9f0a1b";
+
+    await expect(service.ingestActivity(completionContext("operation_a"), {
+      ...completionInput(),
+      operationId
+    })).resolves.toBeDefined();
+    expect(state.activityInsertValues?.[8]).toBe(operationId);
+  });
+
   it("rejects a Runtime principal override outside a trusted maintenance caller", async () => {
     const state = createCompletionSqlState();
     const service = new WorkspaceCompletionService(createCompletionStore(state) as never);

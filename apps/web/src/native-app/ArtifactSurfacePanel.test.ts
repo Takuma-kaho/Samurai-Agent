@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { ArtifactRecord, ArtifactRevisionRecord, JsonValue } from "@samurai-agent/core-schemas";
-import { ArtifactDetailView, artifactBinaryPreviewEligibility, artifactCurrentRevision, artifactRequestIsCurrent, artifactRestoreOperationSnapshot, artifactTableSnapshot, coerceTableCellValue, filterChartValues, invokeArtifactRevisionRequest, nativeArtifactDetailFromMutation, operationForArtifactSnapshot, parseTable, updateTable, type NativeArtifactDetail } from "./ArtifactSurfacePanel";
+import { ArtifactDetailView, ArtifactSurfacePanel, artifactBinaryPreviewEligibility, artifactCurrentRevision, artifactRequestIsCurrent, artifactRestoreOperationSnapshot, artifactSurfaceInitialArtifactIsCurrent, artifactTableSnapshot, coerceTableCellValue, filterChartValues, invokeArtifactRevisionRequest, nativeArtifactDetailFromMutation, operationForArtifactSnapshot, parseTable, updateTable, type ArtifactSurfaceGateway, type NativeArtifactDetail } from "./ArtifactSurfacePanel";
 
 const createdAt = "2026-09-08T00:00:00.000Z";
 
@@ -51,7 +51,57 @@ function render(detail: NativeArtifactDetail, canEdit = true): string {
   }));
 }
 
+function artifactGateway(): ArtifactSurfaceGateway {
+  return {
+    list: async () => [],
+    get: async () => { throw new Error("not used in static render"); },
+    listRevisions: async () => [],
+    getRevision: async () => { throw new Error("not used in static render"); },
+    revise: async () => { throw new Error("not used in static render"); },
+    restore: async () => { throw new Error("not used in static render"); }
+  };
+}
+
+describe("ArtifactSurfacePanel", () => {
+  it("keeps the regular list header focused on the Artifact entry", () => {
+    const html = renderToStaticMarkup(createElement(ArtifactSurfacePanel, {
+      roomId: "room_a",
+      gateway: artifactGateway()
+    }));
+
+    expect(html).toContain('<section class="native-artifact-surface" aria-label="Roomの成果物">');
+    expect(html).toContain('aria-label="成果物操作"');
+    expect(html).toContain(">再読込<");
+    expect(html).not.toContain(">成果物</h2>");
+    expect(html).not.toContain('native-section-eyebrow">Artifacts');
+    expect(html).not.toContain("このRoomで認可された文書・表・画像・PDF・操作画面を確認します。");
+  });
+});
+
 describe("ArtifactDetailView", () => {
+  it("keeps a result-card Artifact selection bound to the active Room target", () => {
+    const resource = {
+      artifactId: "artifact_plan",
+      revisionId: "revision_2",
+      connectionId: "connection_a",
+      workspaceId: "workspace_a",
+      roomId: "room_a"
+    };
+
+    expect(artifactSurfaceInitialArtifactIsCurrent(resource, {
+      roomId: "room_a",
+      workspaceTarget: { connectionId: "connection_a", workspaceId: "workspace_a", roomId: "room_a" }
+    })).toBe(true);
+    expect(artifactSurfaceInitialArtifactIsCurrent(resource, {
+      roomId: "room_b",
+      workspaceTarget: { connectionId: "connection_a", workspaceId: "workspace_a", roomId: "room_b" }
+    })).toBe(false);
+    expect(artifactSurfaceInitialArtifactIsCurrent({ ...resource, revisionId: "../other" }, {
+      roomId: "room_a",
+      workspaceTarget: { connectionId: "connection_a", workspaceId: "workspace_a", roomId: "room_a" }
+    })).toBe(false);
+  });
+
   it("renders Markdown as escaped preview plus an explicit human editor", () => {
     const html = render({ artifact: artifact("markdown"), content: "# Note\n\n<script>alert('x')</script>" });
 
@@ -106,6 +156,7 @@ describe("ArtifactDetailView", () => {
 
   it("keeps the same logical Artifact save on one operation ID across a failed retry", () => {
     const first = operationForArtifactSnapshot(undefined, "draft-v1");
+    expect(first.operationId).toMatch(/^artifact_operation_[a-z0-9-]+$/);
     expect(operationForArtifactSnapshot(first, "draft-v1")).toBe(first);
     expect(operationForArtifactSnapshot(first, "draft-v2").operationId).not.toBe(first.operationId);
   });

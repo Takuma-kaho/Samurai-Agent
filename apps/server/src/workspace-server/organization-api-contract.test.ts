@@ -111,6 +111,7 @@ describe("Organization HTTP boundary", () => {
     expect(roomProjection).toContain("default_agent_id: room.defaultAgentId");
     expect(roomProjection).toContain("default_agent_version: room.defaultAgentVersion");
     expect(roomProjection).toContain("can_manage: room.canManage");
+    expect(roomProjection).toContain("can_edit: room.canEdit");
     expect(roomProjection).toContain("can_execute: room.canExecute");
 
     const agentQuery = domainSource.slice(domainSource.indexOf('if (queryId === "agent.list")'), domainSource.indexOf('if (queryId === "agent.view")'));

@@ -66,6 +66,41 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(createCalls.some(({ text, values }) => text.includes("samurai_create_workspace") && values?.length === 6)).toBe(true);
   });
 
+  it("projects the Server-owned Room edit capability for list and get", async () => {
+    const workspaceId = "workspace_store_room_capability";
+    const roomId = "room_store_edit_capability";
+    const queries: string[] = [];
+    const store = storeWithQuery(async (text) => {
+      queries.push(text);
+      return {
+        rows: [{
+          workspace_id: workspaceId,
+          id: roomId,
+          parent_room_id: null,
+          room_kind: "normal" as const,
+          default_agent_id: null,
+          default_agent_version: null,
+          dm_account_id: null,
+          name: "Editable Room",
+          version: 3,
+          can_manage: false,
+          can_edit: false,
+          can_execute: true,
+          created_at: "2026-09-15T00:00:00.000Z",
+          updated_at: "2026-09-15T00:00:00.000Z"
+        }]
+      };
+    });
+
+    const context = { workspaceId, accountId: "account_store_room_capability" };
+    const listed = await store.listRooms(context);
+    const viewed = await store.getRoom(context, roomId);
+
+    expect(listed[0]).toMatchObject({ canManage: false, canEdit: false, canExecute: true });
+    expect(viewed).toMatchObject({ canManage: false, canEdit: false, canExecute: true });
+    expect(queries.filter((text) => text.includes("FROM rooms")).every((text) => text.includes("samurai_can_room(workspace_id, id, 'edit') AS can_edit"))).toBe(true);
+  });
+
   it("creates an Organization Workspace standalone before explicitly attaching it", async () => {
     const organizationId = "organization_store_create_target";
     const workspaceId = "workspace_store_org_create";
@@ -451,6 +486,7 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     let workspaceVersion = 1;
     let workspaceVersionReads = 0;
     let roomCreateCalls = 0;
+    const roomSelectQueries: string[] = [];
     const registeredAgentIds: string[] = [];
     let roomCreateValues: readonly unknown[] | undefined;
     const store = storeWithQuery(async (text, values) => {
@@ -480,6 +516,7 @@ describe("WorkspaceServerStore Workspace-first core", () => {
         return { rows: [] };
       }
       if (text.includes("FROM rooms WHERE workspace_id = $1 AND id = $2")) {
+        roomSelectQueries.push(text);
         return {
           rows: [{
             workspace_id: workspaceId,
@@ -491,6 +528,9 @@ describe("WorkspaceServerStore Workspace-first core", () => {
             default_agent_version: 1,
             dm_account_id: null,
             version: 1,
+            can_manage: true,
+            can_edit: false,
+            can_execute: false,
             created_at: "2026-09-06T00:00:00.000Z",
             updated_at: "2026-09-06T00:00:00.000Z"
           }]
@@ -513,6 +553,10 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(replay.replayed).toBe(true);
     expect(replay.room.id).toBe(first.room.id);
     expect(replay.room.defaultAgentId).toBe(first.room.defaultAgentId);
+    expect(first.room).toMatchObject({ canManage: true, canEdit: false, canExecute: false });
+    expect(roomSelectQueries).toHaveLength(1);
+    expect(roomSelectQueries[0]).toContain("samurai_can_room(workspace_id, id, 'edit') AS can_edit");
+    expect(roomSelectQueries[0]).toContain("samurai_can_room(workspace_id, id, 'execute') AS can_execute");
     expect(registeredAgentIds).toEqual([first.room.defaultAgentId]);
     expect(roomCreateCalls).toBe(1);
     expect(workspaceVersionReads).toBe(1);

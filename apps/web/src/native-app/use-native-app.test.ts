@@ -12,6 +12,9 @@ import {
   nativeDraftRequestIsCurrent,
   appendNativeWorkDraft,
   nativeRoomWorkListRequestIsCurrent,
+  nativeRoomWorkDetailHydrationRequestIsCurrent,
+  mergeNativeRoomWorkDetail,
+  mergeNativeRoomWorkList,
   nativeRoomWorkErrorIsExplicitServerFailure,
   nativeRoomWorkAssignmentResultFromUnknown,
   nativeRoomWorkFromUnknown,
@@ -237,6 +240,112 @@ describe("Workspace realtime refresh coordination", () => {
 
     expect(nativeWorkspaceContentRefreshRequestIsCurrent(roomA, roomB)).toBe(false);
     expect(nativeWorkspaceContentRefreshRequestIsCurrent(roomA, { ...roomA })).toBe(true);
+  });
+
+  it("rejects a response after the same Room receives a new target generation", () => {
+    const older = {
+      sequence: 3,
+      roomOpenId: 9,
+      roomId: "room_a",
+      workspaceTargetKey: "server\nworkspace",
+      workspaceTargetIdentityKey: "[\"server\",\"workspace\",\"room_a\",1]"
+    };
+    const newer = { ...older, workspaceTargetIdentityKey: "[\"server\",\"workspace\",\"room_a\",2]" };
+    expect(nativeRoomWorkListRequestIsCurrent(older, newer)).toBe(false);
+    expect(nativeRoomWorkListRequestIsCurrent(newer, newer)).toBe(true);
+    expect(nativeWorkspaceContentRefreshRequestIsCurrent(
+      { roomOpenId: 9, roomId: "room_a", workspaceTargetKey: older.workspaceTargetKey, workspaceTargetIdentityKey: older.workspaceTargetIdentityKey },
+      { roomOpenId: 9, roomId: "room_a", workspaceTargetKey: newer.workspaceTargetKey, workspaceTargetIdentityKey: newer.workspaceTargetIdentityKey }
+    )).toBe(false);
+  });
+});
+
+describe("Room Work detail hydration", () => {
+  const summary = nativeRoomWorkFromUnknown({
+    id: "work_a",
+    room_id: "room_a",
+    requester_id: "account_owner",
+    default_agent_id: "agent_research",
+    title: "調査",
+    objective: "履歴を確認する",
+    status: "completed",
+    instruction_version: 2,
+    generation: 1,
+    version: 2,
+    assignees: []
+  });
+
+  it("retains server detail while accepting the newer list snapshot", () => {
+    const detail = nativeRoomWorkFromUnknown({
+      ...summary,
+      instructions: [{
+        id: "instruction_a",
+        work_id: "work_a",
+        kind: "initial",
+        instruction: "実際に保存された初期指示",
+        status: "applied",
+        version: 1,
+        generation: 0,
+        created_by: "account_owner",
+        created_at: "2026-09-16T00:00:00.000Z"
+      }],
+      assignees: [{
+        id: "assignment_a",
+        work_id: "work_a",
+        agent_id: "agent_research",
+        status: "completed",
+        instruction_version: 1,
+        generation: 0,
+        version: 1,
+        result: { summary: "実際に保存された実行結果" }
+      }]
+    });
+    const projected = mergeNativeRoomWorkDetail(summary, detail);
+
+    expect(projected.instructions?.[0]?.instruction).toBe("実際に保存された初期指示");
+    expect(projected.assignees[0]?.result?.summary).toBe("実際に保存された実行結果");
+  });
+
+  it("uses the latest list membership and never resurrects an old Room Work", () => {
+    const other = nativeRoomWorkFromUnknown({
+      ...summary,
+      id: "work_b",
+      title: "別の仕事"
+    });
+    expect(mergeNativeRoomWorkList([summary], [other]).map((work) => work.id)).toEqual(["work_b"]);
+
+    const sameIdOtherRoom = nativeRoomWorkFromUnknown({ ...summary, room_id: "room_b" });
+    const currentRoomDetail = nativeRoomWorkFromUnknown({
+      ...summary,
+      room_id: "room_a",
+      instructions: [{
+        id: "instruction_a",
+        work_id: "work_a",
+        kind: "initial",
+        instruction: "Room Aの実指示",
+        status: "applied",
+        version: 1,
+        generation: 0,
+        created_by: "account_owner"
+      }]
+    });
+    const switched = mergeNativeRoomWorkList([currentRoomDetail], [sameIdOtherRoom]);
+    expect(switched[0]?.roomId).toBe("room_b");
+    expect(switched[0]?.instructions).toBeUndefined();
+  });
+
+  it("rejects detail responses after Room, target, or list generation changes", () => {
+    const request = {
+      roomOpenId: 4,
+      roomId: "room_a",
+      workspaceTargetKey: "server\nworkspace",
+      workspaceTargetIdentityKey: "[\"server\",\"workspace\",\"room_a\",1]",
+      workListSequence: 8
+    };
+    expect(nativeRoomWorkDetailHydrationRequestIsCurrent(request, { ...request })).toBe(true);
+    expect(nativeRoomWorkDetailHydrationRequestIsCurrent(request, { ...request, roomId: "room_b" })).toBe(false);
+    expect(nativeRoomWorkDetailHydrationRequestIsCurrent(request, { ...request, workspaceTargetIdentityKey: "[\"server\",\"workspace\",\"room_a\",2]" })).toBe(false);
+    expect(nativeRoomWorkDetailHydrationRequestIsCurrent(request, { ...request, workListSequence: 9 })).toBe(false);
   });
 });
 
@@ -673,6 +782,156 @@ describe("Room Work result resource refs", () => {
 
     expect(projected.resultSummary).toBe("旧形式の結果概要");
     expect(projected.assignees).toEqual([]);
+  });
+
+  it("projects the persisted output_summary and nested result shape as visible text", () => {
+    expect(nativeRoomWorkAssignmentResultFromUnknown({ output_summary: "  Geminiの実結果  " })).toEqual({ summary: "Geminiの実結果" });
+
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_output_summary",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "実結果",
+      objective: "実結果を表示する",
+      status: "completed",
+      instruction_version: 1,
+      generation: 0,
+      version: 2,
+      assignees: [{
+        id: "assignment_output_summary",
+        work_id: "work_output_summary",
+        agent_id: "agent_research",
+        status: "completed",
+        instruction_version: 1,
+        generation: 0,
+        version: 2,
+        updated_at: "2026-09-15T00:00:00.000Z",
+        result: { output: { output_summary: "ネストされた実結果" } }
+      }]
+    });
+
+    expect(projected.resultSummary).toBe("ネストされた実結果");
+    expect(projected.assignees[0]?.result).toEqual({ summary: "ネストされた実結果" });
+
+    const directAssignment = nativeRoomWorkFromUnknown({
+      id: "work_direct_assignment_result",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "直接結果",
+      objective: "直接形式の結果を表示する",
+      status: "completed",
+      instruction_version: 1,
+      generation: 0,
+      version: 2,
+      assignees: [{
+        id: "assignment_direct_result",
+        work_id: "work_direct_assignment_result",
+        agent_id: "agent_research",
+        status: "completed",
+        instruction_version: 1,
+        generation: 0,
+        version: 2,
+        output_summary: "直接形式の実結果"
+      }]
+    });
+    expect(directAssignment.assignees[0]?.result).toEqual({ summary: "直接形式の実結果" });
+    expect(directAssignment.resultSummary).toBe("直接形式の実結果");
+  });
+
+  it("deduplicates repeated instruction projections by the newest version", () => {
+    const projected = nativeRoomWorkFromUnknown({
+      id: "work_instruction_replay",
+      room_id: "room_public",
+      requester_id: "account_owner",
+      default_agent_id: "agent_research",
+      title: "再送",
+      objective: "再送された指示を一つにする",
+      status: "running",
+      instruction_version: 2,
+      generation: 1,
+      version: 3,
+      assignees: [],
+      instructions: [
+        { id: "instruction_replayed", work_id: "work_instruction_replay", kind: "initial", instruction: "古い指示", status: "accepted", version: 1, generation: 0, created_by: "account_owner", created_at: "2026-09-15T00:00:00.000Z" },
+        { id: "instruction_replayed", work_id: "work_instruction_replay", kind: "initial", instruction: "新しい指示", status: "applied", version: 2, generation: 1, created_by: "account_owner", created_at: "2026-09-15T00:00:01.000Z" }
+      ]
+    });
+
+    expect(projected.instructions).toHaveLength(1);
+    expect(projected.instructions?.[0]).toMatchObject({ instruction: "新しい指示", version: 2, generation: 1 });
+  });
+});
+
+describe("Room Work response scope and generation", () => {
+  const roomTarget = { connectionId: "server_a", workspaceId: "workspace_a", roomId: "room_public" };
+  const workResponse = (workId = "work_public", roomId = "room_public", workspaceId = "workspace_a", connectionId = "server_a") => ({
+    id: workId,
+    room_id: roomId,
+    workspace_id: workspaceId,
+    connection_id: connectionId,
+    requester_id: "account_owner",
+    default_agent_id: "agent_research",
+    title: "調査",
+    objective: "公開情報を調べる",
+    status: "running",
+    instruction_version: 2,
+    generation: 2,
+    version: 3,
+    assignees: []
+  });
+
+  it("rejects a list/view response from another Room or Work", async () => {
+    const listClient = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [workResponse("work_other", "room_other")] }))
+    });
+    await expect(listClient?.list("room_public", roomTarget)).rejects.toThrow("room_work_room_scope_invalid");
+
+    const workspaceClient = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({
+        works: [{ ...workResponse("work_other_workspace"), workspace_id: "workspace_other" }]
+      }))
+    });
+    await expect(workspaceClient?.list("room_public", roomTarget)).rejects.toThrow("room_work_workspace_scope_invalid");
+
+    const viewClient = createNativeRoomWorkClient({
+      getWorkspaceRoomWork: vi.fn(async () => workResponse("work_other"))
+    });
+    await expect(viewClient?.view("room_public", "work_public", roomTarget)).rejects.toThrow("room_work_scope_invalid");
+  });
+
+  it("rejects a stale continuation generation while preserving its operation contract", async () => {
+    const replyWorkspaceRoomWork = vi.fn(async () => ({
+      id: "instruction_reply",
+      work_id: "work_public",
+      assignee_id: "assignment_public",
+      kind: "reply",
+      instruction: "続行",
+      status: "accepted",
+      version: 4,
+      generation: 1,
+      created_by: "account_owner"
+    }));
+    const client = createNativeRoomWorkClient({
+      listWorkspaceRoomWorks: vi.fn(async () => ({ works: [] })),
+      replyWorkspaceRoomWork
+    });
+
+    await expect(client?.reply({
+      roomId: "room_public",
+      workId: "work_public",
+      assigneeId: "assignment_public",
+      instruction: "続行",
+      expectedGeneration: 2,
+      operationId: "op_stale_generation",
+      target: roomTarget
+    })).rejects.toThrow("room_work_response_generation_stale");
+    expect(replyWorkspaceRoomWork).toHaveBeenCalledWith(expect.objectContaining({
+      expectedGeneration: 2,
+      operationId: "op_stale_generation",
+      target: roomTarget
+    }));
   });
 });
 

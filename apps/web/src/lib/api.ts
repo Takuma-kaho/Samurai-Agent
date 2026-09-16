@@ -606,6 +606,10 @@ export interface DesktopWorkspaceRoom {
   defaultAgentCanExecute?: boolean;
   /** Capability for this Room only; it does not grant access to descendants. */
   canManage?: boolean;
+  /** Capability for editing this Room only; it does not grant access to descendants. */
+  canEdit?: boolean;
+  /** Capability for starting a Runtime turn in this Room only. */
+  canExecute?: boolean;
   createdAt: string;
   updatedAt: string;
 }

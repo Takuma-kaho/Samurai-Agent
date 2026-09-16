@@ -3553,6 +3553,7 @@ function roomRecord(room: {
   defaultAgentVersion?: number;
   version: number;
   canManage?: boolean;
+  canEdit?: boolean;
   canExecute?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -3567,6 +3568,7 @@ function roomRecord(room: {
     ...(room.defaultAgentVersion === undefined ? {} : { default_agent_version: room.defaultAgentVersion }),
     version: room.version,
     ...(room.canManage === undefined ? {} : { can_manage: room.canManage }),
+    ...(room.canEdit === undefined ? {} : { can_edit: room.canEdit }),
     ...(room.canExecute === undefined ? {} : { can_execute: room.canExecute }),
     created_at: room.createdAt,
     updated_at: room.updatedAt

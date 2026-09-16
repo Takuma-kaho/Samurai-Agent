@@ -345,6 +345,8 @@ export interface WorkspaceRoom {
   version: number;
   /** Current caller capability; it does not grant access to any other Room. */
   canManage?: boolean;
+  /** Current caller capability for editing this Room. */
+  canEdit?: boolean;
   /** Current caller capability for starting a Runtime turn in this Room. */
   canExecute?: boolean;
   createdAt: string;
