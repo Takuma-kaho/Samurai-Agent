@@ -77,6 +77,7 @@ Gemini API keyは`.env`からプロセスへ渡したが、値はログ・レポ
 - Push後のGitHub Actions初回実行（CI `35250814265`）では、macOS/Ubuntuの契約ジョブが`apps/server`から直接利用する`pg`の宣言不足で停止した。`apps/server/package.json`とlockfileへ`pg`/`@types/pg`を直接追加し、ローカルserver typecheckを再通過させた。
 - 修正後のCI `35251198091`は、macOS・Ubuntu・Windowsの契約、Linux全体、PostgreSQL deep/load、release readinessを含む全7ジョブがpassした。Security `35251201155`も全ゲートpassした。
 - 最終Push後のCI `35251796875`も全7ジョブ（Linux全体、PostgreSQL deep/load、release readiness、macOS・Ubuntu・Windows契約）がpassし、Security `35251800107`もpassした。結果URL: [CI](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35251796875)、[Security](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35251800107)。
+- レポート最終更新を含む`83a2a04`のCI `35252814593`も全7ジョブがpassし、Security `35252817607`もpassした。結果URL: [CI](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35252814593)、[Security](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35252817607)。
 
 ## 旧API互換経路の設計適合性
 
@@ -84,4 +85,4 @@ Gemini API keyは`.env`からプロセスへ渡したが、値はログ・レポ
 
 ## 残作業と判定
 
-検証上の必須未確認は残っていない。最終コミット`6416c18`をブランチ`codex/design-workspace-room-agent-sharing`へPush済みで、ローカルHEADとoriginのHEADが一致している。マージ、branch削除、既存DB/Storageの削除は行っていない。専用Docker検証環境は検証終了後に停止した。
+検証上の必須未確認は残っていない。最終コミット`83a2a04`をブランチ`codex/design-workspace-room-agent-sharing`へPush済みで、ローカルHEADとoriginのHEADが一致している。マージ、branch削除、既存DB/Storageの削除は行っていない。専用Docker検証環境は検証終了後に停止した。
