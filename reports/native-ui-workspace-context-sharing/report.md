@@ -4,7 +4,7 @@
 対象計画: [`plans/native-ui-workspace-context-sharing-plan.md`](../../plans/native-ui-workspace-context-sharing-plan.md)
 作業ブランチ: `codex/design-workspace-room-agent-sharing`
 基準コミット: `45b9eea`
-コミット: このレポート更新時点では未実施（検証後に実施）
+実装コミット: `7faacdb`（Native UI共有とContext連携を実装）
 
 ## 実装結果
 
@@ -80,4 +80,4 @@ Gemini API keyは`.env`からプロセスへ渡したが、値はログ・レポ
 
 ## 残作業と判定
 
-検証上の必須未確認は残っていない。レポート更新時点では、コミット・Push・Push後のリモートCI確認だけが未実施である。これらを完了してからマージ直前で停止する。マージ、branch削除、既存DB/Storageの削除は行わない。
+検証上の必須未確認は残っていない。レポート更新後にPushし、Push後のリモートCI確認を行ってからマージ直前で停止する。マージ、branch削除、既存DB/Storageの削除は行わない。
