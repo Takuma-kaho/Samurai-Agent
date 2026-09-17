@@ -4,6 +4,7 @@
 - 対象: Roomの既定Agent、仕事、専門Agentへの委譲、人間のコメント、停止・指示変更、Agent DM
 - 正本: [PRODUCT.md](../../PRODUCT.md)、[ARCHITECTURE.md](../../ARCHITECTURE.md)
 - 関連設計: [Native App](native-app.md)、[Agent Backend](agent-backends.md)
+- 記憶と共有: [文脈・通知・共有の基本設計](workspace-context.md)。Room知識共有・Agent共有は固定コピーの配布であり、Roomへの参加や共同編集権限の付与とは別操作とする。
 - 実装計画: [Phase 3・4・6統合プラン](../../plans/room-agent-collaboration-plan-phase3-4-6.md)
 
 ## 1. 目的
