@@ -4,8 +4,10 @@ import type { TrustedDomainContext } from "@samurai-agent/domain-operations";
 import type { RunChatTurnResult } from "@samurai-agent/runtime";
 import {
   WorkspaceServerError,
+  parseWorkspacePersonalPreferencesSnapshot,
   type WorkspaceRequestContext,
-  type WorkspaceServerStore
+  type WorkspaceServerStore,
+  type WorkspacePersonalPreferencesSnapshot
 } from "@samurai-agent/workspace-server";
 import type {
   PostgresRuntimeCommandService,
@@ -36,6 +38,9 @@ interface RoomWorkReservation {
   attachments: ResourceRef[];
   /** A malformed attachment payload is terminal for this reservation. */
   attachmentError?: string;
+  /** Private Account snapshot for this new execution only. */
+  personalPreferences?: WorkspacePersonalPreferencesSnapshot;
+  personalPreferencesError?: string;
   generation: number;
   reservationId?: string;
   leaseOwner?: string;
@@ -142,12 +147,18 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
         if (claimedReservation.attachmentError) {
           throw new WorkspaceServerError(claimedReservation.attachmentError, 400);
         }
+        if (claimedReservation.personalPreferencesError) {
+          throw new WorkspaceServerError(claimedReservation.personalPreferencesError, 500);
+        }
         const reservation = claimedReservation.instruction
           ? claimedReservation
           : await this.hydrateReservation(context, claimedReservation);
         if (!reservation) throw new WorkspaceServerError("room_work_reservation_payload_missing", 500);
         if (reservation.attachmentError) {
           throw new WorkspaceServerError(reservation.attachmentError, 400);
+        }
+        if (reservation.personalPreferencesError) {
+          throw new WorkspaceServerError(reservation.personalPreferencesError, 500);
         }
         const runtime = this.options.runtimeFor(runContext, operationId);
         if (claimedReservation.currentRunId) {
@@ -241,7 +252,8 @@ export class PostgresRoomWorkWorker implements WorkspaceRoomWorkWorkerPort, Work
           input: {
             content: reservation.instruction,
             ...(reservation.agentId ? { agent_id: reservation.agentId } : {}),
-            attachments: reservation.attachments
+            attachments: reservation.attachments,
+            ...(reservation.personalPreferences ? { personal_preferences: reservation.personalPreferences } : {})
           },
           executionBinding,
           ...(reservation.resumeBackendContinuation ? { resumeBackendContinuation: reservation.resumeBackendContinuation } : {}),
@@ -744,6 +756,20 @@ function normalizeReservation(value: unknown): RoomWorkReservation | undefined {
   const parsedAttachments = candidate.attachments === undefined
     ? { attachments: [] as ResourceRef[] }
     : parseRoomWorkAttachments(candidate.attachments);
+  const rawPersonalPreferences = candidate.personal_preferences_snapshot !== undefined
+    ? candidate.personal_preferences_snapshot
+    : candidate.personal_preferences !== undefined
+      ? candidate.personal_preferences
+      : candidate.personalPreferences;
+  let personalPreferences: WorkspacePersonalPreferencesSnapshot | undefined;
+  let personalPreferencesError: string | undefined;
+  try {
+    personalPreferences = rawPersonalPreferences === undefined || rawPersonalPreferences === null
+      ? undefined
+      : parseWorkspacePersonalPreferencesSnapshot(rawPersonalPreferences);
+  } catch {
+    personalPreferencesError = "workspace_personal_preferences_snapshot_invalid";
+  }
   const generation = numberValue(candidate, "generation") ?? numberValue(assignee, "generation") ?? numberValue(work, "generation") ?? 0;
   const originKindValue = stringValue(candidate, "origin_kind", "originKind");
   const originKind = originKindValue === "delegated" || originKindValue === "parent_continuation" || originKindValue === "normal"
@@ -764,6 +790,8 @@ function normalizeReservation(value: unknown): RoomWorkReservation | undefined {
     instruction,
     attachments: parsedAttachments.attachments,
     ...(parsedAttachments.error ? { attachmentError: parsedAttachments.error } : {}),
+    ...(personalPreferences ? { personalPreferences } : {}),
+    ...(personalPreferencesError ? { personalPreferencesError } : {}),
     generation,
     ...(numberValue(candidate, "agent_configuration_version", "agentConfigurationVersion", "configuration_version", "agent_version") === undefined
       ? {}

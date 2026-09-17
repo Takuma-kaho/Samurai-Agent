@@ -12,6 +12,7 @@ import {
   type SupportedLocale
 } from "@samurai-agent/core-schemas";
 import {
+  assertOpaqueId,
   WorkspaceServerError,
   type WorkspaceCompletionResource,
   type WorkspaceCompletionResourceVersion,
@@ -44,18 +45,20 @@ export class PostgresKnowledgeMemory {
       resources.push(...page.items);
       cursor = page.nextCursor;
     } while (cursor);
-    const memories = await Promise.all(resources.map((resource) => this.readIfMemory(context, resource.id)));
+    const memories = await Promise.all(resources.map((resource) => this.readIfMemory(context, resource.id, roomId)));
     return memories.filter((memory): memory is KnowledgeMemoryPage => memory !== undefined && (includeArchived || memory.memory.state !== "archived"));
   }
 
-  async get(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, id: string): Promise<KnowledgeMemoryPage> {
-    const memory = await this.readIfMemory(context, id);
+  async get(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, id: string, roomId?: string): Promise<KnowledgeMemoryPage> {
+    const targetRoomId = requiredRoomId(roomId);
+    const memory = await this.readIfMemory(context, id, targetRoomId);
     if (!memory) throw new WorkspaceServerError("memory_not_found", 404);
     return memory;
   }
 
-  async archive(context: WorkspaceRequestContext, id: string, reason: string): Promise<{ memory: KnowledgeMemoryPage; changed: boolean; replayed: boolean }> {
-    const current = await this.get(context, id);
+  async archive(context: WorkspaceRequestContext, id: string, reason: string, roomId?: string): Promise<{ memory: KnowledgeMemoryPage; changed: boolean; replayed: boolean }> {
+    const targetRoomId = requiredRoomId(roomId);
+    const current = await this.get(context, id, targetRoomId);
     if (current.memory.state === "archived") return { memory: current, changed: false, replayed: true };
     const saved = await this.commands.setCompletionResourceArchived(context, {
       resourceId: id,
@@ -63,21 +66,25 @@ export class PostgresKnowledgeMemory {
       expectedVersion: versionOf(current).version,
       reason
     });
-    return { memory: await this.get(context, id), changed: true, replayed: saved.replayed };
+    return { memory: await this.get(context, id, targetRoomId), changed: true, replayed: saved.replayed };
   }
 
   async search(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string, query: string, limit = 50): Promise<Array<KnowledgeMemoryPage & { rank: number }>> {
     const resources = await this.completion.searchKnowledge(context, { roomId, query, limit: Math.min(100, Math.max(1, limit * 3)) });
     const memories = await Promise.all(resources.map(async (resource) => {
-      const page = await this.readIfMemory(context, resource.id);
+      const page = await this.readIfMemory(context, resource.id, roomId);
       return page ? { ...page, rank: resource.rank } : undefined;
     }));
     return memories.filter((memory): memory is KnowledgeMemoryPage & { rank: number } => Boolean(memory));
   }
 
-  private async readIfMemory(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, id: string): Promise<KnowledgeMemoryPage | undefined> {
+  private async readIfMemory(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, id: string, roomId: string): Promise<KnowledgeMemoryPage | undefined> {
     try {
+      assertOpaqueId(roomId, "knowledge_memory_room_id_invalid");
       const body = await this.completion.getResourceBody(context, id);
+      if (body.resource.kind !== "knowledge" || body.resource.scope.kind !== "room" || body.resource.scope.roomId !== roomId) {
+        return undefined;
+      }
       const metadata = jsonMetadata(body.version.metadata);
       if (!isMemoryMetadata(metadata)) return undefined;
       return { memory: memoryFrontmatter(body, metadata), content: body.content, scope: body.resource.scope, metadata };
@@ -92,6 +99,11 @@ function isMemoryMetadata(metadata: Record<string, JsonValue>): boolean {
   if (metadata.memory === true || metadata.legacy_resource_kind === "memory") return true;
   const legacy = metadata.legacy_source;
   return Boolean(legacy && typeof legacy === "object" && !Array.isArray(legacy) && (legacy as Record<string, JsonValue>).resource_kind === "memory");
+}
+
+function requiredRoomId(roomId: string | undefined): string {
+  if (!roomId) throw new WorkspaceServerError("knowledge_memory_room_id_required", 400);
+  return assertOpaqueId(roomId, "knowledge_memory_room_id_invalid");
 }
 
 function jsonMetadata(value: Record<string, unknown>): Record<string, JsonValue> {
@@ -120,7 +132,7 @@ function memoryFrontmatter(body: { resource: WorkspaceCompletionResource; versio
     ? UsageScopeRefSchema.parse(metadata.usage_scope)
     : body.resource.scope.kind === "room" && body.resource.scope.roomId
       ? { kind: "room" as const, room_id: body.resource.scope.roomId }
-      : { kind: "workspace" as const };
+      : (() => { throw new WorkspaceServerError("knowledge_memory_scope_invalid", 503); })();
   const provenance = metadata.provenance;
   const parsedProvenance = provenance && typeof provenance === "object" && !Array.isArray(provenance) ? provenance : undefined;
   const activity = ActivityContextRefSchema.safeParse(metadata.origin_activity_context);

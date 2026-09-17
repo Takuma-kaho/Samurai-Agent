@@ -128,6 +128,19 @@ export interface ChatTurnResult {
   activity: ActivityInboxItem[];
 }
 
+/**
+ * A private, versioned snapshot attached only when a chat turn starts.
+ * Account identity and authorization stay in the signed connection, not in
+ * this renderer-facing value.
+ */
+export interface PersonalPreferencesSnapshot {
+  schema_version: 1;
+  revision: number;
+  display_name: string;
+  output_locale: SupportedLocale | null;
+  instructions: string;
+}
+
 export interface GeneratedSurfaceDetail {
   surface: GeneratedSurfaceDefinition;
   revisions: GeneratedSurfaceRevisionRecord[];
@@ -515,6 +528,311 @@ export interface DesktopWorkspaceTarget {
   roomId?: string;
   /** Optional navigation generation from Desktop Main. */
   selectionGeneration?: number;
+}
+
+/** Public target returned by Workspace Context search and notifications. */
+export type WorkspaceContextTarget =
+  | { kind: "room"; roomId: string }
+  | { kind: "work"; roomId: string; workId: string; messageId?: string }
+  | { kind: "knowledge"; roomId: string; resourceId: string }
+  | { kind: "interaction_request"; roomId: string; requestId: string }
+  | { kind: "invitation"; invitationId: string };
+
+export type WorkspaceContextSearchType = "room" | "conversation" | "knowledge";
+
+export interface WorkspaceContextSearchInput {
+  query: string;
+  types?: WorkspaceContextSearchType[];
+  roomId?: string;
+  limit?: number;
+  cursor?: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceContextSearchItem {
+  type: WorkspaceContextSearchType;
+  id: string;
+  roomId: string;
+  title: string;
+  snippet: string;
+  updatedAt: string;
+  target: WorkspaceContextTarget;
+}
+
+export interface WorkspaceContextSearchPage {
+  items: WorkspaceContextSearchItem[];
+  nextCursor: string | null;
+}
+
+export type WorkspaceNotificationActionState = "not_required" | "pending" | "resolved";
+
+export interface WorkspaceNotification {
+  id: string;
+  kind: string;
+  createdAt: string;
+  readAt: string | null;
+  title: string;
+  summary: string;
+  target: WorkspaceContextTarget | null;
+  actionState: WorkspaceNotificationActionState;
+}
+
+export interface WorkspaceNotificationPage {
+  items: WorkspaceNotification[];
+  nextCursor: string | null;
+}
+
+export interface WorkspaceNotificationListInput {
+  unreadOnly?: boolean;
+  limit?: number;
+  cursor?: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceNotificationSummary {
+  unreadCount: number;
+  asOf: string;
+}
+
+export interface WorkspaceNotificationWorkspaceSummary {
+  workspaceId: string;
+  unreadCount: number;
+  asOf: string;
+}
+
+export interface WorkspaceNotificationMarkReadResult {
+  updatedIds: string[];
+  alreadyReadIds: string[];
+  readAt: string;
+}
+
+export interface AccountWorkspaceNotificationSummariesInput {
+  workspaceIds: string[];
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface AccountWorkspaceNotificationSummaries {
+  items: WorkspaceNotificationWorkspaceSummary[];
+}
+
+export interface AccountInvitationNotificationListInput {
+  limit?: number;
+  cursor?: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+/**
+ * Renderer-safe Share contracts.  These inputs intentionally use the public
+ * Domain vocabulary and carry the selected target separately; the bridge
+ * resolves the authenticated connection instead of accepting a Workspace or
+ * Account id from a request body.
+ */
+export type WorkspaceShareKind = "room_knowledge" | "agent";
+export type WorkspaceShareVisibility = "restricted" | "public";
+
+export interface WorkspaceShareResourceRefInput {
+  id: string;
+  version: number;
+}
+
+export interface WorkspaceShareDraftCreateInput {
+  sourceKind?: WorkspaceShareKind;
+  sourceId?: string;
+  resourceRefs?: WorkspaceShareResourceRefInput[];
+  baseShareId?: string;
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareDraftViewInput {
+  draftId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareDraftUpdateInput {
+  draftId: string;
+  expectedVersion: number;
+  manifest: WorkspaceShareManifest;
+  visibility: WorkspaceShareVisibility;
+  recipientAccountIds: string[];
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareDraftDiscardInput {
+  draftId: string;
+  expectedVersion: number;
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareDraftDiscardResult {
+  draftId: string;
+  discarded: true;
+}
+
+export interface WorkspaceShareListInput {
+  sourceKind: WorkspaceShareKind;
+  sourceId: string;
+  limit?: number;
+  cursor?: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceSharePublishInput {
+  draftId: string;
+  expectedVersion: number;
+  expectedContentHash: string;
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareRevokeInput {
+  shareId: string;
+  expectedVersion: number;
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareDelegationPayloadInput {
+  version: 1;
+  sourceOrigin: string;
+  shareId: string;
+  claimId: string;
+  recipientAccountId: string;
+  targetOrigin: string;
+  targetWorkspaceId: string;
+  operationId: string;
+  contentHash: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+export interface WorkspaceShareDelegationInput {
+  payload: WorkspaceShareDelegationPayloadInput;
+  publicKey: string;
+  signature: string;
+}
+
+export interface WorkspaceShareImportInput {
+  sourceOrigin: string;
+  locator: string;
+  claimId: string;
+  contentHash: string;
+  delegation: WorkspaceShareDelegationInput;
+  targetRoomId?: string;
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareImportStatusInput {
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareResourceFile {
+  path: string;
+  encoding: "utf8" | "base64";
+  content: string;
+  byteSize: number;
+  sha256: string;
+}
+
+export interface WorkspaceShareResourceEntry {
+  entryId: string;
+  kind: "knowledge" | "skill";
+  title: string;
+  content: string;
+  knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
+  files: WorkspaceShareResourceFile[];
+}
+
+export interface WorkspaceShareManifest {
+  formatVersion: 1;
+  kind: WorkspaceShareKind;
+  title: string;
+  entries: WorkspaceShareResourceEntry[];
+  agent?: { name: string; role: string; instructions: string };
+}
+
+export interface WorkspaceShareDraft {
+  draftId: string;
+  version: number;
+  manifest: WorkspaceShareManifest;
+  contentHash: string;
+  visibility: WorkspaceShareVisibility;
+  /** Recipient IDs and removed source locations are intentionally not exposed. */
+  recipientCount: number;
+  removedReferenceCount: number;
+}
+
+export interface WorkspaceShareSummary {
+  shareId: string;
+  version: number;
+  title: string;
+  status: "draft" | "active" | "revoked";
+  visibility: WorkspaceShareVisibility;
+  recipientCount: number;
+  createdAt: string;
+  publishedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface WorkspaceSharePage {
+  items: WorkspaceShareSummary[];
+  nextCursor: string | null;
+}
+
+export interface WorkspaceSharePublishResult {
+  shareId: string;
+  version: number;
+  /** Returned only because publish needs to offer the newly issued link. */
+  url: string;
+  contentHash: string;
+  publishedAt: string;
+}
+
+export interface WorkspaceShareRevokeResult {
+  shareId: string;
+  version: number;
+  status: "revoked";
+  revokedAt: string;
+}
+
+export interface WorkspaceShareImportResult {
+  importId: string;
+  kind: WorkspaceShareKind;
+  status: "staging" | "committed" | "failed";
+  phase: "fetch" | "files" | "commit" | "done" | "cleanup";
+  retryable: boolean;
+  failureCode: string | null;
+  createdResourceIds: string[];
+  createdAgentId: string | null;
+  committedAt: string | null;
+}
+
+/** Safe projection returned by the fixed external-share source client. */
+export interface WorkspaceShareLinkView {
+  sourceUrl: string;
+  sourceOrigin: string;
+  locator: string;
+  title: string;
+  visibility: WorkspaceShareVisibility;
+  manifest: WorkspaceShareManifest;
+  contentHash: string;
+  publishedAt: string;
+}
+
+export interface WorkspaceShareLinkViewInput {
+  sourceUrl: string;
+  target?: DesktopWorkspaceTarget;
+}
+
+export interface WorkspaceShareLinkImportInput {
+  sourceUrl: string;
+  targetRoomId?: string;
+  operationId: string;
+  target?: DesktopWorkspaceTarget;
 }
 
 export type DesktopWorkspaceConnectionAvailability = "unknown" | "connected" | "reconnecting" | "offline";
@@ -906,7 +1224,7 @@ export interface DesktopWorkspaceLearningSettings {
 export interface WorkspaceCompletionResourceView {
   workspaceId: string;
   id: string;
-  scope: { kind: "workspace" | "room"; roomId?: string };
+  scope: { kind: "workspace" | "room" | "agent"; roomId?: string; agentId?: string };
   kind: "knowledge" | "skill" | "policy";
   knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
   title: string;
@@ -1102,6 +1420,7 @@ declare global {
         backendId?: string;
         metadata?: Record<string, JsonValue>;
         attachments?: ResourceRef[];
+        personalPreferences?: PersonalPreferencesSnapshot;
         target?: DesktopWorkspaceTarget;
       }) => Promise<ChatTurnResult | ChatSurfaceOperationResult>;
       writeWorkspaceAttachment?: (input: {
@@ -1112,12 +1431,13 @@ declare global {
         operationId: string;
         target?: DesktopWorkspaceTarget;
       }) => Promise<WorkspaceAttachmentUploadResult>;
-      listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room"; roomId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean; cursor?: string; target?: DesktopWorkspaceTarget }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
-      getWorkspaceCompletionResource?: (input: { resourceId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceDetail>;
-      getWorkspaceCompletionResourceBody?: (input: { resourceId: string; version?: number; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceBody>;
+      listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room" | "agent"; roomId?: string; agentId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean; cursor?: string; target?: DesktopWorkspaceTarget }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
+      getWorkspaceCompletionResource?: (input: { resourceId: string; scopeKind?: "room" | "agent"; roomId?: string; agentId?: string; kind?: "knowledge" | "skill"; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceDetail>;
+      getWorkspaceCompletionResourceBody?: (input: { resourceId: string; scopeKind?: "room" | "agent"; roomId?: string; agentId?: string; kind?: "knowledge" | "skill"; version?: number; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceBody>;
       createWorkspaceCompletionResource?: (input: {
-        scopeKind: "workspace" | "room";
+        scopeKind: "workspace" | "room" | "agent";
         roomId?: string;
+        agentId?: string;
         kind: "knowledge" | "skill";
         knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
         title: string;
@@ -1129,8 +1449,9 @@ declare global {
       }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
       updateWorkspaceCompletionResource?: (input: {
         resourceId: string;
-        scopeKind: "workspace" | "room";
+        scopeKind: "workspace" | "room" | "agent";
         roomId?: string;
+        agentId?: string;
         kind: "knowledge" | "skill";
         knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
         title: string;
@@ -1142,7 +1463,7 @@ declare global {
         target?: DesktopWorkspaceTarget;
       }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
       setWorkspaceCompletionResourceFixed?: (input: { resourceId: string; fixed: boolean; expectedVersion: number; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
-      archiveWorkspaceCompletionResource?: (input: { resourceId: string; archived: boolean; expectedVersion: number; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
+      archiveWorkspaceCompletionResource?: (input: { resourceId: string; scopeKind?: "room" | "agent"; roomId?: string; agentId?: string; archived: boolean; expectedVersion: number; reason: string; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }>;
       searchWorkspaceCompletionKnowledge?: (input: { roomId: string; query: string; limit?: number; cursor?: string; target?: DesktopWorkspaceTarget }) => Promise<{ resources: Array<WorkspaceCompletionResourceView & { rank?: number }>; next_cursor?: string }>;
       listWorkspaceCompletionSkills?: (input: { roomId: string; cursor?: string; includeArchived?: boolean; target?: DesktopWorkspaceTarget }) => Promise<{ skills: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
       getWorkspaceCompletionSkill?: (input: { resourceId: string; version?: number; target?: DesktopWorkspaceTarget }) => Promise<{ resource: WorkspaceCompletionResourceView; version: WorkspaceCompletionResourceDetail["current_version"]; content: string; support_files?: Array<Record<string, JsonValue>> }>;
@@ -1290,6 +1611,26 @@ declare global {
         operationId: string;
         target?: DesktopWorkspaceTarget;
       }) => Promise<{ settings: DesktopWorkspaceLearningSettings; replayed?: boolean }>;
+      /** Workspace Context APIs use the selected target and public projections only. */
+      searchWorkspaceContext?: (input: WorkspaceContextSearchInput) => Promise<WorkspaceContextSearchPage>;
+      listWorkspaceNotifications?: (input?: WorkspaceNotificationListInput) => Promise<WorkspaceNotificationPage>;
+      getWorkspaceNotificationSummary?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<WorkspaceNotificationSummary>;
+      markWorkspaceNotificationsRead?: (input: { notificationIds: string[]; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceNotificationMarkReadResult>;
+      getAccountWorkspaceNotificationSummaries?: (input: AccountWorkspaceNotificationSummariesInput) => Promise<AccountWorkspaceNotificationSummaries>;
+      listAccountInvitationNotifications?: (input?: AccountInvitationNotificationListInput) => Promise<WorkspaceNotificationPage>;
+      markAccountInvitationNotificationsRead?: (input: { notificationIds: string[]; operationId: string; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceNotificationMarkReadResult>;
+      /** Share operations are fixed Domain API methods; no generic signed request is exposed. */
+      createWorkspaceShareDraft?: (input: WorkspaceShareDraftCreateInput) => Promise<WorkspaceShareDraft>;
+      viewWorkspaceShareDraft?: (input: WorkspaceShareDraftViewInput) => Promise<WorkspaceShareDraft>;
+      updateWorkspaceShareDraft?: (input: WorkspaceShareDraftUpdateInput) => Promise<WorkspaceShareDraft>;
+      discardWorkspaceShareDraft?: (input: WorkspaceShareDraftDiscardInput) => Promise<WorkspaceShareDraftDiscardResult>;
+      listWorkspaceShares?: (input: WorkspaceShareListInput) => Promise<WorkspaceSharePage>;
+      publishWorkspaceShare?: (input: WorkspaceSharePublishInput) => Promise<WorkspaceSharePublishResult>;
+      revokeWorkspaceShare?: (input: WorkspaceShareRevokeInput) => Promise<WorkspaceShareRevokeResult>;
+      importWorkspaceShare?: (input: WorkspaceShareImportInput) => Promise<WorkspaceShareImportResult>;
+      getWorkspaceShareImportStatus?: (input: WorkspaceShareImportStatusInput) => Promise<WorkspaceShareImportResult>;
+      viewWorkspaceShareLink?: (input: WorkspaceShareLinkViewInput) => Promise<WorkspaceShareLinkView>;
+      importWorkspaceShareLink?: (input: WorkspaceShareLinkImportInput) => Promise<WorkspaceShareImportResult>;
       searchWorkspace?: (input: { roomId: string; query: string; target?: DesktopWorkspaceTarget }) => Promise<SearchResult[]>;
       getWorkspaceAudit?: (input?: { target?: DesktopWorkspaceTarget }) => Promise<AuditPayload>;
       listWorkspaceActivity?: (input: { roomId: string; target?: DesktopWorkspaceTarget }) => Promise<ActivityInboxItem[]>;
@@ -1590,6 +1931,7 @@ export const api = {
     rendererCapabilities?: SurfaceRendererCapabilities;
     metadata?: Record<string, JsonValue>;
     attachments?: ResourceRef[];
+    personalPreferences?: PersonalPreferencesSnapshot;
   }) {
     const bridge = activeWorkspaceBridge();
     if (bridge?.sendWorkspaceChatMessage) {
@@ -1601,7 +1943,8 @@ export const api = {
         outputLocale: input.outputLocale,
         ...(input.backendId ? { backendId: input.backendId } : {}),
         ...(input.metadata ? { metadata: input.metadata } : {}),
-        ...(input.attachments?.length ? { attachments: input.attachments } : {})
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.personalPreferences === undefined ? {} : { personalPreferences: input.personalPreferences })
       }).then((result) => {
         const envelope = result as ChatSurfaceOperationResult;
         return envelope.result && envelope.render_spec
@@ -1643,6 +1986,71 @@ export const api = {
     const bridge = activeWorkspaceBridge();
     if (bridge?.searchWorkspace && activeWorkspaceRoomId) return bridge.searchWorkspace({ roomId: activeWorkspaceRoomId, query });
     return workspaceRequestRequired<SearchResult[]>("workspace.search");
+  },
+  createWorkspaceShareDraft(input: Omit<WorkspaceShareDraftCreateInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.createWorkspaceShareDraft) return bridge.createWorkspaceShareDraft({ ...input, operationId });
+    return workspaceRequestRequired<WorkspaceShareDraft>("share.draft.create");
+  },
+  viewWorkspaceShareDraft(input: WorkspaceShareDraftViewInput) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.viewWorkspaceShareDraft) return bridge.viewWorkspaceShareDraft(input);
+    return workspaceRequestRequired<WorkspaceShareDraft>("share.draft.view");
+  },
+  updateWorkspaceShareDraft(input: Omit<WorkspaceShareDraftUpdateInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.updateWorkspaceShareDraft) return bridge.updateWorkspaceShareDraft({ ...input, operationId });
+    return workspaceRequestRequired<WorkspaceShareDraft>("share.draft.update");
+  },
+  discardWorkspaceShareDraft(input: Omit<WorkspaceShareDraftDiscardInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.discardWorkspaceShareDraft) return bridge.discardWorkspaceShareDraft({ ...input, operationId });
+    return workspaceRequestRequired<WorkspaceShareDraftDiscardResult>("share.draft.discard");
+  },
+  listWorkspaceShares(input: WorkspaceShareListInput) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.listWorkspaceShares) return bridge.listWorkspaceShares(input);
+    return workspaceRequestRequired<WorkspaceSharePage>("share.list");
+  },
+  publishWorkspaceShare(input: Omit<WorkspaceSharePublishInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.publishWorkspaceShare) return bridge.publishWorkspaceShare({ ...input, operationId });
+    return workspaceRequestRequired<WorkspaceSharePublishResult>("share.publish");
+  },
+  revokeWorkspaceShare(input: Omit<WorkspaceShareRevokeInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.revokeWorkspaceShare) return bridge.revokeWorkspaceShare({ ...input, operationId });
+    return workspaceRequestRequired<WorkspaceShareRevokeResult>("share.revoke");
+  },
+  importWorkspaceShare(input: Omit<WorkspaceShareImportInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    const delegation = input.operationId
+      ? input.delegation
+      : { ...input.delegation, payload: { ...input.delegation.payload, operationId } };
+    if (bridge?.importWorkspaceShare) return bridge.importWorkspaceShare({ ...input, operationId, delegation });
+    return workspaceRequestRequired<WorkspaceShareImportResult>("share.import");
+  },
+  getWorkspaceShareImportStatus(input: WorkspaceShareImportStatusInput) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.getWorkspaceShareImportStatus) return bridge.getWorkspaceShareImportStatus(input);
+    return workspaceRequestRequired<WorkspaceShareImportResult>("share.import.status");
+  },
+  viewWorkspaceShareLink(input: WorkspaceShareLinkViewInput) {
+    const bridge = activeWorkspaceBridge();
+    if (bridge?.viewWorkspaceShareLink) return bridge.viewWorkspaceShareLink(input);
+    return workspaceRequestRequired<WorkspaceShareLinkView>("share.link.view");
+  },
+  importWorkspaceShareLink(input: Omit<WorkspaceShareLinkImportInput, "operationId"> & { operationId?: string }) {
+    const bridge = activeWorkspaceBridge();
+    const operationId = input.operationId ?? createIdempotencyKey();
+    if (bridge?.importWorkspaceShareLink) return bridge.importWorkspaceShareLink({ ...input, operationId });
+    return workspaceRequestRequired<WorkspaceShareImportResult>("share.link.import");
   },
   getArtifact(id: string) {
     const bridge = activeWorkspaceBridge();

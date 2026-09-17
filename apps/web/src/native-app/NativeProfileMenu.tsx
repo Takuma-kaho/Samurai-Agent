@@ -1,62 +1,51 @@
 import { useCallback, useEffect, useId, useRef } from "react";
-import type { NativeWorkspace } from "./types";
-import { nativeThemes, type NativeTheme } from "../lib/native-app-theme-preferences";
 
 export interface NativeProfileMenuProps {
   accountLabel: string;
   open: boolean;
-  theme: NativeTheme;
-  workspaces: NativeWorkspace[];
-  selectedWorkspaceTargetKey?: string;
   onToggle: () => void;
   onClose: () => void;
-  onThemeChange: (theme: NativeTheme) => void;
-  onSelectWorkspace: (workspace: NativeWorkspace) => void;
-}
-
-function workspaceTargetKey(workspace: NativeWorkspace): string | undefined {
-  const connectionId = workspace.target?.connectionId ?? workspace.connectionId;
-  if (!connectionId || !workspace.id) return undefined;
-  return `${connectionId}\n${workspace.target?.workspaceId ?? workspace.id}`;
+  /** Opens the full-screen Account settings surface owned by the parent. */
+  onOpenSettings?: () => void;
 }
 
 /**
- * The only theme entry point in the Native App. The wrapper owns the trigger
- * and popup together so outside-click handling cannot close a menu while the
- * trigger itself is being clicked.
+ * The profile popup is intentionally a small Account entry point. Workspace
+ * selection and theme choice live in their own surfaces so this menu cannot
+ * accidentally mix account settings with Workspace-scoped actions.
  */
 export function NativeProfileMenu({
   accountLabel,
   open,
-  theme,
-  workspaces,
-  selectedWorkspaceTargetKey,
   onToggle,
   onClose,
-  onThemeChange,
-  onSelectWorkspace
+  onOpenSettings
 }: NativeProfileMenuProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const firstThemeButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
-  const selectedWorkspace = workspaces.find((workspace) => workspaceTargetKey(workspace) === selectedWorkspaceTargetKey);
-  const selectedWorkspaceLabel = selectedWorkspace?.name ?? "Workspace未選択";
 
-  const closeAndRestoreFocus = useCallback((): void => {
+  const closeAndRestoreFocus = useCallback((restore = true): void => {
     onClose();
     // The parent keeps the trigger mounted while the popup closes. Restoring
     // focus on the next frame avoids focusing a stale menu item.
-    if (typeof window !== "undefined") {
+    if (restore && typeof window !== "undefined") {
       window.setTimeout(() => triggerRef.current?.focus(), 0);
-    } else {
+    } else if (restore) {
       triggerRef.current?.focus();
     }
   }, [onClose]);
 
+  const openSettings = useCallback((): void => {
+    if (!onOpenSettings) return;
+    closeAndRestoreFocus(false);
+    onOpenSettings();
+  }, [closeAndRestoreFocus, onOpenSettings]);
+
   useEffect(() => {
     if (!open) return;
-    firstThemeButtonRef.current?.focus();
+    settingsButtonRef.current?.focus();
     const onPointerDown = (event: PointerEvent): void => {
       const target = event.target;
       if (target instanceof Node && rootRef.current?.contains(target)) return;
@@ -81,6 +70,7 @@ export function NativeProfileMenu({
         ref={triggerRef}
         type="button"
         className="native-profile-trigger"
+        data-native-profile-trigger="true"
         aria-label={`${accountLabel}の本人メニュー`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -90,7 +80,7 @@ export function NativeProfileMenu({
         <span className="native-profile-avatar" aria-hidden="true">{accountLabel.slice(0, 1) || "本"}</span>
         <span className="native-profile-copy">
           <strong>{accountLabel}</strong>
-          <small className="native-profile-workspace-name"><span className="native-profile-workspace-icon" aria-hidden="true">◎</span>{selectedWorkspaceLabel}</small>
+          <small>本人設定</small>
         </span>
         <span className="native-profile-chevron" aria-hidden="true">⌃</span>
       </button>
@@ -99,48 +89,19 @@ export function NativeProfileMenu({
           <span className="native-profile-avatar" aria-hidden="true">{accountLabel.slice(0, 1) || "本"}</span>
           <span><strong>{accountLabel}</strong><small>自分のプロフィール</small></span>
         </div>
-        <div className="native-profile-menu-heading">WORKSPACE</div>
-        <div className="native-profile-workspaces" role="group" aria-label="Workspaceを選択">
-          {workspaces.length ? workspaces.map((workspace) => {
-            const targetKey = workspaceTargetKey(workspace);
-            const selected = Boolean(targetKey && targetKey === selectedWorkspaceTargetKey);
-            // Archived/read-only Workspaces can still be opened for their
-            // permitted history. Only a missing Workspace grant is blocked.
-            const available = workspace.access === "granted";
-            return <button
-              key={`${targetKey ?? workspace.id}:${workspace.id}`}
-              type="button"
-              role="menuitemradio"
-              className={`native-profile-workspace${selected ? " is-selected" : ""}`}
-              aria-checked={selected}
-              aria-label={`${workspace.name}${available ? "" : "（利用不可）"}`}
-              disabled={!available}
-              onClick={() => { onSelectWorkspace(workspace); closeAndRestoreFocus(); }}
-            >
-              <span className="native-profile-workspace-mark" aria-hidden="true">{selected ? "✓" : ""}</span>
-              <span><strong>{workspace.name}</strong>{workspace.serverLabel ? <small>{workspace.serverLabel}</small> : null}</span>
-            </button>;
-          }) : <p className="native-profile-menu-empty">Workspaceがありません</p>}
-        </div>
-        <div className="native-profile-menu-divider" />
-        <div className="native-profile-menu-heading">テーマ</div>
-        <div className="native-profile-themes" role="group" aria-label="テーマを選択">
-          {nativeThemes.map((item, index) => <button
-            key={item.id}
-            ref={index === 0 ? firstThemeButtonRef : undefined}
+        {onOpenSettings ? <button
+            ref={settingsButtonRef}
             type="button"
-            role="menuitemradio"
-            className={`native-profile-theme${theme === item.id ? " is-selected" : ""}`}
-            aria-checked={theme === item.id}
-            aria-pressed={theme === item.id}
-            title={item.description}
-            onClick={() => onThemeChange(item.id)}
+            role="menuitem"
+            className="native-profile-settings-entry"
+            aria-label="本人設定を開く"
+            onClick={openSettings}
           >
-            <span className={`native-profile-theme-dot is-${item.id}`} aria-hidden="true" />
-            <span><strong>{item.code} · {item.label}</strong><small>{item.description}</small></span>
-            {theme === item.id ? <span className="native-profile-theme-check" aria-hidden="true">✓</span> : null}
-          </button>)}
-        </div>
+            <span aria-hidden="true">⚙</span>
+            <span><strong>本人設定</strong><small>プロフィール・回答設定・外観</small></span>
+            <span aria-hidden="true">↗</span>
+          </button>
+          : <p className="native-profile-menu-empty">Account接続後に本人設定を利用できます。</p>}
       </div> : null}
     </div>
   );

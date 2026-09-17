@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkspaceServerError } from "./errors";
 import type { WorkspaceKnowledgeReviewPort, WorkspaceKnowledgeReviewSnapshot } from "./workspace-learning-policy";
 import { WorkspaceLearningRunner, WorkspaceLearningWorker } from "./workspace-learning";
-import type { WorkspaceLearningJob, WorkspaceLearningJobAttempt } from "./types";
+import type { WorkspaceLearningJob, WorkspaceLearningJobAttempt, WorkspaceLearningResource } from "./types";
 
 const snapshot: WorkspaceKnowledgeReviewSnapshot = {
   workspaceId: "workspace_one", roomId: "room_one", activities: [], workspaceRules: [], workspaceKnowledge: [], roomKnowledge: []
@@ -92,6 +92,58 @@ describe("Workspace learning worker", () => {
     );
 
     expect(failedCode).toBe("workspace_learning_resource_ai_update_locked");
+    expect(result?.status).toBe("failed");
+  });
+
+  it("rejects removed Workspace Knowledge before invoking the review port", async () => {
+    let failedCode: string | undefined;
+    let reviewCalled = false;
+    const removed: WorkspaceLearningResource = {
+      workspaceId: "workspace_one",
+      id: "removed_workspace_knowledge",
+      scope: { kind: "workspace" },
+      kind: "knowledge",
+      state: "active",
+      isAbsoluteRule: false,
+      aiUpdateLocked: false,
+      title: "Removed",
+      content: "No longer available",
+      payload: {},
+      version: 1,
+      createdBy: "account_one",
+      updatedBy: "account_one",
+      createdAt: "2026-08-16T00:00:00.000Z",
+      updatedAt: "2026-08-16T00:00:00.000Z"
+    };
+    const service = {
+      claimNextJob: async () => ({
+        job,
+        attempt,
+        snapshot: { ...snapshot, workspaceKnowledge: [removed] },
+        settings: {}
+      }),
+      heartbeat: async () => job,
+      applyReview: async () => job,
+      failJob: async (_context: unknown, input: { errorCode: string; retryable: boolean }) => {
+        failedCode = input.errorCode;
+        expect(input.retryable).toBe(false);
+        return { ...job, status: "failed" as const };
+      }
+    };
+    const port: WorkspaceKnowledgeReviewPort = {
+      id: "engine_one", model: "model_one",
+      async review() {
+        reviewCalled = true;
+        return { reviewer: "test", summary: "unexpected", mutations: [] };
+      }
+    };
+
+    const result = await new WorkspaceLearningWorker(service as never, port).runOne(
+      { workspaceId: "workspace_one", accountId: "account_one" }, { workerId: "worker_one" }
+    );
+
+    expect(failedCode).toBe("workspace_memory_removed");
+    expect(reviewCalled).toBe(false);
     expect(result?.status).toBe("failed");
   });
 

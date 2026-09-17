@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { browserWorkspaceRequest, loadBrowserWorkspaceConnection } from "./workspace-browser-auth";
+import {
+  browserShareSourceRequest,
+  browserWorkspaceRequest,
+  createBrowserShareDelegation,
+  loadBrowserWorkspaceConnection,
+  loadBrowserWorkspaceConnections
+} from "./workspace-browser-auth";
 import { createBrowserWorkspaceBridge } from "./workspace-browser-bridge";
 import { updateActiveWorkspaceRoomId } from "./workspace-navigation-state";
 
 vi.mock("./workspace-browser-auth", () => ({
   browserWorkspaceHealth: vi.fn(),
+  browserShareSourceRequest: vi.fn(),
   browserWorkspaceRequest: vi.fn(),
   createBrowserWorkspaceConnectionState: vi.fn(),
+  createBrowserShareDelegation: vi.fn(),
   loadBrowserWorkspaceConnection: vi.fn(),
   loadBrowserWorkspaceConnections: vi.fn(),
   registerBrowserWorkspaceAccount: vi.fn(),
@@ -26,10 +34,47 @@ const connection = {
   updatedAt: "2026-09-08T00:00:00.000Z"
 };
 
+const agentResource = {
+  workspaceId: "workspace_1",
+  id: "agent_resource_1",
+  scope: { kind: "agent", agentId: "agent_1" },
+  kind: "knowledge",
+  knowledgeKind: "fact",
+  title: "Agent fact",
+  evidenceState: "confirmed",
+  lifecycleState: "active",
+  aiProtection: "editable",
+  creationSource: "human",
+  aiManaged: false,
+  version: 1,
+  createdBy: "account_1",
+  updatedBy: "account_1",
+  createdAt: "2026-09-17T00:00:00.000Z",
+  updatedAt: "2026-09-17T00:00:00.000Z"
+} as const;
+
+const agentVersion = {
+  workspaceId: "workspace_1",
+  id: "agent_version_1",
+  resourceId: "agent_resource_1",
+  version: 1,
+  contentHash: "hash",
+  contentSize: 5,
+  evidenceState: "confirmed",
+  lifecycleState: "active",
+  aiProtection: "editable",
+  creationSource: "human",
+  metadata: {},
+  reason: "human edit",
+  actorAccountId: "account_1",
+  createdAt: "2026-09-17T00:00:00.000Z"
+} as const;
+
 beforeEach(() => {
   vi.clearAllMocks();
   updateActiveWorkspaceRoomId(undefined);
   vi.mocked(loadBrowserWorkspaceConnection).mockResolvedValue(connection);
+  vi.mocked(loadBrowserWorkspaceConnections).mockResolvedValue([connection]);
 });
 
 afterEach(() => {
@@ -262,6 +307,62 @@ describe("Browser Room Work resource-ref transport", () => {
       connectionId: "connection_1"
     });
   });
+
+  it("uses DomainApiClient Agent completion routes with a fixed scope and operation id", async () => {
+    vi.mocked(browserWorkspaceRequest)
+      .mockResolvedValueOnce({ resources: [agentResource], next_cursor: "cursor_1" } as never)
+      .mockResolvedValueOnce({ resource: agentResource, current_version: agentVersion, versions: [], evidence: [] } as never)
+      .mockResolvedValueOnce({ resource: agentResource, version: agentVersion, content: "body" } as never)
+      .mockResolvedValueOnce({ resource: agentResource, replayed: false } as never)
+      .mockResolvedValueOnce({ resource: agentResource, replayed: false } as never)
+      .mockResolvedValueOnce({ resource: agentResource, replayed: false } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    const target = { connectionId: "connection_1", workspaceId: "workspace_1" };
+
+    await bridge.listWorkspaceCompletionResources!({ scopeKind: "agent", agentId: "agent_1", target } as never);
+    await bridge.getWorkspaceCompletionResource!({ scopeKind: "agent", agentId: "agent_1", resourceId: "agent_resource_1", target } as never);
+    await bridge.getWorkspaceCompletionResourceBody!({ scopeKind: "agent", agentId: "agent_1", resourceId: "agent_resource_1", version: 1, target } as never);
+    await bridge.createWorkspaceCompletionResource!({
+      scopeKind: "agent", agentId: "agent_1", kind: "knowledge", knowledgeKind: "fact", title: "Fact", content: "body", reason: "create", operationId: "operation_1", target
+    } as never);
+    await bridge.updateWorkspaceCompletionResource!({
+      scopeKind: "agent", agentId: "agent_1", resourceId: "agent_resource_1", kind: "knowledge", knowledgeKind: "fact", title: "Fact", content: "body", reason: "update", expectedVersion: 1, operationId: "operation_2", target
+    } as never);
+    await bridge.archiveWorkspaceCompletionResource!({
+      scopeKind: "agent", agentId: "agent_1", resourceId: "agent_resource_1", archived: true, expectedVersion: 1, reason: "archive", operationId: "operation_3", target
+    } as never);
+
+    const calls = vi.mocked(browserWorkspaceRequest).mock.calls.map(([request]) => request as { method: string; path: string; body?: Record<string, unknown>; operationId?: string; idempotencyKey?: string });
+    expect(calls[0]).toMatchObject({ method: "GET", path: "/api/v1/workspaces/workspace_1/completion/resources?scope_kind=agent&agent_id=agent_1", connectionId: "connection_1" });
+    expect(calls[1]?.path).toBe("/api/v1/workspaces/workspace_1/completion/resources/agent_resource_1?scope_kind=agent&agent_id=agent_1");
+    expect(calls[2]?.path).toBe("/api/v1/workspaces/workspace_1/completion/resources/agent_resource_1/body?scope_kind=agent&agent_id=agent_1&version=1");
+    expect(calls[3]).toMatchObject({ method: "POST", path: "/api/v1/workspaces/workspace_1/completion/resources", operationId: "operation_1", idempotencyKey: "operation_1", body: { scope_kind: "agent", agent_id: "agent_1", kind: "knowledge" } });
+    expect(calls[4]).toMatchObject({ method: "PATCH", operationId: "operation_2", idempotencyKey: "operation_2", body: { scope_kind: "agent", agent_id: "agent_1", expected_version: 1 } });
+    expect(calls[5]).toMatchObject({ method: "POST", path: "/api/v1/workspaces/workspace_1/completion/resources/agent_resource_1/archive", operationId: "operation_3", idempotencyKey: "operation_3", body: { scope_kind: "agent", agent_id: "agent_1", archived: true, expected_version: 1 } });
+  });
+
+  it("rejects Agent scope mixing, unknown fields, stale targets, and unsafe responses", async () => {
+    const bridge = createBrowserWorkspaceBridge();
+    const target = { connectionId: "connection_1", workspaceId: "workspace_1" };
+    for (const input of [
+      { scopeKind: "agent", resourceId: "agent_resource_1" },
+      { scopeKind: "agent", agentId: "agent_1", roomId: "room_1" },
+      { scopeKind: "agent", agentId: "agent_1", unknown: true },
+      { scopeKind: "room", roomId: "room_1", agentId: "agent_1", resourceId: "resource_1" }
+    ]) {
+      await expect(bridge.listWorkspaceCompletionResources!(input as never)).rejects.toThrow();
+    }
+    expect(browserWorkspaceRequest).not.toHaveBeenCalled();
+
+    await expect(bridge.listWorkspaceCompletionResources!({ scopeKind: "agent", agentId: "agent_1", target: { ...target, workspaceId: "workspace_other" } } as never)).rejects.toThrow("workspace_navigation_changed");
+    expect(browserWorkspaceRequest).not.toHaveBeenCalled();
+
+    vi.mocked(browserWorkspaceRequest).mockResolvedValueOnce({ resources: [{ ...agentResource, scope: { kind: "agent", agentId: "agent_other" } }] } as never);
+    await expect(bridge.listWorkspaceCompletionResources!({ scopeKind: "agent", agentId: "agent_1", target } as never)).rejects.toThrow("completion_agent_response_scope_invalid");
+
+    vi.mocked(browserWorkspaceRequest).mockResolvedValueOnce({ resources: [{ ...agentResource, source: "private" }] } as never);
+    await expect(bridge.listWorkspaceCompletionResources!({ scopeKind: "agent", agentId: "agent_1", target } as never)).rejects.toThrow("completion_agent_response_invalid");
+  });
 });
 
 describe("Browser Room capability projection", () => {
@@ -313,6 +414,668 @@ describe("Browser Room capability projection", () => {
     } as never);
 
     expect(result.room).toMatchObject({ canManage: true, canEdit: false, canExecute: false });
+  });
+});
+
+describe("Browser Workspace Context Domain bridge", () => {
+  const target = { connectionId: "connection_1", workspaceId: "workspace_1" };
+  const timestamp = "2026-09-17T00:00:00.000Z";
+
+  it("sends a strict personal preference snapshot only in chat.turn.run input", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({ result: {} } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    const personalPreferences = {
+      schema_version: 1 as const,
+      revision: 4,
+      display_name: "登録名",
+      output_locale: "ja" as const,
+      instructions: "簡潔に"
+    };
+
+    await bridge.sendWorkspaceChatMessage!({
+      sessionId: "session_1",
+      content: "本文",
+      idempotencyKey: "turn_prefs",
+      outputLocale: "ja",
+      metadata: { public: "not preferences" },
+      personalPreferences,
+      target
+    });
+
+    const request = vi.mocked(browserWorkspaceRequest).mock.calls[0]?.[0] as {
+      path: string;
+      body?: { input?: Record<string, unknown> };
+    };
+    expect(request.path).toBe("/api/v1/workspaces/workspace_1/domain/operations/chat.turn.run");
+    expect(request.body?.input?.personal_preferences).toEqual(personalPreferences);
+    expect(request.body?.input).not.toHaveProperty("account_id");
+    expect(request.body?.input).not.toHaveProperty("personalPreferences");
+    expect(request.body?.input).toMatchObject({ metadata: { public: "not preferences" } });
+    expect(JSON.stringify(request.body?.input?.metadata)).not.toContain("personal_preferences");
+  });
+
+  it.each([
+    ["account_id", { account_id: "account_other" }],
+    ["authorization", { authorization: { canExecute: true } }],
+    ["connection_id", { connection_id: "connection_other" }],
+    ["share_id", { share_id: "share_other" }],
+    ["updated_at", { updated_at: "2026-09-17T00:00:00.000Z" }],
+    ["unknown", { future_key: true }]
+  ])("rejects personal preference field %s before transport", async (_name, extra) => {
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.sendWorkspaceChatMessage!({
+      sessionId: "session_1",
+      content: "本文",
+      idempotencyKey: "turn_prefs_invalid",
+      outputLocale: "ja",
+      personalPreferences: {
+        schema_version: 1,
+        revision: 4,
+        display_name: "登録名",
+        output_locale: "ja",
+        instructions: "簡潔に",
+        ...extra
+      } as never,
+      target
+    })).rejects.toThrow("personal_preferences_invalid");
+    expect(browserWorkspaceRequest).not.toHaveBeenCalled();
+  });
+
+  it("calls workspace.search through the selected Workspace Domain path and sanitizes targets", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({
+      api_version: "1",
+      request_id: "request_search",
+      replayed: false,
+      result: {
+        items: [{
+          type: "conversation",
+          id: "conversation_1",
+          room_id: "room_1",
+          title: "議事録",
+          snippet: "公開された抜粋",
+          updated_at: timestamp,
+          target: { kind: "work", room_id: "room_1", work_id: "work_1" }
+        }],
+        next_cursor: null
+      }
+    } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    const result = await bridge.searchWorkspaceContext!({
+      query: " 議事録 ",
+      types: ["conversation"],
+      target
+    });
+
+    expect(vi.mocked(browserWorkspaceRequest).mock.calls[0]?.[0]).toMatchObject({
+      method: "POST",
+      path: "/api/v1/workspaces/workspace_1/domain/queries/workspace.search",
+      connectionId: "connection_1",
+      workspaceScoped: true,
+      body: { context: {}, input: { q: "議事録", types: ["conversation"] } }
+    });
+    expect(result).toEqual({
+      items: [{
+        type: "conversation",
+        id: "conversation_1",
+        roomId: "room_1",
+        title: "議事録",
+        snippet: "公開された抜粋",
+        updatedAt: timestamp,
+        target: { kind: "work", roomId: "room_1", workId: "work_1" }
+      }],
+      nextCursor: null
+    });
+  });
+
+  it("uses Account Domain paths without Workspace routing for summaries and invitation operations", async () => {
+    vi.mocked(browserWorkspaceRequest)
+      .mockResolvedValueOnce({
+        result: { items: [{ workspace_id: "workspace_1", unread_count: 2, as_of: timestamp }] }
+      } as never)
+      .mockResolvedValueOnce({
+        result: {
+          items: [{
+            id: "notification_invitation",
+            kind: "invitation",
+            created_at: timestamp,
+            read_at: null,
+            title: "招待があります",
+            summary: "招待内容を確認してください",
+            target: { kind: "invitation", invitation_id: "invitation_1" },
+            action_state: "pending"
+          }],
+          next_cursor: null
+        }
+      } as never)
+      .mockResolvedValueOnce({
+        result: { updated_ids: ["notification_invitation"], already_read_ids: [], read_at: timestamp }
+      } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.getAccountWorkspaceNotificationSummaries!({ workspaceIds: ["workspace_1"], target })).resolves.toEqual({
+      items: [{ workspaceId: "workspace_1", unreadCount: 2, asOf: timestamp }]
+    });
+    await expect(bridge.listAccountInvitationNotifications!({ target })).resolves.toMatchObject({
+      items: [{ id: "notification_invitation", kind: "invitation", target: { kind: "invitation", invitationId: "invitation_1" } }],
+      nextCursor: null
+    });
+    await expect(bridge.markAccountInvitationNotificationsRead!({
+      notificationIds: ["notification_invitation"],
+      operationId: "notification_read_1",
+      target
+    })).resolves.toEqual({ updatedIds: ["notification_invitation"], alreadyReadIds: [], readAt: timestamp });
+
+    const calls = vi.mocked(browserWorkspaceRequest).mock.calls.map(([request]) => request as { path: string; workspaceScoped?: boolean; operationId?: string; idempotencyKey?: string });
+    expect(calls[0]).toMatchObject({ path: "/api/v1/domain/queries/account.workspace_notification_summaries" });
+    expect(calls[0]?.workspaceScoped).toBeUndefined();
+    expect(calls[1]).toMatchObject({ path: "/api/v1/domain/queries/account.invitation_notifications" });
+    expect(calls[1]?.workspaceScoped).toBeUndefined();
+    expect(calls[2]).toMatchObject({
+      path: "/api/v1/domain/operations/account.invitation_notification_read",
+      operationId: "notification_read_1",
+      idempotencyKey: "notification_read_1"
+    });
+    expect(calls[2]?.workspaceScoped).toBeUndefined();
+  });
+
+  it("uses Workspace Domain paths for notification list, summary, and read", async () => {
+    vi.mocked(browserWorkspaceRequest)
+      .mockResolvedValueOnce({ result: { items: [], next_cursor: null } } as never)
+      .mockResolvedValueOnce({ result: { unread_count: 0, as_of: timestamp } } as never)
+      .mockResolvedValueOnce({ result: { updated_ids: ["notification_1"], already_read_ids: [], read_at: timestamp } } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.listWorkspaceNotifications!({ unreadOnly: true, limit: 10, target })).resolves.toEqual({ items: [], nextCursor: null });
+    await expect(bridge.getWorkspaceNotificationSummary!({ target })).resolves.toEqual({ unreadCount: 0, asOf: timestamp });
+    await expect(bridge.markWorkspaceNotificationsRead!({ notificationIds: ["notification_1"], operationId: "notification_read_2", target })).resolves.toEqual({
+      updatedIds: ["notification_1"],
+      alreadyReadIds: [],
+      readAt: timestamp
+    });
+
+    const calls = vi.mocked(browserWorkspaceRequest).mock.calls.map(([request]) => request as { path: string; workspaceScoped?: boolean; operationId?: string; idempotencyKey?: string; body?: unknown });
+    expect(calls[0]).toMatchObject({
+      path: "/api/v1/workspaces/workspace_1/domain/queries/notification.list",
+      workspaceScoped: true,
+      body: { context: {}, input: { unread_only: true, limit: 10 } }
+    });
+    expect(calls[1]).toMatchObject({
+      path: "/api/v1/workspaces/workspace_1/domain/queries/notification.summary",
+      workspaceScoped: true,
+      body: { context: {}, input: {} }
+    });
+    expect(calls[2]).toMatchObject({
+      path: "/api/v1/workspaces/workspace_1/domain/operations/notification.mark_read",
+      workspaceScoped: true,
+      operationId: "notification_read_2",
+      idempotencyKey: "notification_read_2",
+      body: { context: {}, input: { notification_ids: ["notification_1"] } }
+    });
+  });
+
+  it("rejects a response completed after the target snapshot becomes stale", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({
+      result: { items: [], next_cursor: null }
+    } as never);
+    vi.mocked(loadBrowserWorkspaceConnection).mockReset()
+      .mockResolvedValueOnce(connection)
+      .mockResolvedValueOnce(connection)
+      .mockResolvedValueOnce(connection)
+      .mockResolvedValueOnce({ ...connection, workspaceId: "workspace_2" });
+
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.listWorkspaceNotifications!({ target })).rejects.toThrow("workspace_navigation_changed");
+    expect(browserWorkspaceRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("strictly rejects internal fields, preserves unknown notification kinds, and propagates failures", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValueOnce({
+      result: {
+        items: [{
+          id: "notification_unknown",
+          kind: "future_kind",
+          created_at: timestamp,
+          read_at: null,
+          title: "新しい通知",
+          summary: "安全な概要",
+          target: { kind: "room", room_id: "room_1" },
+          action_state: "not_required"
+        }],
+        next_cursor: null
+      }
+    } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    const unknown = await bridge.listWorkspaceNotifications!({ target });
+    expect(unknown.items[0]).toMatchObject({ id: "notification_unknown", kind: "future_kind", target: { kind: "room", roomId: "room_1" } });
+    expect(JSON.stringify(unknown)).not.toContain("source_id");
+    expect(JSON.stringify(unknown)).not.toContain("recipient_account_id");
+
+    vi.mocked(browserWorkspaceRequest).mockResolvedValueOnce({
+      result: {
+        items: [{
+          id: "notification_internal",
+          kind: "work_completed",
+          created_at: timestamp,
+          read_at: null,
+          title: "仕事",
+          summary: "概要",
+          target: { kind: "work", room_id: "room_1", work_id: "work_1" },
+          action_state: "not_required",
+          source_id: "internal_source"
+        }],
+        next_cursor: null
+      }
+    } as never);
+    await expect(bridge.listWorkspaceNotifications!({ target })).rejects.toThrow("workspace_notification_response_invalid");
+
+    vi.mocked(browserWorkspaceRequest).mockRejectedValueOnce(new Error("network_down"));
+    await expect(bridge.listWorkspaceNotifications!({ target })).rejects.toThrow("network_down");
+  });
+});
+
+describe("Browser Workspace Share Domain bridge", () => {
+  const contentHash = "a".repeat(64);
+  const manifest = {
+    format_version: 1 as const,
+    kind: "room_knowledge" as const,
+    title: "共有用 Knowledge",
+    entries: [{
+      entry_id: "entry_public_1",
+      kind: "knowledge" as const,
+      title: "公開方針",
+      content: "共有本文",
+      knowledge_kind: "fact" as const,
+      files: []
+    }]
+  };
+  const draft = {
+    draft_id: "draft_public_1",
+    version: 1,
+    manifest,
+    content_hash: contentHash,
+    visibility: "restricted" as const,
+    recipient_account_ids: ["recipient_internal_1"],
+    removed_references: [{ entry_id: "entry_removed", location: "source/internal", reason: "権限" }]
+  };
+  const shareSummary = {
+    share_id: "share_public_1",
+    version: 1,
+    title: "共有用 Knowledge",
+    status: "active" as const,
+    visibility: "restricted" as const,
+    recipient_account_ids: ["recipient_internal_1"],
+    url: `https://share.example/s/${"b".repeat(43)}`,
+    created_at: "2026-09-17T00:00:00.000Z",
+    published_at: "2026-09-17T00:00:01.000Z",
+    revoked_at: null
+  };
+  const stagingImport = {
+    import_id: "import_public_1",
+    kind: "room_knowledge" as const,
+    status: "staging" as const,
+    phase: "fetch" as const,
+    retryable: true,
+    failure_code: null,
+    created_resource_ids: [],
+    created_agent_id: null,
+    committed_at: null
+  };
+  const updateManifest = {
+    formatVersion: 1 as const,
+    kind: "room_knowledge" as const,
+    title: "更新後の共有用 Knowledge",
+    entries: [{
+      entryId: "entry_public_1",
+      kind: "knowledge" as const,
+      title: "公開方針",
+      content: "更新本文",
+      knowledgeKind: "fact" as const,
+      files: []
+    }]
+  };
+
+  it("uses fixed Share Domain methods and exposes only safe projections", async () => {
+    vi.mocked(browserWorkspaceRequest)
+      .mockResolvedValueOnce({ result: draft } as never)
+      .mockResolvedValueOnce({ result: draft } as never)
+      .mockResolvedValueOnce({ result: { items: [shareSummary], next_cursor: null } } as never)
+      .mockResolvedValueOnce({ result: { share_id: "share_public_1", version: 1, url: `https://share.example/s/${"c".repeat(43)}`, content_hash: contentHash, published_at: "2026-09-17T00:00:02.000Z" } } as never)
+      .mockResolvedValueOnce({ result: { share_id: "share_public_1", version: 2, status: "revoked", revoked_at: "2026-09-17T00:00:03.000Z" } } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    const target = { connectionId: "connection_1", workspaceId: "workspace_1" };
+
+    const created = await bridge.createWorkspaceShareDraft!({
+      sourceKind: "room_knowledge",
+      sourceId: "room_source_1",
+      resourceRefs: [{ id: "knowledge_1", version: 2 }],
+      operationId: "share_create_1",
+      target
+    });
+    const viewed = await bridge.viewWorkspaceShareDraft!({ draftId: "draft_public_1", target });
+    const listed = await bridge.listWorkspaceShares!({ sourceKind: "room_knowledge", sourceId: "room_source_1", target });
+    const published = await bridge.publishWorkspaceShare!({ draftId: "draft_public_1", expectedVersion: 1, expectedContentHash: contentHash, operationId: "share_publish_1", target });
+    const revoked = await bridge.revokeWorkspaceShare!({ shareId: "share_public_1", expectedVersion: 1, operationId: "share_revoke_1", target });
+
+    expect(created).toMatchObject({ draftId: "draft_public_1", recipientCount: 1, removedReferenceCount: 1 });
+    expect(created).not.toHaveProperty("recipientAccountIds");
+    expect(created).not.toHaveProperty("removedReferences");
+    expect(listed.items[0]).toMatchObject({ shareId: "share_public_1", recipientCount: 1 });
+    expect(listed.items[0]).not.toHaveProperty("url");
+    expect(listed.items[0]).not.toHaveProperty("recipientAccountIds");
+    expect(viewed.manifest.entries[0]).toMatchObject({ entryId: "entry_public_1", content: "共有本文" });
+    expect(published.url).toMatch(/^https:\/\/share\.example\/s\/[A-Za-z0-9_-]{43}$/);
+    expect(revoked).toMatchObject({ shareId: "share_public_1", status: "revoked" });
+
+    const calls = vi.mocked(browserWorkspaceRequest).mock.calls.map(([request]) => request as { method: string; path: string; operationId?: string; idempotencyKey?: string; workspaceScoped?: boolean; body?: { input?: Record<string, unknown> } });
+    expect(calls.map((call) => call.path)).toEqual([
+      "/api/v1/workspaces/workspace_1/domain/operations/share.draft.create",
+      "/api/v1/workspaces/workspace_1/domain/queries/share.draft.view",
+      "/api/v1/workspaces/workspace_1/domain/queries/share.list",
+      "/api/v1/workspaces/workspace_1/domain/operations/share.publish",
+      "/api/v1/workspaces/workspace_1/domain/operations/share.revoke"
+    ]);
+    expect(calls[0]).toMatchObject({ operationId: "share_create_1", idempotencyKey: "share_create_1", workspaceScoped: true });
+    expect(calls[3]).toMatchObject({ operationId: "share_publish_1", idempotencyKey: "share_publish_1", workspaceScoped: true });
+    expect(calls[4]).toMatchObject({ operationId: "share_revoke_1", idempotencyKey: "share_revoke_1", workspaceScoped: true });
+    expect(calls.every((call) => !JSON.stringify(call).includes("recipient_internal_1"))).toBe(true);
+  });
+
+  it("views a strict HTTPS share link through the fixed source API", async () => {
+    const sourceUrl = `https://source.example/s/${"s".repeat(43)}`;
+    vi.mocked(browserShareSourceRequest).mockResolvedValue({
+      status: 200,
+      body: {
+        title: "公開共有",
+        visibility: "public",
+        manifest,
+        content_hash: contentHash,
+        published_at: "2026-09-17T00:00:00.000Z"
+      }
+    });
+    const bridge = createBrowserWorkspaceBridge();
+    const result = await bridge.viewWorkspaceShareLink!({
+      sourceUrl,
+      target: { connectionId: "connection_1", workspaceId: "workspace_1" }
+    });
+
+    expect(result).toMatchObject({ sourceUrl, sourceOrigin: "https://source.example/", locator: "s".repeat(43), title: "公開共有", contentHash });
+    expect(result).not.toHaveProperty("shareId");
+    expect(vi.mocked(browserShareSourceRequest)).toHaveBeenCalledWith({
+      connectionId: "connection_1",
+      operation: "view",
+      sourceOrigin: "https://source.example/",
+      locator: "s".repeat(43)
+    });
+  });
+
+  it("claims and imports a link with the same operation id while preserving staging", async () => {
+    const targetConnection = { ...connection, serverUrl: "https://target.example/" };
+    vi.mocked(loadBrowserWorkspaceConnection).mockResolvedValue(targetConnection);
+    vi.mocked(loadBrowserWorkspaceConnections).mockResolvedValue([targetConnection]);
+    const sourceUrl = `https://source.example/s/${"t".repeat(43)}`;
+    const operationId = "share_link_import_1";
+    vi.mocked(browserShareSourceRequest)
+      .mockResolvedValueOnce({
+        status: 200,
+        body: {
+          title: "限定共有",
+          visibility: "restricted",
+          manifest,
+          content_hash: contentHash,
+          published_at: "2026-09-17T00:00:00.000Z"
+        }
+      })
+      .mockResolvedValueOnce({
+        status: 201,
+        body: {
+          claim_id: "claim_link_1",
+          share_id: "share_link_1",
+          recipient_account_id: "account_1",
+          target_origin: "https://target.example/",
+          target_workspace_id: "workspace_1",
+          operation_id: operationId,
+          content_hash: contentHash,
+          created_at: "2026-09-17T00:00:01.000Z"
+        }
+      });
+    vi.mocked(createBrowserShareDelegation).mockResolvedValue({
+      payload: {
+        version: 1,
+        source_origin: "https://source.example/",
+        share_id: "share_link_1",
+        claim_id: "claim_link_1",
+        recipient_account_id: "account_1",
+        target_origin: "https://target.example/",
+        target_workspace_id: "workspace_1",
+        operation_id: operationId,
+        content_hash: contentHash,
+        issued_at: "2026-09-17T00:00:02.000Z",
+        expires_at: "2026-09-17T00:04:02.000Z"
+      },
+      publicKey: "public-key",
+      signature: "delegation-signature"
+    });
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({ result: stagingImport } as never);
+
+    const bridge = createBrowserWorkspaceBridge();
+    const result = await bridge.importWorkspaceShareLink!({
+      sourceUrl,
+      operationId,
+      target: { connectionId: "connection_1", workspaceId: "workspace_1" }
+    });
+
+    expect(result).toMatchObject({ status: "staging", phase: "fetch" });
+    expect(vi.mocked(browserShareSourceRequest).mock.calls[1]?.[0]).toMatchObject({
+      operation: "claim",
+      operationId,
+      body: {
+        target_origin: "https://target.example/",
+        target_workspace_id: "workspace_1",
+        operation_id: operationId,
+        content_hash: contentHash
+      }
+    });
+    expect(vi.mocked(browserWorkspaceRequest).mock.calls[0]?.[0]).toMatchObject({
+      path: "/api/v1/workspaces/workspace_1/domain/operations/share.import",
+      operationId,
+      idempotencyKey: operationId,
+      body: { input: { source_origin: "https://source.example/", locator: "t".repeat(43), claim_id: "claim_link_1", content_hash: contentHash } }
+    });
+    expect(JSON.stringify(result)).not.toContain("delegation-signature");
+  });
+
+  it("rejects unsafe link syntax and mismatched targets before source transport", async () => {
+    const bridge = createBrowserWorkspaceBridge();
+    const unsafe = [
+      "/s/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      `http://source.example/s/${"u".repeat(43)}`,
+      `https://source.example/s/${"u".repeat(43)}?x=1`,
+      `https://user:pass@source.example/s/${"u".repeat(43)}`,
+      `https://source.example/s/${"u".repeat(42)}`
+    ];
+    for (const sourceUrl of unsafe) {
+      await expect(bridge.viewWorkspaceShareLink!({ sourceUrl, target: { connectionId: "connection_1", workspaceId: "workspace_1" } })).rejects.toThrow();
+    }
+    await expect(bridge.viewWorkspaceShareLink!({
+      sourceUrl: `https://source.example/s/${"u".repeat(43)}`,
+      target: { connectionId: "connection_other", workspaceId: "workspace_other" }
+    })).rejects.toThrow("workspace_navigation_changed");
+    expect(browserShareSourceRequest).not.toHaveBeenCalled();
+  });
+
+  it("does not accept an arbitrary target Room when no Room is selected", async () => {
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.importWorkspaceShareLink!({
+      sourceUrl: `https://source.example/s/${"r".repeat(43)}`,
+      targetRoomId: "room_not_selected",
+      operationId: "share_link_import_no_room",
+      target: { connectionId: "connection_1", workspaceId: "workspace_1" }
+    })).rejects.toThrow("room_navigation_changed");
+    expect(browserShareSourceRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale selection generation before signing the source request", async () => {
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.viewWorkspaceShareLink!({
+      sourceUrl: `https://source.example/s/${"g".repeat(43)}`,
+      target: { connectionId: "connection_1", workspaceId: "workspace_1", selectionGeneration: 999 }
+    })).rejects.toThrow("workspace_navigation_changed");
+    expect(browserShareSourceRequest).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the target after source view and never claims after a Room change", async () => {
+    vi.mocked(browserShareSourceRequest).mockImplementation(async (input) => {
+      if (input.operation === "view") {
+        updateActiveWorkspaceRoomId("room_changed_during_view");
+        return {
+          status: 200,
+          body: {
+            title: "公開共有",
+            visibility: "public",
+            manifest,
+            content_hash: contentHash,
+            published_at: "2026-09-17T00:00:00.000Z"
+          }
+        };
+      }
+      return { status: 201, body: {} };
+    });
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.importWorkspaceShareLink!({
+      sourceUrl: `https://source.example/s/${"c".repeat(43)}`,
+      operationId: "share_link_import_room_change",
+      target: { connectionId: "connection_1", workspaceId: "workspace_1" }
+    })).rejects.toThrow("room_navigation_changed");
+    expect(vi.mocked(browserShareSourceRequest).mock.calls.map(([input]) => input.operation)).toEqual(["view"]);
+  });
+
+  it("keeps import staging explicit and sends the delegation only to the selected Workspace", async () => {
+    vi.mocked(loadBrowserWorkspaceConnection).mockResolvedValue({ ...connection, serverUrl: "https://target.example/" });
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({ result: stagingImport } as never);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const bridge = createBrowserWorkspaceBridge();
+    const operationId = "share_import_1";
+    const delegation = {
+      payload: {
+        version: 1 as const,
+        sourceOrigin: "https://source.example/",
+        shareId: "share_public_1",
+        claimId: "claim_public_1",
+        recipientAccountId: "account_1",
+        targetOrigin: "https://target.example/",
+        targetWorkspaceId: "workspace_1",
+        operationId,
+        contentHash,
+        issuedAt: "2026-09-17T00:00:00.000Z",
+        expiresAt: "2026-09-17T00:05:00.000Z"
+      },
+      publicKey: "public-key",
+      signature: "signed-delegation"
+    };
+
+    const result = await bridge.importWorkspaceShare!({
+      sourceOrigin: "https://source.example/",
+      locator: "d".repeat(43),
+      claimId: "claim_public_1",
+      contentHash,
+      delegation,
+      targetRoomId: "room_target_1",
+      operationId,
+      target: { connectionId: "connection_1", workspaceId: "workspace_1" }
+    });
+
+    expect(result).toMatchObject({ status: "staging", phase: "fetch" });
+    const request = vi.mocked(browserWorkspaceRequest).mock.calls[0]?.[0] as { path: string; body?: { input?: Record<string, unknown> } };
+    expect(request.path).toBe("/api/v1/workspaces/workspace_1/domain/operations/share.import");
+    expect(request.body?.input).toMatchObject({ source_origin: "https://source.example/", locator: "d".repeat(43), target_room_id: "room_target_1" });
+    expect(request.path).not.toContain("source.example");
+    expect(JSON.stringify(result)).not.toContain("signed-delegation");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses fixed update/discard Domain operations with strict manifest and recipient validation", async () => {
+    vi.mocked(browserWorkspaceRequest)
+      .mockResolvedValueOnce({ result: { ...draft, version: 2, manifest: { ...manifest, title: "更新後の共有用 Knowledge", entries: [{ ...manifest.entries[0], content: "更新本文" }] } } } as never)
+      .mockResolvedValueOnce({ result: { draft_id: "draft_public_1", discarded: true } } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    const target = { connectionId: "connection_1", workspaceId: "workspace_1" };
+    const updated = await bridge.updateWorkspaceShareDraft!({
+      draftId: "draft_public_1",
+      expectedVersion: 1,
+      manifest: updateManifest,
+      visibility: "restricted",
+      recipientAccountIds: ["recipient_internal_1"],
+      operationId: "share_update_1",
+      target
+    });
+    const discarded = await bridge.discardWorkspaceShareDraft!({ draftId: "draft_public_1", expectedVersion: 2, operationId: "share_discard_1", target });
+    expect(updated).toMatchObject({ draftId: "draft_public_1", version: 2, recipientCount: 1 });
+    expect(discarded).toEqual({ draftId: "draft_public_1", discarded: true });
+    expect(JSON.stringify(updated)).not.toContain("recipient_internal_1");
+    const calls = vi.mocked(browserWorkspaceRequest).mock.calls.map(([request]) => request as { path: string; operationId?: string; idempotencyKey?: string; body?: { input?: Record<string, unknown> } });
+    expect(calls[0]).toMatchObject({
+      path: "/api/v1/workspaces/workspace_1/domain/operations/share.draft.update",
+      operationId: "share_update_1",
+      idempotencyKey: "share_update_1",
+      body: { input: { draft_id: "draft_public_1", expected_version: 1, visibility: "restricted", recipient_account_ids: ["recipient_internal_1"] } }
+    });
+    expect(calls[0]?.body?.input?.manifest).toMatchObject({ format_version: 1, title: "更新後の共有用 Knowledge" });
+    expect(calls[1]).toMatchObject({
+      path: "/api/v1/workspaces/workspace_1/domain/operations/share.draft.discard",
+      operationId: "share_discard_1",
+      idempotencyKey: "share_discard_1",
+      body: { input: { draft_id: "draft_public_1", expected_version: 2 } }
+    });
+
+    for (const invalid of [
+      { draftId: "draft_public_1", expectedVersion: 1, manifest: updateManifest, visibility: "restricted", recipientAccountIds: ["recipient_internal_1", "recipient_internal_1"], operationId: "share_update_invalid", target },
+      { draftId: "draft_public_1", expectedVersion: 1, manifest: { ...updateManifest, entries: [{ ...updateManifest.entries[0], content: "" }] }, visibility: "restricted", recipientAccountIds: [], operationId: "share_update_invalid", target },
+      { draftId: "draft_public_1", expectedVersion: 1, manifest: updateManifest, visibility: "other", recipientAccountIds: [], operationId: "share_update_invalid", target },
+      { draftId: "draft_public_1", expectedVersion: 1, manifest: updateManifest, visibility: "restricted", recipientAccountIds: [], operationId: "share_update_invalid", accountId: "other", target }
+    ]) {
+      await expect(bridge.updateWorkspaceShareDraft!(invalid as never)).rejects.toThrow();
+    }
+    await expect(bridge.discardWorkspaceShareDraft!({ draftId: "draft_public_1", expectedVersion: 1, operationId: "share_discard_invalid", target, unknown: true } as never)).rejects.toThrow("workspace_share_input_invalid");
+  });
+
+  it("rejects arbitrary target fields, unsafe share URLs, and a target that changes in flight", async () => {
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.createWorkspaceShareDraft!({
+      baseShareId: "share_public_1",
+      operationId: "share_create_invalid",
+      workspaceId: "workspace_attacker" as never
+    } as never)).rejects.toThrow("workspace_share_input_invalid");
+    expect(browserWorkspaceRequest).not.toHaveBeenCalled();
+
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({ result: { items: [{ ...shareSummary, url: "https://evil.example/not-a-share" }], next_cursor: null } } as never);
+    await expect(bridge.listWorkspaceShares!({ sourceKind: "room_knowledge", sourceId: "room_source_1" })).rejects.toThrow("share_summary_url_invalid");
+
+    vi.clearAllMocks();
+    vi.mocked(loadBrowserWorkspaceConnection)
+      .mockResolvedValueOnce(connection)
+      .mockResolvedValueOnce({ ...connection, workspaceId: "workspace_changed" });
+    await expect(bridge.listWorkspaceShares!({ sourceKind: "room_knowledge", sourceId: "room_source_1" })).rejects.toThrow("workspace_navigation_changed");
+    expect(browserWorkspaceRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects strict response extras instead of passing internal fields through", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({ result: { ...draft, source_id: "internal_source" } } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    await expect(bridge.viewWorkspaceShareDraft!({ draftId: "draft_public_1" })).rejects.toThrow("workspace_share_draft_response_invalid");
+  });
+
+  it("uses a fixed status query and does not turn staging into success", async () => {
+    vi.mocked(browserWorkspaceRequest).mockResolvedValue({ result: stagingImport } as never);
+    const bridge = createBrowserWorkspaceBridge();
+    const result = await bridge.getWorkspaceShareImportStatus!({ operationId: "share_import_1" });
+    expect(result.status).toBe("staging");
+    expect(vi.mocked(browserWorkspaceRequest).mock.calls[0]?.[0]).toMatchObject({
+      method: "POST",
+      path: "/api/v1/workspaces/workspace_1/domain/queries/share.import.status",
+      workspaceScoped: true
+    });
   });
 });
 

@@ -41,7 +41,26 @@ const learningJsonlFiles = [
   "learning-job-attempts.jsonl",
   "learning-resource-uses.jsonl"
 ] as const;
-const jsonlFiles = [...coreJsonlFiles, ...learningJsonlFiles] as const;
+// Sharing records are portable audit/state data. Notification and outbox
+// rows are intentionally absent: they are target-account delivery state, not
+// Workspace history, and must never be replayed by a restore.
+const sharingJsonlFiles = [
+  "workspace-shares.jsonl",
+  "workspace-share-recipients.jsonl",
+  "workspace-share-claims.jsonl",
+  "workspace-share-imports.jsonl",
+  "workspace-share-import-resources.jsonl",
+  "workspace-share-file-transactions.jsonl"
+] as const;
+// Share manifests and staged/final transaction bodies are private files below
+// the Workspace storage root.  A portable Bundle must never expose those
+// source paths (they may contain deployment-specific layout), so exports use
+// this private, content-addressed-looking namespace and restores remap it
+// below `workspace-shares/restored/`.
+const shareBundleFilesDirectory = "share-files";
+const restoredShareFilesDirectory = "workspace-shares/restored";
+const jsonlFiles = [...coreJsonlFiles, ...learningJsonlFiles, ...sharingJsonlFiles] as const;
+const optionalJsonlFiles = new Set<string>([...learningJsonlFiles, ...sharingJsonlFiles]);
 const credentialFilePath = /(?:^|\/)(?:\.env(?:\..*)?|[^/]*(?:credential|secret|token|private[_-]?key|id_rsa)[^/]*|[^/]+\.(?:pem|key|p12|pfx))$/i;
 const credentialText = /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----|(?:^|[\n{,])\s*["']?(?:password|passphrase|secret|client[_-]?secret|oauth[_-]?client[_-]?secret|private[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|credential|api[_-]?key)["']?\s*[:=]|(?:^|[^A-Za-z0-9])(?:sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?:$|[^A-Za-z0-9])/i;
 const credentialFieldNames = new Set([
@@ -166,7 +185,10 @@ const portableSchema: Readonly<Record<string, { required: readonly string[]; all
     // SecretRef is intentionally not portable. The target operator chooses a
     // local engine secret after restore.
     required: ["workspace_id", "id", "scope_kind", "room_id", "enabled", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "version", "updated_by", "updated_at"],
-    allowed: ["workspace_id", "id", "scope_kind", "room_id", "enabled", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "currency_reserved", "tokens_reserved", "version", "updated_by", "updated_at"]
+    // enabled_inherits_workspace was added after the first learning-loop
+    // bundles. It is optional on input for old bundles, but every new export
+    // includes it explicitly.
+    allowed: ["workspace_id", "id", "scope_kind", "room_id", "enabled", "enabled_inherits_workspace", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "currency_reserved", "tokens_reserved", "version", "updated_by", "updated_at"]
   },
   "learning-jobs.jsonl": {
     required: ["workspace_id", "room_id", "id", "kind", "status", "priority", "group_key", "high_watermark_activity_id", "next_run_at", "attempt_count", "max_attempts", "lease_owner", "lease_expires_at", "heartbeat_at", "blocked_reason", "engine_id", "model", "created_by", "updated_by", "created_at", "updated_at", "completed_at"],
@@ -179,6 +201,30 @@ const portableSchema: Readonly<Record<string, { required: readonly string[]; all
   "learning-resource-uses.jsonl": {
     required: ["workspace_id", "id", "resource_id", "resource_version", "activity_id", "outcome", "summary", "created_at"],
     allowed: ["workspace_id", "id", "resource_id", "resource_version", "activity_id", "outcome", "supersedes_use_id", "summary", "created_at"]
+  },
+  "workspace-shares.jsonl": {
+    required: ["workspace_id", "id", "source_kind", "source_room_id", "source_agent_id", "created_by", "title", "status", "visibility", "revision", "source_versions", "manifest_path", "content_hash", "byte_size", "public_locator", "created_at", "updated_at", "published_at", "revoked_at"],
+    allowed: ["workspace_id", "id", "source_kind", "source_room_id", "source_agent_id", "created_by", "title", "status", "visibility", "revision", "source_versions", "manifest_path", "content_hash", "byte_size", "public_locator", "created_at", "updated_at", "published_at", "revoked_at"]
+  },
+  "workspace-share-recipients.jsonl": {
+    required: ["workspace_id", "share_id", "recipient_account_id"],
+    allowed: ["workspace_id", "share_id", "recipient_account_id"]
+  },
+  "workspace-share-claims.jsonl": {
+    required: ["workspace_id", "id", "share_id", "recipient_account_id", "target_origin", "target_workspace_id", "operation_id", "request_hash", "content_hash", "created_at"],
+    allowed: ["workspace_id", "id", "share_id", "recipient_account_id", "target_origin", "target_workspace_id", "operation_id", "request_hash", "content_hash", "created_at"]
+  },
+  "workspace-share-imports.jsonl": {
+    required: ["workspace_id", "operation_id", "recipient_account_id", "kind", "source_origin", "source_share_id", "source_locator", "claim_id", "request_hash", "content_hash", "target_room_id", "reserved_agent_id", "reserved_resource_ids", "manifest_path", "status", "phase", "retryable", "failure_code", "lease_token", "lease_until", "result", "created_at", "updated_at", "committed_at"],
+    allowed: ["workspace_id", "operation_id", "recipient_account_id", "kind", "source_origin", "source_share_id", "source_locator", "claim_id", "request_hash", "content_hash", "target_room_id", "reserved_agent_id", "reserved_resource_ids", "manifest_path", "status", "phase", "retryable", "failure_code", "lease_token", "lease_until", "result", "created_at", "updated_at", "committed_at"]
+  },
+  "workspace-share-import-resources.jsonl": {
+    required: ["workspace_id", "operation_id", "entry_id", "resource_id"],
+    allowed: ["workspace_id", "operation_id", "entry_id", "resource_id"]
+  },
+  "workspace-share-file-transactions.jsonl": {
+    required: ["workspace_id", "id", "owner_kind", "owner_id", "actor_account_id", "status", "entries", "created_at", "updated_at", "last_error_code"],
+    allowed: ["workspace_id", "id", "owner_kind", "owner_id", "actor_account_id", "status", "entries", "created_at", "updated_at", "last_error_code"]
   }
 };
 
@@ -663,6 +709,8 @@ export class WorkspaceBundleV3Service {
     // retries that find an already-created target Workspace.
     if (targetOrganizationId) await assertTargetOrganizationAdmin(this.store, context.accountId, targetOrganizationId);
     const source = await verifyWorkspaceBundleV3(input.sourceDirectory);
+    const shareRestorePlan = await readShareRestorePlan(source.directory, input.beforeActivate !== undefined);
+    const restoreRecordCounts = recordCountsForShareRestore(source.manifest.record_counts, shareRestorePlan);
     const sourceWorkspace = await readJsonObject(path.join(source.directory, workspaceFile));
     const sourceWorkspaceVersion = Number(sourceWorkspace.version ?? 1);
     if (!Number.isSafeInteger(sourceWorkspaceVersion) || sourceWorkspaceVersion < 1) {
@@ -698,7 +746,7 @@ export class WorkspaceBundleV3Service {
       });
       if (recovery.state === "active") {
         await assertTargetWorkspaceOrganization(this.store, targetContext, targetOrganizationId);
-        await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
+        await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory, shareRestorePlan);
         return {
           workspaceId: input.targetWorkspaceId,
           manifest: source.manifest,
@@ -715,8 +763,17 @@ export class WorkspaceBundleV3Service {
           await sql.query("SELECT samurai_reopen_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
         });
         recoverySessionOpened = true;
-        await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
+        await cleanupUnselectedShareBundleFiles(finalRoot, source.manifest.files, shareRestorePlan);
         if (input.beforeActivate) await input.beforeActivate(recoveryContext);
+        // Completion-v4 resources are imported by the extension callback.
+        // Share import-resource rows depend on those resources, so they are
+        // deliberately finalized only after the callback (and are also
+        // replayed on recovery from the source JSONL).
+        await this.store.database.withContext(recoveryContext, async (sql) => {
+          await importWorkspaceShareSnapshot(sql, input.targetWorkspaceId, source.directory, context.accountId, shareRestorePlan, this.store.storageRoot);
+          await importWorkspaceShareImportResources(sql, input.targetWorkspaceId, shareRestorePlan.importResources);
+        });
+        await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory, shareRestorePlan);
         await this.store.database.withContext(recoveryContext, async (sql) => {
           await sql.query("SELECT samurai_complete_workspace_import($1, $2, $3)", [input.targetWorkspaceId, recovery.importId, source.manifest.integrity_hash]);
         });
@@ -765,6 +822,7 @@ export class WorkspaceBundleV3Service {
       await mkdir(path.dirname(finalRoot), { recursive: true, mode: 0o700 });
       await rename(stagingRoot, finalRoot);
       finalRootCreated = true;
+      await cleanupUnselectedShareBundleFiles(finalRoot, source.manifest.files, shareRestorePlan);
       await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
         await startWorkspaceImport(sql, {
           targetWorkspaceId: input.targetWorkspaceId,
@@ -788,14 +846,18 @@ export class WorkspaceBundleV3Service {
           importId,
           `portable://bundle-v3/${source.manifest.integrity_hash}`,
           source.manifest.integrity_hash,
-          canonicalJson(source.manifest.record_counts)
+          canonicalJson(restoreRecordCounts)
         ]);
       });
       // The import transaction committed; later verification/completion may
       // fail and must use the guarded database abort path.
       importSessionStarted = true;
       if (input.beforeActivate) await input.beforeActivate({ ...targetContext, importId });
-      await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory);
+      await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
+        await importWorkspaceShareSnapshot(sql, input.targetWorkspaceId, source.directory, context.accountId, shareRestorePlan, this.store.storageRoot);
+        await importWorkspaceShareImportResources(sql, input.targetWorkspaceId, shareRestorePlan.importResources);
+      });
+      await verifyImportedWorkspace(this.store, targetContext, source.manifest, source.directory, shareRestorePlan);
       await this.store.database.withContext({ ...targetContext, importId }, async (sql) => {
         await sql.query("SELECT samurai_complete_workspace_import($1, $2, $3)", [input.targetWorkspaceId, importId, source.manifest.integrity_hash]);
         await this.store.insertAudit(sql, targetContext, {
@@ -890,10 +952,26 @@ export class WorkspaceBundleV3Service {
       const learningJobs = await sql.query<Record<string, unknown>>("SELECT workspace_id, room_id, id, kind, status, priority, group_key, high_watermark_activity_id, next_run_at, attempt_count, max_attempts, lease_owner, lease_expires_at, heartbeat_at, blocked_reason, engine_id, model, created_by, updated_by, created_at, updated_at, completed_at FROM workspace_learning_jobs WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
       const learningJobAttempts = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, job_id, attempt_no, worker_id, engine_id, model, status, input_hash, output_hash, output, error_code, currency_used, tokens_used, reserved_currency, reserved_tokens, started_at, completed_at FROM workspace_learning_job_attempts WHERE workspace_id = $1 ORDER BY job_id, attempt_no", [context.workspaceId]);
       const learningResourceUses = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, resource_id, resource_version, activity_id, outcome, supersedes_use_id, summary, created_at FROM workspace_learning_resource_uses WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const workspaceShares = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, source_kind, source_room_id, source_agent_id, created_by, title, status, visibility, revision, source_versions, manifest_path, content_hash, byte_size, public_locator, created_at, updated_at, published_at, revoked_at FROM workspace_shares WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const workspaceShareRecipients = await sql.query<Record<string, unknown>>("SELECT workspace_id, share_id, recipient_account_id FROM workspace_share_recipients WHERE workspace_id = $1 ORDER BY share_id, recipient_account_id", [context.workspaceId]);
+      const workspaceShareClaims = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, share_id, recipient_account_id, target_origin, target_workspace_id, operation_id, request_hash, content_hash, created_at FROM workspace_share_claims WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      const workspaceShareImports = await sql.query<Record<string, unknown>>("SELECT workspace_id, operation_id, recipient_account_id, kind, source_origin, source_share_id, source_locator, claim_id, request_hash, content_hash, target_room_id, reserved_agent_id, reserved_resource_ids, manifest_path, status, phase, retryable, failure_code, lease_token, lease_until, result, created_at, updated_at, committed_at FROM workspace_share_imports WHERE workspace_id = $1 ORDER BY operation_id", [context.workspaceId]);
+      const workspaceShareImportResources = await sql.query<Record<string, unknown>>("SELECT workspace_id, operation_id, entry_id, resource_id FROM workspace_share_import_resources WHERE workspace_id = $1 ORDER BY operation_id, entry_id", [context.workspaceId]);
+      const workspaceShareFileTransactions = await sql.query<Record<string, unknown>>("SELECT workspace_id, id, owner_kind, owner_id, actor_account_id, status, entries, created_at, updated_at, last_error_code FROM workspace_share_file_transactions WHERE workspace_id = $1 ORDER BY id", [context.workspaceId]);
+      assertShareOperationsReadyForBundle(workspaceShareImports.rows, workspaceShareFileTransactions.rows);
       const workspaceRow = workspace.rows[0];
       if (!workspaceRow) throw new WorkspaceServerError("workspace_not_found", 404);
       const excludedMemberships = new Set(options.excludeMembershipAccountIds ?? []);
-      const includeLegacyLearning = options.includeLegacyLearning !== false;
+      const retiredResourceIds = new Set(
+        learningResources.rows
+          .filter((row) => row.scope_kind === "workspace" && ["knowledge", "memory", "workspace_knowledge", "workspace_memory"].includes(String(row.resource_kind).toLowerCase()))
+          .map((row) => String(row.id))
+      );
+      const retainedLearningResources = learningResources.rows.filter((row) => !retiredResourceIds.has(String(row.id)));
+      const retainedLearningResourceVersions = learningResourceVersions.rows.filter((row) => !retiredResourceIds.has(String(row.resource_id)));
+      const retainedLearningEvidence = learningEvidence.rows.filter((row) => !retiredResourceIds.has(String(row.resource_id)));
+      const retainedLearningResourceLinks = learningResourceLinks.rows.filter((row) => !retiredResourceIds.has(String(row.from_resource_id)) && !retiredResourceIds.has(String(row.to_resource_id)));
+      const retainedLearningResourceUses = learningResourceUses.rows.filter((row) => !retiredResourceIds.has(String(row.resource_id)));
       return {
         workspace: workspaceRow,
         schemaRevision: normalizeSchemaRevision(schema.rows[0]?.revision),
@@ -908,15 +986,24 @@ export class WorkspaceBundleV3Service {
         invitations: invitations.rows,
         audits: audits.rows,
         files: files.rows,
-        learningActivities: includeLegacyLearning ? learningActivities.rows : [],
-        learningResources: includeLegacyLearning ? learningResources.rows : [],
-        learningResourceVersions: includeLegacyLearning ? learningResourceVersions.rows : [],
-        learningEvidence: includeLegacyLearning ? learningEvidence.rows : [],
-        learningResourceLinks: includeLegacyLearning ? learningResourceLinks.rows : [],
-        learningSettings: includeLegacyLearning ? learningSettings.rows : [],
-        learningJobs: includeLegacyLearning ? learningJobs.rows : [],
-        learningJobAttempts: includeLegacyLearning ? learningJobAttempts.rows : [],
-        learningResourceUses: includeLegacyLearning ? learningResourceUses.rows : []
+        // `includeLegacyLearning` is retained in the API for callers, but it
+        // must not erase Room Knowledge/Skill or settings. Only the retired
+        // Workspace Knowledge/Memory projection is removed here.
+        learningActivities: learningActivities.rows,
+        learningResources: retainedLearningResources,
+        learningResourceVersions: retainedLearningResourceVersions,
+        learningEvidence: retainedLearningEvidence,
+        learningResourceLinks: retainedLearningResourceLinks,
+        learningSettings: learningSettings.rows,
+        learningJobs: learningJobs.rows,
+        learningJobAttempts: learningJobAttempts.rows,
+        learningResourceUses: retainedLearningResourceUses,
+        workspaceShares: workspaceShares.rows,
+        workspaceShareRecipients: workspaceShareRecipients.rows,
+        workspaceShareClaims: workspaceShareClaims.rows,
+        workspaceShareImports: workspaceShareImports.rows,
+        workspaceShareImportResources: workspaceShareImportResources.rows,
+        workspaceShareFileTransactions: workspaceShareFileTransactions.rows
       };
     });
   }
@@ -938,6 +1025,7 @@ export class WorkspaceBundleV3Service {
         const written = await writeBundleDirectory({
           directory,
           workspaceId: context.workspaceId,
+          storageRoot: this.store.storageRoot,
           mode: this.store.mode,
           snapshot,
           files: this.files,
@@ -1203,10 +1291,351 @@ function normalizeSchemaRevision(value: unknown): number {
   return Number.isSafeInteger(revision) && revision > 0 ? revision : legacyBundleSchemaRevision;
 }
 
+/**
+ * An export is a durable snapshot, not a queue checkpoint. Carrying a
+ * staging import or an in-flight file rename would make a restored Bundle
+ * claim work that no longer has its source lease. Terminal failed imports are
+ * retained for audit; only processing states block the export.
+ */
+function assertShareOperationsReadyForBundle(
+  imports: Record<string, unknown>[],
+  fileTransactions: Record<string, unknown>[]
+): void {
+  const incompleteImport = imports.find((row) => {
+    const status = String(row.status ?? "");
+    const phase = String(row.phase ?? "");
+    return status === "staging" || (status === "committed" && phase !== "done");
+  });
+  if (incompleteImport) {
+    throw new WorkspaceServerError("workspace_bundle_incomplete_share_operation", 409, {
+      operation_id: String(incompleteImport.operation_id ?? "")
+    });
+  }
+  for (const row of imports) {
+    const status = String(row.status ?? "");
+    const phase = String(row.phase ?? "");
+    const hasLease = row.lease_token !== null && row.lease_token !== undefined
+      || row.lease_until !== null && row.lease_until !== undefined;
+    if (status === "committed"
+      && (phase !== "done" || row.retryable !== false || row.failure_code !== null && row.failure_code !== undefined || hasLease)) {
+      throw new WorkspaceServerError("workspace_bundle_share_import_terminal_state_invalid", 409, {
+        operation_id: String(row.operation_id ?? "")
+      });
+    }
+    if (status === "failed"
+      && (phase !== "cleanup" || row.retryable !== false || typeof row.failure_code !== "string" || row.failure_code.trim() === "" || hasLease)) {
+      throw new WorkspaceServerError("workspace_bundle_failed_share_import_not_terminal", 409, {
+        operation_id: String(row.operation_id ?? "")
+      });
+    }
+  }
+  const incompleteFileTransaction = fileTransactions.find((row) => {
+    const status = String(row.status ?? "");
+    // A Share mutation records a placeholder and a staged path before the
+    // final rename. Once the same owner has a committed row, those older
+    // preparation rows are superseded recovery history rather than an
+    // in-flight operation and must not make an otherwise stable Bundle
+    // impossible to export.
+    if (status !== "committed" && status !== "cleaned") {
+      const ownerKey = `${String(row.owner_kind ?? "")}\u0000${String(row.owner_id ?? "")}`;
+      if (fileTransactions.some((candidate) =>
+        `${String(candidate.owner_kind ?? "")}\u0000${String(candidate.owner_id ?? "")}` === ownerKey
+        && ["committed", "cleaned"].includes(String(candidate.status ?? "")))) return false;
+    }
+    return status !== "committed" && status !== "cleaned";
+  });
+  if (incompleteFileTransaction) {
+    throw new WorkspaceServerError("workspace_bundle_incomplete_share_file_transaction", 409, {
+      transaction_id: String(incompleteFileTransaction.id ?? "")
+    });
+  }
+  for (const row of fileTransactions) {
+    if (String(row.status ?? "") === "committed") assertShareFileTransactionEntries(row, false);
+  }
+}
+
+interface ShareFileTransactionBodyReference {
+  path: string;
+  sha256: string;
+  byteSize: number;
+}
+
+function assertShareFileTransactionEntries(row: Record<string, unknown>, requireBundlePath: boolean): ShareFileTransactionBodyReference[] {
+  if (!Array.isArray(row.entries)) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+  const references: ShareFileTransactionBodyReference[] = [];
+  const collect = (value: unknown): ShareFileTransactionBodyReference[] => {
+    if (Array.isArray(value)) return value.flatMap(collect);
+    if (!value || typeof value !== "object" || value instanceof Date) return [];
+    const record = value as Record<string, unknown>;
+    const found: ShareFileTransactionBodyReference[] = [];
+    const pathValue = Object.entries(record).find(([key]) => key.toLowerCase().replace(/[^a-z0-9]/g, "") === "finalpath")?.[1];
+    const hasTransactionPath = Object.keys(record).some((key) => {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return normalized === "stagedpath" || normalized === "finalpath" || normalized === "manifestpath";
+    });
+    if (hasTransactionPath) {
+      if (typeof pathValue !== "string" || pathValue.trim() === "") {
+        throw new WorkspaceServerError("workspace_bundle_share_file_transaction_entry_invalid", 400, { transaction_id: String(row.id ?? "") });
+      }
+      assertShareInternalPath(pathValue);
+      const sha256 = record.sha256;
+      const byteSize = record.byte_size;
+      if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)
+        || typeof byteSize !== "number" || !Number.isSafeInteger(byteSize) || byteSize < 0) {
+        throw new WorkspaceServerError("workspace_bundle_share_file_transaction_entry_invalid", 400, { transaction_id: String(row.id ?? "") });
+      }
+      if (requireBundlePath) assertShareBundlePath(pathValue);
+      found.push({ path: pathValue, sha256, byteSize });
+    }
+    for (const nested of Object.values(record)) found.push(...collect(nested));
+    return found;
+  };
+  for (const entry of row.entries) {
+    const entryReferences = collect(entry);
+    // A committed ledger entry must retain the final body path. A removed
+    // reference may be nested beside it, but a staged-only entry cannot prove
+    // that the committed bytes survived export.
+    if (entryReferences.length === 0) {
+      throw new WorkspaceServerError("workspace_bundle_share_file_transaction_entry_invalid", 400, { transaction_id: String(row.id ?? "") });
+    }
+    references.push(...entryReferences);
+  }
+  return references;
+}
+
+/**
+ * V3 is also embedded in V4.  A standalone V3 restore has no Completion
+ * Agent/resource rows available to satisfy Agent-share/import-resource FKs;
+ * keep the Room projection and omit only those dependent records.  V4 passes
+ * the activation callback and therefore restores the complete projection.
+ */
+async function readShareRestorePlan(
+  sourceDirectory: string,
+  includeCompletionDependencies: boolean
+): Promise<WorkspaceShareRestorePlan> {
+  const shares = await readOptionalJsonl(path.join(sourceDirectory, "workspace-shares.jsonl"));
+  const recipients = await readOptionalJsonl(path.join(sourceDirectory, "workspace-share-recipients.jsonl"));
+  const claims = await readOptionalJsonl(path.join(sourceDirectory, "workspace-share-claims.jsonl"));
+  const imports = await readOptionalJsonl(path.join(sourceDirectory, "workspace-share-imports.jsonl"));
+  const importResources = await readOptionalJsonl(path.join(sourceDirectory, "workspace-share-import-resources.jsonl"));
+  const fileTransactions = await readOptionalJsonl(path.join(sourceDirectory, "workspace-share-file-transactions.jsonl"));
+  // Never carry an in-flight operation even when it would be omitted below.
+  // The source must be exported only from a terminal, retryable state.
+  assertShareOperationsReadyForBundle(imports, fileTransactions);
+  if (includeCompletionDependencies) {
+    return { shares, recipients, claims, imports, importResources, fileTransactions };
+  }
+  const shareIds = new Set(
+    shares.filter((row) => String(row.source_kind) !== "agent").map((row) => String(row.id))
+  );
+  const resourceOperationIds = new Set(importResources.map((row) => String(row.operation_id)));
+  const importIds = new Set(
+    imports
+      .filter((row) => String(row.kind) !== "agent" && !resourceOperationIds.has(String(row.operation_id)))
+      .map((row) => String(row.operation_id))
+  );
+  return {
+    shares: shares.filter((row) => shareIds.has(String(row.id))),
+    recipients: recipients.filter((row) => shareIds.has(String(row.share_id))),
+    claims: claims.filter((row) => shareIds.has(String(row.share_id))),
+    imports: imports.filter((row) => importIds.has(String(row.operation_id))),
+    // Completion resource ids have no FK target in a standalone V3 restore.
+    importResources: [],
+    fileTransactions: fileTransactions.filter((row) => {
+      const ownerKind = String(row.owner_kind);
+      const ownerId = String(row.owner_id);
+      return ownerKind === "draft" ? shareIds.has(ownerId) : ownerKind === "import" && importIds.has(ownerId);
+    })
+  };
+}
+
+function shareBundleToken(kind: string, id: string): string {
+  return createHash("sha256").update(`${kind}:${id}`).digest("hex");
+}
+
+function shareBundlePath(kind: string, id: string, suffix = "manifest"): string {
+  return `${shareBundleFilesDirectory}/${kind}/${shareBundleToken(kind, id)}${suffix === "manifest" ? ".json" : `/${suffix}`}`;
+}
+
+function restoredSharePath(kind: string, id: string, suffix = "manifest"): string {
+  return `${restoredShareFilesDirectory}/${kind}/${shareBundleToken(kind, id)}${suffix === "manifest" ? ".json" : `/${suffix}`}`;
+}
+
+function assertShareInternalPath(value: string): void {
+  if (!value || value.startsWith("/") || value.startsWith("\\") || value.includes("\\") || value.split("/").some((part) => part === ".." || part === "" || part === ".")) {
+    throw new WorkspaceServerError("workspace_bundle_v3_path_invalid", 400);
+  }
+  assertSafeRelativePath(value);
+}
+
+function assertShareBundlePath(value: string): void {
+  assertShareInternalPath(value);
+  if (!value.startsWith(`${shareBundleFilesDirectory}/`)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_path_invalid", 400);
+  }
+}
+
+async function assertNoSymlinkComponents(root: string, target: string): Promise<void> {
+  const relative = path.relative(root, target);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_path_invalid", 400);
+  }
+  let current = root;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) throw new WorkspaceServerError("workspace_bundle_v3_file_type_invalid", 400);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
+async function readPrivateWorkspaceFile(storageRoot: string, workspaceId: string, relativePath: string): Promise<Uint8Array> {
+  assertOpaqueId(workspaceId, "workspace_id_invalid");
+  assertShareInternalPath(relativePath);
+  // Share manifests/files live in the Server-wide private Share store, while
+  // ordinary Workspace files live under the tenant directory. The portable
+  // Bundle projection handles both path families and reads from their actual
+  // adapter roots.
+  const roots = relativePath.startsWith("workspace-shares/")
+    // The production Share adapter uses the server-wide root. Older fixtures
+    // kept Share files beneath the tenant root, so retain that read-only
+    // compatibility fallback while never widening the path boundary.
+    ? [path.resolve(storageRoot), path.resolve(storageRoot, "workspaces", workspaceId)]
+    : [path.resolve(storageRoot, "workspaces", workspaceId)];
+  for (const root of roots) {
+    const full = resolveBundlePath(root, relativePath);
+    await assertNoSymlinkComponents(root, full);
+    try {
+      const info = await lstat(full);
+      if (!info.isFile()) throw new WorkspaceServerError("workspace_bundle_v3_file_type_invalid", 400);
+      return readFile(full);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof WorkspaceServerError && error.code === "workspace_file_not_found") continue;
+      throw error;
+    }
+  }
+  throw new WorkspaceServerError("workspace_file_not_found", 409);
+}
+
+async function projectShareBundleFiles(input: {
+  snapshot: WorkspaceSnapshot;
+  workspaceId: string;
+  storageRoot: string;
+}): Promise<{
+  shares: Record<string, unknown>[];
+  imports: Record<string, unknown>[];
+  fileTransactions: Record<string, unknown>[];
+  files: ShareBundleFileProjection[];
+}> {
+  const pathMap = new Map<string, { bundlePath: string; targetPath: string }>();
+  const files = new Map<string, ShareBundleFileProjection>();
+  const addPath = async (sourcePath: string, kind: string, id: string, suffix: string, expectedHash?: string, expectedByteSize?: number, required = true) => {
+    assertShareInternalPath(sourcePath);
+    const existing = pathMap.get(sourcePath);
+    const mapped = existing ?? {
+      bundlePath: shareBundlePath(kind, id, suffix),
+      targetPath: restoredSharePath(kind, id, suffix)
+    };
+    pathMap.set(sourcePath, mapped);
+    if (!files.has(mapped.bundlePath)) {
+      try {
+        const content = await readPrivateWorkspaceFile(input.storageRoot, input.workspaceId, sourcePath);
+        if (expectedHash && hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_file_hash_mismatch", 409);
+        if (expectedByteSize !== undefined && content.byteLength !== expectedByteSize) throw new WorkspaceServerError("workspace_file_size_mismatch", 409);
+        assertCredentialFreeShareFile(mapped.bundlePath, content);
+        files.set(mapped.bundlePath, { bundlePath: mapped.bundlePath, sourcePath, content });
+      } catch (error) {
+        if (!required && error instanceof WorkspaceServerError && error.code === "workspace_file_not_found") return mapped.bundlePath;
+        throw error;
+      }
+    } else if (expectedHash && hashBytes(files.get(mapped.bundlePath)!.content) !== expectedHash) {
+      throw new WorkspaceServerError("workspace_file_hash_mismatch", 409);
+    } else if (expectedByteSize !== undefined && files.get(mapped.bundlePath)!.content.byteLength !== expectedByteSize) {
+      throw new WorkspaceServerError("workspace_file_size_mismatch", 409);
+    }
+    return mapped.bundlePath;
+  };
+  const mapEntryPaths = async (value: unknown, transactionId: string, transactionStatus: string): Promise<unknown> => {
+    if (Array.isArray(value)) return Promise.all(value.map((item) => mapEntryPaths(item, transactionId, transactionStatus)));
+    if (!value || typeof value !== "object" || value instanceof Date) return value;
+    const output: Record<string, unknown> = {};
+    const entryRecord = value as Record<string, unknown>;
+    const entryHash = typeof entryRecord.sha256 === "string"
+      ? String(entryRecord.sha256)
+      : undefined;
+    const entryByteSize = typeof entryRecord.byte_size === "number" && Number.isSafeInteger(entryRecord.byte_size)
+      ? entryRecord.byte_size
+      : undefined;
+    for (const [key, nested] of Object.entries(entryRecord)) {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (["stagedpath", "finalpath", "manifestpath"].includes(normalized) && typeof nested === "string") {
+        const required = transactionStatus === "committed" && normalized === "finalpath";
+        output[key] = await addPath(nested, "transactions", transactionId, normalized === "stagedpath" ? "staged" : normalized === "finalpath" ? "final" : "manifest", entryHash, entryByteSize, required);
+      } else {
+        output[key] = await mapEntryPaths(nested, transactionId, transactionStatus);
+      }
+    }
+    return output;
+  };
+  const shares = [] as Record<string, unknown>[];
+  for (const row of input.snapshot.workspaceShares) {
+    const projected = { ...row };
+    if (typeof row.manifest_path === "string" && row.manifest_path) {
+      projected.manifest_path = await addPath(row.manifest_path, "manifests", String(row.id), "manifest", nullableText(row.content_hash) ?? undefined, typeof row.byte_size === "number" ? row.byte_size : undefined);
+    }
+    shares.push(projected);
+  }
+  const imports = [] as Record<string, unknown>[];
+  for (const row of input.snapshot.workspaceShareImports) {
+    const projected = { ...row };
+    if (typeof row.manifest_path === "string" && row.manifest_path) {
+      projected.manifest_path = await addPath(row.manifest_path, "imports", String(row.operation_id), "manifest", nullableText(row.content_hash) ?? undefined, typeof row.byte_size === "number" ? row.byte_size : undefined);
+    }
+    imports.push(projected);
+  }
+  const fileTransactions = [] as Record<string, unknown>[];
+  const terminalOwners = new Set(
+    input.snapshot.workspaceShareFileTransactions
+      .filter((row) => ["committed", "cleaned"].includes(String(row.status ?? "")))
+      .map((row) => `${String(row.owner_kind ?? "")}\u0000${String(row.owner_id ?? "")}`)
+  );
+  for (const row of input.snapshot.workspaceShareFileTransactions) {
+    const ownerKey = `${String(row.owner_kind ?? "")}\u0000${String(row.owner_id ?? "")}`;
+    if (!["committed", "cleaned"].includes(String(row.status ?? "")) && terminalOwners.has(ownerKey)) continue;
+    fileTransactions.push({ ...row, entries: await mapEntryPaths(row.entries, String(row.id), String(row.status)) });
+  }
+  return { shares, imports, fileTransactions, files: [...files.values()] };
+}
+
+function assertCredentialFreeShareFile(relativePath: string, content: Uint8Array): void {
+  assertShareBundlePath(relativePath);
+  const text = Buffer.from(content).toString("utf8");
+  if (!text.includes("\0") && credentialText.test(text)) {
+    throw new WorkspaceServerError("workspace_bundle_v3_contains_credential", 400);
+  }
+}
+
 function optionalOpaqueId(value: unknown, code: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new WorkspaceServerError(code, 400);
   return assertOpaqueId(value, code);
+}
+
+function isPortableShareOrigin(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "https:" || parsed.protocol === "http:")
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.pathname === "/"
+      && parsed.search === ""
+      && parsed.hash === "";
+  } catch {
+    return false;
+  }
 }
 
 function sourceManifestOrganizationId(manifest: WorkspaceBundleV3Manifest): string | undefined {
@@ -1309,11 +1738,51 @@ interface WorkspaceSnapshot {
   learningJobs: Record<string, unknown>[];
   learningJobAttempts: Record<string, unknown>[];
   learningResourceUses: Record<string, unknown>[];
+  workspaceShares: Record<string, unknown>[];
+  workspaceShareRecipients: Record<string, unknown>[];
+  workspaceShareClaims: Record<string, unknown>[];
+  workspaceShareImports: Record<string, unknown>[];
+  workspaceShareImportResources: Record<string, unknown>[];
+  workspaceShareFileTransactions: Record<string, unknown>[];
+}
+
+interface ShareBundleFileProjection {
+  bundlePath: string;
+  sourcePath: string;
+  content: Uint8Array;
+}
+
+interface WorkspaceShareRestorePlan {
+  shares: Record<string, unknown>[];
+  recipients: Record<string, unknown>[];
+  claims: Record<string, unknown>[];
+  imports: Record<string, unknown>[];
+  importResources: Record<string, unknown>[];
+  fileTransactions: Record<string, unknown>[];
+}
+
+function shareRestoreCounts(plan: WorkspaceShareRestorePlan): Record<string, number> {
+  return {
+    share_records: plan.shares.length,
+    share_recipients: plan.recipients.length,
+    share_claims: plan.claims.length,
+    share_imports: plan.imports.length,
+    share_import_resources: plan.importResources.length,
+    share_file_transactions: plan.fileTransactions.length
+  };
+}
+
+function recordCountsForShareRestore(
+  recordCounts: Record<string, number>,
+  plan: WorkspaceShareRestorePlan
+): Record<string, number> {
+  return { ...recordCounts, ...shareRestoreCounts(plan) };
 }
 
 async function writeBundleDirectory(input: {
   directory: string;
   workspaceId: string;
+  storageRoot: string;
   mode: WorkspaceServerMode;
   snapshot: WorkspaceSnapshot;
   files: WorkspaceFileStore;
@@ -1324,6 +1793,11 @@ async function writeBundleDirectory(input: {
   // the restored Workspace inherit source membership or provenance.
   const portableWorkspace = portableWorkspaceRow(input.snapshot.workspace);
   const portableEvents = input.snapshot.events.map(portableEventRow);
+  const projectedSharing = await projectShareBundleFiles({
+    snapshot: input.snapshot,
+    workspaceId: input.workspaceId,
+    storageRoot: input.storageRoot
+  });
   const dataFiles: Array<[string, unknown]> = [
     [workspaceFile, portableWorkspace],
     ["accounts.jsonl", input.snapshot.accounts],
@@ -1345,7 +1819,13 @@ async function writeBundleDirectory(input: {
     ["learning-settings.jsonl", input.snapshot.learningSettings],
     ["learning-jobs.jsonl", input.snapshot.learningJobs],
     ["learning-job-attempts.jsonl", input.snapshot.learningJobAttempts],
-    ["learning-resource-uses.jsonl", input.snapshot.learningResourceUses]
+    ["learning-resource-uses.jsonl", input.snapshot.learningResourceUses],
+    ["workspace-shares.jsonl", projectedSharing.shares],
+    ["workspace-share-recipients.jsonl", input.snapshot.workspaceShareRecipients],
+    ["workspace-share-claims.jsonl", input.snapshot.workspaceShareClaims],
+    ["workspace-share-imports.jsonl", projectedSharing.imports],
+    ["workspace-share-import-resources.jsonl", input.snapshot.workspaceShareImportResources],
+    ["workspace-share-file-transactions.jsonl", projectedSharing.fileTransactions]
   ];
   for (const [file, payload] of dataFiles) {
     // A portable Bundle never carries Organization affiliation.  Apply the
@@ -1376,6 +1856,11 @@ async function writeBundleDirectory(input: {
     assertCredentialFreeWorkspaceFile(`files/${filePath}`, read.content);
     await writeFile(destination, read.content, { flag: "wx", mode: 0o600 });
   }
+  for (const file of projectedSharing.files) {
+    const destination = resolveBundlePath(input.directory, file.bundlePath);
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await writeFile(destination, file.content, { flag: "wx", mode: 0o600 });
+  }
   const hashes = await hashBundleFiles(input.directory, false);
   const recordCounts = {
     rooms: input.snapshot.rooms.length,
@@ -1396,7 +1881,13 @@ async function writeBundleDirectory(input: {
     learning_settings: input.snapshot.learningSettings.length,
     learning_jobs: input.snapshot.learningJobs.length,
     learning_job_attempts: input.snapshot.learningJobAttempts.length,
-    learning_resource_uses: input.snapshot.learningResourceUses.length
+    learning_resource_uses: input.snapshot.learningResourceUses.length,
+    share_records: projectedSharing.shares.length,
+    share_recipients: input.snapshot.workspaceShareRecipients.length,
+    share_claims: input.snapshot.workspaceShareClaims.length,
+    share_imports: projectedSharing.imports.length,
+    share_import_resources: input.snapshot.workspaceShareImportResources.length,
+    share_file_transactions: projectedSharing.fileTransactions.length
   };
   const source = input.snapshot.workspace;
   const schemaRevision = input.snapshot.schemaRevision;
@@ -1494,7 +1985,8 @@ export async function verifyWorkspaceBundleV3(directory: string): Promise<{ dire
   }
   const expected = new Set([workspaceFile, ...coreJsonlFiles]);
   for (const file of Object.keys(actual)) {
-    if (file !== workspaceFile && !jsonlFiles.includes(file as (typeof jsonlFiles)[number]) && !file.startsWith("files/")) {
+    if (file !== workspaceFile && !jsonlFiles.includes(file as (typeof jsonlFiles)[number])
+      && !file.startsWith("files/") && !file.startsWith(`${shareBundleFilesDirectory}/`)) {
       throw new WorkspaceServerError("workspace_bundle_v3_unexpected_file", 400);
     }
     expected.delete(file);
@@ -1502,16 +1994,50 @@ export async function verifyWorkspaceBundleV3(directory: string): Promise<{ dire
   if (expected.size > 0) throw new WorkspaceServerError("workspace_bundle_v3_required_file_missing", 400);
   const rowsByFile = new Map<string, Record<string, unknown>[]>();
   for (const file of [workspaceFile, ...jsonlFiles]) {
-    const rows = learningJsonlFiles.includes(file as (typeof learningJsonlFiles)[number]) && !actual[file]
+    const rows = optionalJsonlFiles.has(file) && !actual[file]
       ? []
       : await assertPortableJsonFile(path.join(root, file), file);
     rowsByFile.set(file, rows);
   }
   assertPortableBundleRelations(manifest, rowsByFile);
+  await assertShareFileTransactionBodies(root, manifest, rowsByFile.get("workspace-share-file-transactions.jsonl") ?? []);
   for (const file of Object.keys(actual).filter((item) => item.startsWith("files/"))) {
     assertCredentialFreeWorkspaceFile(file, await readFile(resolveBundlePath(root, file)));
   }
+  for (const file of Object.keys(actual).filter((item) => item.startsWith(`${shareBundleFilesDirectory}/`))) {
+    assertCredentialFreeShareFile(file, await readFile(resolveBundlePath(root, file)));
+  }
   return { directory: root, manifest };
+}
+
+async function assertShareFileTransactionBodies(
+  root: string,
+  manifest: WorkspaceBundleV3Manifest,
+  rows: Record<string, unknown>[]
+): Promise<void> {
+  for (const row of rows) {
+    if (String(row.status ?? "") !== "committed") continue;
+    for (const reference of assertShareFileTransactionEntries(row, true)) {
+      if (!(reference.path in manifest.files)) {
+        throw new WorkspaceServerError("workspace_bundle_share_file_transaction_body_missing", 400, { path: reference.path });
+      }
+      if (manifest.files[reference.path] !== reference.sha256) {
+        throw new WorkspaceServerError("workspace_bundle_share_file_transaction_hash_mismatch", 400, { path: reference.path });
+      }
+      let content: Uint8Array;
+      try {
+        content = await readFile(resolveBundlePath(root, reference.path));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new WorkspaceServerError("workspace_bundle_share_file_transaction_body_missing", 400, { path: reference.path });
+        }
+        throw error;
+      }
+      if (hashBytes(content) !== reference.sha256 || content.byteLength !== reference.byteSize) {
+        throw new WorkspaceServerError("workspace_bundle_share_file_transaction_body_mismatch", 400, { path: reference.path });
+      }
+    }
+  }
 }
 
 /** Creates the portable HTTP body only after the on-disk Bundle verifies. */
@@ -1665,13 +2191,15 @@ async function importSnapshot(sql: WorkspaceSql, input: {
     ["learning-evidence.jsonl", "workspace_learning_evidence", ["id", "resource_id", "resource_version", "activity_id", "kind", "summary", "created_at"]],
     ["learning-resource-links.jsonl", "workspace_learning_resource_links", ["id", "from_resource_id", "to_resource_id", "relation", "created_at"]],
     // secret_ref is intentionally not present in portable data.
-    ["learning-settings.jsonl", "workspace_learning_settings", ["id", "scope_kind", "room_id", "enabled", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "version", "updated_by", "updated_at"]],
+    ["learning-settings.jsonl", "workspace_learning_settings", ["id", "scope_kind", "room_id", "enabled", "enabled_inherits_workspace", "engine_id", "model", "currency_limit", "token_limit", "currency_used", "tokens_used", "version", "updated_by", "updated_at"]],
     ["learning-resource-uses.jsonl", "workspace_learning_resource_uses", ["id", "resource_id", "resource_version", "activity_id", "outcome", "supersedes_use_id", "summary", "created_at"]]
   ] as const) {
     const rows = await readOptionalJsonl(path.join(input.sourceDirectory, file));
     for (const row of rows) {
       const placeholders = columns.map((_, index) => `$${index + 2}`).join(", ");
-      const values = columns.map((column) => jsonColumnValue(row[column]));
+      const values = columns.map((column) => column === "enabled_inherits_workspace"
+        ? (row[column] === undefined || row[column] === null ? false : row[column])
+        : jsonColumnValue(row[column]));
       const sqlColumns = ["workspace_id", ...columns].join(", ");
       await sql.query(`INSERT INTO ${table}(${sqlColumns}) VALUES ($1, ${placeholders})`, [input.targetWorkspaceId, ...values]);
     }
@@ -1797,6 +2325,377 @@ async function importSnapshot(sql: WorkspaceSql, input: {
   }
 }
 
+function nullableText(value: unknown): string | null {
+  return value === null || value === undefined || value === "" ? null : String(value);
+}
+
+interface MaterializedWorkspaceShareRestorePlan extends WorkspaceShareRestorePlan {}
+
+async function materializeShareRestorePlan(input: {
+  plan: WorkspaceShareRestorePlan;
+  sourceDirectory: string;
+  storageRoot: string;
+  targetWorkspaceId: string;
+}): Promise<MaterializedWorkspaceShareRestorePlan> {
+  const targetRoot = path.resolve(input.storageRoot, "workspaces", input.targetWorkspaceId);
+  const mapped = new Map<string, string>();
+  const materializePath = async (
+    value: string,
+    kind: string,
+    id: string,
+    suffix: string,
+    expectedHash?: string,
+    expectedByteSize?: number,
+    required = true
+  ): Promise<string> => {
+    const marker = value.startsWith(`${shareBundleFilesDirectory}/`);
+    if (marker) assertShareBundlePath(value);
+    else assertShareInternalPath(value);
+    const key = `${marker ? "bundle" : "legacy"}:${value}`;
+    const existing = mapped.get(key);
+    const targetPath = existing ?? (marker
+      ? `${restoredShareFilesDirectory}/${value.slice(`${shareBundleFilesDirectory}/`.length)}`
+      : `${restoredShareFilesDirectory}/legacy/${shareBundleToken(kind, value)}.json`);
+    mapped.set(key, targetPath);
+    const sourceFile = resolveBundlePath(input.sourceDirectory, value);
+    let content: Uint8Array;
+    try {
+      content = await readFile(sourceFile);
+    } catch (error) {
+      // Pre-share V3 bundles contained the database path but not the private
+      // manifest body.  Keep those historical audit rows importable; a modern
+      // `share-files/` marker is required and must fail closed when missing.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && (!required || !marker)) return targetPath;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new WorkspaceServerError("workspace_file_not_found", 409, { path: value });
+      }
+      throw error;
+    }
+    if (expectedHash && hashBytes(content) !== expectedHash) {
+      throw new WorkspaceServerError("workspace_file_hash_mismatch", 409, { path: value });
+    }
+    if (expectedByteSize !== undefined && content.byteLength !== expectedByteSize) {
+      throw new WorkspaceServerError("workspace_file_size_mismatch", 409, { path: value });
+    }
+    assertCredentialFreeShareFile(`${shareBundleFilesDirectory}/${value.slice(`${shareBundleFilesDirectory}/`.length)}`, content);
+    const destination = resolveBundlePath(targetRoot, targetPath);
+    await assertNoSymlinkComponents(targetRoot, destination);
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    if (await pathExists(destination)) {
+      const existingContent = await readFile(destination);
+      if (hashBytes(existingContent) !== hashBytes(content)) {
+        throw new WorkspaceServerError("workspace_import_staging_conflict", 409, { path: targetPath });
+      }
+    } else {
+      await writeFile(destination, content, { flag: "wx", mode: 0o600 });
+    }
+    return targetPath;
+  };
+  const mapEntryPaths = async (value: unknown, transactionId: string, transactionStatus: string, expectedHash?: string, expectedByteSize?: number): Promise<unknown> => {
+    if (Array.isArray(value)) return Promise.all(value.map((item) => mapEntryPaths(item, transactionId, transactionStatus, expectedHash, expectedByteSize)));
+    if (!value || typeof value !== "object" || value instanceof Date) return value;
+    const output: Record<string, unknown> = {};
+    const entryRecord = value as Record<string, unknown>;
+    const entryHash = typeof entryRecord.sha256 === "string"
+      ? String(entryRecord.sha256)
+      : expectedHash;
+    const entryByteSize = typeof entryRecord.byte_size === "number" && Number.isSafeInteger(entryRecord.byte_size)
+      ? entryRecord.byte_size
+      : expectedByteSize;
+    for (const [key, nested] of Object.entries(entryRecord)) {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (["stagedpath", "finalpath", "manifestpath"].includes(normalized) && typeof nested === "string") {
+        const required = transactionStatus === "committed" && normalized === "finalpath";
+        output[key] = await materializePath(nested, "transactions", transactionId, normalized === "stagedpath" ? "staged" : normalized === "finalpath" ? "final" : "manifest", entryHash, entryByteSize, required);
+      } else {
+        output[key] = await mapEntryPaths(nested, transactionId, transactionStatus, entryHash, entryByteSize);
+      }
+    }
+    return output;
+  };
+  const shares: Record<string, unknown>[] = [];
+  for (const row of input.plan.shares) {
+    const restored = { ...row };
+    if (typeof row.manifest_path === "string" && row.manifest_path) {
+      restored.manifest_path = await materializePath(row.manifest_path, "manifests", String(row.id), "manifest", nullableText(row.content_hash) ?? undefined, typeof row.byte_size === "number" ? row.byte_size : undefined);
+    }
+    shares.push(restored);
+  }
+  const imports: Record<string, unknown>[] = [];
+  for (const row of input.plan.imports) {
+    const restored = { ...row };
+    if (typeof row.manifest_path === "string" && row.manifest_path) {
+      restored.manifest_path = await materializePath(row.manifest_path, "imports", String(row.operation_id), "manifest", nullableText(row.content_hash) ?? undefined, typeof row.byte_size === "number" ? row.byte_size : undefined);
+    }
+    imports.push(restored);
+  }
+  const fileTransactions: Record<string, unknown>[] = [];
+  for (const row of input.plan.fileTransactions) {
+    fileTransactions.push({
+      ...row,
+      entries: await mapEntryPaths(row.entries, String(row.id), String(row.status), undefined, undefined)
+    });
+  }
+  return { ...input.plan, shares, imports, fileTransactions };
+}
+
+/** Import the portable share/audit projection after Completion-v4 extension rows exist. */
+async function importWorkspaceShareSnapshot(
+  sql: WorkspaceSql,
+  targetWorkspaceId: string,
+  sourceDirectory: string,
+  ownerAccountId: string,
+  restorePlan: WorkspaceShareRestorePlan,
+  storageRoot: string
+): Promise<void> {
+  const materialized = await materializeShareRestorePlan({
+    plan: restorePlan,
+    sourceDirectory,
+    storageRoot,
+    targetWorkspaceId
+  });
+  const { shares, recipients, claims, imports, fileTransactions } = materialized;
+  if (shares.length === 0 && recipients.length === 0 && claims.length === 0 && imports.length === 0 && fileTransactions.length === 0) return;
+
+  // The first transaction either commits the complete projection or is
+  // aborted. On recovery, matching counts mean this helper already committed;
+  // a partial projection is unsafe to guess at and must use the normal abort
+  // and retry path.
+  const existingCounts = [
+    ["workspace_shares", shares.length],
+    ["workspace_share_recipients", recipients.length],
+    ["workspace_share_claims", claims.length],
+    ["workspace_share_imports", imports.length],
+    ["workspace_share_file_transactions", fileTransactions.length]
+  ] as const;
+  const observed: number[] = [];
+  for (const [table] of existingCounts) observed.push(await count(sql, table, targetWorkspaceId));
+  const anyExisting = observed.some((value) => value > 0);
+  if (anyExisting) {
+    if (observed.every((value, index) => value === existingCounts[index]?.[1])) return;
+    throw new WorkspaceServerError("workspace_import_share_state_mismatch", 409);
+  }
+
+  const restoreTimestamp = new Date().toISOString();
+  const sourceShareStates = new Map<string, string>();
+  for (const row of shares) {
+    const sourceStatus = String(row.status);
+    sourceShareStates.set(String(row.id), sourceStatus);
+    const sourceLocator = nullableText(row.public_locator);
+    let restoredLocator: string | null = null;
+    if (sourceStatus !== "draft" && sourceLocator) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const candidate = createHash("sha256")
+          .update(`workspace-share-restore:${targetWorkspaceId}:${String(row.id)}:${sourceLocator}:${restoreTimestamp}:${attempt}:${randomUUID()}`)
+          .digest("base64url")
+          .slice(0, 43);
+        const existing = await sql.query<{ exists: boolean }>(
+          "SELECT EXISTS(SELECT 1 FROM workspace_shares WHERE public_locator = $1) AS exists",
+          [candidate]
+        );
+        if (existing.rows[0]?.exists !== true) {
+          restoredLocator = candidate;
+          break;
+        }
+      }
+      if (!restoredLocator) throw new WorkspaceServerError("workspace_share_locator_conflict", 409);
+    }
+    // A revoked source share is temporarily inserted as active solely so its
+    // historical claims can pass the share claim guard. It is revoked again
+    // below with its original revoked timestamp. Drafts remain drafts.
+    const insertStatus = sourceStatus === "draft" ? "draft" : "active";
+    await sql.query(
+      `INSERT INTO workspace_shares(
+         workspace_id, id, source_kind, source_room_id, source_agent_id,
+         created_by, title, status, visibility, revision, source_versions,
+         manifest_path, content_hash, byte_size, public_locator, created_at,
+         updated_at, published_at, revoked_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::JSONB, $12, $13,
+         $14, $15, $16::TIMESTAMPTZ, $17::TIMESTAMPTZ, $18::TIMESTAMPTZ,
+         $19::TIMESTAMPTZ
+       )`,
+      [
+        targetWorkspaceId,
+        String(row.id),
+        String(row.source_kind),
+        nullableText(row.source_room_id),
+        nullableText(row.source_agent_id),
+        String(row.created_by ?? ownerAccountId),
+        String(row.title),
+        insertStatus,
+        String(row.visibility),
+        Number(row.revision),
+        jsonColumnValue(row.source_versions),
+        nullableText(row.manifest_path),
+        nullableText(row.content_hash),
+        row.byte_size === null || row.byte_size === undefined ? null : Number(row.byte_size),
+        restoredLocator,
+        String(row.created_at),
+        String(row.updated_at),
+        nullableText(row.published_at),
+        insertStatus === "draft" ? null : null
+      ]
+    );
+  }
+  for (const row of recipients) {
+    await sql.query(
+      `INSERT INTO workspace_share_recipients(workspace_id, share_id, recipient_account_id)
+       VALUES ($1, $2, $3)`,
+      [targetWorkspaceId, String(row.share_id), String(row.recipient_account_id)]
+    );
+  }
+  for (const row of claims) {
+    await sql.query(
+      `INSERT INTO workspace_share_claims(
+         workspace_id, id, share_id, recipient_account_id, target_origin,
+         target_workspace_id, operation_id, request_hash, content_hash,
+         created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::TIMESTAMPTZ)`,
+      [
+        targetWorkspaceId,
+        String(row.id),
+        String(row.share_id),
+        String(row.recipient_account_id),
+        String(row.target_origin),
+        String(row.target_workspace_id),
+        String(row.operation_id),
+        String(row.request_hash),
+        String(row.content_hash),
+        String(row.created_at)
+      ]
+    );
+  }
+  for (const row of imports) {
+    await sql.query(
+      `INSERT INTO workspace_share_imports(
+         workspace_id, operation_id, recipient_account_id, kind, source_origin,
+         source_share_id, source_locator, claim_id, request_hash, content_hash,
+         target_room_id, reserved_agent_id, reserved_resource_ids,
+         manifest_path, status, phase, retryable, failure_code, lease_token,
+         lease_until, result, created_at, updated_at, committed_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::JSONB,
+         $14, $15, $16, $17, $18, $19, $20::TIMESTAMPTZ, $21::JSONB,
+         $22::TIMESTAMPTZ, $23::TIMESTAMPTZ, $24::TIMESTAMPTZ
+       )`,
+      [
+        targetWorkspaceId,
+        String(row.operation_id),
+        String(row.recipient_account_id),
+        String(row.kind),
+        String(row.source_origin),
+        String(row.source_share_id),
+        String(row.source_locator),
+        String(row.claim_id),
+        String(row.request_hash),
+        String(row.content_hash),
+        nullableText(row.target_room_id),
+        nullableText(row.reserved_agent_id),
+        jsonColumnValue(row.reserved_resource_ids),
+        nullableText(row.manifest_path),
+        String(row.status),
+        String(row.phase),
+        String(row.status) === "committed" ? false : row.retryable === true,
+        String(row.status) === "committed" ? null : nullableText(row.failure_code),
+        String(row.status) === "committed" ? null : nullableText(row.lease_token),
+        String(row.status) === "committed" ? null : nullableText(row.lease_until),
+        jsonColumnValue(row.result),
+        String(row.created_at),
+        String(row.updated_at),
+        nullableText(row.committed_at)
+      ]
+    );
+  }
+  for (const row of fileTransactions) {
+    await sql.query(
+      `INSERT INTO workspace_share_file_transactions(
+         workspace_id, id, owner_kind, owner_id, actor_account_id, status,
+         entries, created_at, updated_at, last_error_code
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB, $8::TIMESTAMPTZ,
+                 $9::TIMESTAMPTZ, $10)`,
+      [
+        targetWorkspaceId,
+        String(row.id),
+        String(row.owner_kind),
+        String(row.owner_id),
+        String(row.actor_account_id ?? ownerAccountId),
+        String(row.status),
+        jsonColumnValue(row.entries),
+        String(row.created_at),
+        String(row.updated_at),
+        nullableText(row.last_error_code)
+      ]
+    );
+  }
+  for (const row of shares) {
+    const sourceStatus = sourceShareStates.get(String(row.id));
+    if (sourceStatus !== "active" && sourceStatus !== "revoked") continue;
+    const revokedAt = sourceStatus === "active" ? restoreTimestamp : String(row.revoked_at);
+    const nextRevision = sourceStatus === "active" ? Number(row.revision) + 1 : Number(row.revision);
+    await sql.query(
+      `UPDATE workspace_shares
+          SET status = 'revoked', revoked_at = $4::TIMESTAMPTZ,
+              revision = $3, updated_at = $4::TIMESTAMPTZ
+        WHERE workspace_id = $1 AND id = $2`,
+      [targetWorkspaceId, String(row.id), nextRevision, revokedAt]
+    );
+  }
+}
+
+/** Import-resource rows reference Completion resources, so this runs after a
+ * v4 callback has inserted those resources and remains safe on recovery. */
+async function importWorkspaceShareImportResources(
+  sql: WorkspaceSql,
+  targetWorkspaceId: string,
+  rows: Record<string, unknown>[]
+): Promise<void> {
+  if (rows.length === 0) return;
+  const operationIds = [...new Set(rows.map((row) => String(row.operation_id)))];
+  const imports = await sql.query<{
+    operation_id: string;
+    status: string;
+    phase: string;
+    retryable: boolean;
+    failure_code: string | null;
+    lease_token: string | null;
+    lease_until: string | null;
+    reserved_resource_ids: unknown;
+  }>(
+    `SELECT operation_id, status, phase, retryable, failure_code, lease_token, lease_until, reserved_resource_ids
+       FROM workspace_share_imports
+      WHERE workspace_id = $1 AND operation_id = ANY($2::TEXT[])`,
+    [targetWorkspaceId, operationIds]
+  );
+  const importByOperation = new Map(imports.rows.map((row) => [row.operation_id, row]));
+  for (const row of rows) {
+    const operationId = String(row.operation_id);
+    const importRow = importByOperation.get(operationId);
+    if (!importRow
+      || importRow.status !== "committed"
+      || importRow.phase !== "done"
+      || importRow.retryable
+      || importRow.failure_code !== null
+      || importRow.lease_token !== null
+      || importRow.lease_until !== null
+      || !importReservedResourceIncludes(importRow.reserved_resource_ids, String(row.entry_id), String(row.resource_id))) {
+      throw new WorkspaceServerError("workspace_share_import_resource_not_committed", 409, { operation_id: operationId });
+    }
+  }
+  const existing = await count(sql, "workspace_share_import_resources", targetWorkspaceId);
+  if (existing > 0) {
+    if (existing === rows.length) return;
+    throw new WorkspaceServerError("workspace_import_share_state_mismatch", 409);
+  }
+  for (const row of rows) {
+    await sql.query(
+      `INSERT INTO workspace_share_import_resources(workspace_id, operation_id, entry_id, resource_id)
+       VALUES ($1, $2, $3, $4)`,
+      [targetWorkspaceId, String(row.operation_id), String(row.entry_id), String(row.resource_id)]
+    );
+  }
+}
+
 const workspaceEventBaseColumns = [
   "source_event_id", "room_id", "kind", "record_type", "record_id", "operation_id", "payload", "created_at"
 ] as const;
@@ -1843,7 +2742,8 @@ async function verifyImportedWorkspace(
   store: WorkspaceServerStore,
   context: WorkspaceRequestContext,
   manifest: WorkspaceBundleV3Manifest,
-  sourceDirectory: string
+  sourceDirectory: string,
+  restorePlan?: WorkspaceShareRestorePlan
 ): Promise<void> {
   await assertWorkspaceOwner(store, context);
   const counts = await store.database.withContext(context, async (sql) => {
@@ -1853,14 +2753,16 @@ async function verifyImportedWorkspace(
     const tables = [
       "rooms", "workspace_members", "room_members", "workspace_records", "workspace_events",
       "workspace_jobs", "workspace_operations", "workspace_invitations", "workspace_audit_entries", "workspace_files",
-      "workspace_learning_activities", "workspace_learning_resources", "workspace_learning_resource_versions", "workspace_learning_evidence", "workspace_learning_resource_links", "workspace_learning_settings", "workspace_learning_jobs", "workspace_learning_job_attempts", "workspace_learning_resource_uses"
+      "workspace_learning_activities", "workspace_learning_resources", "workspace_learning_resource_versions", "workspace_learning_evidence", "workspace_learning_resource_links", "workspace_learning_settings", "workspace_learning_jobs", "workspace_learning_job_attempts", "workspace_learning_resource_uses",
+      "workspace_shares", "workspace_share_recipients", "workspace_share_claims", "workspace_share_imports", "workspace_share_import_resources", "workspace_share_file_transactions"
     ] as const;
     const rows: number[] = [];
     for (const table of tables) rows.push(await count(sql, table, context.workspaceId));
     const countAt = (index: number): number => rows[index] ?? 0;
     return {
       rooms: countAt(0), memberships: countAt(1), room_memberships: countAt(2), records: countAt(3), events: countAt(4), jobs: countAt(5), operations: countAt(6), invitations: countAt(7), audits: countAt(8), files: countAt(9),
-      learning_activities: countAt(10), learning_resources: countAt(11), learning_resource_versions: countAt(12), learning_evidence: countAt(13), learning_resource_links: countAt(14), learning_settings: countAt(15), learning_jobs: countAt(16), learning_job_attempts: countAt(17), learning_resource_uses: countAt(18)
+      learning_activities: countAt(10), learning_resources: countAt(11), learning_resource_versions: countAt(12), learning_evidence: countAt(13), learning_resource_links: countAt(14), learning_settings: countAt(15), learning_jobs: countAt(16), learning_job_attempts: countAt(17), learning_resource_uses: countAt(18),
+      share_records: countAt(19), share_recipients: countAt(20), share_claims: countAt(21), share_imports: countAt(22), share_import_resources: countAt(23), share_file_transactions: countAt(24)
     };
   });
   // The importer is guaranteed an active Owner membership on the target. If
@@ -1870,7 +2772,10 @@ async function verifyImportedWorkspace(
   const sourceMemberships = await readJsonl(path.join(sourceDirectory, "memberships.jsonl"));
   const expectedMemberships = (manifest.record_counts.memberships ?? 0)
     + (sourceMemberships.some((row) => row.account_id === context.accountId) ? 0 : 1);
-  const expected = { ...manifest.record_counts, memberships: expectedMemberships };
+  const expected = {
+    ...(restorePlan ? recordCountsForShareRestore(manifest.record_counts, restorePlan) : manifest.record_counts),
+    memberships: expectedMemberships
+  };
   const countsMatch = Object.entries(expected).every(([name, expectedCount]) => {
     const actual = counts[name as keyof typeof counts];
     return name === "audits" ? actual >= expectedCount : actual === expectedCount;
@@ -1884,6 +2789,43 @@ async function verifyImportedWorkspace(
   for (const file of metadata) {
     const read = await files.read(context, { roomId: file.room_id, path: file.path });
     if (read.file.sha256 !== file.sha256) throw new WorkspaceServerError("workspace_import_file_hash_mismatch", 400);
+  }
+  if (restorePlan) {
+    const requiredShareIds = new Set(
+      restorePlan.shares
+        .filter((row) => typeof row.manifest_path === "string" && row.manifest_path.startsWith(`${shareBundleFilesDirectory}/`))
+        .map((row) => String(row.id))
+    );
+    const requiredImportIds = new Set(
+      restorePlan.imports
+        .filter((row) => typeof row.manifest_path === "string" && row.manifest_path.startsWith(`${shareBundleFilesDirectory}/`))
+        .map((row) => String(row.operation_id))
+    );
+    const bodies = await store.database.withContext(context, async (sql) => {
+      const shares = await sql.query<{ id: string; manifest_path: string | null; content_hash: string | null }>(
+        "SELECT id, manifest_path, content_hash FROM workspace_shares WHERE workspace_id = $1",
+        [context.workspaceId]
+      );
+      const imports = await sql.query<{ operation_id: string; manifest_path: string | null; content_hash: string | null }>(
+        "SELECT operation_id, manifest_path, content_hash FROM workspace_share_imports WHERE workspace_id = $1",
+        [context.workspaceId]
+      );
+      return { shares: shares.rows, imports: imports.rows };
+    });
+    for (const row of bodies.shares) {
+      if (!requiredShareIds.has(String(row.id)) || !row.manifest_path || !row.content_hash) continue;
+      const content = await readPrivateWorkspaceFile(store.storageRoot, context.workspaceId, row.manifest_path).catch(() => {
+        throw new WorkspaceServerError("workspace_import_share_manifest_missing", 400, { share_id: row.id });
+      });
+      if (hashBytes(content) !== row.content_hash) throw new WorkspaceServerError("workspace_import_share_manifest_hash_mismatch", 400, { share_id: row.id });
+    }
+    for (const row of bodies.imports) {
+      if (!requiredImportIds.has(String(row.operation_id)) || !row.manifest_path || !row.content_hash) continue;
+      const content = await readPrivateWorkspaceFile(store.storageRoot, context.workspaceId, row.manifest_path).catch(() => {
+        throw new WorkspaceServerError("workspace_import_share_manifest_missing", 400, { operation_id: row.operation_id });
+      });
+      if (hashBytes(content) !== row.content_hash) throw new WorkspaceServerError("workspace_import_share_manifest_hash_mismatch", 400, { operation_id: row.operation_id });
+    }
   }
 }
 
@@ -1903,13 +2845,44 @@ async function count(sql: WorkspaceSql, table: string, workspaceId: string): Pro
 async function copyBundleFilesToStaging(source: string, stagingRoot: string, hashes: Record<string, string>): Promise<void> {
   await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
   for (const [relativePath, expectedHash] of Object.entries(hashes)) {
-    if (!relativePath.startsWith("files/")) continue;
+    if (!relativePath.startsWith("files/") && !relativePath.startsWith(`${shareBundleFilesDirectory}/`)) continue;
     const sourcePath = resolveBundlePath(source, relativePath);
     const content = await readFile(sourcePath);
     if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v3_hash_mismatch", 400);
     const target = resolveBundlePath(stagingRoot, relativePath);
     await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     await writeFile(target, content, { flag: "wx", mode: 0o600 });
+  }
+}
+
+function collectShareBundlePaths(value: unknown, output: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectShareBundlePaths(item, output);
+    return;
+  }
+  if (!value || typeof value !== "object" || value instanceof Date) return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (["manifestpath", "stagedpath", "finalpath"].includes(normalized)
+      && typeof nested === "string" && nested.startsWith(`${shareBundleFilesDirectory}/`)) {
+      output.add(nested);
+    }
+    collectShareBundlePaths(nested, output);
+  }
+}
+
+async function cleanupUnselectedShareBundleFiles(
+  targetRoot: string,
+  manifestFiles: Record<string, string>,
+  plan: WorkspaceShareRestorePlan
+): Promise<void> {
+  const selected = new Set<string>();
+  collectShareBundlePaths(plan.shares, selected);
+  collectShareBundlePaths(plan.imports, selected);
+  collectShareBundlePaths(plan.fileTransactions, selected);
+  for (const relativePath of Object.keys(manifestFiles)) {
+    if (!relativePath.startsWith(`${shareBundleFilesDirectory}/`) || selected.has(relativePath)) continue;
+    await rm(resolveBundlePath(targetRoot, relativePath), { force: true }).catch(() => undefined);
   }
 }
 
@@ -1988,7 +2961,7 @@ function assertCredentialFree(value: unknown): void {
 const portablePathFieldNames = new Set([
   "path", "filepath", "storage_namespace", "storagenamespace", "working_directory", "workingdirectory",
   "worktree_path", "worktreepath", "absolute_path", "absolutepath", "directory", "directory_path",
-  "directorypath", "root_path", "rootpath", "cwd", "home"
+  "directorypath", "root_path", "rootpath", "cwd", "home", "manifest_path", "manifestpath", "staged_path", "stagedpath", "final_path", "finalpath"
 ]);
 
 function assertPortablePathsFree(value: unknown, fieldName?: string): void {
@@ -2271,6 +3244,12 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     const createdBy = opaquePortableValue(row.created_by, "workspace_bundle_v3_relation_invalid");
     const updatedBy = opaquePortableValue(row.updated_by, "workspace_bundle_v3_relation_invalid");
     assertLearningScope(row.scope_kind, row.room_id);
+    if (row.scope_kind === "workspace" && ["knowledge", "memory", "workspace_knowledge", "workspace_memory"].includes(String(row.resource_kind).toLowerCase())) {
+      // Workspace Knowledge/Memory was intentionally retired. Rejecting it at
+      // Bundle verification keeps Restore atomic and leaves Room Knowledge,
+      // Skill, and workspace policy rows portable.
+      throw new WorkspaceServerError("workspace_memory_removed", 409);
+    }
     if (learningResources.has(resourceId) || !knownAccountIds.has(createdBy) || !knownAccountIds.has(updatedBy)
       || !["knowledge", "memory", "skill", "workspace_rule"].includes(String(row.resource_kind))
       || !["active", "provisional", "archived", "conflict"].includes(String(row.state))
@@ -2350,8 +3329,13 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     const roomId = row.scope_kind === "room" ? opaquePortableValue(row.room_id, "workspace_bundle_v3_relation_invalid") : undefined;
     const scopeKey = row.scope_kind === "workspace" ? "workspace" : `room:${roomId}`;
     assertLearningScope(row.scope_kind, row.room_id);
+    const inheritsWorkspace = row.enabled_inherits_workspace === undefined || row.enabled_inherits_workspace === null
+      ? false
+      : row.enabled_inherits_workspace;
     if (learningSettings.has(scopeKey) || !knownAccountIds.has(updatedBy) || !settingsId
-      || settingsId !== scopeKey || typeof row.enabled !== "boolean" || Number(row.currency_used) < 0 || Number(row.tokens_used) < 0) {
+      || settingsId !== scopeKey || typeof row.enabled !== "boolean" || typeof inheritsWorkspace !== "boolean"
+      || (row.scope_kind === "workspace" && inheritsWorkspace)
+      || Number(row.currency_used) < 0 || Number(row.tokens_used) < 0) {
       throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
     }
     learningSettings.add(scopeKey);
@@ -2417,6 +3401,7 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     }
     correctedUseIds.add(supersedesUseId);
   }
+  assertPortableSharingRelations(manifest, rowsByFile, roomIds, knownAccountIds);
   const allCounts: Record<string, number> = {
     rooms: rowsByFile.get("rooms.jsonl")?.length ?? 0,
     memberships: rowsByFile.get("memberships.jsonl")?.length ?? 0,
@@ -2436,12 +3421,20 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     learning_settings: rowsByFile.get("learning-settings.jsonl")?.length ?? 0,
     learning_jobs: rowsByFile.get("learning-jobs.jsonl")?.length ?? 0,
     learning_job_attempts: rowsByFile.get("learning-job-attempts.jsonl")?.length ?? 0,
-    learning_resource_uses: rowsByFile.get("learning-resource-uses.jsonl")?.length ?? 0
+    learning_resource_uses: rowsByFile.get("learning-resource-uses.jsonl")?.length ?? 0,
+    share_records: rowsByFile.get("workspace-shares.jsonl")?.length ?? 0,
+    share_recipients: rowsByFile.get("workspace-share-recipients.jsonl")?.length ?? 0,
+    share_claims: rowsByFile.get("workspace-share-claims.jsonl")?.length ?? 0,
+    share_imports: rowsByFile.get("workspace-share-imports.jsonl")?.length ?? 0,
+    share_import_resources: rowsByFile.get("workspace-share-import-resources.jsonl")?.length ?? 0,
+    share_file_transactions: rowsByFile.get("workspace-share-file-transactions.jsonl")?.length ?? 0
   };
   const requiredCountNames = ["rooms", "memberships", "room_memberships", "records", "events", "jobs", "operations", "invitations", "audits", "files"];
   const learningCountNames = ["learning_activities", "learning_resources", "learning_resource_versions", "learning_evidence", "learning_resource_links", "learning_settings", "learning_jobs", "learning_job_attempts", "learning_resource_uses"];
+  const sharingCountNames = ["share_records", "share_recipients", "share_claims", "share_imports", "share_import_resources", "share_file_transactions"];
   if (requiredCountNames.some((name) => !(name in manifest.record_counts))
     || learningCountNames.some((name) => (allCounts[name] ?? 0) > 0 && !(name in manifest.record_counts))
+    || sharingCountNames.some((name) => (allCounts[name] ?? 0) > 0 && !(name in manifest.record_counts))
     || Object.entries(manifest.record_counts).some(([name, value]) => !(name in allCounts) || !Number.isSafeInteger(value) || value < 0)) {
     throw new WorkspaceServerError("workspace_bundle_v3_record_count_mismatch", 400);
   }
@@ -2450,7 +3443,7 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
     throw new WorkspaceServerError("workspace_bundle_v3_record_count_mismatch", 400);
   }
   if (allCounts.operations !== 0) throw new WorkspaceServerError("workspace_bundle_v3_operations_not_portable", 400);
-  for (const file of ["rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl", ...learningJsonlFiles] as const) {
+  for (const file of ["rooms.jsonl", "memberships.jsonl", "room-memberships.jsonl", "records.jsonl", "events.jsonl", "jobs.jsonl", "invitations.jsonl", "audits.jsonl", "files.jsonl", ...learningJsonlFiles, ...sharingJsonlFiles] as const) {
     for (const row of rowsByFile.get(file) ?? []) {
       if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
     }
@@ -2468,6 +3461,244 @@ function assertPortableBundleRelations(manifest: WorkspaceBundleV3Manifest, rows
   for (const bundlePath of Object.keys(manifest.files).filter((path) => path.startsWith("files/"))) {
     if (!metadataPaths.has(bundlePath)) throw new WorkspaceServerError("workspace_bundle_v3_file_metadata_mismatch", 400);
   }
+}
+
+function assertPortableSharingRelations(
+  manifest: WorkspaceBundleV3Manifest,
+  rowsByFile: Map<string, Record<string, unknown>[]>,
+  roomIds: Set<string>,
+  knownAccountIds: Set<string>
+): void {
+  const shares = rowsByFile.get("workspace-shares.jsonl") ?? [];
+  const recipients = rowsByFile.get("workspace-share-recipients.jsonl") ?? [];
+  const claims = rowsByFile.get("workspace-share-claims.jsonl") ?? [];
+  const imports = rowsByFile.get("workspace-share-imports.jsonl") ?? [];
+  const importResources = rowsByFile.get("workspace-share-import-resources.jsonl") ?? [];
+  const fileTransactions = rowsByFile.get("workspace-share-file-transactions.jsonl") ?? [];
+  const shareIds = new Set<string>();
+  const shareStatuses = new Map<string, string>();
+  const shareVisibilities = new Map<string, string>();
+  for (const row of shares) {
+    if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+    const id = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const sourceKind = String(row.source_kind);
+    const sourceRoomId = row.source_room_id === null || row.source_room_id === undefined ? undefined : opaquePortableValue(row.source_room_id, "workspace_bundle_v3_relation_invalid");
+    const sourceAgentId = row.source_agent_id === null || row.source_agent_id === undefined ? undefined : opaquePortableValue(row.source_agent_id, "workspace_bundle_v3_relation_invalid");
+    const status = String(row.status);
+    const visibility = String(row.visibility);
+    const createdBy = opaquePortableValue(row.created_by, "workspace_bundle_v3_relation_invalid");
+    const revision = Number(row.revision);
+    const byteSize = row.byte_size === null || row.byte_size === undefined ? undefined : Number(row.byte_size);
+    const contentHash = row.content_hash === null || row.content_hash === undefined ? undefined : String(row.content_hash);
+    const publicLocator = row.public_locator === null || row.public_locator === undefined ? undefined : String(row.public_locator);
+    const manifestPath = row.manifest_path === null || row.manifest_path === undefined ? undefined : String(row.manifest_path);
+    const sourceVersionsValid = Array.isArray(row.source_versions);
+    if (shareIds.has(id) || !knownAccountIds.has(createdBy)
+      || !["room_knowledge", "agent"].includes(sourceKind)
+      || (sourceKind === "room_knowledge" ? sourceRoomId === undefined || sourceAgentId !== undefined : sourceRoomId !== undefined || sourceAgentId === undefined)
+      || (sourceRoomId !== undefined && !roomIds.has(sourceRoomId))
+      || !["draft", "active", "revoked"].includes(status)
+      || !["restricted", "public"].includes(visibility)
+      || !Number.isSafeInteger(revision) || revision < 1
+      || !sourceVersionsValid
+      || (byteSize !== undefined && (!Number.isSafeInteger(byteSize) || byteSize < 0))
+      || (contentHash !== undefined && !/^[0-9a-f]{64}$/.test(contentHash))
+      || (publicLocator !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(publicLocator))
+      || (manifestPath !== undefined && (!manifestPath || (() => { assertSafeRelativePath(manifestPath); return false; })()))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if (status === "draft") {
+      if (manifestPath !== undefined || contentHash !== undefined || byteSize !== undefined || publicLocator !== undefined || row.published_at !== null || row.revoked_at !== null) {
+        throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+      }
+    } else if (manifestPath === undefined || contentHash === undefined || byteSize === undefined || publicLocator === undefined || typeof row.published_at !== "string") {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    } else if (status === "active" ? row.revoked_at !== null : typeof row.revoked_at !== "string") {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    shareIds.add(id);
+    shareStatuses.set(id, status);
+    shareVisibilities.set(id, visibility);
+  }
+  const recipientKeys = new Set<string>();
+  for (const row of recipients) {
+    if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+    const shareId = opaquePortableValue(row.share_id, "workspace_bundle_v3_relation_invalid");
+    const recipientId = nonEmptyPortableText(row.recipient_account_id);
+    const key = `${shareId}\u0000${recipientId}`;
+    if (!shareIds.has(shareId) || recipientKeys.has(key)) throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    recipientKeys.add(key);
+  }
+  for (const [shareId, status] of shareStatuses) {
+    if (status === "draft") continue;
+    const recipientCount = [...recipientKeys].filter((key) => key.startsWith(`${shareId}\u0000`)).length;
+    const visibility = String(shares.find((row) => String(row.id) === shareId)?.visibility ?? "");
+    if ((visibility === "restricted" && recipientCount === 0) || (visibility === "public" && recipientCount > 0)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  const claimKeys = new Set<string>();
+  const claimIds = new Set<string>();
+  for (const row of claims) {
+    if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+    const claimId = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const shareId = opaquePortableValue(row.share_id, "workspace_bundle_v3_relation_invalid");
+    const recipientId = nonEmptyPortableText(row.recipient_account_id);
+    const targetOrigin = nonEmptyPortableText(row.target_origin);
+    const targetWorkspaceId = nonEmptyPortableText(row.target_workspace_id);
+    const operationId = nonEmptyPortableText(row.operation_id);
+    const replayKey = `${shareId}\u0000${recipientId}\u0000${targetOrigin}\u0000${targetWorkspaceId}\u0000${operationId}`;
+    if (claimIds.has(claimId) || !shareIds.has(shareId) || shareStatuses.get(shareId) === "draft"
+      || claimKeys.has(replayKey) || !/^[0-9a-f]{64}$/.test(String(row.request_hash))
+      || (shareVisibilities.get(shareId) !== "public" && !recipientKeys.has(`${shareId}\u0000${recipientId}`))
+      || !/^[0-9a-f]{64}$/.test(String(row.content_hash)) || !isPortableShareOrigin(targetOrigin)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    claimIds.add(claimId);
+    claimKeys.add(replayKey);
+  }
+  const importKeys = new Set<string>();
+  const importsByOperation = new Map<string, Record<string, unknown>>();
+  const reservedResourceMappingsByOperation = new Map<string, readonly ReservedResourceMapping[]>();
+  for (const row of imports) {
+    if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+    const operationId = opaquePortableValue(row.operation_id, "workspace_bundle_v3_relation_invalid");
+    const recipientId = opaquePortableValue(row.recipient_account_id, "workspace_bundle_v3_relation_invalid");
+    const kind = String(row.kind);
+    const sourceOrigin = nonEmptyPortableText(row.source_origin);
+    const targetRoomId = row.target_room_id === null || row.target_room_id === undefined ? undefined : opaquePortableValue(row.target_room_id, "workspace_bundle_v3_relation_invalid");
+    const reservedAgentId = row.reserved_agent_id === null || row.reserved_agent_id === undefined ? undefined : opaquePortableValue(row.reserved_agent_id, "workspace_bundle_v3_relation_invalid");
+    const status = String(row.status);
+    const phase = String(row.phase);
+    const leaseToken = row.lease_token === null || row.lease_token === undefined ? undefined : nonEmptyPortableText(row.lease_token);
+    const leaseUntil = row.lease_until === null || row.lease_until === undefined ? undefined : String(row.lease_until);
+    if (importKeys.has(operationId) || !knownAccountIds.has(recipientId)
+      || !["room_knowledge", "agent"].includes(kind)
+      || !isPortableShareOrigin(sourceOrigin)
+      || (kind === "room_knowledge" ? targetRoomId === undefined || reservedAgentId !== undefined : targetRoomId !== undefined || reservedAgentId === undefined)
+      || (targetRoomId !== undefined && !roomIds.has(targetRoomId))
+      || !Array.isArray(row.reserved_resource_ids)
+      || !["staging", "committed", "failed"].includes(status)
+      || !["fetch", "files", "commit", "done", "cleanup"].includes(phase)
+      || typeof row.retryable !== "boolean"
+      || (leaseToken === undefined) !== (leaseUntil === undefined)
+      || (status === "staging" || (status === "committed" && phase !== "done"))) {
+      if (status === "staging" || (status === "committed" && phase !== "done")) {
+        throw new WorkspaceServerError("workspace_bundle_incomplete_share_operation", 409, { operation_id: operationId });
+      }
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if (status === "committed" && (row.result === null || row.result === undefined || typeof row.committed_at !== "string")) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if (status === "committed" && (row.retryable !== false || row.failure_code !== null || leaseToken !== undefined || leaseUntil !== undefined)) {
+      throw new WorkspaceServerError("workspace_bundle_share_import_terminal_state_invalid", 409, { operation_id: operationId });
+    }
+    if (status === "failed" && (typeof row.failure_code !== "string" || row.failure_code.trim() === "" || phase !== "cleanup" || row.retryable !== false || leaseToken !== undefined || leaseUntil !== undefined)) {
+      throw new WorkspaceServerError("workspace_bundle_failed_share_import_not_terminal", 409, { operation_id: operationId });
+    }
+    if (status !== "failed" && row.failure_code !== null && row.failure_code !== undefined) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if (status === "committed") {
+      const reservedResourceMappings = normalizeReservedResourceMappings(row.reserved_resource_ids);
+      if (!reservedResourceMappings) {
+        throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+      }
+      reservedResourceMappingsByOperation.set(operationId, reservedResourceMappings);
+    }
+    importKeys.add(operationId);
+    importsByOperation.set(operationId, row);
+  }
+  const importResourceKeys = new Set<string>();
+  const importResourceIds = new Set<string>();
+  const importResourcePairsByOperation = new Map<string, Set<string>>();
+  for (const row of importResources) {
+    if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+    const operationId = opaquePortableValue(row.operation_id, "workspace_bundle_v3_relation_invalid");
+    const entryId = nonEmptyPortableText(row.entry_id);
+    const resourceId = opaquePortableValue(row.resource_id, "workspace_bundle_v3_relation_invalid");
+    const key = `${operationId}\u0000${entryId}`;
+    const importRow = importsByOperation.get(operationId);
+    if (!importKeys.has(operationId) || !importRow || String(importRow.status) !== "committed"
+      || !importReservedResourceIncludes(importRow.reserved_resource_ids, entryId, resourceId)
+      || importResourceKeys.has(key) || importResourceIds.has(resourceId)) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    importResourceKeys.add(key);
+    importResourceIds.add(resourceId);
+    const pairs = importResourcePairsByOperation.get(operationId) ?? new Set<string>();
+    pairs.add(`${entryId}\u0000${resourceId}`);
+    importResourcePairsByOperation.set(operationId, pairs);
+  }
+  for (const [operationId, importRow] of importsByOperation) {
+    if (String(importRow.status) !== "committed") continue;
+    const reservedResourceMappings = reservedResourceMappingsByOperation.get(operationId) ?? [];
+    const reservedPairs = new Set(reservedResourceMappings.map(({ entryId, resourceId }) => `${entryId}\u0000${resourceId}`));
+    const importResourcePairs = importResourcePairsByOperation.get(operationId) ?? new Set<string>();
+    if (reservedPairs.size !== importResourcePairs.size
+      || reservedResourceMappings.length !== reservedPairs.size
+      || [...reservedPairs].some((pair) => !importResourcePairs.has(pair))) {
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+  }
+  const fileTransactionIds = new Set<string>();
+  for (const row of fileTransactions) {
+    if (row.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
+    const id = opaquePortableValue(row.id, "workspace_bundle_v3_relation_invalid");
+    const ownerKind = String(row.owner_kind);
+    const actorAccountId = opaquePortableValue(row.actor_account_id, "workspace_bundle_v3_relation_invalid");
+    const status = String(row.status);
+    if (fileTransactionIds.has(id) || !["draft", "import"].includes(ownerKind)
+      || !knownAccountIds.has(actorAccountId) || !["committed", "cleaned"].includes(status)
+      || !Array.isArray(row.entries)) {
+      if (!["committed", "cleaned"].includes(status)) {
+        throw new WorkspaceServerError("workspace_bundle_incomplete_share_file_transaction", 409, { transaction_id: id });
+      }
+      throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+    }
+    if (status === "committed") assertShareFileTransactionEntries(row, true);
+    fileTransactionIds.add(id);
+  }
+}
+
+type ReservedResourceMapping = { entryId: string; resourceId: string };
+
+function normalizeReservedResourceMappings(value: unknown): ReservedResourceMapping[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const mappings: ReservedResourceMapping[] = [];
+  const entryIds = new Set<string>();
+  const resourceIds = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const record = item as Record<string, unknown>;
+    const hasCamelEntryId = Object.prototype.hasOwnProperty.call(record, "entryId");
+    const hasSnakeEntryId = Object.prototype.hasOwnProperty.call(record, "entry_id");
+    const hasCamelResourceId = Object.prototype.hasOwnProperty.call(record, "resourceId");
+    const hasSnakeResourceId = Object.prototype.hasOwnProperty.call(record, "resource_id");
+    const entryId = hasCamelEntryId ? record.entryId : record.entry_id;
+    const resourceId = hasCamelResourceId ? record.resourceId : record.resource_id;
+    if ((hasCamelEntryId && hasSnakeEntryId && record.entryId !== record.entry_id)
+      || (hasCamelResourceId && hasSnakeResourceId && record.resourceId !== record.resource_id)
+      || typeof entryId !== "string" || entryId.trim() === ""
+      || typeof resourceId !== "string" || resourceId.trim() === ""
+      || entryIds.has(entryId) || resourceIds.has(resourceId)) {
+      return undefined;
+    }
+    entryIds.add(entryId);
+    resourceIds.add(resourceId);
+    mappings.push({ entryId, resourceId });
+  }
+  return mappings;
+}
+
+function importReservedResourceIncludes(value: unknown, entryId: string, resourceId: string): boolean {
+  return normalizeReservedResourceMappings(value)?.some((mapping) => mapping.entryId === entryId && mapping.resourceId === resourceId) ?? false;
+}
+
+function nonEmptyPortableText(value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") throw new WorkspaceServerError("workspace_bundle_v3_relation_invalid", 400);
+  return value;
 }
 
 function opaquePortableValue(value: unknown, code: string): string {

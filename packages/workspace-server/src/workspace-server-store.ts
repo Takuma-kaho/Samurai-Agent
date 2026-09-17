@@ -75,8 +75,10 @@ import {
   ResourceRefSchema,
   RoomWorkResultResourceRefSchema,
   WorkspaceFileResourceRefSchema,
+  SupportedLocaleSchema,
   type ResourceRef,
-  type RoomWorkResultResourceRef
+  type RoomWorkResultResourceRef,
+  type SupportedLocale
 } from "@samurai-agent/core-schemas";
 
 const roleSet = new Set<WorkspaceMembershipRole>(["owner", "admin", "member", "guest"]);
@@ -332,6 +334,90 @@ export interface RoomWorkResourceRefInput {
   label?: string;
 }
 
+/** Private, immutable Account settings carried by one new execution. */
+export interface WorkspacePersonalPreferencesSnapshot {
+  schema_version: 1;
+  revision: number;
+  display_name: string;
+  output_locale: SupportedLocale | null;
+  instructions: string;
+}
+
+/**
+ * The Domain API validates this snapshot before dispatch, but the Store is a
+ * second Core boundary. Keep the parser strict so direct/internal callers
+ * cannot persist arbitrary JSON or use preferences as an authority channel.
+ */
+export function parseWorkspacePersonalPreferencesSnapshot(
+  value: unknown,
+  status: 400 | 500 = 400
+): WorkspacePersonalPreferencesSnapshot | undefined {
+  if (value === undefined) return undefined;
+  const invalid = (): never => {
+    throw new WorkspaceServerError("workspace_personal_preferences_snapshot_invalid", status);
+  };
+  if (value === null) return invalid();
+  if (typeof value !== "object" || Array.isArray(value)) return invalid();
+  const candidate = value as Record<string, unknown>;
+  const expectedKeys = ["schema_version", "revision", "display_name", "output_locale", "instructions"];
+  const keys = Object.keys(candidate).sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys.slice().sort()[index])) return invalid();
+  if (candidate.schema_version !== 1
+    || typeof candidate.revision !== "number"
+    || !Number.isSafeInteger(candidate.revision)
+    || candidate.revision < 0
+    || typeof candidate.display_name !== "string"
+    || !candidate.display_name.trim()
+    || candidate.display_name.trim().length > 200
+    || typeof candidate.instructions !== "string"
+    || candidate.instructions.length > 20_000) return invalid();
+  let outputLocale: SupportedLocale | null;
+  if (candidate.output_locale === null) {
+    outputLocale = null;
+  } else {
+    const parsedLocale = SupportedLocaleSchema.safeParse(candidate.output_locale);
+    if (!parsedLocale.success) return invalid();
+    outputLocale = parsedLocale.data;
+  }
+  const revision = candidate.revision as number;
+  const displayName = candidate.display_name as string;
+  const instructions = candidate.instructions as string;
+  return {
+    schema_version: 1,
+    revision,
+    display_name: displayName.trim(),
+    output_locale: outputLocale,
+    instructions
+  };
+}
+
+function normalizeWorkspacePersonalPreferencesSnapshot(value: unknown): WorkspacePersonalPreferencesSnapshot | undefined {
+  return parseWorkspacePersonalPreferencesSnapshot(value, 400);
+}
+
+/**
+ * Schema companion expected by this Store boundary:
+ * `workspace_human_work_instructions.personal_preferences_snapshot JSONB NULL`
+ * and `samurai_set_human_work_instruction_personal_preferences(workspace_id,
+ * instruction_id, work_id, snapshot_json, operation_id)`.  The SQL function
+ * must re-check Account/Workspace/Room ownership and reject a second value for
+ * an already persisted instruction.
+ */
+async function persistWorkspacePersonalPreferencesSnapshot(
+  sql: WorkspaceSql,
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "operationId">,
+  input: { workId: string; instructionId: string; snapshot: WorkspacePersonalPreferencesSnapshot }
+): Promise<void> {
+  try {
+    await sql.query(
+      "SELECT samurai_set_human_work_instruction_personal_preferences($1, $2, $3, $4::JSONB, $5)",
+      [context.workspaceId, input.instructionId, input.workId, canonicalJson(input.snapshot), context.operationId]
+    );
+  } catch (error) {
+    throw mapRoomWorkPostgresError(error, "room_work_personal_preferences_persist_failed");
+  }
+}
+
 export interface CreateRoomWorkInput {
   roomId: string;
   instruction?: string;
@@ -344,6 +430,7 @@ export interface CreateRoomWorkInput {
   objective?: string;
   completionCriteria?: unknown[];
   scheduledAt?: string;
+  personalPreferences?: unknown;
 }
 
 /**
@@ -357,6 +444,7 @@ export interface MigrateLegacyChatTurnInput {
   instruction: string;
   attachments?: WorkspaceFileResourceRef[];
   agentId?: string;
+  personalPreferences?: unknown;
 }
 
 export type MigrateLegacyChatTurnValue =
@@ -380,6 +468,7 @@ export interface ReplyToRoomWorkInput {
   resourceRefs?: RoomWorkResourceRefInput[];
   expectedVersion?: number;
   expectedGeneration?: number;
+  personalPreferences?: unknown;
 }
 
 export interface CreateRoomWorkCommentInput {
@@ -1627,6 +1716,57 @@ export class WorkspaceServerStore {
     return { agent: result.value, replayed: result.replayed };
   }
 
+  /** Registers an Agent while the caller already owns an open RLS
+   * transaction. Share import uses this seam so Agent creation and the
+   * imported Completion rows cannot commit independently. The V1 SQL function
+   * remains the only Agent mutation authority; this method only validates its
+   * narrow input, maps the result, and records the normal audit entry. */
+  async registerAgentInTransaction(
+    sql: WorkspaceSql,
+    context: WorkspaceRequestContext,
+    input: Omit<RegisterWorkspaceAgentInput, "id"> & { id: string }
+  ): Promise<WorkspaceAgent> {
+    assertOpaqueId(input.id, "workspace_agent_id_invalid");
+    const displayName = input.displayName.trim();
+    if (!displayName || displayName.length > 200) throw new WorkspaceServerError("workspace_agent_display_name_invalid", 400);
+    const backendId = normalizeAgentBackendId(input.backendId);
+    const role = input.role?.trim() || "workspace_agent";
+    const instructions = input.instructions?.trim() || input.description?.trim() || "Workspace Agent";
+    if (role.length > 500 || instructions.length > 20_000) throw new WorkspaceServerError("workspace_agent_input_invalid", 400);
+    await this.assertWorkspaceWritable(sql, context.workspaceId);
+    try {
+      await sql.query("SELECT samurai_register_workspace_agent_v1($1, $2, $3, $4, $5, $6, $7)", [
+        context.workspaceId,
+        input.id,
+        displayName,
+        role,
+        instructions,
+        backendId,
+        input.enabled ?? true
+      ]);
+    } catch (error) {
+      if (postgresMessage(error).includes("duplicate key")) throw new WorkspaceServerError("workspace_agent_id_conflict", 409);
+      throw mapRoomWorkPostgresError(error, "workspace_agent_registration_failed");
+    }
+    const saved = await sql.query<AgentRow>(
+      `SELECT workspace_id, id, display_name, description, role, instructions, enabled, backend_id, status, version, created_by, created_at, updated_at
+       FROM workspace_agents WHERE workspace_id = $1 AND id = $2`,
+      [context.workspaceId, input.id]
+    );
+    const row = saved.rows[0];
+    if (!row) throw new WorkspaceServerError("workspace_agent_registration_failed", 500);
+    const agent = agentFromRow(row);
+    await this.insertAudit(sql, context, {
+      action: "workspace.agent.register",
+      subjectKind: "workspace_agent",
+      subjectId: agent.id,
+      beforeVersion: 0,
+      afterVersion: agent.version,
+      details: { display_name: agent.displayName, status: agent.status, source: "share_import" }
+    });
+    return agent;
+  }
+
   async patchRoom(
     context: WorkspaceRequestContext,
     input: { id: string; name: string; expectedVersion?: number }
@@ -1834,6 +1974,7 @@ export class WorkspaceServerStore {
    * database transaction. The caller never receives or supplies a Session ID. */
   async createRoomWork(context: WorkspaceRequestContext, input: CreateRoomWorkInput): Promise<WorkspaceHumanWorkCreateResult> {
     assertOpaqueId(input.roomId, "room_id_invalid");
+    const personalPreferences = normalizeWorkspacePersonalPreferencesSnapshot(input.personalPreferences);
     const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
     const resourceRefs = normalizeRoomWorkResourceRefs(input.resourceRefs);
     const instruction = input.instruction?.trim()
@@ -1867,7 +2008,8 @@ export class WorkspaceServerStore {
       title: input.title ?? null,
       objective: input.objective ?? null,
       completionCriteria,
-      scheduledAt: scheduledAt.toISOString()
+      scheduledAt: scheduledAt.toISOString(),
+      ...(personalPreferences === undefined ? {} : { personalPreferences })
     };
     const result = await this.runIdempotentResult(context, { action: "room.work.create", input: requestInput }, async (sql) => {
       await assertRoomWorkAttachmentRefs(sql, context, input.roomId, attachments);
@@ -1912,6 +2054,13 @@ export class WorkspaceServerStore {
       } catch (error) {
         throw mapRoomWorkPostgresError(error, "room_work_creation_failed");
       }
+      if (personalPreferences) {
+        await persistWorkspacePersonalPreferencesSnapshot(sql, context, {
+          workId,
+          instructionId,
+          snapshot: personalPreferences
+        });
+      }
       const work = await this.readHumanWorkAggregate(sql, context.workspaceId, workId, input.roomId);
       const reservation = await this.readHumanWorkReservation(sql, context.workspaceId, reservationId);
       if (!reservation) throw new WorkspaceServerError("room_work_launch_reservation_missing", 500);
@@ -1945,6 +2094,7 @@ export class WorkspaceServerStore {
   ): Promise<IdempotentOperationResult<MigrateLegacyChatTurnValue>> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     assertOpaqueId(input.sessionId, "legacy_session_id_invalid");
+    const personalPreferences = normalizeWorkspacePersonalPreferencesSnapshot(input.personalPreferences);
     if (input.agentId) assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
     const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
     const instruction = input.instruction.trim() || (attachments.length > 0 ? "Review the attached resources." : "");
@@ -1966,7 +2116,8 @@ export class WorkspaceServerStore {
       sessionId: input.sessionId,
       instruction,
       attachments,
-      agentId: input.agentId ?? null
+      agentId: input.agentId ?? null,
+      ...(personalPreferences === undefined ? {} : { personalPreferences })
     };
     const result = await this.runIdempotentResult(
       context,
@@ -2020,6 +2171,13 @@ export class WorkspaceServerStore {
             );
           } catch (error) {
             throw mapRoomWorkPostgresError(error, "room_work_reply_failed");
+          }
+          if (personalPreferences) {
+            await persistWorkspacePersonalPreferencesSnapshot(sql, context, {
+              workId: mapping.work_id,
+              instructionId,
+              snapshot: personalPreferences
+            });
           }
           const row = (await sql.query<HumanWorkInstructionRow>(
             `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs,
@@ -2091,6 +2249,13 @@ export class WorkspaceServerStore {
             "SELECT samurai_bind_human_work_legacy_session($1, $2, $3, $4, $5, $6)",
             [context.workspaceId, legacyMapId, input.sessionId, input.roomId, workId, context.operationId]
           );
+          if (personalPreferences) {
+            await persistWorkspacePersonalPreferencesSnapshot(sql, context, {
+              workId,
+              instructionId,
+              snapshot: personalPreferences
+            });
+          }
         } catch (error) {
           throw mapRoomWorkPostgresError(error, "room_work_creation_failed");
         }
@@ -2175,6 +2340,7 @@ export class WorkspaceServerStore {
   async replyToRoomWork(context: WorkspaceRequestContext, input: ReplyToRoomWorkInput): Promise<WorkspaceHumanWorkInstruction> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     assertOpaqueId(input.workId, "room_work_id_invalid");
+    const personalPreferences = normalizeWorkspacePersonalPreferencesSnapshot(input.personalPreferences);
     if (input.assigneeId) assertOpaqueId(input.assigneeId, "room_work_assignment_id_invalid");
     const attachments = normalizeRoomWorkAttachmentRefs(input.attachments);
     const resourceRefs = normalizeRoomWorkResourceRefs(input.resourceRefs);
@@ -2190,7 +2356,8 @@ export class WorkspaceServerStore {
       attachments,
       ...(input.resourceRefs === undefined ? {} : { resourceRefs }),
       expectedVersion: input.expectedVersion ?? null,
-      expectedGeneration: input.expectedGeneration ?? null
+      expectedGeneration: input.expectedGeneration ?? null,
+      ...(personalPreferences === undefined ? {} : { personalPreferences })
     };
     const result = await this.runIdempotentResult(context, { action: "room.work.reply", input: requestInput }, async (sql) => {
       const work = await this.readHumanWorkAggregate(sql, context.workspaceId, input.workId, input.roomId);
@@ -2207,6 +2374,13 @@ export class WorkspaceServerStore {
         );
       } catch (error) {
         throw mapRoomWorkPostgresError(error, "room_work_reply_failed");
+      }
+      if (personalPreferences) {
+        await persistWorkspacePersonalPreferencesSnapshot(sql, context, {
+          workId: input.workId,
+          instructionId,
+          snapshot: personalPreferences
+        });
       }
       const row = (await sql.query<HumanWorkInstructionRow>(
         `SELECT workspace_id, id, work_id, assignment_id, room_id, version, body, attachment_refs, resource_refs,
@@ -2959,6 +3133,7 @@ export class WorkspaceServerStore {
                 CASE WHEN parent_session.id IS NOT NULL THEN parent_run.metadata -> 'runtime_binding' ELSE NULL::JSONB END AS parent_runtime_binding,
                 parent_session.id AS session_id,
                 instruction.body AS instruction,
+                instruction.personal_preferences_snapshot AS personal_preferences_snapshot,
                 work.resource_refs AS work_resource_refs,
                 instruction.resource_refs AS resource_refs,
                 samurai_project_human_work_attachment_refs(
@@ -3033,6 +3208,9 @@ export class WorkspaceServerStore {
         [context.workspaceId, reservationId]
       )).rows[0];
       if (!claimed || !claimed.instruction) throw new WorkspaceServerError("room_work_instruction_not_found", 500);
+      const personalPreferences = claimed.personal_preferences_snapshot === undefined || claimed.personal_preferences_snapshot === null
+        ? undefined
+        : parseWorkspacePersonalPreferencesSnapshot(claimed.personal_preferences_snapshot, 500);
       if (claimed.attachments_have_unresolved === true) {
         const preflight = await sql.query<{ failed: boolean }>(
           "SELECT samurai_fail_human_work_launch_preflight($1, $2, $3, $4, $5, $6, $7) AS failed",
@@ -3128,6 +3306,7 @@ export class WorkspaceServerStore {
           resume_backend_continuation: parentContinuation.continuation
         } : {}),
         instruction: claimed.instruction,
+        ...(personalPreferences === undefined ? {} : { personalPreferences, personal_preferences: personalPreferences }),
         attachments,
         resourceRefs,
         generation,
@@ -5704,6 +5883,7 @@ interface HumanWorkExecutionRow {
   parent_runtime_binding: unknown;
   session_id: string | null;
   instruction: string | null;
+  personal_preferences_snapshot?: unknown;
   resource_refs?: unknown;
   work_resource_refs?: unknown;
   attachments: unknown;

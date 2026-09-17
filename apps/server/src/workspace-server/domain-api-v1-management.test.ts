@@ -27,7 +27,13 @@ const workspaceResource = {
   ...resource,
   id: "resource_workspace",
   scope: { kind: "workspace" as const },
-  title: "Workspace fact"
+  // Workspace Knowledge was retired by the Native context contract. Keep the
+  // legacy management-boundary fixture as a Workspace Skill so the test still
+  // verifies that Room lists include retained Workspace resources without
+  // reintroducing the removed memory surface.
+  kind: "skill" as const,
+  knowledgeKind: undefined,
+  title: "Workspace skill"
 };
 
 const version = {

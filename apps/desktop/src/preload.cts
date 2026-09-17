@@ -21,6 +21,28 @@ import {
   sanitizeWorkspaceRoomWorkResourceRefs
 } from "./preload-sanitizers.js";
 import { workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests.js";
+import {
+  accountInvitationNotificationListRequest,
+  accountInvitationNotificationReadRequest,
+  accountWorkspaceNotificationSummaryRequest,
+  workspaceChatPersonalPreferencesRequest,
+  workspaceCompletionAgentInputForOperation,
+  workspaceContextSearchRequest,
+  workspaceNotificationListRequest,
+  workspaceNotificationReadRequest,
+  workspaceNotificationSummaryRequest,
+  workspaceShareDraftCreateRequest,
+  workspaceShareDraftDiscardRequest,
+  workspaceShareDraftUpdateRequest,
+  workspaceShareDraftViewRequest,
+  workspaceShareImportRequest,
+  workspaceShareImportStatusRequest,
+  workspaceShareLinkImportRequest,
+  workspaceShareLinkViewRequest,
+  workspaceShareListRequest,
+  workspaceSharePublishRequest,
+  workspaceShareRevokeRequest
+} from "./workspace-context-requests.js";
 
 const apiBaseUrl = readArg("--samurai-api-base-url=");
 const workspaceServerUrl = readArg("--samurai-workspace-server-url=");
@@ -99,6 +121,24 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   sendWorkspaceChatMessage: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:message:send", sanitizeWorkspaceChatTurnInput(input)),
   writeWorkspaceAttachment: async (input: unknown) => workspaceAttachmentUploadResult(await ipcRenderer.invoke("samurai:workspace-server:files:attachment:write", sanitizeWorkspaceAttachmentInput(input))),
   searchWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:search", sanitizeWorkspaceRuntimeQuery(input)),
+  searchWorkspaceContext: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:context:search", workspaceContextSearchRequest(input)),
+  listWorkspaceNotifications: (input?: unknown) => ipcRenderer.invoke("samurai:workspace-server:notifications:list", workspaceNotificationListRequest(input)),
+  getWorkspaceNotificationSummary: (input?: unknown) => ipcRenderer.invoke("samurai:workspace-server:notifications:summary", workspaceNotificationSummaryRequest(input)),
+  markWorkspaceNotificationsRead: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:notifications:read", workspaceNotificationReadRequest(input)),
+  getAccountWorkspaceNotificationSummaries: (input: unknown) => ipcRenderer.invoke("samurai:account:notifications:workspace-summaries", accountWorkspaceNotificationSummaryRequest(input)),
+  listAccountInvitationNotifications: (input?: unknown) => ipcRenderer.invoke("samurai:account:notifications:invitations", accountInvitationNotificationListRequest(input)),
+  markAccountInvitationNotificationsRead: (input: unknown) => ipcRenderer.invoke("samurai:account:notifications:invitations:read", accountInvitationNotificationReadRequest(input)),
+  createWorkspaceShareDraft: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:draft:create", workspaceShareDraftCreateRequest(input)),
+  viewWorkspaceShareDraft: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:draft:view", workspaceShareDraftViewRequest(input)),
+  updateWorkspaceShareDraft: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:draft:update", workspaceShareDraftUpdateRequest(input)),
+  discardWorkspaceShareDraft: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:draft:discard", workspaceShareDraftDiscardRequest(input)),
+  listWorkspaceShares: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:list", workspaceShareListRequest(input)),
+  publishWorkspaceShare: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:publish", workspaceSharePublishRequest(input)),
+  revokeWorkspaceShare: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:revoke", workspaceShareRevokeRequest(input)),
+  importWorkspaceShare: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:import", workspaceShareImportRequest(input)),
+  getWorkspaceShareImportStatus: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:import:status", workspaceShareImportStatusRequest(input)),
+  viewWorkspaceShareLink: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:link:view", workspaceShareLinkViewRequest(input)),
+  importWorkspaceShareLink: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:share:link:import", workspaceShareLinkImportRequest(input)),
   listWorkspaceBackendRuns: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:runs:list", sanitizeWorkspaceRuntimeQuery(input)),
   getWorkspaceBackendRun: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:run:get", sanitizeWorkspaceRuntimeQuery(input)),
   listWorkspaceBackendEvents: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:events:list", sanitizeWorkspaceRuntimeQuery(input)),
@@ -110,13 +150,13 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   reconnectWorkspaceServer: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:reconnect", sanitizeWorkspaceReconnectInput(input)),
   readWorkspaceEvidence: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:evidence:read", sanitizeWorkspaceEvidenceInput(input)),
   getWorkspaceAudit: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:audit:get", sanitizeWorkspaceAgentTargetInput(input)),
-  listWorkspaceCompletionResources: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resources:list", sanitizeWorkspaceCompletionOperation(input)),
-  getWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:get", sanitizeWorkspaceCompletionOperation(input)),
-  getWorkspaceCompletionResourceBody: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:body", sanitizeWorkspaceCompletionOperation(input)),
-  createWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:create", sanitizeWorkspaceCompletionOperation(input)),
-  updateWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:update", sanitizeWorkspaceCompletionOperation(input)),
-  setWorkspaceCompletionResourceFixed: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:fixed", sanitizeWorkspaceCompletionOperation(input)),
-  archiveWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:archive", sanitizeWorkspaceCompletionOperation(input)),
+  listWorkspaceCompletionResources: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resources:list", sanitizeWorkspaceCompletionOperation(input, "list")),
+  getWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:get", sanitizeWorkspaceCompletionOperation(input, "get")),
+  getWorkspaceCompletionResourceBody: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:body", sanitizeWorkspaceCompletionOperation(input, "body")),
+  createWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:create", sanitizeWorkspaceCompletionOperation(input, "create")),
+  updateWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:update", sanitizeWorkspaceCompletionOperation(input, "update")),
+  setWorkspaceCompletionResourceFixed: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:fixed", sanitizeWorkspaceCompletionOperation(input, "fixed")),
+  archiveWorkspaceCompletionResource: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:resource:archive", sanitizeWorkspaceCompletionOperation(input, "archive")),
   searchWorkspaceCompletionKnowledge: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:knowledge:search", sanitizeWorkspaceCompletionOperation(input)),
   listWorkspaceCompletionSkills: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:skills:list", sanitizeWorkspaceCompletionOperation(input)),
   getWorkspaceCompletionSkill: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:completion:skills:get", sanitizeWorkspaceCompletionOperation(input)),
@@ -544,6 +584,8 @@ function sanitizeWorkspaceChatTurnInput(input: unknown): Record<string, unknown>
       return [result];
     });
   }
+  const personalPreferences = workspaceChatPersonalPreferencesRequest(value);
+  if (personalPreferences !== undefined) output.personalPreferences = personalPreferences;
   return output;
 }
 
@@ -870,9 +912,23 @@ function sanitizeWorkspaceLearningSettingsReadInput(input: unknown): Record<stri
   return output;
 }
 
-function sanitizeWorkspaceCompletionOperation(input: unknown): Record<string, unknown> {
+function sanitizeWorkspaceCompletionOperation(input: unknown, operation?: "list" | "get" | "body" | "create" | "update" | "fixed" | "archive"): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
+  // Agent completion resources use a deliberately closed request shape. Do
+  // not let the compatibility sanitizer silently drop an account/room field
+  // or an unknown key before Main can authorize the selected target.
+  if (value.scopeKind === "agent" || value.agentId !== undefined) {
+    switch (operation) {
+      case "list": return workspaceCompletionAgentInputForOperation(value, "list");
+      case "get": return workspaceCompletionAgentInputForOperation(value, "get");
+      case "body": return workspaceCompletionAgentInputForOperation(value, "body");
+      case "create": return workspaceCompletionAgentInputForOperation(value, "create");
+      case "update": return workspaceCompletionAgentInputForOperation(value, "update");
+      case "archive": return workspaceCompletionAgentInputForOperation(value, "archive");
+      default: throw new Error("completion_agent_operation_invalid");
+    }
+  }
   const output: Record<string, unknown> = {};
   copyWorkspaceTargetInput(value, output);
   for (const key of ["scopeKind", "roomId", "kind", "resourceId", "operationId", "knowledgeKind", "expectedVersion"]) {

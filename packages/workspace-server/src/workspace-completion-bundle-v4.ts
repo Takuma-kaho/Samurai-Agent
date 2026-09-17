@@ -21,7 +21,13 @@ import {
   WORKSPACE_BUNDLE_MAX_RECORDS_PER_FILE,
   WorkspaceBundleV3Service
 } from "./workspace-bundle-v3";
-import { WorkspaceCompletionFileService, type StagedWorkspaceCompletionFileBatch } from "./workspace-completion-files";
+import {
+  assertSkillSupportRelativePath,
+  completionResourcePath,
+  completionSkillSupportPath,
+  WorkspaceCompletionFileService,
+  type StagedWorkspaceCompletionFileBatch
+} from "./workspace-completion-files";
 import { containsWorkspaceCompletionSecret } from "./workspace-completion-policy";
 import { WorkspaceServerStore } from "./workspace-server-store";
 import type { WorkspaceCompletionScope } from "./workspace-completion-types";
@@ -259,12 +265,15 @@ export class WorkspaceBundleV4Service {
         excludeMembershipAccountIds: maintenanceAccountIds,
         ...(input.transferId ? { transferId: input.transferId } : {})
       });
+      await assertV3WorkspaceMemoryRemoved(path.join(staging, baseV3Directory));
       // File batch entries are a recovery ledger. During a normal update an
       // old batch can have staged the former live path while its Version now
       // points at `.versions/...`. Export the durable snapshot by the paths
       // each Version actually references, not by stale staging destinations.
-      const rows = normalizePortableBatchRows(await this.readCompletionRows(context));
       const identityRows = await this.readWorkspaceIdentityRows(context);
+      const rawRows = await this.readCompletionRows(context);
+      assertPortableCompletionRows({ ...rawRows, ...identityRows });
+      const rows = normalizePortableBatchRows(rawRows);
       for (const [table, filename] of tableFiles) {
         await writeJsonl(resolveBundlePath(staging, `${completionDirectory}/${filename}`), rows[table] ?? []);
       }
@@ -820,11 +829,16 @@ export class WorkspaceBundleV4Service {
     const versions = rows.workspace_completion_resource_versions ?? [];
     const currentVersions = new Map<string, Record<string, unknown>>();
     for (const resource of resources) {
-      if (resource.resource_kind !== "knowledge") continue;
-      const version = numberValue(resource.current_confirmed_version ?? resource.current_provisional_version);
+      // Workspace Knowledge was removed from the product contract.  The
+      // portable wiki is a derived view for Room/Agent Knowledge only; never
+      // recreate a Workspace-wide page (and never let a provisional Agent
+      // candidate become a readable page during export).
+      if (resource.resource_kind !== "knowledge"
+        || (resource.scope_kind !== "room" && resource.scope_kind !== "agent")) continue;
+      const version = numberValue(resource.current_confirmed_version);
       if (version === undefined) continue;
       const current = versions.find((candidate) => candidate.resource_id === resource.id && numberValue(candidate.version) === version);
-      if (!current || !isWikiMetadata(recordValue(current.metadata))) continue;
+      if (!current || current.evidence_state !== "confirmed" || current.lifecycle_state !== "active" || !isWikiMetadata(recordValue(current.metadata))) continue;
       currentVersions.set(String(resource.id), current);
     }
 
@@ -842,7 +856,9 @@ export class WorkspaceBundleV4Service {
       const version = currentVersions.get(resourceId)!;
       const metadata = recordValue(version.metadata);
       const slug = typeof metadata.slug === "string" ? metadata.slug : String(resource.title ?? resource.id);
-      const room = resource.scope_kind === "room" ? String(resource.room_id ?? "") : "workspace";
+      const room = resource.scope_kind === "room"
+        ? String(resource.room_id ?? "")
+        : `agent:${String(resource.agent_id ?? "")}`;
       const pagePath = `pages/${safeProjectionId(resourceId)}.md`;
       const contentPath = String(version.file_path ?? "");
       const content = (await readFile(resolveBundlePath(root, `${completionDirectory}/files/${contentPath}`))).toString("utf8");
@@ -916,8 +932,8 @@ export class WorkspaceBundleV4Service {
           if (stagedIds.has(id)) {
             const scope = batchScopeFromPortableHeader(header);
             await sql.query(
-              "INSERT INTO workspace_completion_file_batches(workspace_id, id, scope_kind, room_id, status) VALUES ($1, $2, $3, $4, 'db_committed')",
-              [context.workspaceId, id, scope.kind, scope.roomId ?? null]
+              "INSERT INTO workspace_completion_file_batches(workspace_id, id, scope_kind, room_id, agent_id, status) VALUES ($1, $2, $3, $4, $5, 'db_committed')",
+              [context.workspaceId, id, scope.kind, scope.roomId ?? null, scope.agentId ?? null]
             );
           } else {
             if (header.status !== "rolled_back") throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
@@ -984,8 +1000,8 @@ export class WorkspaceBundleV4Service {
     root: string,
     rows: Record<string, Record<string, unknown>[]>
   ): Promise<void> {
-    const pending = await this.store.database.withContext(context, async (sql) => sql.query<{ id: string; scope_kind: string; room_id: string | null }>(
-      "SELECT id, scope_kind, room_id FROM workspace_completion_file_batches WHERE workspace_id = $1 AND status = 'db_committed' ORDER BY id",
+    const pending = await this.store.database.withContext(context, async (sql) => sql.query<{ id: string; scope_kind: string; room_id: string | null; agent_id: string | null }>(
+      "SELECT id, scope_kind, room_id, agent_id FROM workspace_completion_file_batches WHERE workspace_id = $1 AND status = 'db_committed' ORDER BY id",
       [context.workspaceId]
     ));
     const entriesByBatch = new Map<string, Record<string, unknown>[]>();
@@ -994,11 +1010,7 @@ export class WorkspaceBundleV4Service {
       entriesByBatch.set(batchId, [...(entriesByBatch.get(batchId) ?? []), row]);
     }
     for (const batch of pending.rows) {
-      const scope = batch.scope_kind === "workspace" && batch.room_id === null
-        ? { kind: "workspace" as const }
-        : batch.scope_kind === "room" && batch.room_id
-          ? { kind: "room" as const, roomId: batch.room_id }
-          : (() => { throw new WorkspaceServerError("workspace_bundle_v4_batch_scope_invalid", 400); })();
+      const scope = batchScopeFromPortableHeader(batch);
       const entries = (entriesByBatch.get(batch.id) ?? []).map((row) => {
         const relative = assertSafeRelativePath(stringValue(row.path, "workspace_bundle_v4_file_path_invalid"));
         const expectedHash = stringValue(row.sha256, "workspace_bundle_v4_file_hash_invalid");
@@ -1011,6 +1023,7 @@ export class WorkspaceBundleV4Service {
       })));
       if (resolved.length === 0) throw new WorkspaceServerError("workspace_bundle_v4_batch_entries_missing", 400);
       if (resolved.some((entry) => hashBytes(entry.content) !== entry.sha256)) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
+      await this.assertImportedDestinationsAvailable(context.workspaceId, resolved);
       await this.files.recover({ workspaceId: context.workspaceId, id: batch.id, scope, entries: resolved });
       await this.store.database.withContext(context, async (sql) => {
         await sql.query("UPDATE workspace_completion_file_batches SET status = 'renamed', updated_at = NOW() WHERE workspace_id = $1 AND id = $2 AND status = 'db_committed'", [context.workspaceId, batch.id]);
@@ -1143,6 +1156,7 @@ export class WorkspaceBundleV4Service {
           if (hashBytes(content) !== expectedHash) throw new WorkspaceServerError("workspace_bundle_v4_hash_mismatch", 400);
           stagedFiles.push({ path: relative, content });
         }
+        await this.assertImportedDestinationsAvailable(context.workspaceId, stagedFiles);
         staged.push(await this.files.stageImported(context.workspaceId, scope, batchId, stagedFiles));
       }
       return staged;
@@ -1162,6 +1176,27 @@ export class WorkspaceBundleV4Service {
         });
       }
       throw error;
+    }
+  }
+
+  private async assertImportedDestinationsAvailable(
+    workspaceId: string,
+    entries: readonly { path: string; content: Uint8Array; sha256?: string }[]
+  ): Promise<void> {
+    for (const entry of entries) {
+      const expectedHash = entry.sha256 ?? hashBytes(entry.content);
+      try {
+        const current = await this.files.inspectPhysicalFile(workspaceId, entry.path);
+        // A same-hash destination is the idempotent half of a recovery that
+        // already renamed the body. A different body must never be replaced
+        // by a restored resource with the same path.
+        if (current.sha256 !== expectedHash) {
+          throw new WorkspaceServerError("workspace_bundle_v4_file_conflict", 409, { path: entry.path });
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
     }
   }
 
@@ -1325,6 +1360,11 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
   const manifest = JSON.parse(raw) as unknown;
   assertWorkspaceBundleV4ManifestCandidate(manifest);
   const v3 = await verifyWorkspaceBundleV3(resolveBundlePath(root, baseV3Directory));
+  // V3 carries the retired learning store as `learning-resources.jsonl`.
+  // Reject Workspace Knowledge/Memory before V4 import can enter the Core
+  // restore transaction; Room history and Workspace Skill/Rule rows remain
+  // portable and are intentionally left untouched here.
+  await assertV3WorkspaceMemoryRemoved(root);
   if (v3.manifest.workspace_id !== manifest.workspace_id) throw new WorkspaceServerError("workspace_bundle_workspace_mismatch", 400);
   if (v3.manifest.integrity_hash !== manifest.base_v3_integrity_hash) throw new WorkspaceServerError("workspace_bundle_v4_base_mismatch", 400);
   if (v3.manifest.transfer_id !== manifest.transfer_id) throw new WorkspaceServerError("workspace_transfer_bundle_mismatch", 409);
@@ -1396,6 +1436,7 @@ export async function verifyWorkspaceBundleV4(directory: string): Promise<Export
       : [];
   }
   await assertPortableCompletionFileRelations(root, rows);
+  await assertPortableShareImportResourceScopes(root, rows);
   // Old v95/v96 exports may carry a parent reply continuation with the
   // post-v107 default `normal` origin.  Apply the same strict compatibility
   // projection used by restore before validating the graph; forged or
@@ -1519,6 +1560,228 @@ async function readCompletionBundleRows(root: string, workspaceId: string): Prom
   return rows;
 }
 
+/** Validate the Completion-specific ownership graph before a Bundle can write
+ * either staging files or PostgreSQL rows.  The DB constraints are still the
+ * final authority after restore; this early check keeps a malformed Bundle
+ * from reaching the batch rename/receipt transaction. */
+function assertPortableCompletionRows(rows: Record<string, Record<string, unknown>[]>): void {
+  const agents = new Set<string>();
+  for (const agent of rows.workspace_agents ?? []) {
+    const id = stringValue(agent.id, "workspace_bundle_agent_id_invalid");
+    if (agents.has(id)) throw new WorkspaceServerError("workspace_bundle_agent_duplicate", 400);
+    agents.add(id);
+  }
+
+  const resources = new Map<string, { row: Record<string, unknown>; scope: WorkspaceCompletionScope }>();
+  for (const row of rows.workspace_completion_resources ?? []) {
+    const resourceId = stringValue(row.id, "workspace_bundle_v4_resource_invalid");
+    if (resources.has(resourceId)) throw new WorkspaceServerError("workspace_bundle_v4_resource_duplicate", 400);
+    rejectRetiredWorkspaceMemory(row);
+    const scope = portableScopeFromRow(row, "workspace_bundle_v4_scope_invalid");
+    const kind = stringValue(row.resource_kind, "workspace_bundle_v4_resource_kind_invalid");
+    if (scope.kind === "agent") {
+      if (!agents.has(scope.agentId!)) throw new WorkspaceServerError("workspace_completion_agent_not_found", 404, { agent_id: scope.agentId });
+      if (kind !== "knowledge" && kind !== "skill") {
+        throw new WorkspaceServerError("workspace_completion_agent_resource_kind_invalid", 422);
+      }
+      if (row.ai_managed !== false) throw new WorkspaceServerError("workspace_completion_agent_ai_managed_forbidden", 422);
+    }
+    resources.set(resourceId, { row, scope });
+  }
+
+  const batches = new Map<string, WorkspaceCompletionScope>();
+  for (const header of rows.workspace_completion_file_batches ?? []) {
+    const id = stringValue(header.id, "workspace_bundle_v4_batch_invalid");
+    if (batches.has(id)) throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+    const scope = batchScopeFromPortableHeader(header);
+    if (scope.kind === "agent" && !agents.has(scope.agentId!)) {
+      throw new WorkspaceServerError("workspace_completion_agent_not_found", 404, { agent_id: scope.agentId });
+    }
+    batches.set(id, scope);
+  }
+
+  const resourceVersionKeys = new Set<string>();
+  for (const row of rows.workspace_completion_resource_versions ?? []) {
+    const resource = resourceForPortableRow(resources, row.resource_id);
+    const version = integerValue(row.version, "workspace_bundle_v4_resource_version_invalid");
+    resourceVersionKeys.add(`${resource.row.id}\u0000${version}`);
+    assertPortableFileBatchScope(row, resource.scope, batches);
+    if (resource.scope.kind === "agent") assertAgentResourceVersionPath(row, resource.row, resource.scope);
+  }
+  for (const row of rows.workspace_completion_skill_files ?? []) {
+    const resource = resourceForPortableRow(resources, row.resource_id);
+    if (resource.row.resource_kind !== "skill") {
+      throw new WorkspaceServerError("workspace_bundle_v4_skill_resource_invalid", 400);
+    }
+    const version = integerValue(row.resource_version, "workspace_bundle_v4_resource_version_invalid");
+    if (!resourceVersionKeys.has(`${resource.row.id}\u0000${version}`)) {
+      throw new WorkspaceServerError("workspace_bundle_v4_resource_version_not_found", 400, { resource_id: resource.row.id, version });
+    }
+    assertPortableFileBatchScope(row, resource.scope, batches);
+    if (resource.scope.kind === "agent") assertAgentSkillFilePath(row, resource.row, resource.scope);
+  }
+  for (const row of rows.workspace_completion_workspace_documents ?? []) {
+    if (row.file_batch_id === undefined || row.file_batch_id === null) continue;
+    const batchId = stringValue(row.file_batch_id, "workspace_bundle_v4_batch_invalid");
+    const batchScope = batches.get(batchId);
+    if (!batchScope || batchScope.kind !== "workspace") {
+      throw new WorkspaceServerError("workspace_bundle_v4_batch_scope_mismatch", 400, { batch_id: batchId });
+    }
+  }
+
+  // Search rows are projections, not a second ownership source. Agent rows
+  // must carry the same Agent id; Room/Workspace projections must not smuggle
+  // one in. Older v4 rows omitted the nullable column and remain compatible.
+  for (const row of rows.workspace_completion_search_projection ?? []) {
+    const resource = resourceForPortableRow(resources, row.resource_id);
+    const projectedAgentId = portableNullableScopeId(row.agent_id, "workspace_bundle_v4_search_agent_invalid");
+    if ((resource.scope.kind === "agent" ? resource.scope.agentId : null) !== projectedAgentId) {
+      throw new WorkspaceServerError("workspace_bundle_v4_search_scope_invalid", 400);
+    }
+  }
+}
+
+function rejectRetiredWorkspaceMemory(row: Record<string, unknown>): void {
+  const primaryKind = typeof row.resource_kind === "string" ? row.resource_kind.toLowerCase() : "";
+  const legacyKind = typeof row.kind === "string" ? row.kind.toLowerCase() : "";
+  const resourceType = typeof row.resource_type === "string" ? row.resource_type.toLowerCase() : "";
+  const isMemory = [primaryKind, legacyKind, resourceType].some((kind) => kind === "memory" || kind === "workspace_memory");
+  const isWorkspaceKnowledge = row.scope_kind === "workspace"
+    && [primaryKind, legacyKind, resourceType].includes("knowledge");
+  if (isMemory || isWorkspaceKnowledge) throw new WorkspaceServerError("workspace_memory_removed", 409);
+}
+
+async function assertV3WorkspaceMemoryRemoved(root: string): Promise<void> {
+  const rows = await readOptionalJsonl(resolveBundlePath(root, `${baseV3Directory}/learning-resources.jsonl`));
+  for (const row of rows) {
+    const scopeKind = row.scope_kind;
+    const resourceKind = typeof row.resource_kind === "string" ? row.resource_kind.toLowerCase() : "";
+    if (scopeKind === "workspace" && (resourceKind === "knowledge" || resourceKind === "memory")) {
+      throw new WorkspaceServerError("workspace_memory_removed", 409);
+    }
+  }
+}
+
+/** V3 carries the import ledger while V4 carries the Completion ownership
+ * graph. Validate the cross-file edge before restore so an Agent import cannot
+ * point at a Room/Workspace resource (or another Agent), and a Room import
+ * cannot point outside its target Room. The database trigger remains the final
+ * authority after the Completion rows are inserted. */
+async function assertPortableShareImportResourceScopes(
+  root: string,
+  rows: Record<string, Record<string, unknown>[]>
+): Promise<void> {
+  const imports = await readOptionalJsonl(resolveBundlePath(root, `${baseV3Directory}/workspace-share-imports.jsonl`));
+  const importResources = await readOptionalJsonl(resolveBundlePath(root, `${baseV3Directory}/workspace-share-import-resources.jsonl`));
+  const importsByOperation = new Map(imports.map((row) => [String(row.operation_id), row]));
+  const agentIds = new Set((rows.workspace_agents ?? []).map((row) => String(row.id)));
+  const resourcesById = new Map((rows.workspace_completion_resources ?? []).map((row) => [String(row.id), row]));
+  for (const importRow of imports) {
+    if (String(importRow.status) === "committed" && String(importRow.kind) === "agent"
+      && (typeof importRow.reserved_agent_id !== "string" || !agentIds.has(importRow.reserved_agent_id))) {
+      throw new WorkspaceServerError("workspace_bundle_v4_share_import_agent_not_found", 400, {
+        operation_id: String(importRow.operation_id)
+      });
+    }
+  }
+  for (const link of importResources) {
+    const operationId = String(link.operation_id);
+    const importRow = importsByOperation.get(operationId);
+    const resource = resourcesById.get(String(link.resource_id));
+    if (!importRow || String(importRow.status) !== "committed" || !resource) {
+      throw new WorkspaceServerError("workspace_bundle_v4_share_import_resource_invalid", 400, { operation_id: operationId });
+    }
+    if (String(importRow.kind) === "agent") {
+      if (resource.scope_kind !== "agent" || resource.agent_id !== importRow.reserved_agent_id) {
+        throw new WorkspaceServerError("workspace_bundle_v4_share_import_agent_resource_scope_invalid", 400, { operation_id: operationId });
+      }
+    } else if (String(importRow.kind) === "room_knowledge") {
+      if (resource.scope_kind !== "room" || resource.room_id !== importRow.target_room_id) {
+        throw new WorkspaceServerError("workspace_bundle_v4_share_import_room_resource_scope_invalid", 400, { operation_id: operationId });
+      }
+    } else {
+      throw new WorkspaceServerError("workspace_bundle_v4_share_import_resource_invalid", 400, { operation_id: operationId });
+    }
+  }
+}
+
+function portableScopeFromRow(row: Record<string, unknown>, code: string): WorkspaceCompletionScope {
+  const kind = row.scope_kind;
+  const roomId = portableNullableScopeId(row.room_id, code);
+  const agentId = portableNullableScopeId(row.agent_id, code);
+  if (kind === "workspace" && roomId === null && agentId === null) return { kind: "workspace" };
+  if (kind === "room" && roomId !== null && agentId === null) return { kind: "room", roomId };
+  if (kind === "agent" && roomId === null && agentId !== null) return { kind: "agent", agentId };
+  throw new WorkspaceServerError(code, 400);
+}
+
+function portableNullableScopeId(value: unknown, code: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || value.length === 0) throw new WorkspaceServerError(code, 400);
+  return value;
+}
+
+function resourceForPortableRow(
+  resources: Map<string, { row: Record<string, unknown>; scope: WorkspaceCompletionScope }>,
+  resourceId: unknown
+): { row: Record<string, unknown>; scope: WorkspaceCompletionScope } {
+  const id = stringValue(resourceId, "workspace_bundle_v4_resource_invalid");
+  const resource = resources.get(id);
+  if (!resource) throw new WorkspaceServerError("workspace_bundle_v4_resource_not_found", 400, { resource_id: id });
+  return resource;
+}
+
+function assertPortableFileBatchScope(
+  row: Record<string, unknown>,
+  resourceScope: WorkspaceCompletionScope,
+  batches: Map<string, WorkspaceCompletionScope>
+): void {
+  if (row.file_batch_id === undefined || row.file_batch_id === null) return;
+  const batchId = stringValue(row.file_batch_id, "workspace_bundle_v4_batch_invalid");
+  const batchScope = batches.get(batchId);
+  if (!batchScope || !samePortableCompletionScope(batchScope, resourceScope)) {
+    throw new WorkspaceServerError("workspace_bundle_v4_batch_scope_mismatch", 400, { batch_id: batchId });
+  }
+}
+
+function samePortableCompletionScope(left: WorkspaceCompletionScope, right: WorkspaceCompletionScope): boolean {
+  return left.kind === right.kind && left.roomId === right.roomId && left.agentId === right.agentId;
+}
+
+function assertAgentResourceVersionPath(
+  row: Record<string, unknown>,
+  resource: Record<string, unknown>,
+  scope: WorkspaceCompletionScope
+): void {
+  const id = stringValue(resource.id, "workspace_bundle_v4_resource_invalid");
+  const kind = stringValue(resource.resource_kind, "workspace_bundle_v4_resource_kind_invalid");
+  const relative = assertSafeRelativePath(stringValue(row.file_path, "workspace_bundle_v4_file_path_invalid"));
+  const current = completionResourcePath({ id, kind: kind as "knowledge" | "skill", scope });
+  const version = integerValue(row.version, "workspace_bundle_v4_resource_version_invalid");
+  const historic = completionResourcePath({ id, kind: kind as "knowledge" | "skill", scope, version });
+  const candidate = completionResourcePath({ id, kind: kind as "knowledge" | "skill", scope, version, candidate: true });
+  if (relative !== current && relative !== historic && relative !== candidate) {
+    throw new WorkspaceServerError("workspace_bundle_v4_agent_file_path_invalid", 400, { path: relative });
+  }
+}
+
+function assertAgentSkillFilePath(
+  row: Record<string, unknown>,
+  resource: Record<string, unknown>,
+  scope: WorkspaceCompletionScope
+): void {
+  const id = stringValue(resource.id, "workspace_bundle_v4_resource_invalid");
+  const relativePath = assertSkillSupportRelativePath(stringValue(row.relative_path, "workspace_bundle_v4_skill_relative_path_invalid"));
+  const filePath = assertSafeRelativePath(stringValue(row.file_path, "workspace_bundle_v4_file_path_invalid"));
+  const current = completionSkillSupportPath({ id, relativePath, scope });
+  const version = integerValue(row.resource_version, "workspace_bundle_v4_resource_version_invalid");
+  const historic = completionSkillSupportPath({ id, relativePath, scope, version });
+  const candidate = completionSkillSupportPath({ id, relativePath, scope, version, candidate: true });
+  if (filePath !== current && filePath !== historic && filePath !== candidate) {
+    throw new WorkspaceServerError("workspace_bundle_v4_agent_file_path_invalid", 400, { path: filePath });
+  }
+}
+
 /** The DB row points at the body, while the batch entry and the Bundle file
  * prove that the body actually arrived. Check all three before a restore can
  * insert metadata; otherwise a mismatched hash would look like a successful
@@ -1527,6 +1790,7 @@ async function assertPortableCompletionFileRelations(
   root: string,
   rows: Record<string, Record<string, unknown>[]>
 ): Promise<void> {
+  assertPortableCompletionRows(rows);
   const headers = new Map<string, Record<string, unknown>>();
   for (const header of rows.workspace_completion_file_batches ?? []) {
     const id = stringValue(header.id, "workspace_bundle_v4_batch_invalid");
@@ -1559,6 +1823,9 @@ async function assertPortableCompletionFileRelations(
     entries.set(key, { sha256, size });
   }
 
+  const referencedPaths = new Map<string, { sha256: string; size: number }>();
+  const referencedBatchPaths = new Map<string, { sha256: string; size: number }>();
+  const referencedBatchIds = new Set<string>();
   for (const [table, fields] of [
     ["workspace_completion_resource_versions", { path: "file_path", hash: "content_hash", size: "content_size" }],
     ["workspace_completion_workspace_documents", { path: "file_path", hash: "content_hash", size: "content_size" }],
@@ -1569,14 +1836,21 @@ async function assertPortableCompletionFileRelations(
       const sha256 = stringValue(row[fields.hash], "workspace_bundle_v4_file_hash_invalid");
       if (!/^[a-f0-9]{64}$/.test(sha256)) throw new WorkspaceServerError("workspace_bundle_v4_file_hash_invalid", 400);
       const size = nonNegativeIntegerValue(row[fields.size], "workspace_bundle_v4_file_size_invalid");
+      const previous = referencedPaths.get(relative);
+      if (previous && (previous.sha256 !== sha256 || previous.size !== size)) {
+        throw new WorkspaceServerError("workspace_bundle_v4_file_path_conflict", 400, { path: relative });
+      }
+      referencedPaths.set(relative, { sha256, size });
       if (row.file_batch_id !== undefined && row.file_batch_id !== null) {
         const batchId = stringValue(row.file_batch_id, "workspace_bundle_v4_batch_invalid");
         const header = headers.get(batchId);
         if (!header || header.status !== "renamed") throw new WorkspaceServerError("workspace_bundle_v4_batch_invalid", 400);
+        referencedBatchIds.add(batchId);
         const entry = entries.get(`${batchId}\u0000${relative}`);
         if (!entry || entry.sha256 !== sha256 || entry.size !== size) {
           throw new WorkspaceServerError("workspace_bundle_v4_file_metadata_mismatch", 400, { table, path: relative });
         }
+        referencedBatchPaths.set(`${batchId}\u0000${relative}`, { sha256, size });
       }
       let content: Buffer;
       try {
@@ -1587,6 +1861,16 @@ async function assertPortableCompletionFileRelations(
       if (content.byteLength !== size || hashBytes(content) !== sha256) {
         throw new WorkspaceServerError("workspace_bundle_v4_file_metadata_mismatch", 400, { table, path: relative });
       }
+    }
+  }
+  for (const [key, entry] of entries) {
+    const separator = key.indexOf("\u0000");
+    const batchId = separator < 0 ? key : key.slice(0, separator);
+    if (!referencedBatchIds.has(batchId)) continue;
+    const relative = separator < 0 ? "" : key.slice(separator + 1);
+    const referenced = referencedBatchPaths.get(`${batchId}\u0000${relative}`);
+    if (!referenced || referenced.sha256 !== entry.sha256 || referenced.size !== entry.size) {
+      throw new WorkspaceServerError("workspace_bundle_v4_batch_entry_unreferenced", 400, { batch_id: batchId, path: relative });
     }
   }
 }
@@ -1608,8 +1892,9 @@ function attachLegacyCompletionFileBatches(
   const headerIds = new Set(headers.map((header) => typeof header.id === "string" ? header.id : ""));
   type LegacyCompletionBatchHeader = Record<string, unknown> & {
     id: string;
-    scope_kind: "workspace" | "room";
+    scope_kind: "workspace" | "room" | "agent";
     room_id: string | null;
+    agent_id: string | null;
     status: "renamed";
     created_at: string;
     updated_at: string;
@@ -1618,27 +1903,27 @@ function attachLegacyCompletionFileBatches(
   const entryByKey = new Map(entries.map((entry) => [`${String(entry.batch_id)}\u0000${String(entry.path)}`, entry]));
   const timestamp = new Date().toISOString();
 
-  const scopeForResource = (resourceId: unknown): { kind: "workspace" | "room"; roomId?: string } => {
+  const scopeForResource = (resourceId: unknown): WorkspaceCompletionScope => {
     const resource = typeof resourceId === "string" ? resources.get(resourceId) : undefined;
-    if (!resource || (resource.scope_kind !== "workspace" && resource.scope_kind !== "room")) {
+    if (!resource) {
       throw new WorkspaceServerError("workspace_bundle_v4_file_scope_invalid", 400);
     }
-    if (resource.scope_kind === "workspace") return { kind: "workspace" };
-    if (typeof resource.room_id !== "string" || !resource.room_id) {
-      throw new WorkspaceServerError("workspace_bundle_v4_file_scope_invalid", 400);
-    }
-    return { kind: "room", roomId: resource.room_id };
+    return portableScopeFromRow(resource, "workspace_bundle_v4_file_scope_invalid");
   };
 
   const attach = (
     row: Record<string, unknown>,
-    scope: { kind: "workspace" | "room"; roomId?: string }
+    scope: WorkspaceCompletionScope
   ): void => {
     if (row.file_batch_id !== undefined && row.file_batch_id !== null) return;
     const relative = assertSafeRelativePath(stringValue(row.file_path, "workspace_bundle_v4_file_path_invalid"));
     const sha256 = stringValue(row.content_hash, "workspace_bundle_v4_file_hash_invalid");
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new WorkspaceServerError("workspace_bundle_v4_file_hash_invalid", 400);
-    const scopeKey = scope.kind === "workspace" ? "workspace" : `room:${scope.roomId}`;
+    const scopeKey = scope.kind === "workspace"
+      ? "workspace"
+      : scope.kind === "room"
+        ? `room:${scope.roomId}`
+        : `agent:${scope.agentId}`;
     let header = byScope.get(scopeKey);
     if (!header) {
       const id = completionId("bundle_legacy_file_batch", sourceWorkspaceId, scopeKey);
@@ -1647,6 +1932,7 @@ function attachLegacyCompletionFileBatches(
         id,
         scope_kind: scope.kind,
         room_id: scope.roomId ?? null,
+        agent_id: scope.agentId ?? null,
         status: "renamed",
         created_at: timestamp,
         updated_at: timestamp
@@ -1678,6 +1964,24 @@ function attachLegacyCompletionFileBatches(
   for (const row of rows.workspace_completion_skill_files ?? []) {
     if (row.file_batch_id === undefined || row.file_batch_id === null) attach(row, scopeForResource(row.resource_id));
   }
+
+  // A legacy Bundle may carry a renamed header/entry snapshot even though no
+  // exported Version points at it anymore. Do not stage or import that stale
+  // body; recovery is limited to batches referenced by the portable metadata.
+  const referencedBatchIds = new Set<string>();
+  for (const table of [
+    "workspace_completion_resource_versions",
+    "workspace_completion_workspace_documents",
+    "workspace_completion_skill_files"
+  ]) {
+    for (const row of rows[table] ?? []) {
+      if (typeof row.file_batch_id === "string") referencedBatchIds.add(row.file_batch_id);
+    }
+  }
+  const retainedHeaders = headers.filter((header) => header.status === "rolled_back" || referencedBatchIds.has(String(header.id)));
+  const retainedHeaderIds = new Set(retainedHeaders.map((header) => String(header.id)));
+  rows.workspace_completion_file_batches = retainedHeaders;
+  rows.workspace_completion_file_batch_entries = entries.filter((entry) => retainedHeaderIds.has(String(entry.batch_id)));
 }
 
 /**
@@ -3454,9 +3758,11 @@ function stringArrayValue(value: unknown, code: string): string[] {
 
 function batchScopeFromPortableHeader(header: Record<string, unknown>): WorkspaceCompletionScope {
   const kind = header.scope_kind;
-  const roomId = header.room_id;
-  if (kind === "workspace" && (roomId === null || roomId === undefined)) return { kind: "workspace" };
-  if (kind === "room" && typeof roomId === "string" && roomId) return { kind: "room", roomId };
+  const roomId = portableNullableScopeId(header.room_id, "workspace_bundle_v4_batch_scope_invalid");
+  const agentId = portableNullableScopeId(header.agent_id, "workspace_bundle_v4_batch_scope_invalid");
+  if (kind === "workspace" && roomId === null && agentId === null) return { kind: "workspace" };
+  if (kind === "room" && roomId !== null && agentId === null) return { kind: "room", roomId };
+  if (kind === "agent" && roomId === null && agentId !== null) return { kind: "agent", agentId };
   throw new WorkspaceServerError("workspace_bundle_v4_batch_scope_invalid", 400);
 }
 

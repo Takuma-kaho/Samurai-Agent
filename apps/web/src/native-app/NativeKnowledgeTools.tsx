@@ -5,10 +5,13 @@ import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
 import { useNativeDraftNavigation, type NativeDraftNavigationController } from "./use-native-draft-navigation";
 import {
   isNativeKnowledgeResourceKind,
+  nativeKnowledgeShareAvailabilityMessage,
+  nativeRoomKnowledgeShareSelection,
   nativeRoomSearchResultCanOpen,
   nativeRoomSearchResultOpenHint,
   type NativeKnowledgeResourceDetail,
   type NativeKnowledgeToolsBridge,
+  type NativeRoomKnowledgeShareSelection,
   type NativeKnowledgeToolsSettingsDraft,
   type NativeKnowledgeToolsState,
   type NativeKnowledgeToolsTab,
@@ -35,6 +38,8 @@ export interface NativeKnowledgeToolsProps {
     scopeKind: "workspace" | "room";
     roomId?: string;
   }) => void | Promise<void>;
+  /** Opens the existing share surface with the fixed Room and safe resource options. */
+  onOpenShare?: (selection: NativeRoomKnowledgeShareSelection) => void | Promise<void>;
   onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
   /** Test seam; production uses window.samuraiDesktop through the hook. */
   bridge?: NativeKnowledgeToolsBridge;
@@ -255,6 +260,15 @@ export default function NativeKnowledgeTools(props: NativeKnowledgeToolsProps) {
         : undefined;
     if (target) draftNavigation.requestNavigation(target);
   };
+  const openShare = (): void => {
+    if (!props.onOpenShare || !model.target || model.shareAvailability !== "ready") return;
+    const selection: NativeRoomKnowledgeShareSelection = nativeRoomKnowledgeShareSelection(
+      model.target,
+      props.roomName,
+      model.roomKnowledgeShareResources
+    );
+    draftNavigation.requestNavigation(() => props.onOpenShare?.(selection));
+  };
 
   return (
     <>
@@ -282,7 +296,7 @@ export default function NativeKnowledgeTools(props: NativeKnowledgeToolsProps) {
         {!model.target ? <div className="native-knowledge-tools__status is-note" role="status">WorkspaceとRoomを選択すると、このパネルを利用できます。</div> : null}
         {model.target && model.readOnly ? <div className="native-knowledge-tools__status is-note" role="status">既存bridgeを確認できないため、読み取り専用で待機しています。</div> : null}
         <NativeDraftNavigationPrompt controller={draftNavigation} />
-        {model.tab === "knowledge" ? <KnowledgeView model={model} onUseResource={props.onUseResource} onOpenResource={openResource} onStartCreateResource={startCreateResource} /> : null}
+        {model.tab === "knowledge" ? <KnowledgeView model={model} onUseResource={props.onUseResource} onOpenResource={openResource} onStartCreateResource={startCreateResource} onOpenShare={props.onOpenShare ? openShare : undefined} /> : null}
         {model.tab === "search" ? <SearchView model={model} onOpenSearchResult={openSearchResult} /> : null}
         {model.tab === "settings" ? <SettingsView model={model} /> : null}
         {model.tab === "automation" ? <AutomationView model={model} /> : null}
@@ -330,32 +344,36 @@ function KnowledgeView({
   model,
   onUseResource,
   onOpenResource,
-  onStartCreateResource
+  onStartCreateResource,
+  onOpenShare
 }: {
   model: NativeKnowledgeToolsState;
   onUseResource?: NativeKnowledgeToolsProps["onUseResource"];
   onOpenResource?: (resourceId: string) => void;
   onStartCreateResource?: () => void;
+  onOpenShare?: () => void;
 }) {
+  const shareMessage = nativeKnowledgeShareAvailabilityMessage(model.shareAvailability);
   return (
     <div className="native-knowledge-tools__body" id="native-knowledge-tools-panel-knowledge" role="tabpanel" aria-labelledby="native-knowledge-tools-tab-knowledge">
       <div className="native-knowledge-tools__toolbar">
         <div>
           <h3 className="native-knowledge-tools__section-title">確認できる資源</h3>
-          <p className="native-knowledge-tools__section-note">Roomの知識とWorkspace共通の知識を分けて表示します。Skillの最適化画面はここへ追加しません。</p>
+          <p className="native-knowledge-tools__section-note">確認済みのRoom Knowledgeと、既存のSkillだけを分けて表示します。</p>
         </div>
         <div className="native-knowledge-tools__actions">
           <button className="native-knowledge-tools__primary-button" type="button" onClick={onStartCreateResource ?? model.startCreateResource} disabled={model.createBusy || model.resourcesLoading || !model.target}>Knowledgeを作成</button>
           <button className="native-knowledge-tools__quiet-button" type="button" onClick={() => void model.reloadResources()} disabled={model.resourcesLoading || !model.target}>更新</button>
+          {onOpenShare && model.shareAvailability === "ready" ? <button className="native-knowledge-tools__quiet-button" type="button" onClick={onOpenShare}>Room Knowledgeを共有</button> : null}
         </div>
       </div>
 
       {model.resourcesError ? <div className="native-knowledge-tools__status is-error" role="alert">{model.resourcesError}</div> : null}
-      {model.resourcesLoading ? <div className="native-knowledge-tools__status" role="status">KnowledgeとSkillを読み込んでいます…</div> : null}
+      {model.resourcesLoading ? <div className="native-knowledge-tools__status" role="status">Room KnowledgeとSkillを読み込んでいます…</div> : null}
+      {onOpenShare && model.shareAvailability !== "ready" && model.shareAvailability !== "loading" && shareMessage ? <div className={`native-knowledge-tools__status ${model.shareAvailability === "permission_denied" || model.shareAvailability === "retrieval_failed" ? "is-error" : "is-note"}`} role={model.shareAvailability === "permission_denied" || model.shareAvailability === "retrieval_failed" ? "alert" : "status"}>{shareMessage}</div> : null}
 
       <div className="native-knowledge-tools__resource-groups">
         <ResourceGroup title="このRoomのKnowledge" resources={model.roomResources} selectedResourceId={model.selectedResourceId} onOpen={onOpenResource ?? model.openResource} />
-        <ResourceGroup title="Workspace共通Knowledge" resources={model.workspaceResources} selectedResourceId={model.selectedResourceId} onOpen={onOpenResource ?? model.openResource} />
         <ResourceGroup title="Skill" resources={model.skills} selectedResourceId={model.selectedResourceId} onOpen={onOpenResource ?? model.openResource} />
       </div>
 
@@ -377,15 +395,12 @@ function CreateResourceView({ model }: { model: NativeKnowledgeToolsState }) {
   return (
     <form className="native-knowledge-tools__detail" aria-label="Knowledgeの新規作成" onSubmit={submit}>
       <div className="native-knowledge-tools__detail-head">
-        <div><h3>Knowledgeを作成</h3><p>保存先・種別・理由を確認して、現在のWorkspace/Roomへ保存します。</p></div>
+        <div><h3>Knowledgeを作成</h3><p>保存先・種別・理由を確認して、現在のRoomへ保存します。</p></div>
         <span className="native-knowledge-tools__resource-state">下書き</span>
       </div>
       <label className="native-knowledge-tools__field">
         <span>保存先</span>
-        <select value={draft.scopeKind} onChange={(event) => model.updateCreateDraft({ scopeKind: event.currentTarget.value as "workspace" | "room", roomId: model.target?.roomId })} disabled={busy} aria-label="Knowledge保存先">
-          <option value="room">このRoom</option>
-          <option value="workspace">Workspace共通</option>
-        </select>
+        <input value="このRoom" readOnly aria-label="Knowledge保存先" />
       </label>
       <label className="native-knowledge-tools__field">
         <span>Knowledge種別</span>
@@ -467,6 +482,7 @@ function ResourceDetailView({
   const reasonMissing = !draft.reason.trim();
   const version = detail.version.version ?? resource.version;
   const resourceKind = isNativeKnowledgeResourceKind(resource.kind) ? resource.kind : undefined;
+  const scopeKind = resource.scope.kind === "room" || resource.scope.kind === "workspace" ? resource.scope.kind : undefined;
   const canUseInWork = resourceKind ? nativeKnowledgeResourceCanBeUsedInWork({ kind: resourceKind, lifecycleState: resource.lifecycleState }) : false;
 
   return (
@@ -511,7 +527,7 @@ function ResourceDetailView({
         <button className="native-knowledge-tools__quiet-button" type="button" onClick={model.cancelDraft} disabled={busy || !draft.dirty}>取消</button>
         {resource.kind === "knowledge" ? <button className="native-knowledge-tools__quiet-button" type="button" onClick={() => void model.toggleFixed()} disabled={busy || !model.resourceCanFix || draft.dirty}>{resource.aiProtection === "fixed" ? "AI更新の固定を解除" : "AI更新を固定"}</button> : null}
         <button className="native-knowledge-tools__danger-button" type="button" onClick={() => void model.toggleArchived()} disabled={busy || !model.resourceCanArchive || draft.dirty}>{skillArchiveLabel(resource)}</button>
-        {onUseResource && resourceKind ? <button className="native-knowledge-tools__quiet-button" type="button" onClick={() => void onUseResource({ resourceId: resource.id, kind: resourceKind, title: resource.title, version, scopeKind: resource.scope.kind, ...(resource.scope.kind === "room" ? { roomId: resource.scope.roomId } : {}) })} disabled={busy || !canUseInWork}>仕事で使う</button> : null}
+        {onUseResource && resourceKind && scopeKind ? <button className="native-knowledge-tools__quiet-button" type="button" onClick={() => void onUseResource({ resourceId: resource.id, kind: resourceKind, title: resource.title, version, scopeKind, ...(scopeKind === "room" ? { roomId: resource.scope.roomId } : {}) })} disabled={busy || !canUseInWork}>仕事で使う</button> : null}
       </div>
 
       <ResourceHistory detail={detail} />
@@ -627,16 +643,12 @@ function SettingsView({ model }: { model: NativeKnowledgeToolsState }) {
         </form>
 
         <form className="native-knowledge-tools__settings-card" onSubmit={submitLearning}>
-          <h3>学習の基本状態</h3>
-          <p>高度なEngine・model・予算編集はここでは行わず、現在の有効状態だけを管理します。</p>
-          <label className="native-knowledge-tools__choice"><input type="checkbox" checked={draft.learningEnabled} onChange={(event) => updateSettings(model, { learningEnabled: event.currentTarget.checked })} disabled={model.settingsBusy !== null || !model.settingsCanEdit} /> <span>Workspaceの学習を有効にする</span></label>
-          <fieldset className="native-knowledge-tools__fieldset"><legend>適用範囲</legend>
-            <label className="native-knowledge-tools__choice"><input type="radio" name="native-knowledge-tools-learning-scope" value="workspace" checked={draft.learningScope === "workspace"} onChange={() => updateSettings(model, { learningScope: "workspace", scopedLearningEnabled: settings.learning.workspace?.enabled ?? settings.learning.effective.enabled })} disabled={model.settingsBusy !== null || !model.settingsCanEdit} /> <span>Workspace標準</span></label>
-            <label className="native-knowledge-tools__choice"><input type="radio" name="native-knowledge-tools-learning-scope" value="room" checked={draft.learningScope === "room"} onChange={() => updateSettings(model, { learningScope: "room", scopedLearningEnabled: settings.learning.room?.enabled ?? settings.learning.effective.enabled })} disabled={model.settingsBusy !== null || !model.settingsCanEdit} /> <span>このRoomの上書き</span></label>
-          </fieldset>
-          <label className="native-knowledge-tools__choice"><input type="checkbox" checked={draft.scopedLearningEnabled} onChange={(event) => updateSettings(model, { scopedLearningEnabled: event.currentTarget.checked })} disabled={model.settingsBusy !== null || !model.settingsCanEdit} /> <span>{draft.learningScope === "room" ? "このRoomで学習処理を有効にする" : "Workspace標準の学習処理を有効にする"}</span></label>
+          <h3>このRoomの学習</h3>
+          <p>学習の状態はRoomに保存します。Workspace標準は継承元として表示するだけで、この画面から変更しません。</p>
+          <label className="native-knowledge-tools__choice"><input type="checkbox" checked={draft.scopedLearningEnabled} onChange={(event) => updateSettings(model, { scopedLearningEnabled: event.currentTarget.checked, learningScope: "room" })} disabled={model.settingsBusy !== null || !model.settingsCanEdit} /> <span>このRoomで学習処理を有効にする</span></label>
           <div className="native-knowledge-tools__settings-summary">
-            <div><span>現在の適用元</span><strong>{settings.learning.room ? "Room上書き" : "Workspace標準"}</strong></div>
+            <div><span>Workspace標準（継承元）</span><strong>{settings.workspace.learning_enabled ? "有効" : "停止"}</strong></div>
+            <div><span>このRoomの設定</span><strong>{settings.learning.room ? "Room上書き" : "Workspace標準を継承"}</strong></div>
             <div><span>現在の状態</span><strong>{settings.learning.effective.enabled ? "有効" : "停止"}</strong></div>
             <div><span>使用量</span><strong>{settings.learning.effective.tokensUsed.toLocaleString()} tokens</strong></div>
             <div><span>確保中</span><strong>{settings.learning.effective.tokensReserved.toLocaleString()} tokens</strong></div>

@@ -45,10 +45,26 @@ export const domainApiVersion = "1" as const;
 export const DomainApiVersionSchema = z.literal(domainApiVersion);
 export type DomainApiVersion = z.infer<typeof DomainApiVersionSchema>;
 
+/**
+ * Account-owned preferences are admitted as an immutable snapshot for one
+ * execution only.  The Server re-validates and persists this value privately;
+ * it is never an authority selector or a public Room field.
+ */
+export const PersonalPreferencesSnapshotSchema = z.object({
+  schema_version: z.literal(1),
+  revision: z.number().int().nonnegative().safe(),
+  display_name: z.string().trim().min(1).max(200),
+  output_locale: SupportedLocaleSchema.nullable(),
+  instructions: z.string().max(20_000)
+}).strict();
+export type PersonalPreferencesSnapshot = z.infer<typeof PersonalPreferencesSnapshotSchema>;
+
 /** Only app-owned references cross the public boundary. Authority is rebuilt by the Server. */
 export const PublicRequestContextSchema = z.object({
   room_id: z.string().trim().min(1).max(512).optional(),
-  session_id: z.string().trim().min(1).max(512).optional()
+  session_id: z.string().trim().min(1).max(512).optional(),
+  /** Optional authenticated Account snapshot. Query and management routes reject it. */
+  personal_preferences: PersonalPreferencesSnapshotSchema.optional()
 }).strict();
 export type PublicRequestContext = z.infer<typeof PublicRequestContextSchema>;
 
@@ -720,18 +736,25 @@ const publicManagementId = z.string().trim().min(1).max(512);
 const publicManagementTimestamp = z.string().datetime();
 
 export const PublicCompletionScopeSchema = z.object({
-  kind: z.enum(["workspace", "room"]),
-  roomId: publicManagementId.optional()
+  kind: z.enum(["workspace", "room", "agent"]),
+  roomId: publicManagementId.optional(),
+  agentId: publicManagementId.optional()
 }).strict().superRefine((scope, issue) => {
+  if (scope.roomId && scope.agentId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agentId"], message: "completion_scope_targets_exclusive" });
   if (scope.kind === "room" && !scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "room_id_required" });
+  if (scope.kind === "room" && scope.agentId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agentId"], message: "room_scope_agent_forbidden" });
+  if (scope.kind === "agent" && !scope.agentId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agentId"], message: "agent_id_required" });
+  if (scope.kind === "agent" && scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "agent_scope_room_forbidden" });
   if (scope.kind === "workspace" && scope.roomId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["roomId"], message: "workspace_scope_room_forbidden" });
+  if (scope.kind === "workspace" && scope.agentId) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agentId"], message: "workspace_scope_agent_forbidden" });
 });
 export type PublicCompletionScope = z.infer<typeof PublicCompletionScopeSchema>;
 
 const publicCompletionWriteBase = z.object({
   resource_id: publicManagementId.optional(),
-  scope_kind: z.enum(["workspace", "room"]),
+  scope_kind: z.enum(["workspace", "room", "agent"]),
   room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   kind: z.enum(["knowledge", "skill"]),
   knowledge_kind: z.enum(["fact", "decision", "explanation", "experience_rule"]).optional(),
   title: z.string().trim().min(1).max(200),
@@ -747,10 +770,41 @@ const publicCompletionWriteBase = z.object({
 }).strict();
 
 function refinePublicCompletionWrite(value: z.infer<typeof publicCompletionWriteBase>, issue: z.RefinementCtx): void {
+  if (value.room_id && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "completion_scope_targets_exclusive" });
   if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
+  if (value.scope_kind === "room" && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "room_scope_agent_forbidden" });
+  if (value.scope_kind === "agent" && !value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "agent_id_required" });
+  if (value.scope_kind === "agent" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "agent_scope_room_forbidden" });
   if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
+  if (value.scope_kind === "workspace" && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "workspace_scope_agent_forbidden" });
   if (value.kind === "knowledge" && !value.knowledge_kind) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["knowledge_kind"], message: "knowledge_kind_required" });
   if (value.kind === "skill" && value.knowledge_kind) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["knowledge_kind"], message: "skill_knowledge_kind_forbidden" });
+  if (value.scope_kind === "workspace" && value.kind === "knowledge") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["scope_kind"], message: "workspace_memory_removed" });
+  }
+  if (value.scope_kind === "agent" && value.ai_managed === true) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["ai_managed"], message: "agent_scope_ai_managed_forbidden" });
+}
+
+type PublicCompletionReadTarget = {
+  scope_kind?: "workspace" | "room" | "agent";
+  room_id?: string;
+  agent_id?: string;
+  kind?: "knowledge" | "skill";
+};
+
+function refinePublicCompletionReadTarget(value: PublicCompletionReadTarget, issue: z.RefinementCtx): void {
+  if (value.room_id && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "completion_scope_targets_exclusive" });
+  if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
+  if (value.scope_kind === "room" && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "room_scope_agent_forbidden" });
+  if (value.scope_kind === "agent" && !value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "agent_id_required" });
+  if (value.scope_kind === "agent" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "agent_scope_room_forbidden" });
+  if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
+  if (value.scope_kind === "workspace" && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "workspace_scope_agent_forbidden" });
+  if (value.scope_kind === "workspace" && value.kind === "knowledge") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["scope_kind"], message: "workspace_memory_removed" });
+  }
+  if (value.agent_id && value.scope_kind && value.scope_kind !== "agent") issue.addIssue({ code: z.ZodIssueCode.custom, path: ["scope_kind"], message: "agent_scope_kind_required" });
+  if (value.room_id && value.scope_kind && value.scope_kind !== "room") issue.addIssue({ code: z.ZodIssueCode.custom, path: ["scope_kind"], message: "room_scope_kind_required" });
 }
 
 export const PublicCompletionResourceCreateInputSchema = publicCompletionWriteBase.superRefine(refinePublicCompletionWrite);
@@ -762,15 +816,25 @@ export const PublicCompletionResourceUpdateInputSchema = publicCompletionWriteBa
 export type PublicCompletionResourceUpdateInput = z.input<typeof PublicCompletionResourceUpdateInputSchema>;
 
 export const PublicCompletionResourceListInputSchema = z.object({
-  scope_kind: z.enum(["workspace", "room"]).optional(),
+  scope_kind: z.enum(["workspace", "room", "agent"]).optional(),
   room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   kind: z.enum(["knowledge", "skill", "policy"]).optional(),
   include_archived: z.boolean().default(false),
   limit: z.number().int().positive().max(100).default(50),
   cursor: publicManagementId.optional()
 }).strict().superRefine((value, issue) => {
+  if (value.room_id && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "completion_scope_targets_exclusive" });
   if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
+  if (value.scope_kind === "room" && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "room_scope_agent_forbidden" });
+  if (value.scope_kind === "agent" && !value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "agent_id_required" });
+  if (value.scope_kind === "agent" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "agent_scope_room_forbidden" });
   if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
+  if (value.scope_kind === "workspace" && value.agent_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent_id"], message: "workspace_scope_agent_forbidden" });
+  if (value.scope_kind === "workspace" && value.kind === "knowledge") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["scope_kind"], message: "workspace_memory_removed" });
+  }
+  if (value.scope_kind === "agent" && value.kind === "policy") issue.addIssue({ code: z.ZodIssueCode.custom, path: ["kind"], message: "agent_scope_resource_kind_invalid" });
 });
 export type PublicCompletionResourceListInput = z.input<typeof PublicCompletionResourceListInputSchema>;
 
@@ -784,42 +848,54 @@ export type PublicCompletionKnowledgeSearchInput = z.input<typeof PublicCompleti
 
 export const PublicCompletionResourceViewInputSchema = z.object({
   resource_id: publicManagementId,
+  scope_kind: z.enum(["workspace", "room", "agent"]).optional(),
   room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   kind: z.enum(["knowledge", "skill"]).optional(),
   versions_limit: z.number().int().positive().max(100).default(50),
   evidence_limit: z.number().int().positive().max(100).default(50)
-}).strict();
+}).strict().superRefine(refinePublicCompletionReadTarget);
 export const PublicCompletionResourceBodyInputSchema = z.object({
   resource_id: publicManagementId,
+  scope_kind: z.enum(["workspace", "room", "agent"]).optional(),
   room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   kind: z.enum(["knowledge", "skill"]).optional(),
   version: z.number().int().positive().optional()
-}).strict();
+}).strict().superRefine(refinePublicCompletionReadTarget);
 export const PublicCompletionResourceStateInputSchema = z.object({
   resource_id: publicManagementId,
+  scope_kind: z.enum(["workspace", "room", "agent"]).optional(),
+  room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   expected_version: z.number().int().positive(),
   reason: z.string().trim().min(1).max(4_000),
   archived: z.boolean().optional(),
   fixed: z.boolean().optional()
 }).strict().superRefine((value, issue) => {
+  refinePublicCompletionReadTarget(value, issue);
   if ((value.archived === undefined) === (value.fixed === undefined)) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["resource_id"], message: "completion_state_action_required" });
 });
 export const PublicCompletionResourceArchiveInputSchema = z.object({
   resource_id: publicManagementId,
+  scope_kind: z.enum(["workspace", "room", "agent"]).optional(),
   room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   archived: z.boolean(),
   expected_version: z.number().int().positive(),
   reason: z.string().trim().min(1).max(4_000)
-}).strict();
+}).strict().superRefine(refinePublicCompletionReadTarget);
 export const PublicCompletionResourceFixInputSchema = z.object({
   resource_id: publicManagementId,
+  scope_kind: z.enum(["workspace", "room", "agent"]).optional(),
   room_id: publicManagementId.optional(),
+  agent_id: publicManagementId.optional(),
   fixed: z.boolean(),
   expected_version: z.number().int().positive(),
   reason: z.string().trim().min(1).max(4_000)
-}).strict();
+}).strict().superRefine(refinePublicCompletionReadTarget);
 
-export const PublicCompletionResourceSchema = z.object({
+const publicCompletionResourceBaseSchema = z.object({
   workspaceId: publicManagementId,
   id: publicManagementId,
   scope: PublicCompletionScopeSchema,
@@ -841,6 +917,19 @@ export const PublicCompletionResourceSchema = z.object({
   createdAt: publicManagementTimestamp,
   updatedAt: publicManagementTimestamp
 }).strict();
+
+function refinePublicCompletionResourceOutput(resource: z.infer<typeof publicCompletionResourceBaseSchema>, issue: z.RefinementCtx): void {
+  if (resource.scope.kind === "workspace" && resource.kind === "knowledge") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["scope"], message: "workspace_memory_removed" });
+  }
+  if (resource.scope.kind === "agent" && resource.kind !== "knowledge" && resource.kind !== "skill") {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["kind"], message: "agent_scope_resource_kind_invalid" });
+  }
+  if (resource.scope.kind === "agent" && resource.aiManaged) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["aiManaged"], message: "agent_scope_ai_managed_forbidden" });
+  }
+}
+export const PublicCompletionResourceSchema = publicCompletionResourceBaseSchema.superRefine(refinePublicCompletionResourceOutput);
 export type PublicCompletionResource = z.infer<typeof PublicCompletionResourceSchema>;
 
 export const PublicCompletionResourceVersionSchema = z.object({
@@ -879,9 +968,9 @@ export const PublicCompletionResourcePageSchema = z.object({
   resources: z.array(PublicCompletionResourceSchema),
   next_cursor: publicManagementId.optional()
 }).strict();
-export const PublicCompletionKnowledgeSearchResourceSchema = PublicCompletionResourceSchema.extend({
+export const PublicCompletionKnowledgeSearchResourceSchema = publicCompletionResourceBaseSchema.extend({
   rank: z.number().finite()
-}).strict();
+}).strict().superRefine((resource, issue) => refinePublicCompletionResourceOutput(resource, issue));
 export const PublicCompletionKnowledgeSearchPageSchema = z.object({
   resources: z.array(PublicCompletionKnowledgeSearchResourceSchema),
   next_cursor: publicManagementId.optional()
@@ -987,6 +1076,454 @@ export const PublicLearningSettingsPatchInputSchema = z.object({
   if (value.scope_kind === "room" && !value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "room_id_required" });
   if (value.scope_kind === "workspace" && value.room_id) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["room_id"], message: "workspace_scope_room_forbidden" });
 });
+
+/**
+ * Shared Context/Notification/Share contracts for the Native UI.  These
+ * schemas are deliberately kept independent from the internal Workspace
+ * records: the Server remains the authority for membership, ownership, and
+ * the source of every identifier.
+ */
+const publicContextId = z.string().trim().min(1).max(512);
+const publicContextVersion = z.number().int().positive();
+const publicContextTimestamp = z.string().datetime();
+const publicContextHash = z.string().regex(/^[a-f0-9]{64}$/);
+const publicContextTitle = z.string().trim().min(1).max(200);
+const publicContextPageCursor = z.string().trim().min(1).max(4_096);
+
+export const PublicPageInputSchema = z.object({
+  limit: z.number().int().min(1).max(100).default(30),
+  cursor: publicContextPageCursor.optional()
+}).strict();
+export type PublicPageInput = z.input<typeof PublicPageInputSchema>;
+export const PageInputSchema = PublicPageInputSchema;
+export type PageInput = PublicPageInput;
+
+/** Build a strict page response with an explicit null cursor at the end. */
+const publicPageSchema = <T extends z.ZodTypeAny>(item: T) => z.object({
+  items: z.array(item).max(100),
+  next_cursor: publicContextPageCursor.nullable()
+}).strict();
+export const PublicPageSchema = publicPageSchema;
+export const PageSchema = publicPageSchema;
+
+export const PublicShareKindSchema = z.enum(["room_knowledge", "agent"]);
+export type PublicShareKind = z.infer<typeof PublicShareKindSchema>;
+export const PublicShareVisibilitySchema = z.enum(["restricted", "public"]);
+export type PublicShareVisibility = z.infer<typeof PublicShareVisibilitySchema>;
+
+export const PublicTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("room"), room_id: publicContextId }).strict(),
+  z.object({ kind: z.literal("work"), room_id: publicContextId, work_id: publicContextId, message_id: publicContextId.optional() }).strict(),
+  z.object({ kind: z.literal("knowledge"), room_id: publicContextId, resource_id: publicContextId }).strict(),
+  z.object({ kind: z.literal("interaction_request"), room_id: publicContextId, request_id: publicContextId }).strict(),
+  z.object({ kind: z.literal("invitation"), invitation_id: publicContextId }).strict()
+]);
+export type PublicTarget = z.infer<typeof PublicTargetSchema>;
+export const TargetSchema = PublicTargetSchema;
+export type Target = PublicTarget;
+
+export const PublicSearchItemSchema = z.object({
+  type: z.enum(["room", "conversation", "knowledge"]),
+  id: publicContextId,
+  room_id: publicContextId,
+  title: publicContextTitle,
+  snippet: z.string().max(200),
+  updated_at: publicContextTimestamp,
+  target: PublicTargetSchema
+}).strict();
+export type PublicSearchItem = z.infer<typeof PublicSearchItemSchema>;
+
+export const PublicWorkspaceSearchInputSchema = z.object({
+  q: z.string().trim().min(1).max(512),
+  types: z.array(z.enum(["room", "conversation", "knowledge"])).min(1).max(3).default(["room", "conversation", "knowledge"]),
+  room_id: publicContextId.optional(),
+  limit: PublicPageInputSchema.shape.limit,
+  cursor: PublicPageInputSchema.shape.cursor
+}).strict().superRefine((value, issue) => {
+  if (new Set(value.types).size !== value.types.length) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["types"], message: "types_must_be_unique" });
+  }
+});
+export type PublicWorkspaceSearchInput = z.input<typeof PublicWorkspaceSearchInputSchema>;
+export const PublicWorkspaceSearchPageSchema = publicPageSchema(PublicSearchItemSchema);
+export type PublicWorkspaceSearchPage = z.infer<typeof PublicWorkspaceSearchPageSchema>;
+/** Short aliases used by generic Context clients. */
+export const PublicSearchPageSchema = PublicWorkspaceSearchPageSchema;
+export type PublicSearchPage = PublicWorkspaceSearchPage;
+
+/** Keep the wire kind open for forward-compatible rendering of unknown kinds. */
+export const PublicNotificationKindSchema = z.string().trim().min(1).max(256);
+export type PublicNotificationKind = z.infer<typeof PublicNotificationKindSchema>;
+
+export const PublicNotificationActionStateSchema = z.enum(["not_required", "pending", "resolved"]);
+export type PublicNotificationActionState = z.infer<typeof PublicNotificationActionStateSchema>;
+
+export const PublicNotificationSchema = z.object({
+  id: publicContextId,
+  kind: PublicNotificationKindSchema,
+  created_at: publicContextTimestamp,
+  read_at: publicContextTimestamp.nullable(),
+  title: z.string().trim().min(1).max(200),
+  summary: z.string().max(20_000),
+  target: PublicTargetSchema.nullable(),
+  action_state: PublicNotificationActionStateSchema
+}).strict();
+export type PublicNotification = z.infer<typeof PublicNotificationSchema>;
+export const NotificationSchema = PublicNotificationSchema;
+export type Notification = PublicNotification;
+
+const publicInvitationNotificationSchema = PublicNotificationSchema.extend({ kind: z.literal("invitation") }).strict();
+
+export const PublicNotificationListInputSchema = PublicPageInputSchema.extend({
+  unread_only: z.boolean().default(false)
+}).strict();
+export type PublicNotificationListInput = z.input<typeof PublicNotificationListInputSchema>;
+export const PublicNotificationPageSchema = publicPageSchema(PublicNotificationSchema);
+export type PublicNotificationPage = z.infer<typeof PublicNotificationPageSchema>;
+export const PublicInvitationNotificationPageSchema = publicPageSchema(publicInvitationNotificationSchema);
+export type PublicInvitationNotificationPage = z.infer<typeof PublicInvitationNotificationPageSchema>;
+
+export const PublicNotificationSummarySchema = z.object({
+  unread_count: z.number().int().nonnegative(),
+  as_of: publicContextTimestamp
+}).strict();
+export type PublicNotificationSummary = z.infer<typeof PublicNotificationSummarySchema>;
+
+const publicNotificationIdsSchema = z.array(publicContextId).min(1).max(100).superRefine((ids, issue) => {
+  if (new Set(ids).size !== ids.length) issue.addIssue({ code: z.ZodIssueCode.custom, message: "notification_ids_must_be_unique" });
+});
+export const PublicNotificationMarkReadInputSchema = z.object({ notification_ids: publicNotificationIdsSchema }).strict();
+export type PublicNotificationMarkReadInput = z.infer<typeof PublicNotificationMarkReadInputSchema>;
+export const PublicNotificationMarkReadResultSchema = z.object({
+  updated_ids: z.array(publicContextId).max(100),
+  already_read_ids: z.array(publicContextId).max(100),
+  read_at: publicContextTimestamp
+}).strict();
+export type PublicNotificationMarkReadResult = z.infer<typeof PublicNotificationMarkReadResultSchema>;
+
+export const PublicAccountWorkspaceNotificationSummariesInputSchema = z.object({
+  workspace_ids: z.array(publicContextId).min(1).max(100).superRefine((ids, issue) => {
+    if (new Set(ids).size !== ids.length) issue.addIssue({ code: z.ZodIssueCode.custom, message: "workspace_ids_must_be_unique" });
+  })
+}).strict();
+export type PublicAccountWorkspaceNotificationSummariesInput = z.infer<typeof PublicAccountWorkspaceNotificationSummariesInputSchema>;
+export const PublicWorkspaceNotificationSummarySchema = z.object({
+  workspace_id: publicContextId,
+  unread_count: z.number().int().nonnegative(),
+  as_of: publicContextTimestamp
+}).strict();
+export type PublicWorkspaceNotificationSummary = z.infer<typeof PublicWorkspaceNotificationSummarySchema>;
+export const PublicAccountWorkspaceNotificationSummariesSchema = z.object({
+  items: z.array(PublicWorkspaceNotificationSummarySchema).max(100)
+}).strict();
+export type PublicAccountWorkspaceNotificationSummaries = z.infer<typeof PublicAccountWorkspaceNotificationSummariesSchema>;
+
+export const PublicAccountInvitationNotificationsInputSchema = PublicPageInputSchema;
+export type PublicAccountInvitationNotificationsInput = PublicPageInput;
+export const PublicAccountInvitationNotificationsPageSchema = PublicInvitationNotificationPageSchema;
+export type PublicAccountInvitationNotificationsPage = PublicInvitationNotificationPage;
+export const PublicAccountInvitationNotificationReadInputSchema = PublicNotificationMarkReadInputSchema;
+export type PublicAccountInvitationNotificationReadInput = PublicNotificationMarkReadInput;
+export const PublicAccountInvitationNotificationReadResultSchema = PublicNotificationMarkReadResultSchema;
+export type PublicAccountInvitationNotificationReadResult = PublicNotificationMarkReadResult;
+
+const publicShareFilePath = z.string().trim().min(1).max(1_024).refine((value) => {
+  if (value.startsWith("/") || value.includes("\\") || value.includes("//")) return false;
+  return value.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+}, "share_file_path_invalid");
+
+export const PublicShareResourceFileSchema = z.object({
+  path: publicShareFilePath,
+  encoding: z.enum(["utf8", "base64"]),
+  content: z.string().min(1).max(8 * 1024 * 1024),
+  byte_size: z.number().int().nonnegative(),
+  sha256: publicContextHash
+}).strict().superRefine((file, issue) => {
+  if (file.encoding === "base64" && !isCanonicalBase64(file.content)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["content"], message: "share_file_content_base64_invalid" });
+  }
+});
+export type PublicShareResourceFile = z.infer<typeof PublicShareResourceFileSchema>;
+
+export const PublicShareResourceEntrySchema = z.object({
+  entry_id: publicContextId,
+  kind: z.enum(["knowledge", "skill"]),
+  title: publicContextTitle,
+  content: z.string().min(1).max(8 * 1024 * 1024),
+  knowledge_kind: z.enum(["fact", "decision", "explanation", "experience_rule"]).optional(),
+  files: z.array(PublicShareResourceFileSchema).max(99).default([])
+}).strict().superRefine((entry, issue) => {
+  if (entry.kind === "knowledge" && !entry.knowledge_kind) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["knowledge_kind"], message: "knowledge_kind_required" });
+  }
+  if (entry.kind === "knowledge" && entry.files.length > 0) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["files"], message: "knowledge_files_forbidden" });
+  }
+  if (entry.kind === "skill" && entry.knowledge_kind) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["knowledge_kind"], message: "skill_knowledge_kind_forbidden" });
+  }
+  const filePaths = entry.files.map((file) => file.path);
+  if (new Set(filePaths).size !== filePaths.length) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["files"], message: "file_paths_must_be_unique" });
+});
+export type PublicShareResourceEntry = z.infer<typeof PublicShareResourceEntrySchema>;
+
+const publicShareAgentSchema = z.object({
+  name: publicContextTitle,
+  role: z.string().trim().min(1).max(500),
+  instructions: z.string().trim().min(1).max(20_000)
+}).strict();
+
+export const PublicShareManifestSchema = z.object({
+  format_version: z.literal(1),
+  kind: PublicShareKindSchema,
+  title: publicContextTitle,
+  entries: z.array(PublicShareResourceEntrySchema).max(1_000),
+  agent: publicShareAgentSchema.optional()
+}).strict().superRefine((manifest, issue) => {
+  const hasKnowledgeEntry = manifest.entries.some((entry) => entry.kind === "knowledge");
+  if (manifest.kind === "room_knowledge") {
+    if (manifest.agent) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent"], message: "room_knowledge_agent_forbidden" });
+    if (!hasKnowledgeEntry) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["entries"], message: "room_knowledge_entry_required" });
+  }
+  if (manifest.kind === "agent" && !manifest.agent) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["agent"], message: "agent_manifest_required" });
+  }
+  const entryIds = manifest.entries.map((entry) => entry.entry_id);
+  if (new Set(entryIds).size !== entryIds.length) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["entries"], message: "entry_ids_must_be_unique" });
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest)).byteLength;
+  if (manifestBytes > 32 * 1024 * 1024) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["entries"], message: "manifest_too_large" });
+});
+export type PublicShareManifest = z.infer<typeof PublicShareManifestSchema>;
+export const PublicManifestSchema = PublicShareManifestSchema;
+export type PublicManifest = PublicShareManifest;
+export const ManifestSchema = PublicShareManifestSchema;
+export type Manifest = PublicShareManifest;
+
+export const PublicShareRemovedReferenceSchema = z.object({
+  entry_id: publicContextId,
+  location: z.string().trim().min(1).max(1_024),
+  reason: z.string().trim().min(1).max(2_000)
+}).strict();
+export type PublicShareRemovedReference = z.infer<typeof PublicShareRemovedReferenceSchema>;
+
+export const PublicShareDraftSchema = z.object({
+  draft_id: publicContextId,
+  version: publicContextVersion,
+  manifest: PublicShareManifestSchema,
+  content_hash: publicContextHash,
+  visibility: PublicShareVisibilitySchema,
+  recipient_account_ids: z.array(publicContextId).max(1_000),
+  removed_references: z.array(PublicShareRemovedReferenceSchema).max(1_000)
+}).strict().superRefine((draft, issue) => {
+  if (new Set(draft.recipient_account_ids).size !== draft.recipient_account_ids.length) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["recipient_account_ids"], message: "recipient_account_ids_must_be_unique" });
+  }
+});
+export type PublicShareDraft = z.infer<typeof PublicShareDraftSchema>;
+export const PublicDraftSchema = PublicShareDraftSchema;
+export type PublicDraft = PublicShareDraft;
+export const DraftSchema = PublicShareDraftSchema;
+export type Draft = PublicShareDraft;
+
+const publicShareSummaryBaseSchema = z.object({
+  share_id: publicContextId,
+  version: publicContextVersion,
+  title: publicContextTitle,
+  status: z.enum(["draft", "active", "revoked"]),
+  visibility: PublicShareVisibilitySchema,
+  recipient_account_ids: z.array(publicContextId).max(1_000),
+  url: z.string().trim().min(1).max(4_096).nullable(),
+  created_at: publicContextTimestamp,
+  published_at: publicContextTimestamp.nullable(),
+  revoked_at: publicContextTimestamp.nullable()
+}).strict();
+export const PublicShareSummarySchema = publicShareSummaryBaseSchema.superRefine((summary, issue) => {
+  if (new Set(summary.recipient_account_ids).size !== summary.recipient_account_ids.length) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["recipient_account_ids"], message: "recipient_account_ids_must_be_unique" });
+  }
+});
+export type PublicShareSummary = z.infer<typeof PublicShareSummarySchema>;
+
+export const PublicShareViewSchema = publicShareSummaryBaseSchema.extend({
+  manifest: PublicShareManifestSchema,
+  content_hash: publicContextHash
+}).strict().superRefine((summary, issue) => {
+  if (new Set(summary.recipient_account_ids).size !== summary.recipient_account_ids.length) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["recipient_account_ids"], message: "recipient_account_ids_must_be_unique" });
+  }
+});
+export type PublicShareView = z.infer<typeof PublicShareViewSchema>;
+
+export const PublicShareResourceRefSchema = z.object({
+  id: publicContextId,
+  version: publicContextVersion
+}).strict();
+export type PublicShareResourceRef = z.infer<typeof PublicShareResourceRefSchema>;
+
+const publicShareDraftResourceInputSchema = z.object({
+  source_kind: PublicShareKindSchema,
+  source_id: publicContextId,
+  resource_refs: z.array(PublicShareResourceRefSchema).min(1).max(1_000)
+}).strict().superRefine((value, issue) => {
+  const ids = value.resource_refs.map((ref) => ref.id);
+  if (new Set(ids).size !== ids.length) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["resource_refs"], message: "resource_refs_must_be_unique" });
+});
+const publicShareDraftBaseInputSchema = z.object({ base_share_id: publicContextId }).strict();
+export const PublicShareDraftCreateInputSchema = z.union([
+  publicShareDraftResourceInputSchema,
+  publicShareDraftBaseInputSchema
+]);
+export type PublicShareDraftCreateInput = z.input<typeof PublicShareDraftCreateInputSchema>;
+
+export const PublicShareDraftUpdateInputSchema = z.object({
+  draft_id: publicContextId,
+  expected_version: publicContextVersion,
+  manifest: PublicShareManifestSchema,
+  visibility: PublicShareVisibilitySchema,
+  recipient_account_ids: z.array(publicContextId).max(1_000)
+}).strict().superRefine((value, issue) => {
+  if (new Set(value.recipient_account_ids).size !== value.recipient_account_ids.length) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["recipient_account_ids"], message: "recipient_account_ids_must_be_unique" });
+  }
+});
+export type PublicShareDraftUpdateInput = z.input<typeof PublicShareDraftUpdateInputSchema>;
+export const PublicShareDraftViewInputSchema = z.object({ draft_id: publicContextId }).strict();
+export type PublicShareDraftViewInput = z.infer<typeof PublicShareDraftViewInputSchema>;
+export const PublicShareDraftDiscardInputSchema = z.object({
+  draft_id: publicContextId,
+  expected_version: publicContextVersion
+}).strict();
+export type PublicShareDraftDiscardInput = z.infer<typeof PublicShareDraftDiscardInputSchema>;
+export const PublicShareDraftDiscardResultSchema = z.object({
+  draft_id: publicContextId,
+  discarded: z.literal(true)
+}).strict();
+export type PublicShareDraftDiscardResult = z.infer<typeof PublicShareDraftDiscardResultSchema>;
+
+export const PublicSharePublishInputSchema = z.object({
+  draft_id: publicContextId,
+  expected_version: publicContextVersion,
+  expected_content_hash: publicContextHash
+}).strict();
+export type PublicSharePublishInput = z.infer<typeof PublicSharePublishInputSchema>;
+export const PublicSharePublishResultSchema = z.object({
+  share_id: publicContextId,
+  version: publicContextVersion,
+  url: z.string().trim().min(1).max(4_096),
+  content_hash: publicContextHash,
+  published_at: publicContextTimestamp
+}).strict();
+export type PublicSharePublishResult = z.infer<typeof PublicSharePublishResultSchema>;
+
+export const PublicShareListInputSchema = z.object({
+  source_kind: PublicShareKindSchema,
+  source_id: publicContextId,
+  limit: PublicPageInputSchema.shape.limit,
+  cursor: PublicPageInputSchema.shape.cursor
+}).strict();
+export type PublicShareListInput = z.input<typeof PublicShareListInputSchema>;
+export const PublicSharePageSchema = publicPageSchema(PublicShareSummarySchema);
+export type PublicSharePage = z.infer<typeof PublicSharePageSchema>;
+export const PublicShareViewInputSchema = z.object({ share_id: publicContextId }).strict();
+export type PublicShareViewInput = z.infer<typeof PublicShareViewInputSchema>;
+export const PublicShareRevokeInputSchema = z.object({
+  share_id: publicContextId,
+  expected_version: publicContextVersion
+}).strict();
+export type PublicShareRevokeInput = z.infer<typeof PublicShareRevokeInputSchema>;
+export const PublicShareRevokeResultSchema = z.object({
+  share_id: publicContextId,
+  version: publicContextVersion,
+  status: z.literal("revoked"),
+  revoked_at: publicContextTimestamp
+}).strict();
+export type PublicShareRevokeResult = z.infer<typeof PublicShareRevokeResultSchema>;
+
+export const PublicShareOriginSchema = z.string().trim().min(1).max(2_048).refine((value) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.username === "" && url.password === ""
+      && url.pathname === "/" && url.search === "" && url.hash === "";
+  } catch {
+    return false;
+  }
+}, "share_origin_invalid");
+export type PublicShareOrigin = z.infer<typeof PublicShareOriginSchema>;
+export const PublicShareLocatorSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export type PublicShareLocator = z.infer<typeof PublicShareLocatorSchema>;
+
+export const PublicShareDelegationPayloadSchema = z.object({
+  version: z.literal(1),
+  source_origin: PublicShareOriginSchema,
+  share_id: publicContextId,
+  claim_id: publicContextId,
+  recipient_account_id: publicContextId,
+  target_origin: PublicShareOriginSchema,
+  target_workspace_id: publicContextId,
+  operation_id: publicContextId,
+  content_hash: publicContextHash,
+  issued_at: publicContextTimestamp,
+  expires_at: publicContextTimestamp
+}).strict();
+export type PublicShareDelegationPayload = z.infer<typeof PublicShareDelegationPayloadSchema>;
+export const PublicShareDelegationSchema = z.object({
+  payload: PublicShareDelegationPayloadSchema,
+  public_key: z.string().trim().min(1).max(8_192),
+  signature: z.string().trim().min(1).max(8_192)
+}).strict();
+export type PublicShareDelegation = z.infer<typeof PublicShareDelegationSchema>;
+
+export const PublicShareImportInputSchema = z.object({
+  source_origin: PublicShareOriginSchema,
+  locator: PublicShareLocatorSchema,
+  claim_id: publicContextId,
+  content_hash: publicContextHash,
+  delegation: PublicShareDelegationSchema,
+  target_room_id: publicContextId.optional()
+}).strict();
+export type PublicShareImportInput = z.infer<typeof PublicShareImportInputSchema>;
+export const PublicShareImportResultSchema = z.object({
+  import_id: publicContextId,
+  kind: PublicShareKindSchema,
+  status: z.enum(["staging", "committed", "failed"]),
+  phase: z.enum(["fetch", "files", "commit", "done", "cleanup"]),
+  retryable: z.boolean(),
+  failure_code: publicContextId.max(256).nullable(),
+  created_resource_ids: z.array(publicContextId).max(1_000),
+  created_agent_id: publicContextId.nullable(),
+  committed_at: publicContextTimestamp.nullable()
+}).strict().superRefine((result, issue) => {
+  if (new Set(result.created_resource_ids).size !== result.created_resource_ids.length) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, path: ["created_resource_ids"], message: "created_resource_ids_must_be_unique" });
+  }
+  if (result.status === "staging") {
+    if (result.created_resource_ids.length > 0 || result.created_agent_id !== null || result.committed_at !== null) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: ["status"], message: "staging_result_must_not_have_created_resources" });
+    }
+    if (result.phase === "done") issue.addIssue({ code: z.ZodIssueCode.custom, path: ["phase"], message: "staging_result_phase_invalid" });
+    if (result.failure_code !== null) issue.addIssue({ code: z.ZodIssueCode.custom, path: ["failure_code"], message: "staging_failure_code_forbidden" });
+  }
+  if (result.status === "committed") {
+    if (result.phase !== "done" || result.retryable || result.failure_code !== null || result.committed_at === null) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: ["status"], message: "committed_result_incomplete" });
+    }
+  }
+  if (result.status === "failed") {
+    if (result.failure_code === null || result.committed_at !== null) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, path: ["status"], message: "failed_result_incomplete" });
+    }
+  }
+});
+export type PublicShareImportResult = z.infer<typeof PublicShareImportResultSchema>;
+export const PublicImportResultSchema = PublicShareImportResultSchema;
+export type PublicImportResult = PublicShareImportResult;
+export const ImportResultSchema = PublicShareImportResultSchema;
+export type ImportResult = PublicShareImportResult;
+export const PublicShareImportStatusInputSchema = z.object({ operation_id: publicContextId }).strict();
+export type PublicShareImportStatusInput = z.infer<typeof PublicShareImportStatusInputSchema>;
+
+export const PublicContextSearchInputSchema = PublicWorkspaceSearchInputSchema;
+export type PublicContextSearchInput = PublicWorkspaceSearchInput;
 
 export const PublicAutomationJobSchema = z.object({
   id: publicManagementId,
@@ -1101,6 +1638,23 @@ const managementCommand = (
 });
 
 export const publicManagementContractDefinitions: readonly PublicManagementContractDefinition[] = Object.freeze([
+  managementQuery("workspace.search", PublicWorkspaceSearchInputSchema, PublicWorkspaceSearchPageSchema),
+  managementQuery("notification.list", PublicNotificationListInputSchema, PublicNotificationPageSchema),
+  managementQuery("notification.summary", z.object({}).strict(), PublicNotificationSummarySchema),
+  managementCommand("notification.mark_read", PublicNotificationMarkReadInputSchema, PublicNotificationMarkReadResultSchema, "state_transition"),
+  managementQuery("account.workspace_notification_summaries", PublicAccountWorkspaceNotificationSummariesInputSchema, PublicAccountWorkspaceNotificationSummariesSchema),
+  managementQuery("account.invitation_notifications", PublicAccountInvitationNotificationsInputSchema, PublicAccountInvitationNotificationsPageSchema),
+  managementCommand("account.invitation_notification_read", PublicAccountInvitationNotificationReadInputSchema, PublicAccountInvitationNotificationReadResultSchema, "state_transition"),
+  managementCommand("share.draft.create", PublicShareDraftCreateInputSchema, PublicShareDraftSchema, "append_or_unique"),
+  managementCommand("share.draft.update", PublicShareDraftUpdateInputSchema, PublicShareDraftSchema, "optimistic_version"),
+  managementQuery("share.draft.view", PublicShareDraftViewInputSchema, PublicShareDraftSchema),
+  managementCommand("share.draft.discard", PublicShareDraftDiscardInputSchema, PublicShareDraftDiscardResultSchema, "state_transition"),
+  managementCommand("share.publish", PublicSharePublishInputSchema, PublicSharePublishResultSchema, "optimistic_version"),
+  managementQuery("share.list", PublicShareListInputSchema, PublicSharePageSchema),
+  managementQuery("share.view", PublicShareViewInputSchema, PublicShareViewSchema),
+  managementCommand("share.revoke", PublicShareRevokeInputSchema, PublicShareRevokeResultSchema, "state_transition"),
+  managementCommand("share.import", PublicShareImportInputSchema, PublicShareImportResultSchema, "external_idempotency"),
+  managementQuery("share.import.status", PublicShareImportStatusInputSchema, PublicShareImportResultSchema),
   managementQuery("completion.resource.list", PublicCompletionResourceListInputSchema, PublicCompletionResourcePageSchema),
   managementQuery("completion.knowledge.search", PublicCompletionKnowledgeSearchInputSchema, PublicCompletionKnowledgeSearchPageSchema),
   managementQuery("completion.resource.view", PublicCompletionResourceViewInputSchema, PublicCompletionResourceDetailSchema),
@@ -1146,6 +1700,11 @@ export const publicDomainOperationIds = Object.freeze([
   "agent.backend.list", "agent.list", "agent.view", "agent.create", "agent.patch", "agent.backend.bind",
   "artifact.list", "artifact.view", "artifact.create", "artifact.revise", "artifact.restore_revision", "artifact.repair",
   "generated_surface.create", "generated_surface.revise", "generated_surface.action.run", "generated_surface.state", "generated_surface.export",
+  "workspace.search",
+  "notification.list", "notification.summary", "notification.mark_read",
+  "account.workspace_notification_summaries", "account.invitation_notifications", "account.invitation_notification_read",
+  "share.draft.create", "share.draft.update", "share.draft.view", "share.draft.discard",
+  "share.publish", "share.list", "share.view", "share.revoke", "share.import", "share.import.status",
   "completion.resource.list", "completion.resource.view", "completion.resource.body", "completion.knowledge.search", "completion.resource.create", "completion.resource.update", "completion.resource.archive", "completion.resource.fix",
   "settings.view", "settings.patch",
   "learning.settings.view", "learning.settings.patch",
@@ -1514,6 +2073,10 @@ const eventPayloadSchemas = {
     status: z.enum(["pending", "accepted", "denied", "cancelled", "expired", "executing", "completed", "failed"]),
     action: z.enum(["created", "responded", "cancelled", "executing", "completed", "failed", "expired"])
   }).strict(),
+  "notification.changed": z.object({
+    notification_id: publicContextId,
+    workspace_id: publicContextId.nullable()
+  }).strict(),
   // Organization events carry stable resource IDs and role/state facts only.
   // They deliberately omit raw invitation tokens, private Account fields, and
   // all Room/Message/Knowledge content.
@@ -1552,6 +2115,7 @@ const eventResourceKinds: Record<keyof typeof eventPayloadSchemas, string[]> = {
   "automation.job.created": ["automation_job", "room"],
   "automation.job.management_changed": ["automation_job", "room"],
   "workspace.interaction_request.changed": ["interaction_request", "room", "backend_run", "generated_surface", "generated_surface_revision"],
+  "notification.changed": ["notification"],
   "organization.created": ["organization"],
   "organization.member.invited": ["organization", "organization_invitation"],
   "organization.member.accepted": ["organization", "organization_membership"],
@@ -1892,6 +2456,93 @@ export class DomainApiClient {
     });
   }
 
+  /** Account-scoped Domain API entry points do not carry a Workspace path. */
+  executeAccountQuery<T = JsonValue>(queryId: string, request: DomainApiRequest = { context: {}, input: {} }): Promise<DomainApiResponse<T>> {
+    return this.transport<DomainApiResponse<T>>({
+      method: "POST",
+      path: `/api/v1/domain/queries/${encodeURIComponent(queryId)}`,
+      body: request
+    });
+  }
+
+  executeAccountOperation<T = JsonValue>(operationId: string, request: DomainApiRequest, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.transport<DomainApiResponse<T>>({
+      method: "POST",
+      path: `/api/v1/domain/operations/${encodeURIComponent(operationId)}`,
+      body: request,
+      operationId: options.operationId,
+      idempotencyKey: options.idempotencyKey ?? options.operationId
+    });
+  }
+
+  searchWorkspace<T = PublicWorkspaceSearchPage>(workspaceId: string, input: PublicWorkspaceSearchInput): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "workspace.search", { context: {}, input });
+  }
+
+  listNotifications<T = PublicNotificationPage>(workspaceId: string, input: PublicNotificationListInput = {}): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "notification.list", { context: {}, input });
+  }
+
+  getNotificationSummary<T = PublicNotificationSummary>(workspaceId: string): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "notification.summary", { context: {}, input: {} });
+  }
+
+  markNotificationsRead<T = PublicNotificationMarkReadResult>(workspaceId: string, input: PublicNotificationMarkReadInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "notification.mark_read", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  getAccountWorkspaceNotificationSummaries<T = PublicAccountWorkspaceNotificationSummaries>(input: PublicAccountWorkspaceNotificationSummariesInput): Promise<DomainApiResponse<T>> {
+    return this.executeAccountQuery<T>("account.workspace_notification_summaries", { context: {}, input });
+  }
+
+  listAccountInvitationNotifications<T = PublicAccountInvitationNotificationsPage>(input: PublicAccountInvitationNotificationsInput = {}): Promise<DomainApiResponse<T>> {
+    return this.executeAccountQuery<T>("account.invitation_notifications", { context: {}, input });
+  }
+
+  markAccountInvitationNotificationsRead<T = PublicAccountInvitationNotificationReadResult>(input: PublicAccountInvitationNotificationReadInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeAccountOperation<T>("account.invitation_notification_read", { context: {}, input }, options);
+  }
+
+  createShareDraft<T = PublicShareDraft>(workspaceId: string, input: PublicShareDraftCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "share.draft.create", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  updateShareDraft<T = PublicShareDraft>(workspaceId: string, input: PublicShareDraftUpdateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "share.draft.update", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  viewShareDraft<T = PublicShareDraft>(workspaceId: string, input: PublicShareDraftViewInput): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "share.draft.view", { context: {}, input });
+  }
+
+  discardShareDraft<T = PublicShareDraftDiscardResult>(workspaceId: string, input: PublicShareDraftDiscardInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "share.draft.discard", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  publishShare<T = PublicSharePublishResult>(workspaceId: string, input: PublicSharePublishInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "share.publish", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  listShares<T = PublicSharePage>(workspaceId: string, input: PublicShareListInput): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "share.list", { context: {}, input });
+  }
+
+  viewShare<T = PublicShareView>(workspaceId: string, input: PublicShareViewInput): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "share.view", { context: {}, input });
+  }
+
+  revokeShare<T = PublicShareRevokeResult>(workspaceId: string, input: PublicShareRevokeInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "share.revoke", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  importShare<T = PublicShareImportResult>(workspaceId: string, input: PublicShareImportInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
+    return this.executeOperation<T>(workspaceId, "share.import", { context: {}, input }, { operationId: options.operationId, idempotencyKey: options.idempotencyKey ?? options.operationId });
+  }
+
+  getShareImportStatus<T = PublicShareImportResult>(workspaceId: string, input: PublicShareImportStatusInput): Promise<DomainApiResponse<T>> {
+    return this.executeQuery<T>(workspaceId, "share.import.status", { context: {}, input });
+  }
+
   /** Completion management routes are the canonical v1 surface used by
    * Native management clients. They intentionally return the same safe
    * projections as the Domain Query/Operation contracts. */
@@ -1899,6 +2550,7 @@ export class DomainApiClient {
     const query = new URLSearchParams();
     if (input.scope_kind) query.set("scope_kind", input.scope_kind);
     if (input.room_id) query.set("room_id", input.room_id);
+    if (input.agent_id) query.set("agent_id", input.agent_id);
     if (input.kind) query.set("kind", input.kind);
     if (input.include_archived !== undefined) query.set("include_archived", String(input.include_archived));
     if (input.limit !== undefined) query.set("limit", String(input.limit));
@@ -1919,9 +2571,11 @@ export class DomainApiClient {
     });
   }
 
-  getCompletionResource<T = z.infer<typeof PublicCompletionResourceDetailSchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; kind?: "knowledge" | "skill"; versions_limit?: number; evidence_limit?: number } = {}): Promise<T> {
+  getCompletionResource<T = z.infer<typeof PublicCompletionResourceDetailSchema>>(workspaceId: string, resourceId: string, input: { scope_kind?: "workspace" | "room" | "agent"; room_id?: string; agent_id?: string; kind?: "knowledge" | "skill"; versions_limit?: number; evidence_limit?: number } = {}): Promise<T> {
     const query = new URLSearchParams();
+    if (input.scope_kind) query.set("scope_kind", input.scope_kind);
     if (input.room_id) query.set("room_id", input.room_id);
+    if (input.agent_id) query.set("agent_id", input.agent_id);
     if (input.kind) query.set("kind", input.kind);
     if (input.versions_limit !== undefined) query.set("versions_limit", String(input.versions_limit));
     if (input.evidence_limit !== undefined) query.set("evidence_limit", String(input.evidence_limit));
@@ -1931,9 +2585,11 @@ export class DomainApiClient {
     });
   }
 
-  getCompletionResourceBody<T = z.infer<typeof PublicCompletionResourceBodySchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; kind?: "knowledge" | "skill"; version?: number } = {}): Promise<T> {
+  getCompletionResourceBody<T = z.infer<typeof PublicCompletionResourceBodySchema>>(workspaceId: string, resourceId: string, input: { scope_kind?: "workspace" | "room" | "agent"; room_id?: string; agent_id?: string; kind?: "knowledge" | "skill"; version?: number } = {}): Promise<T> {
     const query = new URLSearchParams();
+    if (input.scope_kind) query.set("scope_kind", input.scope_kind);
     if (input.room_id) query.set("room_id", input.room_id);
+    if (input.agent_id) query.set("agent_id", input.agent_id);
     if (input.kind) query.set("kind", input.kind);
     if (input.version !== undefined) query.set("version", String(input.version));
     return this.transport<T>({
@@ -1962,7 +2618,7 @@ export class DomainApiClient {
     });
   }
 
-  setCompletionResourceArchived<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; archived: boolean; expected_version: number; reason: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+  setCompletionResourceArchived<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: { scope_kind?: "workspace" | "room" | "agent"; room_id?: string; agent_id?: string; archived: boolean; expected_version: number; reason: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
     return this.transport<T>({
       method: "POST",
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}/archive`,
@@ -1972,7 +2628,7 @@ export class DomainApiClient {
     });
   }
 
-  setCompletionResourceFixed<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: { room_id?: string; fixed: boolean; expected_version: number; reason: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
+  setCompletionResourceFixed<T = z.infer<typeof PublicCompletionResourceMutationResponseSchema>>(workspaceId: string, resourceId: string, input: { scope_kind?: "workspace" | "room" | "agent"; room_id?: string; agent_id?: string; fixed: boolean; expected_version: number; reason: string }, options: { operationId: string; idempotencyKey?: string }): Promise<T> {
     return this.transport<T>({
       method: "POST",
       path: `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion/resources/${encodeURIComponent(resourceId)}/fix`,
@@ -2109,12 +2765,26 @@ export class DomainApiClient {
     return this.executeQuery<T>(workspaceId, "room.work.view", { context: { room_id: roomId }, input });
   }
 
-  createRoomWork<T = PublicRoomWorkRecord>(workspaceId: string, roomId: string, input: PublicRoomWorkCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
-    return this.executeOperation<T>(workspaceId, "room.work.create", { context: { room_id: roomId }, input }, options);
+  createRoomWork<T = PublicRoomWorkRecord>(workspaceId: string, roomId: string, input: PublicRoomWorkCreateInput, options: { operationId: string; idempotencyKey?: string; personalPreferences?: PersonalPreferencesSnapshot }): Promise<DomainApiResponse<T>> {
+    const { personalPreferences, ...transportOptions } = options;
+    return this.executeOperation<T>(workspaceId, "room.work.create", {
+      context: {
+        room_id: roomId,
+        ...(personalPreferences === undefined ? {} : { personal_preferences: personalPreferences })
+      },
+      input
+    }, transportOptions);
   }
 
-  replyRoomWork<T = PublicRoomWorkInstruction>(workspaceId: string, roomId: string, input: PublicRoomWorkReplyInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {
-    return this.executeOperation<T>(workspaceId, "room.work.reply", { context: { room_id: roomId }, input }, options);
+  replyRoomWork<T = PublicRoomWorkInstruction>(workspaceId: string, roomId: string, input: PublicRoomWorkReplyInput, options: { operationId: string; idempotencyKey?: string; personalPreferences?: PersonalPreferencesSnapshot }): Promise<DomainApiResponse<T>> {
+    const { personalPreferences, ...transportOptions } = options;
+    return this.executeOperation<T>(workspaceId, "room.work.reply", {
+      context: {
+        room_id: roomId,
+        ...(personalPreferences === undefined ? {} : { personal_preferences: personalPreferences })
+      },
+      input
+    }, transportOptions);
   }
 
   createRoomWorkComment<T = PublicRoomWorkComment>(workspaceId: string, roomId: string, input: PublicRoomWorkCommentCreateInput, options: { operationId: string; idempotencyKey?: string }): Promise<DomainApiResponse<T>> {

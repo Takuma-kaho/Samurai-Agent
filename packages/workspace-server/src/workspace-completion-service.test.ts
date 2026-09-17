@@ -181,21 +181,34 @@ describe("Workspace completion ResourceRef authorization", () => {
     await expect(service.getResourceRefForRoom(context, {
       targetRoomId: "room_target",
       resourceId: "knowledge_workspace",
-      kind: "knowledge",
+      kind: "skill",
       version: "2",
       uri: "client://forced-uri",
       label: "client-forced-label"
     })).resolves.toEqual({
-      kind: "knowledge",
+      kind: "skill",
       id: "knowledge_workspace",
-      uri: ".versions/knowledge_workspace/2.md",
+      uri: ".versions/knowledge_workspace/2/SKILL.md",
       version: "2",
       label: "DB title"
     });
 
     const resourceQuery = store.queries.find((query) => query.text.includes("FROM workspace_completion_resources"));
     expect(resourceQuery?.text).toContain("resource.id = $2");
-    expect(resourceQuery?.text).toContain("resource.scope_kind = 'workspace' OR resource.room_id = $4");
+    expect(resourceQuery?.text).toContain("resource.scope_kind = 'workspace' OR (resource.scope_kind = 'room' AND resource.room_id = $4)");
+  });
+
+  it("rejects a retired Workspace Knowledge resource instead of returning a ref", async () => {
+    const store = createResourceRefStore({
+      resource: { ...defaultCompletionResourceRow(), resource_kind: "knowledge", knowledge_kind: "fact" },
+      version: { ...defaultCompletionVersionRow(), file_path: ".versions/knowledge_workspace/2.md" }
+    });
+    const service = new WorkspaceCompletionService(store as never);
+
+    await expect(service.getResourceRefForRoom(context, {
+      ...resourceRefInput(),
+      kind: "knowledge"
+    })).rejects.toMatchObject({ code: "workspace_memory_removed", status: 409 });
   });
 
   it("rejects a Room-scoped resource from another Room", async () => {
@@ -250,6 +263,55 @@ describe("Workspace completion ResourceRef authorization", () => {
       code: "workspace_completion_file_recovery_required",
       status: 503
     });
+  });
+});
+
+describe("Workspace completion scope guards", () => {
+  const context = { workspaceId: "workspace_a", accountId: "account_a", operationId: "operation_a" };
+  const resourceInput = (scope: { kind: "workspace" | "room" | "agent"; roomId?: string; agentId?: string }, overrides: Record<string, unknown> = {}) => ({
+    scope,
+    kind: "knowledge" as const,
+    knowledgeKind: "fact" as const,
+    title: "A fact",
+    content: "The body",
+    metadata: {},
+    reason: "human update",
+    ...overrides
+  });
+
+  it("rejects Workspace Knowledge at the Core input boundary", async () => {
+    const service = new WorkspaceCompletionService({} as never);
+    await expect(service.createResource(context, resourceInput({ kind: "workspace" }))).rejects.toMatchObject({
+      code: "workspace_memory_removed",
+      status: 409
+    });
+  });
+
+  it("rejects an Agent resource with AI-managed ownership or ambiguous scope", async () => {
+    const service = new WorkspaceCompletionService({} as never);
+    await expect(service.createResource(context, resourceInput({ kind: "agent", agentId: "agent_a" }, { aiManaged: true }))).rejects.toMatchObject({
+      code: "workspace_completion_agent_ai_managed_forbidden",
+      status: 422
+    });
+    await expect(service.createResource(context, resourceInput({ kind: "room", roomId: "room_a", agentId: "agent_a" }))).rejects.toMatchObject({
+      code: "workspace_completion_scope_invalid",
+      status: 422
+    });
+  });
+
+  it("rejects Agent policy and configuration scopes", async () => {
+    const service = new WorkspaceCompletionService({} as never);
+    await expect(service.applyPolicy(context, {
+      scope: { kind: "agent", agentId: "agent_a" },
+      title: "Agent policy",
+      content: "No policy",
+      rules: [],
+      reason: "test"
+    })).rejects.toMatchObject({ code: "workspace_completion_policy_agent_scope_forbidden", status: 422 });
+    await expect(service.updateConfiguration(context, {
+      scope: { kind: "agent", agentId: "agent_a" },
+      values: {}
+    })).rejects.toMatchObject({ code: "workspace_completion_configuration_agent_scope_forbidden", status: 422 });
   });
 });
 
@@ -381,7 +443,7 @@ function resourceRefInput() {
   return {
     targetRoomId: "room_target",
     resourceId: "knowledge_workspace",
-    kind: "knowledge" as const,
+    kind: "skill" as const,
     version: "2",
     uri: "client://forced-uri",
     label: "client-forced-label"
@@ -394,8 +456,8 @@ function defaultCompletionResourceRow() {
     id: "knowledge_workspace",
     scope_kind: "workspace" as const,
     room_id: null,
-    resource_kind: "knowledge" as const,
-    knowledge_kind: "fact" as const,
+    resource_kind: "skill" as const,
+    knowledge_kind: null,
     title: "DB title",
     evidence_state: "confirmed" as const,
     lifecycle_state: "active" as const,
@@ -421,7 +483,7 @@ function defaultCompletionVersionRow() {
     resource_id: "knowledge_workspace",
     version: 2,
     parent_version: 1,
-    file_path: ".versions/knowledge_workspace/2.md",
+    file_path: ".versions/knowledge_workspace/2/SKILL.md",
     content_hash: "a".repeat(64),
     content_size: 12,
     evidence_state: "confirmed" as const,

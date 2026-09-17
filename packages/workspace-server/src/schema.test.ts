@@ -6,7 +6,7 @@ describe("Workspace Server PostgreSQL schema", () => {
     const migrations = workspaceServerMigrationDefinitions();
     const schema = migrations.flatMap((migration) => migration.statements).join("\n");
 
-    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 128 }, (_, index) => index + 1));
+    expect(migrations.map((migration) => migration.version)).toEqual(Array.from({ length: 140 }, (_, index) => index + 1));
     expect(workspaceServerMigrationStatus().map((migration) => migration.version)).toEqual(migrations.map((migration) => migration.version));
     for (const table of ["workspace_records", "workspace_files", "workspace_events", "workspace_jobs", "workspace_operations"]) {
       expect(schema).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
@@ -236,6 +236,170 @@ describe("Workspace Server PostgreSQL schema", () => {
     expect(schema).toContain("workspace_runtime_runs_idempotency_index");
     expect(schema).toContain("workspace_runtime_reservations");
     expect(schema).toContain("workspace_runtime_client_events_room_fkey");
+    const contextSharingMigration = migrations.find((migration) => migration.version === 129);
+    expect(contextSharingMigration?.name).toBe("workspace_server_native_ui_context_sharing_schema");
+    const contextSharingSql = contextSharingMigration?.statements.join("\n") ?? "";
+    for (const table of [
+      "workspace_shares", "workspace_share_recipients", "workspace_share_claims",
+      "workspace_share_file_transactions", "workspace_share_imports", "workspace_share_import_resources",
+      "account_notifications", "account_notification_outbox"
+    ]) {
+      expect(contextSharingSql).toContain(`CREATE TABLE ${table}`);
+      expect(contextSharingSql).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+      expect(contextSharingSql).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    }
+    expect(contextSharingSql).toContain("ALTER TABLE workspace_completion_resources ADD COLUMN agent_id TEXT");
+    expect(contextSharingSql).toContain("ALTER TABLE workspace_completion_file_batches ADD COLUMN agent_id TEXT");
+    expect(contextSharingSql).toContain("scope_kind IN ('workspace', 'room', 'agent')");
+    expect(contextSharingSql).toContain("workspace_completion_resources_workspace_knowledge_retired_check");
+    expect(contextSharingSql).toContain("workspace_completion_resources_agent_kind_check");
+    expect(contextSharingSql).toContain("enabled_inherits_workspace BOOLEAN NOT NULL DEFAULT FALSE");
+    expect(contextSharingSql).toContain("account_notifications_workspace_source_unique");
+    expect(contextSharingSql).toContain("account_notifications_account_source_unique");
+    expect(contextSharingSql).toContain("workspace_share_recipients_shape_guard");
+    expect(contextSharingSql).toContain("samurai.internal_access");
+    expect(contextSharingSql).toContain("CREATE TABLE workspace_completion_file_cleanup_queue");
+    expect(contextSharingSql).toContain("INSERT INTO workspace_completion_file_cleanup_queue");
+    expect(contextSharingSql).toContain("workspace_completion_file_cleanup_queue_internal");
+    expect(contextSharingSql.indexOf("INSERT INTO workspace_completion_file_cleanup_queue")).toBeLessThan(contextSharingSql.indexOf("DELETE FROM workspace_completion_file_batch_entries"));
+    expect(contextSharingSql).toContain("batch.scope_kind = 'workspace'");
+    expect(contextSharingSql.indexOf("DELETE FROM workspace_completion_resources resource")).toBeLessThan(contextSharingSql.indexOf("workspace_completion_resources_workspace_knowledge_retired_check"));
+    expect(contextSharingSql).toContain("FOREIGN KEY (workspace_id, source_room_id) REFERENCES rooms(workspace_id, id)");
+    expect(contextSharingSql).toContain("FOREIGN KEY (workspace_id, source_agent_id) REFERENCES workspace_agents(workspace_id, id)");
+    const contextSharingImportRlsMigration = migrations.find((migration) => migration.version === 130);
+    expect(contextSharingImportRlsMigration?.name).toBe("workspace_server_native_ui_context_sharing_import_rls");
+    const contextSharingImportRlsSql = contextSharingImportRlsMigration?.statements.join("\n") ?? "";
+    for (const policy of [
+      "workspace_shares_read", "workspace_share_recipients_manage", "workspace_share_claims_read",
+      "workspace_share_imports_read", "workspace_share_import_resources_read"
+    ]) {
+      expect(contextSharingImportRlsSql).toContain(`samurai_is_import_session(workspace_id)`);
+      expect(contextSharingImportRlsSql).toContain(`DROP POLICY ${policy}`);
+    }
+    expect(contextSharingImportRlsSql).toContain("samurai_guard_workspace_share_recipients");
+    expect(contextSharingImportRlsSql).toContain("share_row.status = 'draft' OR samurai_is_import_session(share_row.workspace_id)");
+    expect(contextSharingImportRlsSql).toContain("DELETE FROM workspace_share_import_resources");
+    expect(contextSharingImportRlsSql).toContain("DELETE FROM workspace_shares WHERE workspace_id = workspace_key");
+    expect(contextSharingImportRlsSql).not.toContain("CREATE POLICY account_notifications");
+    expect(contextSharingImportRlsSql).not.toContain("CREATE POLICY account_notification_outbox");
+    const publicShareMigration = migrations.find((migration) => migration.version === 131);
+    expect(publicShareMigration?.name).toBe("workspace_server_share_public_locator_and_claim_functions");
+    const publicShareSql = publicShareMigration?.statements.join("\n") ?? "";
+    expect(publicShareSql).toContain("SECURITY DEFINER SET search_path = public, pg_temp");
+    expect(publicShareSql).toContain("share.status = 'active'");
+    expect(publicShareSql).toContain("workspace_share_recipients");
+    expect(publicShareSql).toContain("FROM public.workspace_share_claims AS claim");
+    expect(publicShareSql).toContain("FOR UPDATE");
+    expect(publicShareSql).toContain("p_request_hash");
+    expect(publicShareSql).toContain("p_content_hash");
+    expect(publicShareSql).not.toContain("CREATE POLICY workspace_shares_public");
+    expect(publicShareSql).not.toContain("CREATE POLICY workspace_share_claims_public");
+    expect(publicShareSql).toContain("REVOKE EXECUTE ON FUNCTION samurai_workspace_share_public_lookup(TEXT, TEXT) FROM PUBLIC");
+    expect(publicShareSql).toContain("REVOKE EXECUTE ON FUNCTION samurai_workspace_share_claim(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC");
+    expect(publicShareSql).toContain("REVOKE EXECUTE ON FUNCTION samurai_workspace_share_claim_content(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC");
+    const personalPreferencesMigration = migrations.find((migration) => migration.version === 132);
+    expect(personalPreferencesMigration?.name).toBe("workspace_server_human_work_personal_preferences_snapshot");
+    const personalPreferencesSql = personalPreferencesMigration?.statements.join("\n") ?? "";
+    expect(personalPreferencesSql).toContain("ADD COLUMN IF NOT EXISTS personal_preferences_snapshot JSONB NULL");
+    expect(personalPreferencesSql).toContain("workspace_human_work_instructions_personal_preferences_snapshot_check");
+    expect(personalPreferencesSql).toContain("personal_preferences_snapshot - ARRAY['schema_version', 'revision', 'display_name', 'output_locale', 'instructions'] = '{}'::JSONB");
+    expect(personalPreferencesSql).toContain("samurai_current_account_id()");
+    expect(personalPreferencesSql).toContain("workspace_operations");
+    expect(personalPreferencesSql).toContain("operation_row.status = 'running'");
+    expect(personalPreferencesSql).toContain("instruction_row.work_id IS DISTINCT FROM target_work_id");
+    expect(personalPreferencesSql).toContain("instruction_row.created_by IS DISTINCT FROM samurai_current_account_id()");
+    expect(personalPreferencesSql).toContain("instruction_row.personal_preferences_snapshot IS DISTINCT FROM snapshot_json");
+    expect(personalPreferencesSql).toContain("human_work_instruction_version_conflict");
+    expect(personalPreferencesSql).toContain("FOR UPDATE");
+    expect(personalPreferencesSql).toContain("REVOKE EXECUTE ON FUNCTION samurai_set_human_work_instruction_personal_preferences(TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC");
+    expect(schema).toContain("samurai_set_human_work_instruction_personal_preferences(TEXT, TEXT, TEXT, JSONB, TEXT)");
+    const shareOriginMigration = migrations.find((migration) => migration.version === 133);
+    expect(shareOriginMigration?.name).toBe("workspace_server_share_origin_canonicalization");
+    const shareOriginSql = shareOriginMigration?.statements.join("\n") ?? "";
+    expect(shareOriginSql).toContain("workspace_share_claims_target_origin_canonical_check");
+    expect(shareOriginSql).toContain("workspace_share_imports_source_origin_canonical_check");
+    expect(shareOriginSql).toContain("CHECK (target_origin ~ '^https://[^/?#@]+/$') NOT VALID");
+    expect(shareOriginSql).toContain("CHECK (source_origin ~ '^https://[^/?#@]+/$') NOT VALID");
+    expect(shareOriginSql).toContain("samurai_normalize_workspace_share_claim_origin");
+    expect(shareOriginSql).toContain("samurai_normalize_workspace_share_import_origin");
+    expect(shareOriginSql).toContain("workspace_share_claims_origin_canonicalization");
+    expect(shareOriginSql).toContain("workspace_share_imports_origin_canonicalization");
+    expect(shareOriginSql).toContain("VALIDATE CONSTRAINT workspace_share_claims_target_origin_canonical_check");
+    expect(shareOriginSql).toContain("VALIDATE CONSTRAINT workspace_share_imports_source_origin_canonical_check");
+    expect(shareOriginSql).toContain("p_target_origin !~ '^https://[^/?#@]+/$'");
+    expect(shareOriginSql).not.toContain("p_target_origin !~ '^https?://[^/?#@]+$'");
+    expect(shareOriginSql).toContain("DROP CONSTRAINT IF EXISTS workspace_share_claims_target_origin_check");
+    expect(shareOriginSql).toContain("DROP CONSTRAINT IF EXISTS workspace_share_imports_source_origin_check");
+    expect(shareOriginSql).not.toContain("UPDATE workspace_share_claims");
+    expect(shareOriginSql).not.toContain("UPDATE workspace_share_imports");
+    const committedImportMigration = migrations.find((migration) => migration.version === 134);
+    expect(committedImportMigration?.name).toBe("workspace_server_share_committed_import_terminal_state");
+    const committedImportSql = committedImportMigration?.statements.join("\n") ?? "";
+    expect(committedImportSql).toContain("SET retryable = FALSE, failure_code = NULL");
+    expect(committedImportSql).toContain("workspace_share_imports_committed_terminal_state_check");
+    expect(committedImportSql).toContain("VALIDATE CONSTRAINT workspace_share_imports_committed_terminal_state_check");
+    const importScopeMigration = migrations.find((migration) => migration.version === 135);
+    expect(importScopeMigration?.name).toBe("workspace_server_share_import_scope_and_failed_terminal_guards");
+    const importScopeSql = importScopeMigration?.statements.join("\n") ?? "";
+    expect(importScopeSql).toContain("workspace_share_imports_failed_terminal_state_check");
+    expect(importScopeSql).toContain("SET phase = 'cleanup', retryable = FALSE, lease_token = NULL, lease_until = NULL");
+    expect(importScopeSql).toContain("samurai_guard_workspace_share_import_agent_scope");
+    expect(importScopeSql).toContain("workspace_agents agent");
+    expect(importScopeSql).toContain("samurai_guard_workspace_share_import_resource");
+    expect(importScopeSql).toContain("import_row.status <> 'committed'");
+    expect(importScopeSql).toContain("resource_row.scope_kind <> 'agent'");
+    expect(importScopeSql).toContain("resource_row.scope_kind <> 'room'");
+    expect(importScopeSql).toContain("samurai_guard_workspace_share_import_resource_parent");
+    const cleanupMigration = migrations.find((migration) => migration.version === 136);
+    expect(cleanupMigration?.name).toBe("workspace_server_completion_file_cleanup_ledger");
+    const cleanupSql = cleanupMigration?.statements.join("\n") ?? "";
+    expect(cleanupSql).toContain("workspace_completion_file_cleanup_queue");
+    expect(cleanupSql).toContain("INSERT INTO workspace_completion_file_cleanup_queue");
+    expect(cleanupSql).toContain("DELETE FROM workspace_completion_file_batch_entries");
+    expect(cleanupSql.indexOf("INSERT INTO workspace_completion_file_cleanup_queue")).toBeLessThan(cleanupSql.indexOf("DELETE FROM workspace_completion_file_batch_entries"));
+    expect(cleanupSql).toContain("batch.scope_kind = 'workspace'");
+    expect(cleanupSql).not.toContain("batch.scope_kind = 'room'");
+    expect(cleanupSql).toContain("samurai_claim_workspace_completion_file_cleanup");
+    expect(cleanupSql).toContain("samurai_complete_workspace_completion_file_cleanup");
+    expect(cleanupSql).toContain("samurai_release_workspace_completion_file_cleanup");
+    const completionMigrationRlsRepair = migrations.find((migration) => migration.version === 137);
+    expect(completionMigrationRlsRepair?.name).toBe("workspace_server_completion_migration_resource_rls_boundary");
+    const completionMigrationRlsRepairSql = completionMigrationRlsRepair?.statements.join("\n") ?? "";
+    for (const policy of [
+      "workspace_completion_resources_access",
+      "workspace_completion_versions_access",
+      "workspace_completion_evidence_access",
+      "workspace_completion_skill_files_access"
+    ]) {
+      expect(completionMigrationRlsRepairSql).toContain(`ALTER POLICY ${policy}`);
+    }
+    expect(completionMigrationRlsRepairSql).toContain("samurai_completion_migration_write_allowed(workspace_id)");
+    const shareDraftFileTransactionMigration = migrations.find((migration) => migration.version === 138);
+    expect(shareDraftFileTransactionMigration?.name).toBe("workspace_server_share_draft_file_transaction_rls");
+    const shareDraftFileTransactionSql = shareDraftFileTransactionMigration?.statements.join("\n") ?? "";
+    expect(shareDraftFileTransactionSql).toContain("ALTER POLICY workspace_share_file_transactions_internal ON workspace_share_file_transactions");
+    expect(shareDraftFileTransactionSql).toContain("owner_kind = 'draft'");
+    expect(shareDraftFileTransactionSql).toContain("share_row.status = 'draft'");
+    expect(shareDraftFileTransactionSql).toContain("share_row.created_by = samurai_current_account_id()");
+    expect(shareDraftFileTransactionSql).toContain("samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage')");
+    expect(shareDraftFileTransactionSql).toContain("samurai_can_workspace(share_row.workspace_id, 'admin')");
+    expect(shareDraftFileTransactionSql).toContain("samurai_workspace_is_writable(workspace_id)");
+    expect(shareDraftFileTransactionSql).toContain("actor_account_id = samurai_current_account_id()");
+    expect(shareDraftFileTransactionSql).toContain("current_setting('samurai.share_operation', true) = '1'");
+    const shareRecipientReadMigration = migrations.find((migration) => migration.version === 139);
+    expect(shareRecipientReadMigration?.name).toBe("workspace_server_share_recipient_read_projection_rls");
+    const shareRecipientReadSql = shareRecipientReadMigration?.statements.join("\n") ?? "";
+    expect(shareRecipientReadSql).toContain("ALTER POLICY workspace_share_recipients_manage ON workspace_share_recipients");
+    expect(shareRecipientReadSql).toContain("share_row.status IN ('draft','active','revoked')");
+    expect(shareDraftFileTransactionSql).toContain("samurai_is_completion_maintenance_identity(workspace_id)");
+    expect(shareDraftFileTransactionSql).toContain("samurai_is_import_session(workspace_id)");
+    expect(shareDraftFileTransactionSql).toContain("current_setting('samurai.internal_access', true) = '1'");
+    expect(shareDraftFileTransactionSql).toContain("current_setting('samurai.share_operation', true) = '1'");
+    const notificationProjectionMigration = migrations.find((migration) => migration.version === 140);
+    expect(notificationProjectionMigration?.name).toBe("workspace_server_notification_projection_rls");
+    const notificationProjectionSql = notificationProjectionMigration?.statements.join("\n") ?? "";
+    expect(notificationProjectionSql).toContain("account_notifications_internal_read");
+    expect(notificationProjectionSql).toContain("samurai_is_completion_maintenance_identity(workspace_id)");
     const delegationMigration = migrations.find((migration) => migration.version === 102);
     expect(delegationMigration?.name).toBe("workspace_server_human_work_delegation");
     const delegationSql = delegationMigration?.statements.join("\n") ?? "";

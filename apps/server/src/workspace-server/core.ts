@@ -4,6 +4,7 @@ import {
   WorkspaceBundleV3Service,
   WorkspaceBundleV4Service,
   WorkspaceCompletionCuratorService,
+  WorkspaceCompletionFileCleanupService,
   WorkspaceCompletionJobService,
   WorkspaceCompletionMaintenanceService,
   WorkspaceCompletionMigrationService,
@@ -100,7 +101,8 @@ export async function createWorkspaceServerCore(
     const learning = new WorkspaceLearningService(store);
     const completionJobs = new WorkspaceCompletionJobService(completion);
     const curator = new WorkspaceCompletionCuratorService(completion);
-    const maintenance = new WorkspaceCompletionMaintenanceService(completion, completionJobs, curator);
+    const fileCleanup = new WorkspaceCompletionFileCleanupService(database, completion.files);
+    const maintenance = new WorkspaceCompletionMaintenanceService(completion, completionJobs, curator, fileCleanup);
     const completionMigrations = new WorkspaceCompletionMigrationService(completion);
     const runtimeActivities = new WorkspaceRuntimeActivityService(database);
     const commands = new WorkspaceServerCommandService({ store, files, bundles, completionBundles, completion, completionMigrations, maintenance, runtimeActivities });

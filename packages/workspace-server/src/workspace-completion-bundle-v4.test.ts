@@ -45,6 +45,15 @@ const humanWorkFiles = [
   ["workspace_human_work_launch_reservations", "human-work-launch-reservations.jsonl"],
   ["workspace_human_work_legacy_sessions", "human-work-legacy-sessions.jsonl"]
 ] as const;
+const sharingFiles = [
+  "workspace-shares.jsonl",
+  "workspace-share-recipients.jsonl",
+  "workspace-share-claims.jsonl",
+  "workspace-share-imports.jsonl",
+  "workspace-share-import-resources.jsonl",
+  "workspace-share-file-transactions.jsonl"
+] as const;
+type SharingFile = (typeof sharingFiles)[number];
 
 describe("Workspace Bundle v4 HTTP transport", () => {
   it("round-trips a verified transfer bundle without changing its transfer identity", async () => {
@@ -222,6 +231,307 @@ describe("Workspace Bundle v4 HTTP transport", () => {
         instructions: "Use evidence before answering",
         enabled: false
       });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips Agent Knowledge/Skill bodies, support files, and Agent batch scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-agent-completion-"));
+    try {
+      const source = path.join(root, "source");
+      const agentId = "agent_bundle_completion_scope";
+      const knowledgeId = "knowledge_agent_bundle";
+      const skillId = "skill_agent_bundle";
+      const knowledgePath = `agents/${agentId}/knowledge/${knowledgeId}.md`;
+      const skillPath = `agents/${agentId}/skills/${skillId}/SKILL.md`;
+      const supportPath = `agents/${agentId}/skills/${skillId}/references/guide.md`;
+      const knowledgeBody = "# Agent knowledge\n\nKeep this confirmed decision.\n";
+      const skillBody = "---\nname: agent-skill\n---\n\nUse the verified source.\n";
+      const supportBody = "Read the linked reference before execution.\n";
+      const batchId = "completion_batch_agent_scope";
+      const agent = {
+        workspace_id: workspaceId,
+        id: agentId,
+        display_name: "Completion Agent",
+        status: "active",
+        version: 1,
+        created_by: "account_owner",
+        created_at: timestamp,
+        updated_at: timestamp
+      };
+      const resourceBase = {
+        workspace_id: workspaceId,
+        scope_kind: "agent",
+        room_id: null,
+        agent_id: agentId,
+        lifecycle_state: "active",
+        evidence_state: "confirmed",
+        current_confirmed_version: 1,
+        current_provisional_version: null,
+        ai_managed: false
+      };
+      const resources = [{
+        ...resourceBase,
+        id: knowledgeId,
+        resource_kind: "knowledge",
+        title: "Agent decision",
+        ai_protection: "editable",
+        metadata: { wiki: true }
+      }, {
+        ...resourceBase,
+        id: skillId,
+        resource_kind: "skill",
+        title: "Agent skill",
+        ai_protection: "editable"
+      }];
+      const versions = [{
+        workspace_id: workspaceId,
+        id: "resource_version_agent_knowledge",
+        resource_id: knowledgeId,
+        version: 1,
+        file_path: knowledgePath,
+        content_hash: hash(knowledgeBody),
+        content_size: Buffer.byteLength(knowledgeBody),
+        evidence_state: "confirmed",
+        lifecycle_state: "active",
+        file_batch_id: batchId,
+        metadata: { wiki: true }
+      }, {
+        workspace_id: workspaceId,
+        id: "resource_version_agent_skill",
+        resource_id: skillId,
+        version: 1,
+        file_path: skillPath,
+        content_hash: hash(skillBody),
+        content_size: Buffer.byteLength(skillBody),
+        evidence_state: "confirmed",
+        lifecycle_state: "active",
+        file_batch_id: batchId,
+        metadata: {}
+      }];
+      const skillFiles = [{
+        workspace_id: workspaceId,
+        id: "skill_file_agent_reference",
+        resource_id: skillId,
+        resource_version: 1,
+        relative_path: "references/guide.md",
+        file_path: supportPath,
+        content_hash: hash(supportBody),
+        content_size: Buffer.byteLength(supportBody),
+        file_batch_id: batchId
+      }];
+      const entries = [knowledgePath, skillPath, supportPath].map((filePath) => {
+        const content = filePath === knowledgePath ? knowledgeBody : filePath === skillPath ? skillBody : supportBody;
+        return {
+          workspace_id: workspaceId,
+          batch_id: batchId,
+          path: filePath,
+          sha256: hash(content),
+          size: Buffer.byteLength(content)
+        };
+      });
+      await writeMinimalV4Bundle(source, {
+        agents: [agent],
+        completionResources: resources,
+        completionResourceVersions: versions,
+        completionSkillFiles: skillFiles,
+        completionSearchProjection: [{ workspace_id: workspaceId, resource_id: knowledgeId, resource_version: 1, agent_id: agentId, search_text: "decision" }, { workspace_id: workspaceId, resource_id: skillId, resource_version: 1, agent_id: agentId, search_text: "skill" }],
+        completionFileBatches: [{ workspace_id: workspaceId, id: batchId, scope_kind: "agent", room_id: null, agent_id: agentId, status: "renamed", created_at: timestamp, updated_at: timestamp }],
+        completionFileBatchEntries: entries,
+        completionBodies: { [knowledgePath]: knowledgeBody, [skillPath]: skillBody, [supportPath]: supportBody }
+      });
+
+      await expect(verifyWorkspaceBundleV4(source)).resolves.toMatchObject({ manifest: { workspace_id: workspaceId } });
+      const transport = await readWorkspaceBundleV4Transport(source);
+      const paths = transport.entries.map((entry) => entry.path);
+      expect(paths).toEqual(expect.arrayContaining([
+        `completion/files/${knowledgePath}`,
+        `completion/files/${skillPath}`,
+        `completion/files/${supportPath}`
+      ]));
+      const resourceRows = Buffer.from(transport.entries.find((entry) => entry.path === "completion/resources.jsonl")!.content_base64, "base64")
+        .toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(resourceRows.every((row) => row.agent_id === agentId && row.room_id === null)).toBe(true);
+      expect(paths).not.toContain("completion/knowledge-wiki/index.md");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects Agent imports without a target Agent and mismatched Agent resource scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-share-agent-scope-"));
+    try {
+      const missingAgent = path.join(root, "missing-agent");
+      await writeMinimalV4Bundle(missingAgent, {
+        agents: [{ workspace_id: workspaceId, id: "agent_present", display_name: "Present" }],
+        sharing: {
+          "workspace-share-imports.jsonl": [{
+            workspace_id: workspaceId,
+            operation_id: "operation_agent_missing",
+            recipient_account_id: "account_owner",
+            kind: "agent",
+            source_origin: "https://source.example",
+            source_share_id: "share_source",
+            source_locator: "locator_source",
+            claim_id: "claim_source",
+            request_hash: "b".repeat(64),
+            content_hash: "a".repeat(64),
+            target_room_id: null,
+            reserved_agent_id: "agent_missing",
+            reserved_resource_ids: [],
+            manifest_path: null,
+            status: "committed",
+            phase: "done",
+            retryable: false,
+            failure_code: null,
+            lease_token: null,
+            lease_until: null,
+            result: {},
+            created_at: timestamp,
+            updated_at: timestamp,
+            committed_at: timestamp
+          }]
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(missingAgent)).rejects.toThrow("workspace_bundle_v4_share_import_agent_not_found");
+
+      const mismatch = path.join(root, "mismatch");
+      await writeMinimalV4Bundle(mismatch, {
+        agents: [
+          { workspace_id: workspaceId, id: "agent_target", display_name: "Target" },
+          { workspace_id: workspaceId, id: "agent_other", display_name: "Other" }
+        ],
+        completionResources: [{
+          workspace_id: workspaceId,
+          id: "resource_agent_other",
+          scope_kind: "agent",
+          room_id: null,
+          agent_id: "agent_other",
+          resource_kind: "knowledge",
+          ai_managed: false
+        }],
+        sharing: {
+          "workspace-share-imports.jsonl": [{
+            workspace_id: workspaceId,
+            operation_id: "operation_agent_scope_mismatch",
+            recipient_account_id: "account_owner",
+            kind: "agent",
+            source_origin: "https://source.example",
+            source_share_id: "share_source",
+            source_locator: "locator_source",
+            claim_id: "claim_source",
+            request_hash: "b".repeat(64),
+            content_hash: "a".repeat(64),
+            target_room_id: null,
+            reserved_agent_id: "agent_target",
+            reserved_resource_ids: [{ entryId: "entry_resource", resourceId: "resource_agent_other" }],
+            manifest_path: null,
+            status: "committed",
+            phase: "done",
+            retryable: false,
+            failure_code: null,
+            lease_token: null,
+            lease_until: null,
+            result: {},
+            created_at: timestamp,
+            updated_at: timestamp,
+            committed_at: timestamp
+          }],
+          "workspace-share-import-resources.jsonl": [{
+            workspace_id: workspaceId,
+            operation_id: "operation_agent_scope_mismatch",
+            entry_id: "entry_resource",
+            resource_id: "resource_agent_other"
+          }]
+        }
+      });
+      await expect(verifyWorkspaceBundleV4(mismatch)).rejects.toThrow("workspace_bundle_v4_share_import_agent_resource_scope_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects Workspace Knowledge and legacy Memory before materializing a destination", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-memory-removed-"));
+    try {
+      for (const resourceKind of ["knowledge", "memory"] as const) {
+        const source = path.join(root, resourceKind);
+        await writeMinimalV4Bundle(source, {
+          completionResources: [{
+            workspace_id: workspaceId,
+            id: `${resourceKind}_bundle_removed`,
+            scope_kind: "workspace",
+            room_id: null,
+            agent_id: null,
+            resource_kind: resourceKind,
+            title: "Retired Workspace memory",
+            ai_managed: false
+          }]
+        });
+        const manifest = JSON.parse(await readFile(path.join(source, "manifest.json"), "utf8")) as { files: Record<string, string>; [key: string]: unknown };
+        const entries = await Promise.all(Object.keys(manifest.files).map(async (relativePath) => ({
+          path: relativePath,
+          content_base64: (await readFile(path.join(source, relativePath))).toString("base64")
+        })));
+        const destination = path.join(root, `${resourceKind}-destination`);
+        await expect(writeWorkspaceBundleV4Transport({
+          transport: { format: "samurai-workspace-bundle-v4", manifest: manifest as never, entries },
+          destination
+        })).rejects.toThrow("workspace_memory_removed");
+        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers only the referenced Agent staging batch with its Agent scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v4-agent-recovery-"));
+    try {
+      const agentId = "agent_bundle_recovery";
+      const batchId = "completion_batch_agent_recovery";
+      const relativePath = `agents/${agentId}/knowledge/knowledge_recovery.md`;
+      const body = "# Recovered Agent knowledge\n";
+      const source = path.join(root, "source");
+      await mkdir(path.join(source, "completion", "files", path.dirname(relativePath)), { recursive: true, mode: 0o700 });
+      await writeFile(path.join(source, "completion", "files", relativePath), body, { flag: "wx", mode: 0o600 });
+      const targetRoot = path.join(root, "storage");
+      const staged = path.join(targetRoot, "workspaces", workspaceId, ".completion-staging", batchId, path.dirname(relativePath));
+      await mkdir(staged, { recursive: true, mode: 0o700 });
+      await writeFile(path.join(staged, path.basename(relativePath)), body, { flag: "wx", mode: 0o600 });
+      const orphan = path.join(targetRoot, "workspaces", workspaceId, ".completion-staging", "orphan_batch", "agents", agentId, "knowledge");
+      await mkdir(orphan, { recursive: true, mode: 0o700 });
+      await writeFile(path.join(orphan, "orphan.md"), "leave this staged\n", { flag: "wx", mode: 0o600 });
+
+      const queries: string[] = [];
+      const store = {
+        storageRoot: targetRoot,
+        database: {
+          withContext: async (_context: unknown, callback: (sql: { query: (query: string) => Promise<{ rows: Record<string, unknown>[] }> }) => Promise<unknown>) => callback({
+            query: async (query: string) => {
+              queries.push(query);
+              if (/SELECT id, scope_kind, room_id, agent_id FROM workspace_completion_file_batches/.test(query)) {
+                return { rows: [{ id: batchId, scope_kind: "agent", room_id: null, agent_id: agentId }] };
+              }
+              return { rows: [] };
+            }
+          })
+        }
+      } as unknown as WorkspaceServerStore;
+      const service = new WorkspaceBundleV4Service(store);
+      await (service as unknown as {
+        recoverImportedCommittedBatches: (context: unknown, source: string, rows: Record<string, Record<string, unknown>[]>) => Promise<void>;
+      }).recoverImportedCommittedBatches(
+        { workspaceId, accountId: "account_owner" },
+        source,
+        { workspace_completion_file_batch_entries: [{ batch_id: batchId, path: relativePath, sha256: hash(body), size: Buffer.byteLength(body) }] }
+      );
+
+      expect(await readFile(path.join(targetRoot, "workspaces", workspaceId, "files", relativePath), "utf8")).toBe(body);
+      await expect(readFile(path.join(targetRoot, "workspaces", workspaceId, ".completion-staging", batchId, relativePath))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(path.join(targetRoot, "workspaces", workspaceId, ".completion-staging", "orphan_batch", "agents", agentId, "knowledge", "orphan.md"), "utf8")).toBe("leave this staged\n");
+      expect(queries.some((query) => query.includes("SET status = 'renamed'"))).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -978,8 +1288,8 @@ describe("Workspace Bundle v4 HTTP transport", () => {
         completionResources: [{
           workspace_id: workspaceId,
           id: knowledgeRef.id,
-          scope_kind: "workspace",
-          room_id: null,
+          scope_kind: "room",
+          room_id: "room_bundle_attachment",
           resource_kind: "knowledge",
           title: knowledgeRef.label,
           lifecycle_state: "active",
@@ -988,8 +1298,8 @@ describe("Workspace Bundle v4 HTTP transport", () => {
         }, {
           workspace_id: workspaceId,
           id: skillRef.id,
-          scope_kind: "workspace",
-          room_id: null,
+          scope_kind: "room",
+          room_id: "room_bundle_attachment",
           resource_kind: "skill",
           title: skillRef.label,
           lifecycle_state: "active",
@@ -1018,8 +1328,8 @@ describe("Workspace Bundle v4 HTTP transport", () => {
         completionFileBatches: [{
           workspace_id: workspaceId,
           id: batchId,
-          scope_kind: "workspace",
-          room_id: null,
+          scope_kind: "room",
+          room_id: "room_bundle_attachment",
           status: "renamed",
           created_at: timestamp,
           updated_at: timestamp
@@ -2305,9 +2615,12 @@ async function writeMinimalV4Bundle(
     runtimeResourceUsage?: readonly Record<string, unknown>[];
     completionResources?: readonly Record<string, unknown>[];
     completionResourceVersions?: readonly Record<string, unknown>[];
+    completionSkillFiles?: readonly Record<string, unknown>[];
+    completionSearchProjection?: readonly Record<string, unknown>[];
     completionFileBatches?: readonly Record<string, unknown>[];
     completionFileBatchEntries?: readonly Record<string, unknown>[];
     completionBodies?: Readonly<Record<string, string | Uint8Array>>;
+    sharing?: Partial<Record<SharingFile, readonly Record<string, unknown>[]>>;
     humanWork?: {
       work: Record<string, unknown>;
       instruction: Record<string, unknown>;
@@ -2400,6 +2713,9 @@ async function writeMinimalV4Bundle(
     })}\n`;
     baseFiles["files.jsonl"] = `${canonicalJson(file)}\n`;
   }
+  if (input.sharing) {
+    for (const file of sharingFiles) baseFiles[file] = jsonLines(input.sharing[file] ?? []);
+  }
   const baseHashes = Object.fromEntries(Object.entries(baseFiles).map(([name, content]) => [name, hash(content)]));
   for (const [name, content] of Object.entries(baseFiles)) await writeFile(path.join(base, name), content, "utf8");
   if (input.humanWork) {
@@ -2407,7 +2723,19 @@ async function writeMinimalV4Bundle(
     await writeFile(path.join(base, "files", "notes", "brief.md"), input.humanWork.fileContent, { flag: "wx", mode: 0o600 });
     baseHashes["files/notes/brief.md"] = input.humanWork.fileHash;
   }
-  const baseRecordCounts = { rooms: input.humanWork ? 1 : 0, memberships: 1, room_memberships: input.humanWork ? 1 : 0, records: 0, events: 0, jobs: 0, operations: 0, invitations: 0, audits: 0, files: input.humanWork ? 1 : 0 };
+  const baseRecordCounts = {
+    rooms: input.humanWork ? 1 : 0,
+    memberships: 1,
+    room_memberships: input.humanWork ? 1 : 0,
+    records: 0,
+    events: 0,
+    jobs: 0,
+    operations: 0,
+    invitations: 0,
+    audits: 0,
+    files: input.humanWork ? 1 : 0,
+    ...(input.sharing ? Object.fromEntries(sharingFiles.map((file) => [sharingCountName(file), input.sharing?.[file]?.length ?? 0])) : {})
+  };
   const baseProvenance = input.provenance;
   const baseIntegrityPayload = baseProvenance
     ? {
@@ -2458,6 +2786,8 @@ async function writeMinimalV4Bundle(
   const runtimeResourceUsage = input.runtimeResourceUsage ?? [];
   const completionResources = input.completionResources ?? [];
   const completionResourceVersions = input.completionResourceVersions ?? [];
+  const completionSkillFiles = input.completionSkillFiles ?? [];
+  const completionSearchProjection = input.completionSearchProjection ?? [];
   const completionFileBatches = input.completionFileBatches ?? [];
   const completionFileBatchEntries = input.completionFileBatchEntries ?? [];
   for (const file of completionFiles) {
@@ -2483,8 +2813,12 @@ async function writeMinimalV4Bundle(
                       ? runtimeResourceUsage
                       : file === "resources.jsonl"
                         ? completionResources
-                        : file === "resource-versions.jsonl"
+                      : file === "resource-versions.jsonl"
                           ? completionResourceVersions
+                          : file === "skill-files.jsonl"
+                            ? completionSkillFiles
+                            : file === "search-projection.jsonl"
+                              ? completionSearchProjection
                           : file === "file-batches.jsonl"
                             ? completionFileBatches
                             : file === "file-batch-entries.jsonl"
@@ -2544,9 +2878,13 @@ async function writeMinimalV4Bundle(
                   ? runtimeResourceUsage.length
                   : key === "resources"
                     ? completionResources.length
-                    : key === "resource_versions"
-                      ? completionResourceVersions.length
-                      : key === "file_batches"
+                      : key === "resource_versions"
+                        ? completionResourceVersions.length
+                        : key === "skill_files"
+                          ? completionSkillFiles.length
+                          : key === "search_projection"
+                            ? completionSearchProjection.length
+                        : key === "file_batches"
                         ? completionFileBatches.length
                         : key === "file_batch_entries"
                           ? completionFileBatchEntries.length
@@ -2618,6 +2956,15 @@ async function hashFiles(root: string, prefix = ""): Promise<Record<string, stri
 
 async function readFileText(file: string): Promise<string> {
   return (await readFile(file, "utf8"));
+}
+
+function jsonLines(rows: readonly Record<string, unknown>[]): string {
+  return rows.map((row) => canonicalJson(row)).join(rows.length ? "\n" : "") + (rows.length ? "\n" : "");
+}
+
+function sharingCountName(file: SharingFile): string {
+  if (file === "workspace-shares.jsonl") return "share_records";
+  return file.replace("workspace-", "").replace(".jsonl", "").replaceAll("-", "_");
 }
 
 function hash(value: string): string {

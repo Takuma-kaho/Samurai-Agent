@@ -115,6 +115,257 @@ describe("Workspace Server migration checksum compatibility", () => {
       .rejects.toThrow("workspace_server_schema_migration_mismatch:109");
     expect(ledgerUpdates(client)).toHaveLength(0);
   });
+
+  it("appends the Native UI context-sharing schema after the existing migrations", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(128));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([129, "workspace_server_native_ui_context_sharing_schema"])
+    });
+    const contextMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 129);
+    expect(contextMigration?.statements.join("\n")).toContain("workspace_completion_resources_workspace_knowledge_retired_check");
+    expect(contextMigration?.statements.join("\n")).toContain("account_notification_outbox_due_index");
+  });
+
+  it("appends the import-session-only sharing RLS repair after v129", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(129));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([130, "workspace_server_native_ui_context_sharing_import_rls"])
+    });
+    const repairMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 130);
+    const repairSql = repairMigration?.statements.join("\n") ?? "";
+    expect(repairSql).toContain("samurai_is_import_session(workspace_id)");
+    expect(repairSql).toContain("samurai_guard_workspace_share_recipients");
+    expect(repairSql).toContain("PERFORM samurai_abort_workspace_import_v89");
+    expect(repairSql).not.toContain("CREATE POLICY account_notifications");
+    expect(repairSql).not.toContain("CREATE POLICY account_notification_outbox");
+  });
+
+  it("appends the narrow public-share functions after v130 without an anonymous RLS policy", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(130));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([131, "workspace_server_share_public_locator_and_claim_functions"])
+    });
+    const publicShareMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 131);
+    const publicShareSql = publicShareMigration?.statements.join("\n") ?? "";
+    expect(publicShareSql).toContain("samurai_workspace_share_public_lookup");
+    expect(publicShareSql).toContain("samurai_workspace_share_claim");
+    expect(publicShareSql).toContain("samurai_workspace_share_claim_content");
+    expect(publicShareSql).toContain("FOR UPDATE");
+    expect(publicShareSql).not.toContain("CREATE POLICY workspace_shares_public");
+    expect(publicShareSql).not.toContain("CREATE POLICY workspace_share_claims_public");
+  });
+
+  it("appends the Account-owned personal preference snapshot guard after v131", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(131));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([132, "workspace_server_human_work_personal_preferences_snapshot"])
+    });
+    const preferenceMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 132);
+    const preferenceSql = preferenceMigration?.statements.join("\n") ?? "";
+    expect(preferenceSql).toContain("personal_preferences_snapshot JSONB NULL");
+    expect(preferenceSql).toContain("workspace_human_work_instructions_personal_preferences_snapshot_check");
+    expect(preferenceSql).toContain("samurai_set_human_work_instruction_personal_preferences");
+    expect(preferenceSql).toContain("operation_row.status = 'running'");
+    expect(preferenceSql).toContain("instruction_row.work_id IS DISTINCT FROM target_work_id");
+    expect(preferenceSql).toContain("instruction_row.created_by IS DISTINCT FROM samurai_current_account_id()");
+    expect(preferenceSql).toContain("FOR UPDATE");
+    expect(preferenceSql).toContain("human_work_instruction_version_conflict");
+  });
+
+  it("appends canonical HTTPS share origins without rewriting legacy audit rows", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(132));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([133, "workspace_server_share_origin_canonicalization"])
+    });
+    const originMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 133);
+    const originSql = originMigration?.statements.join("\n") ?? "";
+    expect(originSql).toContain("DROP CONSTRAINT IF EXISTS workspace_share_claims_target_origin_check");
+    expect(originSql).toContain("DROP CONSTRAINT IF EXISTS workspace_share_imports_source_origin_check");
+    expect(originSql).toContain("CHECK (target_origin ~ '^https://[^/?#@]+/$') NOT VALID");
+    expect(originSql).toContain("CHECK (source_origin ~ '^https://[^/?#@]+/$') NOT VALID");
+    expect(originSql).toContain("samurai_normalize_workspace_share_claim_origin");
+    expect(originSql).toContain("samurai_normalize_workspace_share_import_origin");
+    expect(originSql).toContain("workspace_share_claims_origin_canonicalization");
+    expect(originSql).toContain("workspace_share_imports_origin_canonicalization");
+    expect(originSql).toContain("VALIDATE CONSTRAINT workspace_share_claims_target_origin_canonical_check");
+    expect(originSql).toContain("VALIDATE CONSTRAINT workspace_share_imports_source_origin_canonical_check");
+    expect(originSql).toContain("p_target_origin !~ '^https://[^/?#@]+/$'");
+    expect(originSql).not.toContain("p_target_origin !~ '^https?://[^/?#@]+$'");
+    expect(originSql).not.toMatch(/UPDATE\s+workspace_share_(claims|imports)/);
+    expect(originSql).not.toMatch(/DELETE\s+FROM\s+workspace_share_(claims|imports)/);
+  });
+
+  it("normalizes committed imports and fixes their terminal retry state", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(133));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([134, "workspace_server_share_committed_import_terminal_state"])
+    });
+    const terminalMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 134);
+    const terminalSql = terminalMigration?.statements.join("\n") ?? "";
+    expect(terminalSql).toContain("SET retryable = FALSE, failure_code = NULL");
+    expect(terminalSql).toContain("workspace_share_imports_committed_terminal_state_check");
+    expect(terminalSql).toContain("VALIDATE CONSTRAINT workspace_share_imports_committed_terminal_state_check");
+  });
+
+  it("converges failed imports and guards resource scope at the committed boundary", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(134));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([135, "workspace_server_share_import_scope_and_failed_terminal_guards"])
+    });
+    const scopeMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 135);
+    const scopeSql = scopeMigration?.statements.join("\n") ?? "";
+    expect(scopeSql).toContain("SET phase = 'cleanup', retryable = FALSE, lease_token = NULL, lease_until = NULL");
+    expect(scopeSql).toContain("workspace_share_imports_failed_terminal_state_check");
+    expect(scopeSql).toContain("samurai_guard_workspace_share_import_agent_scope");
+    expect(scopeSql).toContain("samurai_guard_workspace_share_import_resource");
+    expect(scopeSql).toContain("samurai_guard_workspace_share_import_resource_parent");
+    expect(scopeSql).toContain("resource_row.scope_kind <> 'agent'");
+    expect(scopeSql).toContain("resource_row.scope_kind <> 'room'");
+  });
+
+  it("records orphaned Workspace file paths before deleting their DB batches", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(135));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([136, "workspace_server_completion_file_cleanup_ledger"])
+    });
+    const cleanupMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 136);
+    const cleanupSql = cleanupMigration?.statements.join("\n") ?? "";
+    expect(cleanupSql.indexOf("INSERT INTO workspace_completion_file_cleanup_queue")).toBeLessThan(cleanupSql.indexOf("DELETE FROM workspace_completion_file_batch_entries"));
+    expect(cleanupSql.indexOf("DELETE FROM workspace_completion_file_batch_entries")).toBeLessThan(cleanupSql.indexOf("DELETE FROM workspace_completion_file_batches"));
+    expect(cleanupSql).toContain("ALTER TABLE workspace_completion_file_cleanup_queue FORCE ROW LEVEL SECURITY");
+    expect(cleanupSql).toContain("FOR UPDATE SKIP LOCKED");
+  });
+
+  it("restores Completion migration capability after the Agent-scope RLS rewrite", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(136));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([137, "workspace_server_completion_migration_resource_rls_boundary"])
+    });
+    const repairMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 137);
+    const repairSql = repairMigration?.statements.join("\n") ?? "";
+    for (const policy of [
+      "workspace_completion_resources_access",
+      "workspace_completion_versions_access",
+      "workspace_completion_evidence_access",
+      "workspace_completion_skill_files_access"
+    ]) {
+      expect(repairSql).toContain(`ALTER POLICY ${policy}`);
+    }
+    expect(repairSql).toContain("samurai_is_import_session(workspace_id)");
+    expect(repairSql).toContain("samurai_completion_migration_write_allowed(workspace_id)");
+  });
+
+  it("allows only an owning account's writable draft Share file transaction", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(137));
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([138, "workspace_server_share_draft_file_transaction_rls"])
+    });
+    const repairMigration = workspaceServerMigrationDefinitions().find((migration) => migration.version === 138);
+    const repairSql = repairMigration?.statements.join("\n") ?? "";
+    expect(repairSql).toContain("ALTER POLICY workspace_share_file_transactions_internal ON workspace_share_file_transactions");
+    expect(repairSql).toContain("owner_kind = 'draft'");
+    expect(repairSql).toContain("share_row.status = 'draft'");
+    expect(repairSql).toContain("share_row.created_by = samurai_current_account_id()");
+    expect(repairSql).toContain("samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage')");
+    expect(repairSql).toContain("samurai_can_workspace(share_row.workspace_id, 'admin')");
+    expect(repairSql).toContain("samurai_workspace_is_writable(workspace_id)");
+    expect(repairSql).toContain("actor_account_id = samurai_current_account_id()");
+    expect(repairSql).toContain("current_setting('samurai.share_operation', true) = '1'");
+    expect(repairSql).toContain("samurai_is_completion_maintenance_identity(workspace_id)");
+    expect(repairSql).toContain("samurai_is_import_session(workspace_id)");
+    expect(repairSql).toContain("current_setting('samurai.internal_access', true) = '1'");
+    expect(repairSql).toContain("current_setting('samurai.share_operation', true) = '1'");
+  });
+
+  it("extends Share recipient reads to active and revoked owner-managed Shares", () => {
+    const migration = workspaceServerMigrationDefinitions().find((item) => item.version === 139);
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(migration?.name).toBe("workspace_server_share_recipient_read_projection_rls");
+    expect(sql).toContain("ALTER POLICY workspace_share_recipients_manage ON workspace_share_recipients");
+    expect(sql).toContain("share_row.status IN ('draft','active','revoked')");
+  });
+
+  it("allows the maintenance projection to satisfy notification ON CONFLICT RLS", () => {
+    const migration = workspaceServerMigrationDefinitions().find((item) => item.version === 140);
+    const sql = migration?.statements.join("\n") ?? "";
+    expect(migration?.name).toBe("workspace_server_notification_projection_rls");
+    expect(sql).toContain("CREATE POLICY account_notifications_internal_read ON account_notifications FOR SELECT");
+    expect(sql).toContain("samurai_is_completion_maintenance_identity(workspace_id)");
+    expect(sql).toContain("current_setting('samurai.internal_access', true) = '1'");
+  });
+
+  it("rolls back the cleanup ledger transaction when the queue insert fails", async () => {
+    const client = new FakeMigrationClient(migrationRowsThrough(135), "INSERT INTO workspace_completion_file_cleanup_queue");
+
+    await expect(applyWorkspaceServerMigrations(fakePool(client), "samurai_app"))
+      .rejects.toThrow("simulated_migration_failure");
+    expect(client.queries.map((query) => query.text)).toContain("ROLLBACK");
+    expect(client.queries).not.toContainEqual(expect.objectContaining({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([136, "workspace_server_completion_file_cleanup_ledger"])
+    }));
+  });
+
+  it("accepts the pre-ledger v129 checksum and converges it after the repair", async () => {
+    const applied = migrationRowsThrough(135).map((migration) => (
+      migration.version === 129
+        ? { ...migration, checksum: "c9691dde97e7a3879f2b72605a065cc42c46d9278b42eec75971eab6e2b5afde" }
+        : migration
+    ));
+    const client = new FakeMigrationClient(applied);
+
+    await applyWorkspaceServerMigrations(fakePool(client), "samurai_app");
+
+    const currentV129 = workspaceServerMigrationStatus().find((migration) => migration.version === 129)?.checksum;
+    expect(ledgerUpdates(client)).toContainEqual({
+      text: "UPDATE samurai_server_schema_migrations SET checksum = $1 WHERE version = $2",
+      values: [currentV129, 129]
+    });
+    expect(client.queries).toContainEqual({
+      text: "INSERT INTO samurai_server_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)",
+      values: expect.arrayContaining([136, "workspace_server_completion_file_cleanup_ledger"])
+    });
+  });
 });
 
 interface MigrationRow {

@@ -2,6 +2,8 @@ import {
   browserWorkspaceHealth,
   browserWorkspaceBinaryRequest,
   browserWorkspaceRequest,
+  browserShareSourceRequest,
+  createBrowserShareDelegation,
   createBrowserWorkspaceConnectionState,
   loadBrowserWorkspaceConnection,
   loadBrowserWorkspaceConnections,
@@ -10,7 +12,47 @@ import {
   selectBrowserWorkspaceCandidate,
   subscribeBrowserWorkspaceRealtime
 } from "./workspace-browser-auth";
-import { DomainApiClient, PublicAgentBackendRecordSchema, PublicRoomWorkResultResourceRefSchema, type DomainApiTransportRequest, type PublicRoomRecord } from "@samurai-agent/domain-api";
+import {
+  DomainApiClient,
+  PublicAccountInvitationNotificationsPageSchema,
+  PublicAccountWorkspaceNotificationSummariesSchema,
+  PublicAgentBackendRecordSchema,
+  PublicCompletionResourceBodySchema,
+  PublicCompletionResourceDetailSchema,
+  PublicCompletionResourceMutationResponseSchema,
+  PublicCompletionResourcePageSchema,
+  PublicNotificationMarkReadResultSchema,
+  PublicNotificationPageSchema,
+  PublicNotificationSummarySchema,
+  PublicRoomWorkResultResourceRefSchema,
+  PublicShareDelegationSchema,
+  PublicShareDraftCreateInputSchema,
+  PublicShareDraftDiscardInputSchema,
+  PublicShareDraftDiscardResultSchema,
+  PublicShareDraftSchema,
+  PublicShareDraftUpdateInputSchema,
+  PublicShareDraftViewInputSchema,
+  PublicShareImportInputSchema,
+  PublicShareImportResultSchema,
+  PublicShareListInputSchema,
+  PublicShareLocatorSchema,
+  PublicShareOriginSchema,
+  PublicSharePageSchema,
+  PublicSharePublishInputSchema,
+  PublicSharePublishResultSchema,
+  PublicShareRevokeInputSchema,
+  PublicShareRevokeResultSchema,
+  PublicShareManifestSchema,
+  PublicShareVisibilitySchema,
+  PublicShareImportStatusInputSchema,
+  PublicTargetSchema,
+  PublicWorkspaceSearchPageSchema,
+  type DomainApiRequest,
+  type DomainApiTransportRequest,
+  type PublicSearchItem,
+  type PublicTarget,
+  type PublicRoomRecord
+} from "@samurai-agent/domain-api";
 import { beginActiveWorkspaceRoomSelection, currentActiveWorkspaceRoomId, isCurrentActiveWorkspaceRoomSelection } from "./workspace-navigation-state";
 import type {
   AgentBackendAvailability,
@@ -20,6 +62,7 @@ import type {
   AuditPayload,
   ChatTurnResult,
   ChatSurfaceOperationResult,
+  PersonalPreferencesSnapshot,
   DesktopRoomMemberPreview,
   DesktopRoomMovePreview,
   DesktopWorkspaceConnection,
@@ -65,12 +108,44 @@ import type {
   WorkspaceCompletionResourceDetail,
   WorkspaceCompletionResourceView,
   WorkspaceAttachmentUploadResult,
+  AccountInvitationNotificationListInput,
+  AccountWorkspaceNotificationSummaries,
+  AccountWorkspaceNotificationSummariesInput,
+  WorkspaceContextSearchInput,
+  WorkspaceContextSearchPage,
+  WorkspaceContextSearchItem,
+  WorkspaceContextTarget,
+  WorkspaceNotification,
+  WorkspaceNotificationListInput,
+  WorkspaceNotificationMarkReadResult,
+  WorkspaceNotificationPage,
+  WorkspaceNotificationSummary,
   WorkspaceKnowledgeMemoryPage,
-  WorkspaceKnowledgeWikiPage
+  WorkspaceKnowledgeWikiPage,
+  DesktopWorkspaceTarget,
+  WorkspaceShareDraft,
+  WorkspaceShareDraftCreateInput,
+  WorkspaceShareDraftDiscardInput,
+  WorkspaceShareDraftDiscardResult,
+  WorkspaceShareDraftUpdateInput,
+  WorkspaceShareDraftViewInput,
+  WorkspaceShareImportInput,
+  WorkspaceShareImportResult,
+  WorkspaceShareImportStatusInput,
+  WorkspaceShareLinkImportInput,
+  WorkspaceShareLinkView,
+  WorkspaceShareLinkViewInput,
+  WorkspaceShareListInput,
+  WorkspaceSharePage,
+  WorkspaceSharePublishInput,
+  WorkspaceSharePublishResult,
+  WorkspaceShareRevokeInput,
+  WorkspaceShareRevokeResult
 } from "./api";
 import {
   ResourceRefSchema,
   WorkspaceFileResourceRefSchema,
+  supportedLocales,
   type ActivityInboxItem,
   type AutomationJobRecord,
   type BackendEventRecord,
@@ -93,6 +168,46 @@ import type { NativeRoomCreateInput, NativeWorkspaceTarget } from "../native-app
 
 type DesktopBridge = NonNullable<Window["samuraiDesktop"]>;
 type BrowserWorkspaceTargetRef = NativeWorkspaceTarget;
+
+/**
+ * Validate the renderer-provided private preference snapshot before it enters
+ * the signed Domain API input. The Account identity is supplied by the
+ * selected connection, so it is deliberately not part of this value.
+ */
+function normalizeBrowserPersonalPreferences(value: unknown): PersonalPreferencesSnapshot | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("personal_preferences_invalid");
+  const record = value as Record<string, unknown>;
+  const allowedKeys = ["schema_version", "revision", "display_name", "output_locale", "instructions"] as const;
+  if (Object.keys(record).some((key) => !(allowedKeys as readonly string[]).includes(key))) {
+    throw new Error("personal_preferences_invalid");
+  }
+  if (record.schema_version !== 1
+    || typeof record.revision !== "number"
+    || !Number.isSafeInteger(record.revision)
+    || record.revision < 0
+    || typeof record.display_name !== "string"
+    || typeof record.instructions !== "string") {
+    throw new Error("personal_preferences_invalid");
+  }
+  const displayName = record.display_name.trim();
+  if (!displayName || displayName.length > 200 || record.instructions.length > 20_000) {
+    throw new Error("personal_preferences_invalid");
+  }
+  const outputLocale = record.output_locale;
+  if (outputLocale !== null
+    && (typeof outputLocale !== "string" || !(supportedLocales as readonly string[]).includes(outputLocale))) {
+    throw new Error("personal_preferences_invalid");
+  }
+  return {
+    schema_version: 1,
+    revision: record.revision,
+    display_name: displayName,
+    output_locale: outputLocale as SupportedLocale | null,
+    instructions: record.instructions
+  };
+}
+
 type BrowserWorkspaceSnapshot = {
   id: string;
   workspaceId: string;
@@ -586,6 +701,10 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
     },
     getWorkspaceChatSession: (input) => workspaceRequest<SessionDetail>("GET", `/chat/sessions/${encodeURIComponent(input.sessionId)}`, undefined, undefined, undefined, browserTargetFromInput(input)),
     sendWorkspaceChatMessage: async (input) => {
+      if (Object.prototype.hasOwnProperty.call(input as object, "personal_preferences")) {
+        throw new Error("personal_preferences_invalid");
+      }
+      const personalPreferences = normalizeBrowserPersonalPreferences(input.personalPreferences);
       const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
       const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<ChatTurnResult>(snapshot.workspaceId, "chat.turn.run", {
         context: { session_id: input.sessionId },
@@ -595,8 +714,9 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
           ...(input.outputLocale ? { output_locale: input.outputLocale } : {}),
           ...(input.backendId ? { backend_id: input.backendId } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
-          ...(input.attachments?.length ? { attachments: input.attachments } : {})
-        }
+          ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+          ...(personalPreferences === undefined ? {} : { personal_preferences: personalPreferences })
+        } as unknown as DomainApiRequest["input"]
       }, { operationId: input.idempotencyKey, idempotencyKey: input.idempotencyKey });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return response.result;
@@ -617,6 +737,24 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
       return sanitizeWorkspaceAttachmentUploadResult(result);
     },
     searchWorkspace: (input) => workspaceInputRequest<SearchResult[]>(input, "GET", `/chat/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}`),
+    searchWorkspaceContext: (input) => searchBrowserWorkspaceContext(input),
+    listWorkspaceNotifications: (input = {}) => listBrowserWorkspaceNotifications(input),
+    getWorkspaceNotificationSummary: (input = {}) => getBrowserWorkspaceNotificationSummary(input),
+    markWorkspaceNotificationsRead: (input) => markBrowserWorkspaceNotificationsRead(input),
+    getAccountWorkspaceNotificationSummaries: (input) => getBrowserAccountWorkspaceNotificationSummaries(input),
+    listAccountInvitationNotifications: (input = {}) => listBrowserAccountInvitationNotifications(input),
+    markAccountInvitationNotificationsRead: (input) => markBrowserAccountInvitationNotificationsRead(input),
+    createWorkspaceShareDraft: (input) => createBrowserWorkspaceShareDraft(input),
+    viewWorkspaceShareDraft: (input) => viewBrowserWorkspaceShareDraft(input),
+    updateWorkspaceShareDraft: (input) => updateBrowserWorkspaceShareDraft(input),
+    discardWorkspaceShareDraft: (input) => discardBrowserWorkspaceShareDraft(input),
+    listWorkspaceShares: (input) => listBrowserWorkspaceShares(input),
+    publishWorkspaceShare: (input) => publishBrowserWorkspaceShare(input),
+    revokeWorkspaceShare: (input) => revokeBrowserWorkspaceShare(input),
+    importWorkspaceShare: (input) => importBrowserWorkspaceShare(input),
+    getWorkspaceShareImportStatus: (input) => getBrowserWorkspaceShareImportStatus(input),
+    viewWorkspaceShareLink: (input) => viewBrowserWorkspaceShareLink(input),
+    importWorkspaceShareLink: (input) => importBrowserWorkspaceShareLink(input),
     listWorkspaceBackendRuns: (input) => workspaceInputRequest<BackendRunRecord[]>(input, "GET", `/chat/runs${input.sessionId ? `?session_id=${encodeURIComponent(input.sessionId)}` : ""}`),
     getWorkspaceBackendRun: (input) => workspaceInputRequest<BackendRunRecord>(input, "GET", `/chat/runs/${encodeURIComponent(input.runId)}`),
     listWorkspaceBackendEvents: (input) => workspaceInputRequest<BackendEventRecord[]>(input, "GET", `/chat/runs/${encodeURIComponent(input.runId)}/events`),
@@ -630,6 +768,7 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
       return { auditRecords: [], operations: [], policyDecisions: [], approvalRequests: [], rollbackPoints: [], workspaceEntries: body.entries } satisfies AuditPayload;
     },
     listWorkspaceCompletionResources: (input) => {
+      if (isBrowserAgentCompletionInput(input)) return listBrowserAgentCompletionResources(input);
       const query = new URLSearchParams();
       query.set("scope_kind", input.scopeKind);
       if (input.scopeKind === "room") query.set("room_id", input.roomId ?? "");
@@ -638,9 +777,15 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
       if (input.cursor) query.set("cursor", input.cursor);
       return workspaceV1InputRequest<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>(input, "GET", `/completion/resources?${query.toString()}`);
     },
-    getWorkspaceCompletionResource: (input) => workspaceV1InputRequest<WorkspaceCompletionResourceDetail>(input, "GET", `/completion/resources/${encodeURIComponent(input.resourceId)}`),
-    getWorkspaceCompletionResourceBody: (input) => workspaceV1InputRequest<WorkspaceCompletionResourceBody>(input, "GET", `/completion/resources/${encodeURIComponent(input.resourceId)}/body`),
-    createWorkspaceCompletionResource: (input) => workspaceV1InputRequest(input, "POST", "/completion/resources", {
+    getWorkspaceCompletionResource: (input) => isBrowserAgentCompletionInput(input)
+      ? getBrowserAgentCompletionResource(input)
+      : workspaceV1InputRequest<WorkspaceCompletionResourceDetail>(input, "GET", `/completion/resources/${encodeURIComponent(input.resourceId)}`),
+    getWorkspaceCompletionResourceBody: (input) => isBrowserAgentCompletionInput(input)
+      ? getBrowserAgentCompletionResourceBody(input)
+      : workspaceV1InputRequest<WorkspaceCompletionResourceBody>(input, "GET", `/completion/resources/${encodeURIComponent(input.resourceId)}/body`),
+    createWorkspaceCompletionResource: (input) => isBrowserAgentCompletionInput(input)
+      ? createBrowserAgentCompletionResource(input)
+      : workspaceV1InputRequest(input, "POST", "/completion/resources", {
       scope_kind: input.scopeKind,
       ...(input.roomId ? { room_id: input.roomId } : {}),
       kind: input.kind,
@@ -650,7 +795,9 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
       ...(input.metadata ? { metadata: input.metadata } : {}),
       reason: input.reason
     }, input.operationId),
-    updateWorkspaceCompletionResource: (input) => workspaceV1InputRequest(input, "PATCH", `/completion/resources/${encodeURIComponent(input.resourceId)}`, {
+    updateWorkspaceCompletionResource: (input) => isBrowserAgentCompletionInput(input)
+      ? updateBrowserAgentCompletionResource(input)
+      : workspaceV1InputRequest(input, "PATCH", `/completion/resources/${encodeURIComponent(input.resourceId)}`, {
       scope_kind: input.scopeKind,
       ...(input.roomId ? { room_id: input.roomId } : {}),
       kind: input.kind,
@@ -662,7 +809,9 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
       reason: input.reason
     }, input.operationId),
     setWorkspaceCompletionResourceFixed: (input) => workspaceV1InputRequest(input, "POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/fix`, { fixed: input.fixed, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
-    archiveWorkspaceCompletionResource: (input) => workspaceV1InputRequest(input, "POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/archive`, { archived: input.archived, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
+    archiveWorkspaceCompletionResource: (input) => isBrowserAgentCompletionInput(input)
+      ? archiveBrowserAgentCompletionResource(input)
+      : workspaceV1InputRequest(input, "POST", `/completion/resources/${encodeURIComponent(input.resourceId)}/archive`, { archived: input.archived, expected_version: input.expectedVersion, reason: input.reason }, input.operationId),
     searchWorkspaceCompletionKnowledge: (input) => workspaceV1InputRequest(input, "GET", `/completion/knowledge/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}${input.limit === undefined ? "" : `&limit=${input.limit}`}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`),
     listWorkspaceCompletionSkills: (input) => workspaceV1InputRequest(input, "GET", `/completion/skills?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`),
     getWorkspaceCompletionSkill: (input) => workspaceV1InputRequest(input, "GET", `/completion/skills/${encodeURIComponent(input.resourceId)}${input.version === undefined ? "" : `?version=${input.version}`}`),
@@ -716,9 +865,17 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
     getWorkspaceKnowledgeWikiLint: (input) => workspaceInputRequest(input, "GET", `/knowledge-wiki/lint?room_id=${encodeURIComponent(input.roomId)}`),
     getWorkspaceKnowledgeWikiBacklinks: (input) => workspaceInputRequest(input, "GET", `/knowledge-wiki/${encodeURIComponent(input.wikiId)}/backlinks?room_id=${encodeURIComponent(input.roomId)}`),
     listWorkspaceKnowledgeMemory: (input) => workspaceInputRequest<{ memories: WorkspaceKnowledgeMemoryPage[] }>(input, "GET", `/knowledge-memory?room_id=${encodeURIComponent(input.roomId)}${input.includeArchived ? "&include_archived=true" : ""}`),
-    getWorkspaceKnowledgeMemory: (input) => workspaceInputRequest<WorkspaceKnowledgeMemoryPage>(input, "GET", `/knowledge-memory/${encodeURIComponent(input.memoryId)}`),
+    getWorkspaceKnowledgeMemory: (input) => {
+      const roomId = input.target?.roomId ?? currentActiveWorkspaceRoomId();
+      if (!roomId) throw new Error("knowledge_memory_room_id_required");
+      return workspaceInputRequest<WorkspaceKnowledgeMemoryPage>(input, "GET", `/knowledge-memory/${encodeURIComponent(input.memoryId)}?room_id=${encodeURIComponent(roomId)}`);
+    },
     searchWorkspaceKnowledgeMemory: (input) => workspaceInputRequest(input, "GET", `/knowledge-memory/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}${input.limit === undefined ? "" : `&limit=${input.limit}`}`),
-    archiveWorkspaceKnowledgeMemory: (input) => workspaceInputRequest(input, "POST", `/knowledge-memory/${encodeURIComponent(input.memoryId)}/archive`, { reason: input.reason }, input.operationId),
+    archiveWorkspaceKnowledgeMemory: (input) => {
+      const roomId = input.target?.roomId ?? currentActiveWorkspaceRoomId();
+      if (!roomId) throw new Error("knowledge_memory_room_id_required");
+      return workspaceInputRequest(input, "POST", `/knowledge-memory/${encodeURIComponent(input.memoryId)}/archive?room_id=${encodeURIComponent(roomId)}`, { reason: input.reason }, input.operationId);
+    },
     listWorkspaceCollectionSchemas: (input) => workspaceInputRequest(input, "GET", `/collections/schemas?room_id=${encodeURIComponent(input.roomId)}`),
     getWorkspaceCollectionSchema: (input) => workspaceInputRequest(input, "GET", `/collections/${encodeURIComponent(input.collectionId)}/schema?room_id=${encodeURIComponent(input.roomId)}`),
     saveWorkspaceCollectionSchema: (input) => workspaceInputRequest(input, "POST", "/collections/schemas", { room_id: input.roomId, schema: input.schema, ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }) }, input.operationId),
@@ -1099,6 +1256,1017 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
   return bridge;
 }
 
+async function searchBrowserWorkspaceContext(input: WorkspaceContextSearchInput): Promise<WorkspaceContextSearchPage> {
+  const normalized = normalizeWorkspaceContextSearchInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "workspace.search", {
+    context: {},
+    input: normalized
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceContextSearchResponse(response.result);
+}
+
+async function listBrowserWorkspaceNotifications(input: WorkspaceNotificationListInput): Promise<WorkspaceNotificationPage> {
+  const normalized = normalizeWorkspaceNotificationListInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "notification.list", {
+    context: {},
+    input: normalized
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserNotificationPageResponse(response.result, false);
+}
+
+async function getBrowserWorkspaceNotificationSummary(input: { target?: DesktopWorkspaceTarget }): Promise<WorkspaceNotificationSummary> {
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).executeQuery<unknown>(snapshot.workspaceId, "notification.summary", {
+    context: {},
+    input: {}
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserNotificationSummaryResponse(response.result);
+}
+
+async function markBrowserWorkspaceNotificationsRead(input: { notificationIds: string[]; operationId: string; target?: DesktopWorkspaceTarget }): Promise<WorkspaceNotificationMarkReadResult> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_notification_mark_read_input_invalid");
+  const notificationIds = normalizeBrowserNotificationIds(input.notificationIds);
+  const operationId = requirePublicId(input.operationId, "operationId");
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).executeOperation<unknown>(snapshot.workspaceId, "notification.mark_read", {
+    context: {},
+    input: { notification_ids: notificationIds }
+  }, { operationId, idempotencyKey: operationId });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserNotificationMarkReadResponse(response.result, notificationIds);
+}
+
+async function getBrowserAccountWorkspaceNotificationSummaries(input: AccountWorkspaceNotificationSummariesInput): Promise<AccountWorkspaceNotificationSummaries> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("account_workspace_notification_summary_input_invalid");
+  const workspaceIds = normalizeBrowserWorkspaceIds(input.workspaceIds);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotAccountDomainApiClient(snapshot).executeAccountQuery<unknown>("account.workspace_notification_summaries", {
+    context: {},
+    input: { workspace_ids: workspaceIds }
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserAccountWorkspaceNotificationSummariesResponse(response.result, workspaceIds);
+}
+
+async function listBrowserAccountInvitationNotifications(input: AccountInvitationNotificationListInput): Promise<WorkspaceNotificationPage> {
+  const normalized = normalizeBrowserAccountInvitationListInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotAccountDomainApiClient(snapshot).executeAccountQuery<unknown>("account.invitation_notifications", {
+    context: {},
+    input: normalized
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserNotificationPageResponse(response.result, true);
+}
+
+async function markBrowserAccountInvitationNotificationsRead(input: { notificationIds: string[]; operationId: string; target?: DesktopWorkspaceTarget }): Promise<WorkspaceNotificationMarkReadResult> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("account_invitation_notification_read_input_invalid");
+  const notificationIds = normalizeBrowserNotificationIds(input.notificationIds);
+  const operationId = requirePublicId(input.operationId, "operationId");
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+  const response = await browserSnapshotAccountDomainApiClient(snapshot).executeAccountOperation<unknown>("account.invitation_notification_read", {
+    context: {},
+    input: { notification_ids: notificationIds }
+  }, { operationId, idempotencyKey: operationId });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserNotificationMarkReadResponse(response.result, notificationIds);
+}
+
+async function createBrowserWorkspaceShareDraft(input: WorkspaceShareDraftCreateInput): Promise<WorkspaceShareDraft> {
+  const operationId = requireWorkspaceShareOperationId(input, ["sourceKind", "sourceId", "resourceRefs", "baseShareId", "operationId", "target"]);
+  const normalized = normalizeWorkspaceShareDraftCreateInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).createShareDraft(snapshot.workspaceId, normalized, {
+    operationId,
+    idempotencyKey: operationId
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareDraftResponse(response.result);
+}
+
+async function viewBrowserWorkspaceShareDraft(input: WorkspaceShareDraftViewInput): Promise<WorkspaceShareDraft> {
+  const normalized = normalizeWorkspaceShareDraftViewInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).viewShareDraft(snapshot.workspaceId, normalized);
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareDraftResponse(response.result);
+}
+
+async function updateBrowserWorkspaceShareDraft(input: WorkspaceShareDraftUpdateInput): Promise<WorkspaceShareDraft> {
+  const operationId = requireWorkspaceShareOperationId(input, ["draftId", "expectedVersion", "manifest", "visibility", "recipientAccountIds", "operationId", "target"]);
+  const normalized = normalizeWorkspaceShareDraftUpdateInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).updateShareDraft(snapshot.workspaceId, normalized, {
+    operationId,
+    idempotencyKey: operationId
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareDraftResponse(response.result);
+}
+
+async function discardBrowserWorkspaceShareDraft(input: WorkspaceShareDraftDiscardInput): Promise<WorkspaceShareDraftDiscardResult> {
+  const operationId = requireWorkspaceShareOperationId(input, ["draftId", "expectedVersion", "operationId", "target"]);
+  const normalized = normalizeWorkspaceShareDraftDiscardInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).discardShareDraft(snapshot.workspaceId, normalized, {
+    operationId,
+    idempotencyKey: operationId
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareDiscardResponse(response.result);
+}
+
+async function listBrowserWorkspaceShares(input: WorkspaceShareListInput): Promise<WorkspaceSharePage> {
+  const normalized = normalizeWorkspaceShareListInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).listShares(snapshot.workspaceId, normalized);
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceSharePageResponse(response.result);
+}
+
+async function publishBrowserWorkspaceShare(input: WorkspaceSharePublishInput): Promise<WorkspaceSharePublishResult> {
+  const operationId = requireWorkspaceShareOperationId(input, ["draftId", "expectedVersion", "expectedContentHash", "operationId", "target"]);
+  const normalized = normalizeWorkspaceSharePublishInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).publishShare(snapshot.workspaceId, normalized, {
+    operationId,
+    idempotencyKey: operationId
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceSharePublishResponse(response.result);
+}
+
+async function revokeBrowserWorkspaceShare(input: WorkspaceShareRevokeInput): Promise<WorkspaceShareRevokeResult> {
+  const operationId = requireWorkspaceShareOperationId(input, ["shareId", "expectedVersion", "operationId", "target"]);
+  const normalized = normalizeWorkspaceShareRevokeInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).revokeShare(snapshot.workspaceId, normalized, {
+    operationId,
+    idempotencyKey: operationId
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareRevokeResponse(response.result);
+}
+
+async function importBrowserWorkspaceShare(input: WorkspaceShareImportInput): Promise<WorkspaceShareImportResult> {
+  const operationId = requireWorkspaceShareOperationId(input, ["sourceOrigin", "locator", "claimId", "contentHash", "delegation", "targetRoomId", "operationId", "target"]);
+  const normalized = normalizeWorkspaceShareImportInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  await assertBrowserWorkspaceShareDelegationTarget(snapshot, normalized, operationId);
+  const response = await browserSnapshotDomainApiClient(snapshot).importShare(snapshot.workspaceId, normalized, {
+    operationId,
+    idempotencyKey: operationId
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareImportResponse(response.result);
+}
+
+async function getBrowserWorkspaceShareImportStatus(input: WorkspaceShareImportStatusInput): Promise<WorkspaceShareImportResult> {
+  const normalized = normalizeWorkspaceShareImportStatusInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(browserShareTargetFromInput(input));
+  const response = await browserSnapshotDomainApiClient(snapshot).getShareImportStatus(snapshot.workspaceId, normalized);
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return sanitizeBrowserWorkspaceShareImportResponse(response.result);
+}
+
+async function viewBrowserWorkspaceShareLink(input: WorkspaceShareLinkViewInput): Promise<WorkspaceShareLinkView> {
+  const normalized = normalizeBrowserWorkspaceShareLinkViewInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(normalized.target);
+  const response = await browserShareSourceRequest({
+    connectionId: snapshot.id,
+    operation: "view",
+    sourceOrigin: normalized.sourceOrigin,
+    locator: normalized.locator
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  if (response.status !== 200) throw new Error(`workspace_share_source_response_invalid:${response.status}`);
+  return sanitizeBrowserWorkspaceShareLinkViewResponse(response.body, normalized);
+}
+
+async function importBrowserWorkspaceShareLink(input: WorkspaceShareLinkImportInput): Promise<WorkspaceShareImportResult> {
+  const normalized = normalizeBrowserWorkspaceShareLinkImportInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(normalized.target);
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  if (normalized.targetRoomId !== undefined && snapshot.roomId !== normalized.targetRoomId) {
+    throw new Error("room_navigation_changed");
+  }
+
+  const viewResponse = await browserShareSourceRequest({
+    connectionId: snapshot.id,
+    operation: "view",
+    sourceOrigin: normalized.sourceOrigin,
+    locator: normalized.locator
+  });
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  if (viewResponse.status !== 200) throw new Error(`workspace_share_source_response_invalid:${viewResponse.status}`);
+  const view = sanitizeBrowserWorkspaceShareLinkViewResponse(viewResponse.body, normalized);
+
+  // Re-capture the complete target after reading the public source and again
+  // before the Account-authenticated claim.  The claim must never be sent for
+  // a Room/Workspace/connection/selection generation that changed while the
+  // source view was in flight.
+  const claimSnapshot = await captureBrowserWorkspaceSnapshot(normalized.target);
+  await assertBrowserWorkspaceSnapshot(claimSnapshot);
+  if (!sameBrowserWorkspaceSnapshot(snapshot, claimSnapshot)) {
+    throw new Error("workspace_navigation_changed");
+  }
+  const claimConnection = await requireBrowserWorkspaceConnection(claimSnapshot.id);
+  await assertBrowserWorkspaceSnapshot(claimSnapshot);
+  const claimTargetOrigin = `${new URL(claimConnection.serverUrl).origin}/`;
+  if (normalized.targetRoomId !== undefined && claimSnapshot.roomId !== normalized.targetRoomId) {
+    throw new Error("room_navigation_changed");
+  }
+  await assertBrowserWorkspaceSnapshot(claimSnapshot);
+
+  const claimResponse = await browserShareSourceRequest({
+    connectionId: claimSnapshot.id,
+    operation: "claim",
+    sourceOrigin: normalized.sourceOrigin,
+    locator: normalized.locator,
+    operationId: normalized.operationId,
+    body: {
+      target_origin: claimTargetOrigin,
+      target_workspace_id: claimSnapshot.workspaceId,
+      operation_id: normalized.operationId,
+      content_hash: view.contentHash
+    }
+  });
+  await assertBrowserWorkspaceSnapshot(claimSnapshot);
+  if (claimResponse.status !== 200 && claimResponse.status !== 201) throw new Error(`workspace_share_claim_response_invalid:${claimResponse.status}`);
+  const claim = sanitizeBrowserWorkspaceShareLinkClaimResponse(claimResponse.body);
+  if (claim.recipientAccountId !== claimConnection.accountId
+    || claim.targetOrigin !== claimTargetOrigin
+    || claim.targetWorkspaceId !== claimSnapshot.workspaceId
+    || claim.operationId !== normalized.operationId
+    || claim.contentHash !== view.contentHash) {
+    throw new Error("workspace_share_claim_scope_invalid");
+  }
+
+  const issuedAt = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 4 * 60_000).toISOString();
+  const delegation = await createBrowserShareDelegation(claimSnapshot.id, {
+    version: 1,
+    source_origin: normalized.sourceOrigin,
+    share_id: claim.shareId,
+    claim_id: claim.claimId,
+    recipient_account_id: claimConnection.accountId,
+    target_origin: claimTargetOrigin,
+    target_workspace_id: claimSnapshot.workspaceId,
+    operation_id: normalized.operationId,
+    content_hash: view.contentHash,
+    issued_at: issuedAt,
+    expires_at: expiresAt
+  });
+  await assertBrowserWorkspaceSnapshot(claimSnapshot);
+  return importBrowserWorkspaceShare({
+    sourceOrigin: normalized.sourceOrigin,
+    locator: normalized.locator,
+    claimId: claim.claimId,
+    contentHash: view.contentHash,
+    delegation: {
+      payload: {
+        version: delegation.payload.version,
+        sourceOrigin: delegation.payload.source_origin,
+        shareId: delegation.payload.share_id,
+        claimId: delegation.payload.claim_id,
+        recipientAccountId: delegation.payload.recipient_account_id,
+        targetOrigin: delegation.payload.target_origin,
+        targetWorkspaceId: delegation.payload.target_workspace_id,
+        operationId: delegation.payload.operation_id,
+        contentHash: delegation.payload.content_hash,
+        issuedAt: delegation.payload.issued_at,
+        expiresAt: delegation.payload.expires_at
+      },
+      publicKey: delegation.publicKey,
+      signature: delegation.signature
+    },
+    ...(normalized.targetRoomId === undefined ? {} : { targetRoomId: normalized.targetRoomId }),
+    operationId: normalized.operationId,
+    ...(normalized.target === undefined ? {} : { target: normalized.target })
+  });
+}
+
+function normalizeBrowserWorkspaceShareLinkViewInput(input: WorkspaceShareLinkViewInput): {
+  sourceUrl: string;
+  sourceOrigin: string;
+  locator: string;
+  target?: BrowserWorkspaceTargetRef;
+} {
+  const record = browserShareInputRecord(input, ["sourceUrl", "target"], "workspace_share_link_input_invalid");
+  const source = normalizeBrowserWorkspaceShareSourceUrl(record.sourceUrl);
+  const target = browserShareTargetFromInput(input);
+  return { ...source, ...(target ? { target } : {}) };
+}
+
+function normalizeBrowserWorkspaceShareLinkImportInput(input: WorkspaceShareLinkImportInput): {
+  sourceUrl: string;
+  sourceOrigin: string;
+  locator: string;
+  targetRoomId?: string;
+  operationId: string;
+  target?: BrowserWorkspaceTargetRef;
+} {
+  const record = browserShareInputRecord(input, ["sourceUrl", "targetRoomId", "operationId", "target"], "workspace_share_link_import_input_invalid");
+  const source = normalizeBrowserWorkspaceShareSourceUrl(record.sourceUrl);
+  const operationId = requirePublicId(record.operationId, "workspace_share_operation_id");
+  const targetRoomId = record.targetRoomId === undefined ? undefined : requirePublicId(record.targetRoomId, "workspace_share_target_room_id");
+  const target = browserShareTargetFromInput(input);
+  return { ...source, ...(targetRoomId === undefined ? {} : { targetRoomId }), operationId, ...(target ? { target } : {}) };
+}
+
+function browserShareInputRecord(input: unknown, allowedKeys: readonly string[], errorCode: string): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error(errorCode);
+  const record = input as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !allowedKeys.includes(key)) || "workspaceId" in record || "accountId" in record || "connectionId" in record) {
+    throw new Error(errorCode);
+  }
+  return record;
+}
+
+function normalizeBrowserWorkspaceShareSourceUrl(value: unknown): { sourceUrl: string; sourceOrigin: string; locator: string } {
+  if (typeof value !== "string" || !value || value.length > 4_096) throw new Error("workspace_share_link_source_invalid");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("workspace_share_link_source_invalid");
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || value.includes("?") || value.includes("#")) {
+    throw new Error("workspace_share_link_source_scope_invalid");
+  }
+  const locator = /^\/s\/([A-Za-z0-9_-]{43})$/.exec(parsed.pathname)?.[1];
+  if (!locator) throw new Error("workspace_share_link_locator_invalid");
+  return { sourceUrl: parsed.toString(), sourceOrigin: new URL("/", parsed.origin).toString(), locator };
+}
+
+function browserShareTargetFromInput(input: unknown): BrowserWorkspaceTargetRef | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_share_input_invalid");
+  const record = input as Record<string, unknown>;
+  const target = record.target;
+  if (target !== undefined) {
+    if (!target || typeof target !== "object" || Array.isArray(target)) throw new Error("workspace_share_target_invalid");
+    const targetRecord = target as Record<string, unknown>;
+    const allowed = new Set(["connectionId", "workspaceId", "roomId", "selectionGeneration"]);
+    if (Object.keys(targetRecord).some((key) => !allowed.has(key))) throw new Error("workspace_share_target_invalid");
+  }
+  if ("workspaceId" in record || "accountId" in record || "connectionId" in record) {
+    throw new Error("workspace_share_target_must_be_selected");
+  }
+  return browserTargetFromInput(input);
+}
+
+function requireWorkspaceShareOperationId(input: unknown, allowed: readonly string[]): string {
+  const record = workspaceShareInputRecord(input, allowed, "workspace_share_input_invalid");
+  return requirePublicId(record.operationId, "share_operation_id");
+}
+
+function workspaceShareInputRecord(value: unknown, allowedKeys: readonly string[], error: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(error);
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(allowedKeys);
+  if (Object.keys(record).some((key) => !allowed.has(key))) throw new Error(error);
+  return record;
+}
+
+function normalizeWorkspaceShareDraftCreateInput(input: WorkspaceShareDraftCreateInput): import("@samurai-agent/domain-api").PublicShareDraftCreateInput {
+  const record = workspaceShareInputRecord(input, ["sourceKind", "sourceId", "resourceRefs", "baseShareId", "operationId", "target"], "workspace_share_draft_create_input_invalid");
+  const hasBase = Object.prototype.hasOwnProperty.call(record, "baseShareId");
+  const hasSource = Object.prototype.hasOwnProperty.call(record, "sourceKind")
+    || Object.prototype.hasOwnProperty.call(record, "sourceId")
+    || Object.prototype.hasOwnProperty.call(record, "resourceRefs");
+  if (hasBase === hasSource) throw new Error("workspace_share_draft_create_input_invalid");
+  const body = hasBase
+    ? { base_share_id: requirePublicId(record.baseShareId, "share_base_id") }
+    : {
+      source_kind: normalizeWorkspaceShareKind(record.sourceKind),
+      source_id: requirePublicId(record.sourceId, "share_source_id"),
+      resource_refs: normalizeWorkspaceShareResourceRefs(record.resourceRefs)
+    };
+  const parsed = PublicShareDraftCreateInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_draft_create_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareDraftViewInput(input: WorkspaceShareDraftViewInput): import("@samurai-agent/domain-api").PublicShareDraftViewInput {
+  const record = workspaceShareInputRecord(input, ["draftId", "target"], "workspace_share_draft_view_input_invalid");
+  const parsed = PublicShareDraftViewInputSchema.safeParse({ draft_id: requirePublicId(record.draftId, "share_draft_id") });
+  if (!parsed.success) throw new Error("workspace_share_draft_view_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareDraftUpdateInput(input: WorkspaceShareDraftUpdateInput): import("@samurai-agent/domain-api").PublicShareDraftUpdateInput {
+  const record = workspaceShareInputRecord(input, ["draftId", "expectedVersion", "manifest", "visibility", "recipientAccountIds", "operationId", "target"], "workspace_share_draft_update_input_invalid");
+  const parsed = PublicShareDraftUpdateInputSchema.safeParse({
+    draft_id: requirePublicId(record.draftId, "share_draft_id"),
+    expected_version: normalizeWorkspaceShareVersion(record.expectedVersion, "share_expected_version"),
+    manifest: normalizeWorkspaceShareManifestInput(record.manifest),
+    visibility: normalizeWorkspaceShareVisibility(record.visibility),
+    recipient_account_ids: normalizeWorkspaceShareRecipients(record.recipientAccountIds)
+  });
+  if (!parsed.success) throw new Error("workspace_share_draft_update_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareDraftDiscardInput(input: WorkspaceShareDraftDiscardInput): import("@samurai-agent/domain-api").PublicShareDraftDiscardInput {
+  const record = workspaceShareInputRecord(input, ["draftId", "expectedVersion", "operationId", "target"], "workspace_share_draft_discard_input_invalid");
+  const parsed = PublicShareDraftDiscardInputSchema.safeParse({
+    draft_id: requirePublicId(record.draftId, "share_draft_id"),
+    expected_version: normalizeWorkspaceShareVersion(record.expectedVersion, "share_expected_version")
+  });
+  if (!parsed.success) throw new Error("workspace_share_draft_discard_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareVisibility(value: unknown): "restricted" | "public" {
+  const parsed = PublicShareVisibilitySchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_visibility_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareRecipients(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 1_000) throw new Error("workspace_share_recipient_ids_invalid");
+  const recipients = value.map((item) => requirePublicId(item, "workspace_share_recipient_id_invalid"));
+  if (new Set(recipients).size !== recipients.length) throw new Error("workspace_share_recipient_ids_invalid");
+  return recipients;
+}
+
+function normalizeWorkspaceShareManifestInput(value: unknown): import("@samurai-agent/domain-api").PublicShareManifest {
+  const record = workspaceShareInputRecord(value, ["formatVersion", "kind", "title", "entries", "agent"], "workspace_share_manifest_input_invalid");
+  const entries = Array.isArray(record.entries)
+    ? record.entries.map((entry, index) => {
+      const item = workspaceShareInputRecord(entry, ["entryId", "kind", "title", "content", "knowledgeKind", "files"], `workspace_share_manifest_entry_${index}_invalid`);
+      const files = item.files === undefined ? [] : Array.isArray(item.files)
+        ? item.files.map((file, fileIndex) => {
+          const fileRecord = workspaceShareInputRecord(file, ["path", "encoding", "content", "byteSize", "sha256"], `workspace_share_manifest_file_${index}_${fileIndex}_invalid`);
+          return {
+            path: fileRecord.path,
+            encoding: fileRecord.encoding,
+            content: fileRecord.content,
+            byte_size: fileRecord.byteSize,
+            sha256: fileRecord.sha256
+          };
+        })
+        : (() => { throw new Error("workspace_share_manifest_files_invalid"); })();
+      return {
+        entry_id: requirePublicId(item.entryId, "workspace_share_manifest_entry_id_invalid"),
+        kind: item.kind,
+        title: item.title,
+        content: item.content,
+        ...(item.knowledgeKind === undefined ? {} : { knowledge_kind: item.knowledgeKind }),
+        files
+      };
+    })
+    : (() => { throw new Error("workspace_share_manifest_entries_invalid"); })();
+  const agent = record.agent === undefined ? undefined : (() => {
+    const agent = workspaceShareInputRecord(record.agent, ["name", "role", "instructions"], "workspace_share_manifest_agent_invalid");
+    return {
+      name: agent.name,
+      role: agent.role,
+      instructions: agent.instructions
+    };
+  })();
+  const parsed = PublicShareManifestSchema.safeParse({
+    format_version: record.formatVersion,
+    kind: record.kind,
+    title: record.title,
+    entries,
+    ...(agent === undefined ? {} : { agent })
+  });
+  if (!parsed.success) throw new Error("workspace_share_manifest_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareListInput(input: WorkspaceShareListInput): import("@samurai-agent/domain-api").PublicShareListInput {
+  const record = workspaceShareInputRecord(input, ["sourceKind", "sourceId", "limit", "cursor", "target"], "workspace_share_list_input_invalid");
+  const page = normalizeBrowserPageInput(record.limit, record.cursor, "workspace_share_list");
+  const parsed = PublicShareListInputSchema.safeParse({
+    source_kind: normalizeWorkspaceShareKind(record.sourceKind),
+    source_id: requirePublicId(record.sourceId, "share_source_id"),
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
+    ...(page.cursor === undefined ? {} : { cursor: page.cursor })
+  });
+  if (!parsed.success) throw new Error("workspace_share_list_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceSharePublishInput(input: WorkspaceSharePublishInput): import("@samurai-agent/domain-api").PublicSharePublishInput {
+  const record = workspaceShareInputRecord(input, ["draftId", "expectedVersion", "expectedContentHash", "operationId", "target"], "workspace_share_publish_input_invalid");
+  const parsed = PublicSharePublishInputSchema.safeParse({
+    draft_id: requirePublicId(record.draftId, "share_draft_id"),
+    expected_version: normalizeWorkspaceShareVersion(record.expectedVersion, "share_expected_version"),
+    expected_content_hash: normalizeWorkspaceShareHash(record.expectedContentHash, "share_expected_content_hash")
+  });
+  if (!parsed.success) throw new Error("workspace_share_publish_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareRevokeInput(input: WorkspaceShareRevokeInput): import("@samurai-agent/domain-api").PublicShareRevokeInput {
+  const record = workspaceShareInputRecord(input, ["shareId", "expectedVersion", "operationId", "target"], "workspace_share_revoke_input_invalid");
+  const parsed = PublicShareRevokeInputSchema.safeParse({
+    share_id: requirePublicId(record.shareId, "share_id"),
+    expected_version: normalizeWorkspaceShareVersion(record.expectedVersion, "share_expected_version")
+  });
+  if (!parsed.success) throw new Error("workspace_share_revoke_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareImportInput(input: WorkspaceShareImportInput): import("@samurai-agent/domain-api").PublicShareImportInput {
+  const record = workspaceShareInputRecord(input, ["sourceOrigin", "locator", "claimId", "contentHash", "delegation", "targetRoomId", "operationId", "target"], "workspace_share_import_input_invalid");
+  const sourceOrigin = normalizeWorkspaceShareOrigin(record.sourceOrigin, "share_source_origin");
+  const locator = normalizeWorkspaceShareLocator(record.locator, "share_locator");
+  const claimId = requirePublicId(record.claimId, "share_claim_id");
+  const contentHash = normalizeWorkspaceShareHash(record.contentHash, "share_content_hash");
+  const delegation = normalizeWorkspaceShareDelegation(record.delegation);
+  const targetRoomId = record.targetRoomId === undefined ? undefined : requirePublicId(record.targetRoomId, "share_target_room_id");
+  const parsed = PublicShareImportInputSchema.safeParse({
+    source_origin: sourceOrigin,
+    locator,
+    claim_id: claimId,
+    content_hash: contentHash,
+    delegation,
+    ...(targetRoomId === undefined ? {} : { target_room_id: targetRoomId })
+  });
+  if (!parsed.success) throw new Error("workspace_share_import_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareImportStatusInput(input: WorkspaceShareImportStatusInput): import("@samurai-agent/domain-api").PublicShareImportStatusInput {
+  const record = workspaceShareInputRecord(input, ["operationId", "target"], "workspace_share_import_status_input_invalid");
+  const parsed = PublicShareImportStatusInputSchema.safeParse({ operation_id: requirePublicId(record.operationId, "share_operation_id") });
+  if (!parsed.success) throw new Error("workspace_share_import_status_input_invalid");
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareResourceRefs(value: unknown): import("@samurai-agent/domain-api").PublicShareResourceRef[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 1_000) throw new Error("workspace_share_resource_refs_invalid");
+  const refs = value.map((item, index) => {
+    const record = workspaceShareInputRecord(item, ["id", "version"], `workspace_share_resource_ref_${index}_invalid`);
+    return {
+      id: requirePublicId(record.id, `share_resource_ref_${index}_id`),
+      version: normalizeWorkspaceShareVersion(record.version, `share_resource_ref_${index}_version`)
+    };
+  });
+  if (new Set(refs.map((ref) => ref.id)).size !== refs.length) throw new Error("workspace_share_resource_refs_invalid");
+  return refs;
+}
+
+function normalizeWorkspaceShareDelegation(value: unknown): import("@samurai-agent/domain-api").PublicShareDelegation {
+  const record = workspaceShareInputRecord(value, ["payload", "publicKey", "signature"], "workspace_share_delegation_invalid");
+  const payload = workspaceShareInputRecord(record.payload, ["version", "sourceOrigin", "shareId", "claimId", "recipientAccountId", "targetOrigin", "targetWorkspaceId", "operationId", "contentHash", "issuedAt", "expiresAt"], "workspace_share_delegation_payload_invalid");
+  const candidate = {
+    payload: {
+      version: payload.version,
+      source_origin: normalizeWorkspaceShareOrigin(payload.sourceOrigin, "share_delegation_source_origin"),
+      share_id: requirePublicId(payload.shareId, "share_delegation_share_id"),
+      claim_id: requirePublicId(payload.claimId, "share_delegation_claim_id"),
+      recipient_account_id: requirePublicId(payload.recipientAccountId, "share_delegation_recipient_account_id"),
+      target_origin: normalizeWorkspaceShareOrigin(payload.targetOrigin, "share_delegation_target_origin"),
+      target_workspace_id: requirePublicId(payload.targetWorkspaceId, "share_delegation_workspace_id"),
+      operation_id: requirePublicId(payload.operationId, "share_delegation_operation_id"),
+      content_hash: normalizeWorkspaceShareHash(payload.contentHash, "share_delegation_content_hash"),
+      issued_at: payload.issuedAt,
+      expires_at: payload.expiresAt
+    },
+    public_key: requireWorkspaceShareBlob(record.publicKey, "share_delegation_public_key"),
+    signature: requireWorkspaceShareBlob(record.signature, "share_delegation_signature")
+  };
+  const parsed = PublicShareDelegationSchema.safeParse(candidate);
+  if (!parsed.success) throw new Error("workspace_share_delegation_invalid");
+  return parsed.data;
+}
+
+async function assertBrowserWorkspaceShareDelegationTarget(
+  snapshot: BrowserWorkspaceSnapshot,
+  input: import("@samurai-agent/domain-api").PublicShareImportInput,
+  operationId: string
+): Promise<void> {
+  const connection = await requireBrowserWorkspaceConnection();
+  if (connection.id !== snapshot.id || connection.workspaceId !== snapshot.workspaceId) throw new Error("workspace_navigation_changed");
+  let targetOrigin: string;
+  try {
+    targetOrigin = `${new URL(connection.serverUrl).origin}/`;
+  } catch {
+    throw new Error("workspace_share_target_origin_invalid");
+  }
+  const delegation = input.delegation.payload;
+  if (delegation.source_origin !== input.source_origin
+    || delegation.claim_id !== input.claim_id
+    || delegation.content_hash !== input.content_hash
+    || delegation.operation_id !== operationId
+    || delegation.target_workspace_id !== snapshot.workspaceId
+    || delegation.target_origin !== targetOrigin
+    || delegation.recipient_account_id !== connection.accountId
+    || (snapshot.roomId !== undefined && input.target_room_id !== undefined && input.target_room_id !== snapshot.roomId)) {
+    throw new Error("workspace_share_delegation_target_invalid");
+  }
+}
+
+function normalizeWorkspaceShareKind(value: unknown): "room_knowledge" | "agent" {
+  if (value !== "room_knowledge" && value !== "agent") throw new Error("share_kind_invalid");
+  return value;
+}
+
+function normalizeWorkspaceShareVersion(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new Error(`${field}_invalid`);
+  return value;
+}
+
+function normalizeWorkspaceShareHash(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw new Error(`${field}_invalid`);
+  return value;
+}
+
+function normalizeWorkspaceShareOrigin(value: unknown, field: string): string {
+  const parsed = PublicShareOriginSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field}_invalid`);
+  return parsed.data;
+}
+
+function normalizeWorkspaceShareLocator(value: unknown, field: string): string {
+  const parsed = PublicShareLocatorSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field}_invalid`);
+  return parsed.data;
+}
+
+function requireWorkspaceShareBlob(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 8_192) throw new Error(`${field}_invalid`);
+  return value;
+}
+
+function sanitizeBrowserWorkspaceShareDraftResponse(value: unknown): WorkspaceShareDraft {
+  const parsed = PublicShareDraftSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_draft_response_invalid");
+  return {
+    draftId: requirePublicId(parsed.data.draft_id, "share_draft_id"),
+    version: normalizeWorkspaceShareVersion(parsed.data.version, "share_draft_version"),
+    manifest: sanitizeBrowserWorkspaceShareManifest(parsed.data.manifest),
+    contentHash: normalizeWorkspaceShareHash(parsed.data.content_hash, "share_content_hash"),
+    visibility: parsed.data.visibility,
+    recipientCount: parsed.data.recipient_account_ids.length,
+    removedReferenceCount: parsed.data.removed_references.length
+  };
+}
+
+function sanitizeBrowserWorkspaceShareDiscardResponse(value: unknown): WorkspaceShareDraftDiscardResult {
+  const parsed = PublicShareDraftDiscardResultSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_draft_discard_response_invalid");
+  return { draftId: requirePublicId(parsed.data.draft_id, "share_draft_id"), discarded: true };
+}
+
+function sanitizeBrowserWorkspaceShareManifest(value: import("@samurai-agent/domain-api").PublicShareManifest): import("./api").WorkspaceShareManifest {
+  return {
+    formatVersion: 1,
+    kind: value.kind,
+    title: value.title,
+    entries: value.entries.map((entry) => ({
+      entryId: requirePublicId(entry.entry_id, "share_manifest_entry_id"),
+      kind: entry.kind,
+      title: entry.title,
+      content: entry.content,
+      ...(entry.knowledge_kind === undefined ? {} : { knowledgeKind: entry.knowledge_kind }),
+      files: entry.files.map((file) => ({
+        path: file.path,
+        encoding: file.encoding,
+        content: file.content,
+        byteSize: file.byte_size,
+        sha256: normalizeWorkspaceShareHash(file.sha256, "share_manifest_file_hash")
+      }))
+    })),
+    ...(value.agent === undefined ? {} : { agent: value.agent })
+  };
+}
+
+function sanitizeBrowserWorkspaceSharePageResponse(value: unknown): WorkspaceSharePage {
+  const parsed = PublicSharePageSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_list_response_invalid");
+  return {
+    items: parsed.data.items.map((item) => sanitizeBrowserWorkspaceShareSummary(item)),
+    nextCursor: parsed.data.next_cursor
+  };
+}
+
+function sanitizeBrowserWorkspaceShareSummary(value: import("@samurai-agent/domain-api").PublicShareSummary): import("./api").WorkspaceShareSummary {
+  if (value.url !== null) sanitizeWorkspaceShareUrl(value.url, "share_summary_url");
+  return {
+    shareId: requirePublicId(value.share_id, "share_id"),
+    version: normalizeWorkspaceShareVersion(value.version, "share_version"),
+    title: value.title,
+    status: value.status,
+    visibility: value.visibility,
+    recipientCount: value.recipient_account_ids.length,
+    createdAt: value.created_at,
+    publishedAt: value.published_at,
+    revokedAt: value.revoked_at
+  };
+}
+
+function sanitizeBrowserWorkspaceSharePublishResponse(value: unknown): WorkspaceSharePublishResult {
+  const parsed = PublicSharePublishResultSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_publish_response_invalid");
+  return {
+    shareId: requirePublicId(parsed.data.share_id, "share_id"),
+    version: normalizeWorkspaceShareVersion(parsed.data.version, "share_version"),
+    url: sanitizeWorkspaceShareUrl(parsed.data.url, "share_publish_url"),
+    contentHash: normalizeWorkspaceShareHash(parsed.data.content_hash, "share_content_hash"),
+    publishedAt: parsed.data.published_at
+  };
+}
+
+function sanitizeBrowserWorkspaceShareRevokeResponse(value: unknown): WorkspaceShareRevokeResult {
+  const parsed = PublicShareRevokeResultSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_revoke_response_invalid");
+  return {
+    shareId: requirePublicId(parsed.data.share_id, "share_id"),
+    version: normalizeWorkspaceShareVersion(parsed.data.version, "share_version"),
+    status: "revoked",
+    revokedAt: parsed.data.revoked_at
+  };
+}
+
+function sanitizeBrowserWorkspaceShareImportResponse(value: unknown): WorkspaceShareImportResult {
+  const parsed = PublicShareImportResultSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_share_import_response_invalid");
+  return {
+    importId: requirePublicId(parsed.data.import_id, "share_import_id"),
+    kind: parsed.data.kind,
+    status: parsed.data.status,
+    phase: parsed.data.phase,
+    retryable: parsed.data.retryable,
+    failureCode: parsed.data.failure_code === null ? null : requirePublicId(parsed.data.failure_code, "share_failure_code"),
+    createdResourceIds: parsed.data.created_resource_ids.map((id) => requirePublicId(id, "share_created_resource_id")),
+    createdAgentId: parsed.data.created_agent_id === null ? null : requirePublicId(parsed.data.created_agent_id, "share_created_agent_id"),
+    committedAt: parsed.data.committed_at
+  };
+}
+
+function sanitizeBrowserWorkspaceShareLinkViewResponse(
+  value: unknown,
+  source: { sourceUrl: string; sourceOrigin: string; locator: string }
+): WorkspaceShareLinkView {
+  const record = publicRecord(value, "workspace_share_link_view_response_invalid");
+  assertBrowserAllowedKeys(record, ["title", "visibility", "manifest", "content_hash", "published_at"], "workspace_share_link_view_response_invalid");
+  const title = requireBrowserText(record.title, "workspace_share_link_title", 200);
+  if (record.visibility !== "public" && record.visibility !== "restricted") throw new Error("workspace_share_link_visibility_invalid");
+  const manifest = PublicShareManifestSchema.safeParse(record.manifest);
+  if (!manifest.success) throw new Error("workspace_share_link_manifest_invalid");
+  const contentHash = normalizeWorkspaceShareHash(record.content_hash, "share_link_content_hash");
+  if (typeof record.published_at !== "string" || !Number.isFinite(Date.parse(record.published_at))) throw new Error("workspace_share_link_published_at_invalid");
+  return {
+    sourceUrl: source.sourceUrl,
+    sourceOrigin: source.sourceOrigin,
+    locator: source.locator,
+    title,
+    visibility: record.visibility,
+    manifest: sanitizeBrowserWorkspaceShareManifest(manifest.data),
+    contentHash,
+    publishedAt: new Date(record.published_at).toISOString()
+  };
+}
+
+function sanitizeBrowserWorkspaceShareLinkClaimResponse(value: unknown): {
+  claimId: string;
+  shareId: string;
+  recipientAccountId: string;
+  targetOrigin: string;
+  targetWorkspaceId: string;
+  operationId: string;
+  contentHash: string;
+  createdAt: string;
+} {
+  const record = publicRecord(value, "workspace_share_link_claim_response_invalid");
+  assertBrowserAllowedKeys(record, ["claim_id", "share_id", "recipient_account_id", "target_origin", "target_workspace_id", "operation_id", "content_hash", "created_at"], "workspace_share_link_claim_response_invalid");
+  if (typeof record.target_origin !== "string") throw new Error("workspace_share_target_origin_invalid");
+  let targetOrigin: string;
+  try {
+    const parsed = new URL(record.target_origin);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) throw new Error();
+    targetOrigin = new URL("/", parsed.origin).toString();
+  } catch {
+    throw new Error("workspace_share_target_origin_invalid");
+  }
+  if (typeof record.created_at !== "string" || !Number.isFinite(Date.parse(record.created_at))) throw new Error("workspace_share_claim_created_at_invalid");
+  return {
+    claimId: requirePublicId(record.claim_id, "share_claim_id"),
+    shareId: requirePublicId(record.share_id, "share_id"),
+    recipientAccountId: requirePublicId(record.recipient_account_id, "share_recipient_account_id"),
+    targetOrigin,
+    targetWorkspaceId: requirePublicId(record.target_workspace_id, "share_target_workspace_id"),
+    operationId: requirePublicId(record.operation_id, "share_operation_id"),
+    contentHash: normalizeWorkspaceShareHash(record.content_hash, "share_claim_content_hash"),
+    createdAt: new Date(record.created_at).toISOString()
+  };
+}
+
+function sanitizeWorkspaceShareUrl(value: string, field: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${field}_invalid`);
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || !/^\/s\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) {
+    throw new Error(`${field}_invalid`);
+  }
+  return url.toString();
+}
+
+function normalizeWorkspaceContextSearchInput(input: WorkspaceContextSearchInput): Record<string, JsonValue> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_search_input_invalid");
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  if (!query || query.length > 512) throw new Error("workspace_search_query_invalid");
+  const types = input.types === undefined
+    ? undefined
+    : normalizeWorkspaceSearchTypes(input.types);
+  const roomId = input.roomId === undefined ? undefined : requirePublicId(input.roomId, "roomId");
+  const page = normalizeBrowserPageInput(input.limit, input.cursor, "workspace_search");
+  return {
+    q: query,
+    ...(types === undefined ? {} : { types }),
+    ...(roomId === undefined ? {} : { room_id: roomId }),
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
+    ...(page.cursor === undefined ? {} : { cursor: page.cursor })
+  };
+}
+
+function normalizeWorkspaceSearchTypes(value: WorkspaceContextSearchInput["types"]): WorkspaceContextSearchInput["types"] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3) throw new Error("workspace_search_types_invalid");
+  const allowed = new Set(["room", "conversation", "knowledge"]);
+  if (value.some((type) => typeof type !== "string" || !allowed.has(type)) || new Set(value).size !== value.length) {
+    throw new Error("workspace_search_types_invalid");
+  }
+  return [...value];
+}
+
+function normalizeWorkspaceNotificationListInput(input: WorkspaceNotificationListInput): Record<string, JsonValue> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_notification_input_invalid");
+  if (input.unreadOnly !== undefined && typeof input.unreadOnly !== "boolean") throw new Error("workspace_notification_unread_only_invalid");
+  const page = normalizeBrowserPageInput(input.limit, input.cursor, "workspace_notification");
+  return {
+    unread_only: input.unreadOnly ?? false,
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
+    ...(page.cursor === undefined ? {} : { cursor: page.cursor })
+  };
+}
+
+function normalizeBrowserAccountInvitationListInput(input: AccountInvitationNotificationListInput): Record<string, JsonValue> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("account_invitation_notification_input_invalid");
+  const page = normalizeBrowserPageInput(input.limit, input.cursor, "account_invitation_notification");
+  return {
+    ...(page.limit === undefined ? {} : { limit: page.limit }),
+    ...(page.cursor === undefined ? {} : { cursor: page.cursor })
+  };
+}
+
+function normalizeBrowserPageInput(limit: unknown, cursor: unknown, prefix: string): { limit?: number; cursor?: string } {
+  if (limit !== undefined && (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+    throw new Error(`${prefix}_limit_invalid`);
+  }
+  if (cursor !== undefined && (typeof cursor !== "string" || !cursor.trim() || cursor.length > 4_096)) {
+    throw new Error(`${prefix}_cursor_invalid`);
+  }
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    ...(cursor === undefined ? {} : { cursor })
+  };
+}
+
+function normalizeBrowserNotificationIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) throw new Error("notification_ids_invalid");
+  const ids = value.map((id) => requirePublicId(id, "notification_id"));
+  if (new Set(ids).size !== ids.length) throw new Error("notification_ids_invalid");
+  return ids;
+}
+
+function normalizeBrowserWorkspaceIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) throw new Error("workspace_ids_invalid");
+  const ids = value.map((id) => requirePublicId(id, "workspace_id"));
+  if (new Set(ids).size !== ids.length) throw new Error("workspace_ids_invalid");
+  return ids;
+}
+
+function sanitizeBrowserWorkspaceContextSearchResponse(value: unknown): WorkspaceContextSearchPage {
+  const parsed = PublicWorkspaceSearchPageSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_search_response_invalid");
+  return {
+    items: parsed.data.items.map((item, index) => sanitizeBrowserWorkspaceContextSearchItem(item, index)),
+    nextCursor: parsed.data.next_cursor
+  };
+}
+
+function sanitizeBrowserWorkspaceContextSearchItem(item: PublicSearchItem, index: number): WorkspaceContextSearchItem {
+  const roomId = requirePublicId(item.room_id, `workspace_search_item_${index}_room_id`);
+  const target = sanitizeBrowserContextTarget(item.target, `workspace_search_item_${index}_target`);
+  if (target.kind === "invitation" || target.roomId !== roomId) throw new Error("workspace_search_target_scope_invalid");
+  return {
+    type: item.type,
+    id: requirePublicId(item.id, `workspace_search_item_${index}_id`),
+    roomId,
+    title: item.title,
+    snippet: item.snippet,
+    updatedAt: item.updated_at,
+    target
+  };
+}
+
+function sanitizeBrowserNotificationPageResponse(value: unknown, invitationOnly: boolean): WorkspaceNotificationPage {
+  const parsed = (invitationOnly ? PublicAccountInvitationNotificationsPageSchema : PublicNotificationPageSchema).safeParse(value);
+  if (!parsed.success) throw new Error(invitationOnly ? "account_invitation_notification_response_invalid" : "workspace_notification_response_invalid");
+  return {
+    items: parsed.data.items.map((item, index) => sanitizeBrowserNotification(item, index)),
+    nextCursor: parsed.data.next_cursor
+  };
+}
+
+function sanitizeBrowserNotification(value: {
+  id: string;
+  kind: string;
+  created_at: string;
+  read_at: string | null;
+  title: string;
+  summary: string;
+  target: PublicTarget | null;
+  action_state: "not_required" | "pending" | "resolved";
+}, index: number): WorkspaceNotification {
+  return {
+    id: requirePublicId(value.id, `workspace_notification_${index}_id`),
+    kind: value.kind,
+    createdAt: value.created_at,
+    readAt: value.read_at,
+    title: value.title,
+    summary: value.summary,
+    target: value.target === null ? null : sanitizeBrowserContextTarget(value.target, `workspace_notification_${index}_target`),
+    actionState: value.action_state
+  };
+}
+
+function sanitizeBrowserContextTarget(value: PublicTarget, field: string): WorkspaceContextTarget {
+  const parsed = PublicTargetSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field}_invalid`);
+  switch (parsed.data.kind) {
+    case "room": return { kind: "room", roomId: requirePublicId(parsed.data.room_id, `${field}_room_id`) };
+    case "work": return {
+      kind: "work",
+      roomId: requirePublicId(parsed.data.room_id, `${field}_room_id`),
+      workId: requirePublicId(parsed.data.work_id, `${field}_work_id`),
+      ...(parsed.data.message_id === undefined ? {} : { messageId: requirePublicId(parsed.data.message_id, `${field}_message_id`) })
+    };
+    case "knowledge": return {
+      kind: "knowledge",
+      roomId: requirePublicId(parsed.data.room_id, `${field}_room_id`),
+      resourceId: requirePublicId(parsed.data.resource_id, `${field}_resource_id`)
+    };
+    case "interaction_request": return {
+      kind: "interaction_request",
+      roomId: requirePublicId(parsed.data.room_id, `${field}_room_id`),
+      requestId: requirePublicId(parsed.data.request_id, `${field}_request_id`)
+    };
+    case "invitation": return { kind: "invitation", invitationId: requirePublicId(parsed.data.invitation_id, `${field}_invitation_id`) };
+  }
+}
+
+function sanitizeBrowserNotificationSummaryResponse(value: unknown): WorkspaceNotificationSummary {
+  const parsed = PublicNotificationSummarySchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_notification_summary_response_invalid");
+  return { unreadCount: parsed.data.unread_count, asOf: parsed.data.as_of };
+}
+
+function sanitizeBrowserNotificationMarkReadResponse(value: unknown, requestedIds: readonly string[]): WorkspaceNotificationMarkReadResult {
+  const parsed = PublicNotificationMarkReadResultSchema.safeParse(value);
+  if (!parsed.success) throw new Error("workspace_notification_mark_read_response_invalid");
+  const updatedIds = parsed.data.updated_ids.map((id) => requirePublicId(id, "notification_id"));
+  const alreadyReadIds = parsed.data.already_read_ids.map((id) => requirePublicId(id, "notification_id"));
+  const requested = new Set(requestedIds);
+  if (new Set(updatedIds).size !== updatedIds.length
+    || new Set(alreadyReadIds).size !== alreadyReadIds.length
+    || updatedIds.some((id) => !requested.has(id))
+    || alreadyReadIds.some((id) => !requested.has(id))
+    || updatedIds.some((id) => alreadyReadIds.includes(id))
+    || new Set([...updatedIds, ...alreadyReadIds]).size !== requested.size) {
+    throw new Error("workspace_notification_mark_read_response_scope_invalid");
+  }
+  return { updatedIds, alreadyReadIds, readAt: parsed.data.read_at };
+}
+
+function sanitizeBrowserAccountWorkspaceNotificationSummariesResponse(value: unknown, requestedWorkspaceIds: readonly string[]): AccountWorkspaceNotificationSummaries {
+  const parsed = PublicAccountWorkspaceNotificationSummariesSchema.safeParse(value);
+  if (!parsed.success) throw new Error("account_workspace_notification_summary_response_invalid");
+  const requested = new Set(requestedWorkspaceIds);
+  const items = parsed.data.items.map((item) => ({
+    workspaceId: requirePublicId(item.workspace_id, "workspace_id"),
+    unreadCount: item.unread_count,
+    asOf: item.as_of
+  }));
+  if (new Set(items.map((item) => item.workspaceId)).size !== items.length || items.some((item) => !requested.has(item.workspaceId))) {
+    throw new Error("account_workspace_notification_summary_response_scope_invalid");
+  }
+  return { items };
+}
+
 async function reassignBrowserRoomWork(input: RoomWorkReassignInput): Promise<DesktopWorkspaceRoomWorkAssignee & { replayed: boolean }> {
   const roomId = requirePublicId(input.roomId, "roomId");
   const workId = requirePublicId(input.workId, "workId");
@@ -1409,6 +2577,25 @@ async function browserSnapshotWorkspaceRequest<T>(
     ...(input.body === undefined ? {} : { body: input.body })
   });
   assertBrowserWorkspaceRequestRoom(snapshot, input);
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  return result;
+}
+
+type BrowserSnapshotAccountRequestInput = Pick<BrowserSnapshotWorkspaceRequestInput, "method" | "path" | "operationId" | "idempotencyKey" | "body">;
+
+async function browserSnapshotAccountRequest<T>(
+  snapshot: BrowserWorkspaceSnapshot,
+  input: BrowserSnapshotAccountRequestInput
+): Promise<T> {
+  await assertBrowserWorkspaceSnapshot(snapshot);
+  const result = await browserWorkspaceRequest<T>({
+    method: input.method,
+    path: input.path,
+    connectionId: snapshot.id,
+    ...(input.operationId ? { operationId: input.operationId } : {}),
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    ...(input.body === undefined ? {} : { body: input.body })
+  });
   await assertBrowserWorkspaceSnapshot(snapshot);
   return result;
 }
@@ -1795,6 +2982,289 @@ async function workspaceV1InputRequest<T>(
   return workspaceRequest<T>(method, suffix, body, operationId, idempotencyKey, browserTargetFromInput(input), "/api/v1/workspaces", browserRequestRoomIdFromInput(input));
 }
 
+type BrowserAgentCompletionInput = {
+  scopeKind: "agent";
+  agentId: string;
+  kind?: "knowledge" | "skill";
+  includeArchived?: boolean;
+  cursor?: string;
+  resourceId?: string;
+  version?: number;
+  title?: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+  knowledgeKind?: "fact" | "decision" | "explanation" | "experience_rule";
+  reason?: string;
+  expectedVersion?: number;
+  operationId?: string;
+  archived?: boolean;
+  target?: BrowserWorkspaceTargetRef;
+};
+
+function isBrowserAgentCompletionInput(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const value = input as Record<string, unknown>;
+  return value.scopeKind === "agent" || value.agentId !== undefined;
+}
+
+function browserAgentCompletionInput(input: unknown): BrowserAgentCompletionInput {
+  const value = publicRecord(input, "completion_agent_input");
+  const allowed = new Set([
+    "scopeKind", "agentId", "roomId", "kind", "includeArchived", "cursor", "resourceId", "version",
+    "title", "content", "metadata", "knowledgeKind", "reason", "expectedVersion", "operationId", "archived", "target"
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("completion_agent_input_invalid");
+  if (value.scopeKind !== "agent") throw new Error("completion_agent_scope_invalid");
+  const agentId = browserCompletionId(value.agentId, "completion_agent_id_invalid");
+  if (value.roomId !== undefined) throw new Error("completion_agent_scope_room_forbidden");
+  const target = browserAgentTarget(value.target);
+  const kind = value.kind === undefined ? undefined : browserCompletionKind(value.kind);
+  const includeArchived = value.includeArchived === undefined ? undefined : browserCompletionBoolean(value.includeArchived, "completion_agent_include_archived_invalid");
+  const cursor = value.cursor === undefined ? undefined : browserCompletionId(value.cursor, "completion_agent_cursor_invalid");
+  const resourceId = value.resourceId === undefined ? undefined : browserCompletionId(value.resourceId, "completion_agent_resource_id_invalid");
+  const version = value.version === undefined ? undefined : browserCompletionPositiveInteger(value.version, "completion_agent_version_invalid");
+  const title = value.title === undefined ? undefined : browserCompletionText(value.title, "completion_agent_title_invalid", 200);
+  const content = value.content === undefined ? undefined : browserCompletionContent(value.content);
+  const knowledgeKind = value.knowledgeKind === undefined ? undefined : browserCompletionKnowledgeKind(value.knowledgeKind);
+  const metadata = value.metadata === undefined ? undefined : browserCompletionMetadata(value.metadata);
+  const reason = value.reason === undefined ? undefined : browserCompletionText(value.reason, "completion_agent_reason_invalid", 4_000);
+  const expectedVersion = value.expectedVersion === undefined ? undefined : browserCompletionPositiveInteger(value.expectedVersion, "completion_agent_expected_version_invalid");
+  const operationId = value.operationId === undefined ? undefined : browserCompletionId(value.operationId, "completion_agent_operation_id_invalid");
+  const archived = value.archived === undefined ? undefined : browserCompletionBoolean(value.archived, "completion_agent_archived_invalid");
+  return {
+    scopeKind: "agent",
+    agentId,
+    ...(kind === undefined ? {} : { kind }),
+    ...(includeArchived === undefined ? {} : { includeArchived }),
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(resourceId === undefined ? {} : { resourceId }),
+    ...(version === undefined ? {} : { version }),
+    ...(title === undefined ? {} : { title }),
+    ...(content === undefined ? {} : { content }),
+    ...(metadata === undefined ? {} : { metadata }),
+    ...(knowledgeKind === undefined ? {} : { knowledgeKind }),
+    ...(reason === undefined ? {} : { reason }),
+    ...(expectedVersion === undefined ? {} : { expectedVersion }),
+    ...(operationId === undefined ? {} : { operationId }),
+    ...(archived === undefined ? {} : { archived }),
+    ...(target === undefined ? {} : { target })
+  };
+}
+
+function assertBrowserAgentCompletionOperationKeys(input: unknown, keys: readonly string[]): void {
+  const value = publicRecord(input, "completion_agent_input");
+  const allowed = new Set(keys);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("completion_agent_input_invalid");
+}
+
+function browserAgentTarget(value: unknown): BrowserWorkspaceTargetRef | undefined {
+  if (value === undefined) return undefined;
+  const target = publicRecord(value, "completion_agent_target_invalid");
+  const allowed = new Set(["connectionId", "workspaceId", "roomId", "selectionGeneration"]);
+  if (Object.keys(target).some((key) => !allowed.has(key))) throw new Error("completion_agent_target_invalid");
+  return browserTargetFromInput({ target });
+}
+
+function browserCompletionId(value: unknown, errorCode: string): string {
+  if (typeof value !== "string" || !browserWorkspaceOpaqueIdPattern.test(value.trim())) throw new Error(errorCode);
+  return value.trim();
+}
+
+function browserCompletionText(value: unknown, errorCode: string, maxLength: number): string {
+  if (typeof value !== "string") throw new Error(errorCode);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) throw new Error(errorCode);
+  return normalized;
+}
+
+function browserCompletionContent(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 8 * 1024 * 1024) throw new Error("completion_agent_content_invalid");
+  return value.trim();
+}
+
+function browserCompletionKind(value: unknown): "knowledge" | "skill" {
+  if (value !== "knowledge" && value !== "skill") throw new Error("completion_agent_kind_invalid");
+  return value;
+}
+
+function browserCompletionKnowledgeKind(value: unknown): "fact" | "decision" | "explanation" | "experience_rule" {
+  if (value !== "fact" && value !== "decision" && value !== "explanation" && value !== "experience_rule") {
+    throw new Error("completion_agent_knowledge_kind_invalid");
+  }
+  return value;
+}
+
+function browserCompletionBoolean(value: unknown, errorCode: string): boolean {
+  if (typeof value !== "boolean") throw new Error(errorCode);
+  return value;
+}
+
+function browserCompletionPositiveInteger(value: unknown, errorCode: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new Error(errorCode);
+  return value;
+}
+
+function browserCompletionMetadata(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("completion_agent_metadata_invalid");
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded.length > 200_000 || !browserCompletionJsonValue(value)) throw new Error("completion_agent_metadata_invalid");
+  } catch {
+    throw new Error("completion_agent_metadata_invalid");
+  }
+  return value as Record<string, unknown>;
+}
+
+function browserCompletionJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(browserCompletionJsonValue);
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).every(browserCompletionJsonValue);
+}
+
+function browserAgentCompletionWriteBody(value: BrowserAgentCompletionInput): Record<string, unknown> {
+  if (!value.kind) throw new Error("completion_agent_kind_invalid");
+  const knowledgeKind = value.kind === "knowledge"
+    ? value.knowledgeKind ?? (() => { throw new Error("completion_agent_knowledge_kind_invalid"); })()
+    : value.knowledgeKind === undefined
+      ? undefined
+      : (() => { throw new Error("completion_agent_skill_knowledge_kind_forbidden"); })();
+  return {
+    scope_kind: "agent",
+    agent_id: value.agentId,
+    kind: value.kind,
+    ...(knowledgeKind === undefined ? {} : { knowledge_kind: knowledgeKind }),
+    title: value.title ?? (() => { throw new Error("completion_agent_title_invalid"); })(),
+    content: value.content ?? (() => { throw new Error("completion_agent_content_invalid"); })(),
+    metadata: value.metadata ?? {},
+    reason: value.reason ?? (() => { throw new Error("completion_agent_reason_invalid"); })()
+  };
+}
+
+function browserAgentCompletionResourceId(value: BrowserAgentCompletionInput): string {
+  return value.resourceId ?? (() => { throw new Error("completion_agent_resource_id_invalid"); })();
+}
+
+function browserAgentCompletionOperationId(value: BrowserAgentCompletionInput): string {
+  return value.operationId ?? (() => { throw new Error("completion_agent_operation_id_invalid"); })();
+}
+
+function browserAgentCompletionExpectedVersion(value: BrowserAgentCompletionInput): number {
+  return value.expectedVersion ?? (() => { throw new Error("completion_agent_expected_version_invalid"); })();
+}
+
+function browserAgentCompletionArchived(value: BrowserAgentCompletionInput): boolean {
+  return value.archived ?? (() => { throw new Error("completion_agent_archived_invalid"); })();
+}
+
+function assertBrowserAgentCompletionResourceScope(resource: { scope: { kind: string; agentId?: string }; kind: string; aiManaged: boolean }, agentId: string): void {
+  if (resource.scope.kind !== "agent" || resource.scope.agentId !== agentId || (resource.kind !== "knowledge" && resource.kind !== "skill") || resource.aiManaged) {
+    throw new Error("completion_agent_response_scope_invalid");
+  }
+}
+
+function sanitizeBrowserAgentCompletionListResponse(value: unknown, agentId: string): { resources: WorkspaceCompletionResourceView[]; next_cursor?: string } {
+  const parsed = PublicCompletionResourcePageSchema.safeParse(value);
+  if (!parsed.success) throw new Error("completion_agent_response_invalid");
+  parsed.data.resources.forEach((resource) => assertBrowserAgentCompletionResourceScope(resource, agentId));
+  return parsed.data as { resources: WorkspaceCompletionResourceView[]; next_cursor?: string };
+}
+
+function sanitizeBrowserAgentCompletionDetailResponse(value: unknown, agentId: string): WorkspaceCompletionResourceDetail {
+  const parsed = PublicCompletionResourceDetailSchema.safeParse(value);
+  if (!parsed.success) throw new Error("completion_agent_response_invalid");
+  assertBrowserAgentCompletionResourceScope(parsed.data.resource, agentId);
+  return parsed.data as WorkspaceCompletionResourceDetail;
+}
+
+function sanitizeBrowserAgentCompletionBodyResponse(value: unknown, agentId: string): WorkspaceCompletionResourceBody {
+  const parsed = PublicCompletionResourceBodySchema.safeParse(value);
+  if (!parsed.success) throw new Error("completion_agent_response_invalid");
+  assertBrowserAgentCompletionResourceScope(parsed.data.resource, agentId);
+  return parsed.data as WorkspaceCompletionResourceBody;
+}
+
+function sanitizeBrowserAgentCompletionMutationResponse(value: unknown, agentId: string): { resource: WorkspaceCompletionResourceView; replayed?: boolean } {
+  const parsed = PublicCompletionResourceMutationResponseSchema.safeParse(value);
+  if (!parsed.success) throw new Error("completion_agent_response_invalid");
+  assertBrowserAgentCompletionResourceScope(parsed.data.resource, agentId);
+  return parsed.data as { resource: WorkspaceCompletionResourceView; replayed?: boolean };
+}
+
+async function listBrowserAgentCompletionResources(input: unknown): Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }> {
+  assertBrowserAgentCompletionOperationKeys(input, ["scopeKind", "agentId", "kind", "includeArchived", "cursor", "target"]);
+  const value = browserAgentCompletionInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(value.target);
+  const response = await browserSnapshotDomainApiClient(snapshot).listCompletionResources(snapshot.workspaceId, {
+    scope_kind: "agent",
+    agent_id: value.agentId,
+    ...(value.kind ? { kind: value.kind } : {}),
+    ...(value.includeArchived === undefined ? {} : { include_archived: value.includeArchived }),
+    ...(value.cursor ? { cursor: value.cursor } : {})
+  });
+  return sanitizeBrowserAgentCompletionListResponse(response, value.agentId);
+}
+
+async function getBrowserAgentCompletionResource(input: unknown): Promise<WorkspaceCompletionResourceDetail> {
+  assertBrowserAgentCompletionOperationKeys(input, ["scopeKind", "agentId", "resourceId", "kind", "target"]);
+  const value = browserAgentCompletionInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(value.target);
+  const response = await browserSnapshotDomainApiClient(snapshot).getCompletionResource(snapshot.workspaceId, browserAgentCompletionResourceId(value), {
+    scope_kind: "agent",
+    agent_id: value.agentId,
+    ...(value.kind ? { kind: value.kind } : {})
+  });
+  return sanitizeBrowserAgentCompletionDetailResponse(response, value.agentId);
+}
+
+async function getBrowserAgentCompletionResourceBody(input: unknown): Promise<WorkspaceCompletionResourceBody> {
+  assertBrowserAgentCompletionOperationKeys(input, ["scopeKind", "agentId", "resourceId", "kind", "version", "target"]);
+  const value = browserAgentCompletionInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(value.target);
+  const response = await browserSnapshotDomainApiClient(snapshot).getCompletionResourceBody(snapshot.workspaceId, browserAgentCompletionResourceId(value), {
+    scope_kind: "agent",
+    agent_id: value.agentId,
+    ...(value.kind ? { kind: value.kind } : {}),
+    ...(value.version === undefined ? {} : { version: value.version })
+  });
+  return sanitizeBrowserAgentCompletionBodyResponse(response, value.agentId);
+}
+
+async function createBrowserAgentCompletionResource(input: unknown): Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }> {
+  assertBrowserAgentCompletionOperationKeys(input, ["scopeKind", "agentId", "kind", "knowledgeKind", "title", "content", "metadata", "reason", "operationId", "target"]);
+  const value = browserAgentCompletionInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(value.target);
+  const operationId = browserAgentCompletionOperationId(value);
+  const response = await browserSnapshotDomainApiClient(snapshot).createCompletionResource(snapshot.workspaceId, browserAgentCompletionWriteBody(value) as never, { operationId, idempotencyKey: operationId });
+  return sanitizeBrowserAgentCompletionMutationResponse(response, value.agentId);
+}
+
+async function updateBrowserAgentCompletionResource(input: unknown): Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }> {
+  assertBrowserAgentCompletionOperationKeys(input, ["scopeKind", "agentId", "resourceId", "kind", "knowledgeKind", "title", "content", "metadata", "reason", "expectedVersion", "operationId", "target"]);
+  const value = browserAgentCompletionInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(value.target);
+  const operationId = browserAgentCompletionOperationId(value);
+  const body = { ...browserAgentCompletionWriteBody(value), expected_version: browserAgentCompletionExpectedVersion(value) };
+  const response = await browserSnapshotDomainApiClient(snapshot).updateCompletionResource(snapshot.workspaceId, browserAgentCompletionResourceId(value), body as never, { operationId, idempotencyKey: operationId });
+  return sanitizeBrowserAgentCompletionMutationResponse(response, value.agentId);
+}
+
+async function archiveBrowserAgentCompletionResource(input: unknown): Promise<{ resource: WorkspaceCompletionResourceView; replayed?: boolean }> {
+  assertBrowserAgentCompletionOperationKeys(input, ["scopeKind", "agentId", "resourceId", "archived", "expectedVersion", "reason", "operationId", "target"]);
+  const value = browserAgentCompletionInput(input);
+  const snapshot = await captureBrowserWorkspaceSnapshot(value.target);
+  const operationId = browserAgentCompletionOperationId(value);
+  const response = await browserSnapshotDomainApiClient(snapshot).setCompletionResourceArchived(snapshot.workspaceId, browserAgentCompletionResourceId(value), {
+    scope_kind: "agent",
+    agent_id: value.agentId,
+    archived: browserAgentCompletionArchived(value),
+    expected_version: browserAgentCompletionExpectedVersion(value),
+    reason: value.reason ?? (() => { throw new Error("completion_agent_reason_invalid"); })()
+  }, { operationId, idempotencyKey: operationId });
+  return sanitizeBrowserAgentCompletionMutationResponse(response, value.agentId);
+}
+
 function browserSnapshotDomainApiClient(snapshot: BrowserWorkspaceSnapshot): DomainApiClient {
   return new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
     await assertBrowserWorkspaceSnapshot(snapshot);
@@ -1809,8 +3279,27 @@ function browserSnapshotDomainApiClient(snapshot: BrowserWorkspaceSnapshot): Dom
   });
 }
 
-async function requireBrowserWorkspaceConnection(): Promise<NonNullable<Awaited<ReturnType<typeof loadBrowserWorkspaceConnection>>>> {
-  const connection = await loadBrowserWorkspaceConnection();
+/** Account-scoped Domain API client. It deliberately omits Workspace routing
+ * and headers while retaining the same target snapshot checks as Workspace
+ * queries and operations. */
+function browserSnapshotAccountDomainApiClient(snapshot: BrowserWorkspaceSnapshot): DomainApiClient {
+  return new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+    await assertBrowserWorkspaceSnapshot(snapshot);
+    const result = await browserSnapshotAccountRequest<T>(snapshot, {
+      method: request.method,
+      path: request.path,
+      ...(request.operationId ? { operationId: request.operationId } : {}),
+      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+      ...(request.body === undefined ? {} : { body: request.body })
+    });
+    return result;
+  });
+}
+
+async function requireBrowserWorkspaceConnection(connectionId?: string): Promise<NonNullable<Awaited<ReturnType<typeof loadBrowserWorkspaceConnection>>>> {
+  const connection = connectionId
+    ? (await loadBrowserWorkspaceConnections()).find((candidate) => candidate.id === connectionId)
+    : await loadBrowserWorkspaceConnection();
   if (!connection) throw new Error("workspace_connection_required");
   return connection;
 }
@@ -1922,8 +3411,15 @@ async function captureBrowserWorkspaceSnapshot(target?: BrowserWorkspaceTargetRe
     throw new Error("workspace_navigation_changed");
   }
   const activeRoomId = currentActiveWorkspaceRoomId();
-  if (target?.roomId !== undefined && activeRoomId !== undefined && target.roomId !== activeRoomId) {
+  // A renderer-supplied Room is a claim about the currently selected Room,
+  // not a routing override.  In particular, an unselected Room must not be
+  // synthesized from targetRoomId or another stale UI value.
+  if (target?.roomId !== undefined && target.roomId !== activeRoomId) {
     throw new Error("room_navigation_changed");
+  }
+  if (target?.selectionGeneration !== undefined
+    && !isCurrentActiveWorkspaceRoomSelection(target.selectionGeneration)) {
+    throw new Error("workspace_navigation_changed");
   }
   return {
     id: connection.id,
@@ -1940,9 +3436,20 @@ async function assertBrowserWorkspaceSnapshot(connection: BrowserWorkspaceSnapsh
     throw new Error("workspace_navigation_changed");
   }
   const activeRoomId = currentActiveWorkspaceRoomId();
-  if (connection.roomId !== undefined && activeRoomId !== undefined && connection.roomId !== activeRoomId) {
+  if (connection.roomId !== activeRoomId) {
     throw new Error("room_navigation_changed");
   }
+  if (connection.selectionGeneration !== undefined
+    && !isCurrentActiveWorkspaceRoomSelection(connection.selectionGeneration)) {
+    throw new Error("workspace_navigation_changed");
+  }
+}
+
+function sameBrowserWorkspaceSnapshot(left: BrowserWorkspaceSnapshot, right: BrowserWorkspaceSnapshot): boolean {
+  return left.id === right.id
+    && left.workspaceId === right.workspaceId
+    && left.roomId === right.roomId
+    && left.selectionGeneration === right.selectionGeneration;
 }
 
 function toDesktopWorkspaceRoom(room: PublicRoomRecord): DesktopWorkspaceRoom {
@@ -2072,6 +3579,18 @@ function requirePublicId(value: unknown, field: string): string {
 function publicRecord(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${field}_response_invalid`);
   return value as Record<string, unknown>;
+}
+
+function assertBrowserAllowedKeys(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
+  const accepted = new Set(allowed);
+  if (Object.keys(value).some((key) => !accepted.has(key))) throw new Error(field);
+}
+
+function requireBrowserText(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== "string") throw new Error(`${field}_invalid`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) throw new Error(`${field}_invalid`);
+  return normalized;
 }
 
 function workspaceOperationHistoryRecordType(value: unknown): WorkspaceOperationHistoryRecordType {

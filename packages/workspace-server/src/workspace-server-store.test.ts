@@ -800,6 +800,13 @@ describe("WorkspaceServerStore Workspace-first core", () => {
             },
             session_id: "session_store_parent",
             instruction: "Run the claimed work",
+            personal_preferences_snapshot: {
+              schema_version: 1,
+              revision: 5,
+              display_name: "Takuma",
+              output_locale: "ja",
+              instructions: "Use concise output."
+            },
             attachments: []
           }]
         };
@@ -827,11 +834,13 @@ describe("WorkspaceServerStore Workspace-first core", () => {
         parent: expect.objectContaining({ assigneeId: "assignment_store_parent", backendId: "claude-code" })
       }
     });
+    expect(result).toMatchObject({ personalPreferences: { revision: 5, display_name: "Takuma" } });
     const claimCall = calls.find(({ text }) => text.includes("SELECT samurai_claim_human_work_launch"));
     expect(claimCall?.values?.[1]).toBeNull();
     const executionCall = calls.find(({ text }) => text.includes("FROM workspace_human_work_launch_reservations AS reservation"));
     expect(executionCall?.text).toContain("workspace_runtime_runs AS parent_run");
     expect(executionCall?.text).toContain("workspace_runtime_sessions AS parent_session");
+    expect(executionCall?.text).toContain("personal_preferences_snapshot");
     expect(calls.some(({ text }) => text.includes("FOR UPDATE"))).toBe(false);
   });
 
@@ -1307,7 +1316,14 @@ describe("WorkspaceServerStore Workspace-first core", () => {
       {
         roomId,
         attachments: [attachment],
-        resourceRefs: [resourceRef]
+        resourceRefs: [resourceRef],
+        personalPreferences: {
+          schema_version: 1,
+          revision: 2,
+          display_name: "Takuma",
+          output_locale: "ja",
+          instructions: "Keep answers concise."
+        }
       }
     );
 
@@ -1317,6 +1333,16 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(JSON.parse(String(createCall?.values?.[14]))).toEqual([resourceRef]);
     expect(createCall?.values?.[13]).not.toBe(createCall?.values?.[14]);
     expect(createCall?.values?.[12]).toBe("Review the referenced resources.");
+    const preferenceCall = calls.find(({ text }) => text.includes("samurai_set_human_work_instruction_personal_preferences"));
+    expect(preferenceCall?.values?.[0]).toBe(workspaceId);
+    expect(preferenceCall?.values?.[2]).toEqual(expect.stringMatching(/^room_work_/));
+    expect(JSON.parse(String(preferenceCall?.values?.[3]))).toEqual({
+      schema_version: 1,
+      revision: 2,
+      display_name: "Takuma",
+      output_locale: "ja",
+      instructions: "Keep answers concise."
+    });
   });
 
   it("appends a Room-work reply and preserves resource refs separately from attachments", async () => {
@@ -1407,7 +1433,19 @@ describe("WorkspaceServerStore Workspace-first core", () => {
 
     const result = await store.replyToRoomWork(
       { workspaceId, accountId, operationId },
-      { roomId, workId, resourceRefs: [resourceRef], attachments: [] }
+      {
+        roomId,
+        workId,
+        resourceRefs: [resourceRef],
+        attachments: [],
+        personalPreferences: {
+          schema_version: 1,
+          revision: 3,
+          display_name: "Takuma",
+          output_locale: null,
+          instructions: "Reply briefly."
+        }
+      }
     );
 
     expect(result).toMatchObject({ id: instructionId, resourceRefs: [resourceRef], attachments: [] });
@@ -1415,6 +1453,8 @@ describe("WorkspaceServerStore Workspace-first core", () => {
     expect(appendCall?.values?.[9]).toBe("[]");
     expect(JSON.parse(String(appendCall?.values?.[10]))).toEqual([resourceRef]);
     expect(appendCall?.values?.[4]).toBe("Review the referenced resources.");
+    const preferenceCall = calls.find(({ text }) => text.includes("samurai_set_human_work_instruction_personal_preferences"));
+    expect(JSON.parse(String(preferenceCall?.values?.[3]))).toMatchObject({ revision: 3, output_locale: null });
   });
 
   it.each([
@@ -1432,6 +1472,25 @@ describe("WorkspaceServerStore Workspace-first core", () => {
         resourceRefs: [resourceRef as never]
       }
     )).rejects.toMatchObject({ code: "room_work_resource_reference_invalid", status: 400 });
+  });
+
+  it("rejects malformed personal preference snapshots before persistence", async () => {
+    const store = storeWithQuery(async () => ({ rows: [] }));
+    await expect(store.createRoomWork(
+      { workspaceId: "workspace_store_preferences_invalid", accountId: "account_store_preferences_invalid", operationId: "operation_store_preferences_invalid" },
+      {
+        roomId: "room_store_preferences_invalid",
+        instruction: "Reject this snapshot",
+        personalPreferences: {
+          schema_version: 1,
+          revision: 0,
+          display_name: "Takuma",
+          output_locale: "ja",
+          instructions: "ok",
+          unexpected: true
+        }
+      }
+    )).rejects.toMatchObject({ code: "workspace_personal_preferences_snapshot_invalid", status: 400 });
   });
 
   it("terminally fails a claimed launch when a resource ref is malformed", async () => {
@@ -2133,6 +2192,61 @@ describe("WorkspaceServerStore Workspace-first core", () => {
         }
       )).rejects.toMatchObject({ code: publicCode, status: 409 });
     }
+  });
+
+  it("registers a Share-imported Agent through the V1 SQL seam in the caller transaction", async () => {
+    const queries: Array<{ text: string; values?: readonly unknown[] }> = [];
+    const agentId = "agent_share_import_store";
+    const workspaceId = "workspace_share_import_store";
+    const accountId = "account_share_import_store";
+    const operationId = "operation_share_import_store";
+    const savedRow = {
+      workspace_id: workspaceId,
+      id: agentId,
+      display_name: "Imported Agent",
+      description: "",
+      role: "researcher",
+      instructions: "Use only confirmed resources.",
+      enabled: true,
+      backend_id: "samurai-native",
+      status: "active" as const,
+      version: 1,
+      created_by: accountId,
+      created_at: "2026-09-17T00:00:00.000Z",
+      updated_at: "2026-09-17T00:00:00.000Z"
+    };
+    const store = storeWithQuery(async () => ({ rows: [] }));
+    const sql = {
+      query: async (text: string, values?: readonly unknown[]) => {
+        queries.push({ text, values });
+        if (text.includes("SELECT state FROM workspaces")) return { rows: [{ state: "active" }] };
+        if (text.includes("FROM workspace_agents WHERE workspace_id = $1 AND id = $2")) return { rows: [savedRow] };
+        return { rows: [] };
+      }
+    };
+
+    const agent = await store.registerAgentInTransaction(sql as never, { workspaceId, accountId, operationId }, {
+      id: agentId,
+      displayName: savedRow.display_name,
+      role: savedRow.role,
+      instructions: savedRow.instructions,
+      backendId: savedRow.backend_id,
+      enabled: true
+    });
+
+    expect(agent).toMatchObject({ id: agentId, workspaceId, backendId: "samurai-native", status: "active" });
+    expect(queries.filter(({ text }) => text.includes("samurai_register_workspace_agent_v1"))).toHaveLength(1);
+    expect(queries.some(({ text }) => text.includes("samurai_register_workspace_agent(") && !text.includes("_v1"))).toBe(false);
+    expect(queries.some(({ text }) => text.includes("samurai_append_workspace_audit"))).toBe(true);
+    expect(queries.find(({ text }) => text.includes("samurai_register_workspace_agent_v1"))?.values).toEqual([
+      workspaceId,
+      agentId,
+      savedRow.display_name,
+      savedRow.role,
+      savedRow.instructions,
+      savedRow.backend_id,
+      true
+    ]);
   });
 });
 

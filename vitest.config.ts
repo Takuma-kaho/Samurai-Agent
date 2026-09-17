@@ -4,6 +4,13 @@ export default defineConfig({
   test: {
     environment: "node",
     testTimeout: 20000,
-    include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "test/**/*.test.ts"]
+    include: [
+      "packages/**/*.test.ts",
+      "packages/**/*.test.tsx",
+      "apps/**/*.test.ts",
+      "apps/**/*.test.tsx",
+      "test/**/*.test.ts",
+      "test/**/*.test.tsx"
+    ]
   }
 });

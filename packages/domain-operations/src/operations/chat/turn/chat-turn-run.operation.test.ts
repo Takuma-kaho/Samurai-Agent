@@ -32,4 +32,40 @@ describe("chat.turn.run handler", () => {
     expect(chatTurnRun.input.safeParse({ content: "Hello", attachments: [{ kind: "file", id: "x" }] }).success).toBe(false);
     expect(chatTurnRun.input.safeParse({ content: "Hello", temporary_context: [{ kind: "desktop_screenshot" }] }).success).toBe(false);
   });
+
+  it("passes a strict Account settings snapshot to the Runtime port", async () => {
+    const runChatTurn = vi.fn(async () => result);
+    const handler = chatTurnRun.createHandler({ runChatTurn });
+    const personalPreferences = {
+      schema_version: 1 as const,
+      revision: 4,
+      display_name: "登録名",
+      output_locale: null,
+      instructions: "簡潔に回答する"
+    };
+    const input = chatTurnRun.input.parse({ content: "Hello", personal_preferences: personalPreferences });
+
+    await handler.execute(contextWithSession, input);
+
+    expect(runChatTurn).toHaveBeenCalledWith(contextWithSession, expect.objectContaining({ personal_preferences: personalPreferences }));
+  });
+
+  it("rejects unknown identity/authorization fields and malformed snapshot values", () => {
+    const valid = {
+      schema_version: 1,
+      revision: 0,
+      display_name: "登録名",
+      output_locale: "ja",
+      instructions: ""
+    };
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: valid }).success).toBe(true);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, account_id: "account-forged" } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, authorization: { role: "owner" } } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, connection_id: "connection-forged" } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, share_id: "share-forged" } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, revision: -1 } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, output_locale: undefined } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", personal_preferences: { ...valid, instructions: "x".repeat(20_001) } }).success).toBe(false);
+    expect(chatTurnRun.input.safeParse({ content: "Hello", account_id: "account-forged" }).success).toBe(false);
+  });
 });

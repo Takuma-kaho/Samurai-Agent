@@ -1,10 +1,153 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentBackendRegistry, BackendEventRecord, BackendRunInput, BackendOutputEvent } from "@samurai-agent/agent-backends";
+import type { BackendRunRecord } from "@samurai-agent/core-schemas";
 import { BackendEventBridge } from "@samurai-agent/runtime";
 import { WorkspaceServerError, type PostgresWorkspaceDatabase } from "@samurai-agent/workspace-server";
-import { PostgresRuntimeChat } from "./postgres-runtime-chat.js";
+import { PostgresRuntimeChat, PostgresRuntimeCommandService } from "./postgres-runtime-chat.js";
 
 describe("PostgresRuntimeChat session projections", () => {
+  it("passes parsed personal preferences to a new turn without copying them into metadata", async () => {
+    const runtime = new PostgresRuntimeCommandService({
+      database: {} as PostgresWorkspaceDatabase,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-personal-preferences"
+    });
+    const runChatTurn = vi.fn(async () => ({ accepted: true }));
+    const internals = runtime as unknown as { chat: { runChatTurn: (input: unknown) => Promise<unknown> } };
+    internals.chat.runChatTurn = runChatTurn;
+    const context = {
+      inputSource: "runtime_api" as const,
+      workspaceId: "workspace-a",
+      actorId: "account-a",
+      correlationId: "correlation-a",
+      idempotencyKey: "turn-personal-preferences",
+      sessionId: "session-a"
+    };
+    const personalPreferences = {
+      schema_version: 1,
+      revision: 2,
+      display_name: "登録名",
+      output_locale: "ja",
+      instructions: "簡潔に回答する"
+    };
+
+    await runtime.runDomainCommand({ operationId: "chat.turn.run", context, input: { content: "こんにちは", personal_preferences: personalPreferences } });
+
+    expect(runChatTurn).toHaveBeenCalledTimes(1);
+    const forwarded = runChatTurn.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(forwarded).toMatchObject({ verifiedPersonalPreferences: personalPreferences, metadata: {} });
+    expect(forwarded.metadata).not.toHaveProperty("personal_preferences");
+    expect(forwarded.metadata).not.toHaveProperty("account_id");
+  });
+
+  it("stops malformed personal preferences at the Domain Operation boundary", async () => {
+    const runtime = new PostgresRuntimeCommandService({
+      database: {} as PostgresWorkspaceDatabase,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-personal-preferences-invalid"
+    });
+    const runChatTurn = vi.fn(async () => ({ accepted: true }));
+    const internals = runtime as unknown as { chat: { runChatTurn: (input: unknown) => Promise<unknown> } };
+    internals.chat.runChatTurn = runChatTurn;
+    const context = {
+      inputSource: "runtime_api" as const,
+      workspaceId: "workspace-a",
+      actorId: "account-a",
+      correlationId: "correlation-a",
+      idempotencyKey: "turn-personal-preferences-invalid",
+      sessionId: "session-a"
+    };
+
+    await expect(runtime.runDomainCommand({
+      operationId: "chat.turn.run",
+      context,
+      input: {
+        content: "こんにちは",
+        personal_preferences: {
+          schema_version: 1,
+          revision: 1,
+          display_name: "登録名",
+          output_locale: "ja",
+          instructions: "",
+          account_id: "forged-account"
+        }
+      }
+    })).rejects.toThrow();
+    expect(runChatTurn).not.toHaveBeenCalled();
+  });
+
+  it("keeps retry personal preferences fixed to the persisted Run snapshot", async () => {
+    const chat = bareChat();
+    const session = reservationTestSession();
+    const original = {
+      schema_version: 1 as const,
+      revision: 3,
+      display_name: "Original owner",
+      instructions: "Original instructions",
+      output_locale: "ja" as const
+    };
+    const internals = chat as unknown as {
+      personalPreferencesForTurn: (input: { retryOfRunId: string; verifiedPersonalPreferences: BackendRunInput["personal_preferences"] }, session: typeof session) => Promise<BackendRunInput["personal_preferences"]>;
+      getBackendRun: (runId: string) => Promise<Partial<BackendRunRecord> | undefined>;
+    };
+    internals.getBackendRun = async () => ({ id: "run-original", session_id: session.id, room_id: session.room_id, metadata: { personal_preferences_snapshot: original } });
+    await expect(internals.personalPreferencesForTurn({
+      retryOfRunId: "run-original",
+      verifiedPersonalPreferences: { schema_version: 1, revision: 99, display_name: "Spoofed", instructions: "Spoofed", output_locale: "en" }
+    }, session)).resolves.toEqual(original);
+  });
+
+  it("accepts the revision-zero Account preference snapshot used by a new local record", async () => {
+    const chat = bareChat();
+    const session = reservationTestSession();
+    const internals = chat as unknown as {
+      personalPreferencesForTurn: (input: { verifiedPersonalPreferences: BackendRunInput["personal_preferences"] }, session: typeof session) => Promise<BackendRunInput["personal_preferences"]>;
+    };
+
+    await expect(internals.personalPreferencesForTurn({
+      verifiedPersonalPreferences: {
+        schema_version: 1,
+        revision: 0,
+        display_name: "登録名",
+        instructions: "",
+        output_locale: null
+      }
+    }, session)).resolves.toMatchObject({ revision: 0, display_name: "登録名", output_locale: null });
+  });
+
+  it("rejects a revoked Agent Room execution permission at the Runtime boundary", async () => {
+    const chat = bareChat();
+    const query = vi.fn(async () => ({ rows: [{ allowed: false }] }));
+    const internals = chat as unknown as { assertAgentCanExecute: (sql: { query: typeof query }, roomId: string, agentId: string) => Promise<void> };
+    await expect(internals.assertAgentCanExecute({ query }, "room-1", "agent-1"))
+      .rejects.toMatchObject({ code: "runtime_agent_not_authorized_for_room", status: 403 });
+  });
+
+  it("assembles Room and Agent resources through the injected Completion selector", async () => {
+    const chat = new PostgresRuntimeChat({
+      database: {} as PostgresWorkspaceDatabase,
+      workspaceId: "workspace-a",
+      accountId: "account-a",
+      backendRegistry: { statuses: () => [] } as unknown as AgentBackendRegistry,
+      agentWorktreeRoot: "/tmp/samurai-agent-context",
+      executionContext: {
+        select: async () => ({
+          roomKnowledge: [{ id: "room-k", kind: "knowledge", title: "Room", version: 2, contentHash: "a".repeat(64), sourceScope: { kind: "room", room_id: "room-1" }, content: "room" }],
+          agentKnowledge: [{ id: "agent-k", kind: "knowledge", title: "Agent", version: 4, contentHash: "b".repeat(64), sourceScope: { kind: "agent", agent_id: "agent-1" }, content: "agent" }],
+          agentSkills: [{ id: "agent-s", kind: "skill", title: "Skill", version: 1, contentHash: "c".repeat(64), sourceScope: { kind: "agent", agent_id: "agent-1" }, disclosureLevel: "catalog", content: "hidden" }]
+        })
+      }
+    });
+    const assembly = await (chat as unknown as { resolveExecutionContext: (roomId: string, agentId: string, query: string) => Promise<any> }).resolveExecutionContext("room-1", "agent-1", "deploy");
+    expect(assembly.resources.map((resource) => resource.id)).toEqual(["room-k", "agent-k", "agent-s"]);
+    expect(assembly.resources[0]?.source_scope).toEqual({ kind: "room", room_id: "room-1" });
+    expect(assembly.resources[1]?.source_scope).toEqual({ kind: "agent", agent_id: "agent-1" });
+  });
+
   it("rejects invalid Room Work attachments before Runtime admission", async () => {
     const session = reservationTestSession();
     const agent = {

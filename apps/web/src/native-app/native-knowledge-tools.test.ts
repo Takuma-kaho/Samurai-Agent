@@ -15,10 +15,17 @@ import {
   nativeKnowledgeDraftAfterMutation,
   nativeKnowledgeDraftMatchesSnapshot,
   nativeKnowledgeResourceForOpen,
+  nativeKnowledgeResourcesErrorKind,
+  nativeKnowledgeShareAvailability,
+  nativeKnowledgeShareAvailabilityMessage,
   nativeRoomSearchResultCanOpen,
   nativeRoomSearchResultOpenHint,
   nativeKnowledgeToolsErrorMessage,
   nativeKnowledgeToolsTargetKey,
+  isNativeRoomKnowledgeResource,
+  isNativeRoomKnowledgeShareableResource,
+  nativeRoomKnowledgeShareResources,
+  nativeRoomKnowledgeShareSelection,
   resourceMatchesNativeKnowledgeToolsTarget,
   withNativeKnowledgeToolsTarget,
   type NativeKnowledgeToolsBridge,
@@ -110,8 +117,16 @@ describe("NativeKnowledgeTools target boundary", () => {
       scope: { kind: "room", roomId: otherTarget.roomId }
     }), target)).toBe(false);
     expect(resourceMatchesNativeKnowledgeToolsTarget(resource({
-      scope: { kind: "workspace" }
+      scope: { kind: "workspace" },
+      kind: "knowledge"
+    }), target)).toBe(false);
+    expect(resourceMatchesNativeKnowledgeToolsTarget(resource({
+      scope: { kind: "workspace" },
+      kind: "skill"
     }), target)).toBe(true);
+    expect(isNativeRoomKnowledgeResource(resource(), target)).toBe(true);
+    expect(isNativeRoomKnowledgeResource(resource({ evidenceState: "provisional" }), target)).toBe(false);
+    expect(isNativeRoomKnowledgeResource(resource({ scope: { kind: "workspace" } }), target)).toBe(false);
     expect(isNativeKnowledgeResourceKind("knowledge")).toBe(true);
     expect(isNativeKnowledgeResourceKind("policy")).toBe(false);
   });
@@ -178,11 +193,63 @@ describe("NativeKnowledgeTools target boundary", () => {
     expect(nativeKnowledgeDraftAfterMutation(submitted, submitted, resource({ version: 4 }))).toBeUndefined();
   });
 
+  it("offers only active, confirmed, manual Knowledge from the fixed Room to sharing", () => {
+    const shareable = nativeRoomKnowledgeShareResources([
+      resource({ id: "knowledge-valid", title: "共有できる知識", version: 8 }),
+      resource({ id: "knowledge-archived", lifecycleState: "archived" }),
+      resource({ id: "knowledge-ai", aiManaged: true }),
+      resource({ id: "knowledge-provisional", evidenceState: "provisional" }),
+      resource({ id: "skill-room", kind: "skill" }),
+      resource({ id: "knowledge-workspace", scope: { kind: "workspace" } }),
+      resource({ id: "knowledge-other-room", scope: { kind: "room", roomId: otherTarget.roomId } }),
+      resource({ id: "knowledge-valid", title: "重複した表示", version: 2 })
+    ], target);
+
+    expect(isNativeRoomKnowledgeShareableResource(resource(), target)).toBe(true);
+    expect(shareable).toEqual([{
+      id: "knowledge-valid",
+      version: 8,
+      kind: "knowledge",
+      title: "共有できる知識"
+    }]);
+    expect(shareable[0]).not.toHaveProperty("content");
+    expect(shareable[0]).not.toHaveProperty("aiManaged");
+    expect(nativeRoomKnowledgeShareSelection(target, "  検証Room  ", shareable)).toEqual({
+      source: { kind: "room_knowledge", id: target.roomId, label: "検証Room" },
+      resources: shareable
+    });
+    expect(nativeRoomKnowledgeShareSelection(target, " ", shareable).source.label).toBe("選択中のRoom");
+  });
+
+  it("keeps share availability truthful for empty, permission, and retrieval failures", () => {
+    const base = {
+      target,
+      resourcesLoading: false,
+      resourcesLoaded: true,
+      resourcesError: null,
+      resourcesErrorKind: null,
+      resources: []
+    } as const;
+    expect(nativeKnowledgeShareAvailability(base)).toBe("no_resources");
+    expect(nativeKnowledgeShareAvailability({ ...base, resources: [{ id: "k", version: 1, kind: "knowledge", title: "K" }] })).toBe("ready");
+    expect(nativeKnowledgeShareAvailability({ ...base, resourcesLoaded: false, resourcesError: "権限がありません", resourcesErrorKind: "permission" })).toBe("permission_denied");
+    expect(nativeKnowledgeShareAvailability({ ...base, resourcesLoaded: false, resourcesError: "network", resourcesErrorKind: "retrieval" })).toBe("retrieval_failed");
+    expect(nativeKnowledgeShareAvailabilityMessage("no_resources")).toContain("ありません");
+    expect(nativeKnowledgeShareAvailabilityMessage("permission_denied")).toContain("権限");
+    expect(nativeKnowledgeShareAvailabilityMessage("retrieval_failed")).toContain("取得できません");
+    expect(nativeKnowledgeResourcesErrorKind(new Error("403 forbidden"))).toBe("permission");
+    expect(nativeKnowledgeResourcesErrorKind(new Error("network_timeout"))).toBe("retrieval");
+  });
+
   it("prefers the just-created Knowledge response when an older list has the same ID", () => {
     const listed = resource({ id: "knowledge-new", title: "一覧の古い表示", version: 3 });
     const created = resource({ id: "knowledge-new", title: "作成直後の表示", version: 4 });
     expect(nativeKnowledgeResourceForOpen([listed], created.id, created)).toBe(created);
     expect(nativeKnowledgeResourceForOpen([listed], listed.id)).toBe(listed);
+    expect(nativeKnowledgeResourceForOpen([resource({ evidenceState: "provisional" })], "knowledge-a")).toBeUndefined();
+    expect(nativeKnowledgeResourceForOpen([resource({ scope: { kind: "workspace" } })], "knowledge-a")).toBeUndefined();
+    const workspaceSkill = resource({ kind: "skill", scope: { kind: "workspace" } });
+    expect(nativeKnowledgeResourceForOpen([workspaceSkill], workspaceSkill.id)).toBe(workspaceSkill);
   });
 
   it("does not offer a Session or Message without work_id as openable", () => {
@@ -216,9 +283,12 @@ describe("NativeKnowledgeTools panel", () => {
     expect(markup).toContain("Room内検索");
     expect(markup).toContain("基本設定");
     expect(markup).toContain("既存automation");
+    expect(markup).not.toContain("Workspace共通Knowledge");
+    expect(markup).not.toContain("Workspace専用Knowledge");
     expect(markup).not.toContain("session_id");
     expect(markup).not.toContain("今すぐ実行");
     expect(markup).not.toContain("automationを作成");
+    expect(markup).not.toContain("Room Knowledgeを共有");
   });
 
   it("exposes Knowledge creation from the management surface", () => {
@@ -228,6 +298,7 @@ describe("NativeKnowledgeTools panel", () => {
     }));
     expect(markup).toContain("Knowledgeを作成");
     expect(markup).toContain("確認できる資源");
+    expect(markup).not.toContain("Workspace共通");
   });
 
   it("explains conflict and permission failures without discarding the draft", () => {

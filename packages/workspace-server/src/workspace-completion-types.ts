@@ -9,12 +9,13 @@ export type WorkspaceCompletionResourceKind = (typeof workspaceCompletionResourc
 export const workspaceCompletionKnowledgeKinds = ["fact", "decision", "explanation", "experience_rule"] as const;
 export type WorkspaceCompletionKnowledgeKind = (typeof workspaceCompletionKnowledgeKinds)[number];
 
-export const workspaceCompletionScopeKinds = ["workspace", "room"] as const;
+export const workspaceCompletionScopeKinds = ["workspace", "room", "agent"] as const;
 export type WorkspaceCompletionScopeKind = (typeof workspaceCompletionScopeKinds)[number];
 
 export interface WorkspaceCompletionScope {
   kind: WorkspaceCompletionScopeKind;
   roomId?: string;
+  agentId?: string;
 }
 
 /** These axes must stay independent. `conflict` is represented by a Link and
@@ -362,6 +363,30 @@ export interface WorkspaceCompletionFileEntry {
   path: string;
   content: Uint8Array;
   sha256: string;
+}
+
+/** A Share import carries the source hash all the way to the Completion
+ * transaction.  The importer never trusts a decoded body or support file
+ * until its byte size and SHA-256 have been checked against this record. */
+export interface WorkspaceCompletionImportFile {
+  path: string;
+  content: Uint8Array;
+  byteSize: number;
+  sha256: string;
+}
+
+export interface WorkspaceCompletionImportEntry {
+  entryId: string;
+  kind: "knowledge" | "skill";
+  title: string;
+  content: string;
+  knowledgeKind?: WorkspaceCompletionKnowledgeKind;
+  files: readonly WorkspaceCompletionImportFile[];
+}
+
+export interface WorkspaceCompletionImportResourceReservation {
+  entryId: string;
+  resourceId: string;
 }
 
 export interface WorkspaceCompletionFileBatch {

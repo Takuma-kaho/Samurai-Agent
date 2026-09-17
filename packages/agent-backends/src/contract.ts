@@ -171,6 +171,70 @@ export interface BackendExecutionAgentContext {
   config_version: string;
 }
 
+/** A context ref carries provenance but never conveys Room authority. */
+export type BackendContextSourceScope =
+  | { kind: "room"; room_id: string }
+  | { kind: "agent"; agent_id: string };
+
+export interface BackendExecutionResourceRef extends ResourceRef {
+  kind: "knowledge" | "skill";
+  version: string;
+  content_hash: string;
+  source_scope: BackendContextSourceScope;
+}
+
+export interface BackendExecutionResource {
+  kind: "knowledge" | "skill";
+  id: string;
+  title: string;
+  version: string;
+  content_hash: string;
+  source_scope: BackendContextSourceScope;
+  selection_reason: string;
+  disclosure_level: "catalog" | "body" | "support";
+  description?: string;
+  tags?: string[];
+  required_capabilities?: string[];
+  content?: string;
+  support_files?: Array<{ path: string; content: string }>;
+  ref: BackendExecutionResourceRef;
+}
+
+/** Server-verified Account settings captured by a Run. */
+export interface BackendPersonalPreferencesSnapshot {
+  schema_version: 1;
+  revision: number;
+  display_name?: string;
+  instructions?: string;
+  output_locale?: SupportedLocale | null;
+}
+
+export interface BackendExecutionContextAssembly {
+  version: 1;
+  room_id: string;
+  agent_id: string;
+  query: string;
+  resource_refs: BackendExecutionResourceRef[];
+  resources: BackendExecutionResource[];
+  sources: Array<{
+    kind: "room_knowledge" | "agent_knowledge" | "agent_skills";
+    source_scope: BackendContextSourceScope;
+    candidate_count: number;
+    included_count: number;
+    refs: BackendExecutionResourceRef[];
+    reason: string;
+  }>;
+  included_count: number;
+  included_content_chars: number;
+  limits: { max_resources: number; max_content_chars: number };
+  omitted: Array<{
+    id: string;
+    kind: "knowledge" | "skill";
+    source_scope: BackendContextSourceScope;
+    reason: string;
+  }>;
+}
+
 /**
  * Optional additive execution context.  The boundary and continuity labels
  * describe host policy; they do not grant a Backend Room authority or expose
@@ -181,6 +245,11 @@ export interface BackendExecutionContext {
   association: BackendRunAssociation;
   credential_boundary: "provider_api" | "external_cli";
   continuity: "samurai_context" | "external_session";
+  /** Explicit, already-authorized context. It is descriptive only. */
+  resources?: BackendExecutionResource[];
+  resource_refs?: BackendExecutionResourceRef[];
+  context_assembly?: BackendExecutionContextAssembly;
+  personal_preferences?: BackendPersonalPreferencesSnapshot;
 }
 
 export interface BackendRunInput {
@@ -251,6 +320,11 @@ export interface BackendRunInput {
   context_handoff?: ContextHandoff;
   recent_messages: MessageRecord[];
   temporary_context?: TemporaryContextAttachment[];
+  /** Server-owned Completion context; absent for legacy empty-context Runs. */
+  context_resources?: BackendExecutionResource[];
+  execution_context_assembly?: BackendExecutionContextAssembly;
+  /** Never accept this from generic caller metadata. */
+  personal_preferences?: BackendPersonalPreferencesSnapshot;
   metadata: Record<string, JsonValue>;
   context_intent?: "light_chat" | "contextual_chat" | "workspace_task";
   expected_outputs?: Array<"artifact" | "collection_schema" | "collection_view" | "generated_surface">;

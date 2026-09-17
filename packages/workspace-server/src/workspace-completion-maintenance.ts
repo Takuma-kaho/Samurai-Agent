@@ -4,6 +4,7 @@ import { assertOpaqueId } from "./config";
 import { WorkspaceServerError } from "./errors";
 import type { WorkspaceRequestContext } from "./types";
 import { WorkspaceCompletionCuratorService, type WorkspaceCompletionSemanticCuratorPort } from "./workspace-completion-curator";
+import { WorkspaceCompletionFileCleanupService } from "./workspace-completion-files";
 import { WorkspaceCompletionJobService, type WorkspaceCompletionJobRunResult, type WorkspaceCompletionReviewPort } from "./workspace-completion-jobs";
 import { WorkspaceCompletionService } from "./workspace-completion-service";
 
@@ -14,6 +15,9 @@ export interface WorkspaceCompletionMaintenanceTickResult {
   recoveredJobs: number;
   blockedReviewJobs: number;
   recoveredFileBatches: number;
+  cleanedCompletionFiles: number;
+  preservedCompletionFiles: number;
+  retriedCompletionFiles: number;
   purgedRawOutputs: number;
   queuedEvaluationCatchup: number;
   queuedCuratorJobs: number;
@@ -33,7 +37,8 @@ export class WorkspaceCompletionMaintenanceService {
   constructor(
     readonly completion: WorkspaceCompletionService,
     readonly jobs: WorkspaceCompletionJobService,
-    readonly curator: WorkspaceCompletionCuratorService
+    readonly curator: WorkspaceCompletionCuratorService,
+    readonly fileCleanup?: WorkspaceCompletionFileCleanupService
   ) {}
 
   /**
@@ -109,6 +114,14 @@ export class WorkspaceCompletionMaintenanceService {
         operationId: context.operationId
       })
     };
+    const fileCleanup = this.fileCleanup
+      ? await this.fileCleanup.runTick(maintenanceContext, { workerId: `${input.workerId}_file_cleanup`, limit: maxRuns })
+      : { cleaned: 0, preserved: 0, retried: 0, failed: [] as readonly { id: string; errorCode: string }[] };
+    if (fileCleanup.failed.length > 0) {
+      throw new WorkspaceServerError("workspace_completion_file_cleanup_failed", 503, {
+        rows: fileCleanup.failed.map((row) => ({ id: row.id, error_code: row.errorCode }))
+      });
+    }
     const recovery = await this.completion.recoverFileBatches(maintenanceContext);
     if (recovery.failed.length > 0) throw new WorkspaceServerError("workspace_completion_file_recovery_required", 503, { failed_batch_ids: recovery.failed });
     const recoveredJobs = await this.jobs.recover(maintenanceContext);
@@ -160,6 +173,9 @@ export class WorkspaceCompletionMaintenanceService {
       recoveredJobs,
       blockedReviewJobs,
       recoveredFileBatches: recovery.recovered.length,
+      cleanedCompletionFiles: fileCleanup.cleaned,
+      preservedCompletionFiles: fileCleanup.preserved,
+      retriedCompletionFiles: fileCleanup.retried,
       purgedRawOutputs,
       queuedEvaluationCatchup,
       queuedCuratorJobs,
