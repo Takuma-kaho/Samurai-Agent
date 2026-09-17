@@ -73,6 +73,7 @@ Gemini API keyは`.env`からプロセスへ渡したが、値はログ・レポ
 - sandbox内の最初の`pnpm run verify:ci-full`は、コード失敗ではなくsandboxの`listen EPERM 127.0.0.1`、tsx IPC socket、Docker接続制限で実行環境エラーになった。
 - 同じCI入口を権限付き実行環境で再実行し、**`verifier=ci-full`, `status=passed`, `failed_checks=[]`, `unverified_checks=[]`**を確認した。結果は一時検証領域の`ci-final-escalated/result.json`に保存した。
 - このCIにはarchitecture、migration readiness、全typecheck、Web build、全test、Hosted/Self-host migration、RLS、HTTP recovery、worker bundle、runtime recovery RLSが含まれる。
+- Push後のGitHub Actions初回実行では、macOS/Ubuntuの契約ジョブが`apps/server`から直接利用する`pg`の宣言不足で停止した。`apps/server/package.json`とlockfileへ`pg`/`@types/pg`を直接追加し、ローカルserver typecheckを再通過させたうえで再Push・再CIする。
 
 ## 旧API互換経路の設計適合性
 
