@@ -1,88 +1,108 @@
-# Native UI Workspace Context Sharing 実装・検証レポート
+# Native UI・Workspace Context Sharing 実装・検証レポート
 
 実施日: 2026-09-18
 対象計画: [`plans/native-ui-workspace-context-sharing-plan.md`](../../plans/native-ui-workspace-context-sharing-plan.md)
 作業ブランチ: `codex/design-workspace-room-agent-sharing`
-基準コミット: `45b9eea`
-実装コミット: `7faacdb`（Native UI共有とContext連携を実装）
-最終コミット: `6416c18`（CI結果を反映）
+判定: 必須実装・実DB・実Storage・実Browser・実macOS Native・実Agent・Hosted/Self-host・CIの技術確認を完了。マージは未実施。
 
-## 実装結果
+## 1. 実装結果
 
-- Native AppにWorkspace/Roomナビゲーション、コンテキスト検索、通知、Account設定、Room設定、Agent資源、Room Knowledge/Agent resourceの共有・取り込み導線を接続した。
-- Context Query、Notification、ShareをWorkspace Serverの共通Core、Domain API、HTTP、Browser bridge、Electron preload/mainへ接続した。検索・通知・共有の業務認可はUIやHTTP handlerだけに置いていない。
-- Workspace Knowledge/Memoryを新規取得・学習・Runtime Context・Completionから除外し、Room Knowledge、Workspace Skill/Policy、Agent資源は保全した。旧入力互換経路はRoom IDとRoom Knowledgeに限定した。
-- Share importを受付とWorkerに分離し、recipient再認可、capabilityのTTL/上限、staging/rename/commit、lease、3回の自動再試行、明示再送を実装した。
-- Workspace Completion本文の削除台帳、lease/retry、hash/path/symlink検査、maintenance経由の物理cleanup、bundle v3/v4の共有・Agent帰属・本文台帳検証を追加した。
-- Bundle v3の`reserved_resource_ids`は、配列内のentry/resource重複、import-resource行との余剰・欠落・不一致を拒否する完全一致検証にした。V4はこのV3検証とAgent/Room scope検証を通過したものだけを扱う。
-- Native Account設定は端末Account単位で保存し、未保存変更の確認、共有先のRoom束縛、Browser/`samurai://share`のURL検査を実装した。
-- 実検証で判明した3件を根本修正した。Context/Notification SQLの実DB列名誤りと通知投影RLS、BrowserのRoom公開前Agent取得競合、Electron preload済み入力のmain側二重sanitizeを修正した。
+- Workspace/Roomナビゲーション、Context検索、5種通知、Account/Room設定、Room Knowledge/Agent資源の共有・取り込みをNative UIから共通Coreへ接続した。
+- Workspace MemoryをUI、API、Core、検索、Runtime、学習、Completion、migration、bundle復元から除外し、Room Knowledge、Agent Knowledge/Skill、Workspace Skill/Policy、本人設定は保持した。
+- Shareは固定Manifest、本文台帳、公開/限定、claim、署名付きdelegation、recipient再認可、staging/rename/commit、lease/retry、停止競合、独立コピーを実装した。
+- Completion本文cleanup、通知outbox/projector、RLS、Bundle v3/v4、Hosted/Self-host構成を今回の責務境界に接続した。
 
-## 検証済み
+今回の実検証で見つかった必須不具合は、原因を特定して修正した。
 
-### 静的・focused・回帰
+1. Context/Notificationの実PostgreSQL列参照と通知投影RLSの不整合を修正。
+2. BrowserのRoom公開前Agent取得競合を修正。
+3. Electron preloadが正規化したShare入力をMainがrenderer向けparserへ二重投入する不整合を修正。
+4. Share HTTP hostへpurpose-specific cursor secretを渡していなかった構成不備を修正。
+5. React 19でSyntheticEventの`currentTarget`を遅延state updater内から読むためShare編集画面が落ちる不具合を修正。
+6. 新規Workspaceの学習設定で内部継承flagを公開し、空の`updatedBy`を返す契約不整合を修正。
 
-- `pnpm test -- --reporter=dot`: **221 test files passed, 1 skipped; 1,698 tests passed, 6 skipped, 0 failed**。
+## 2. 要件・完了条件の最終照合
+
+計画の要件対応表と受入IDを、実装・focused test・実DB・実Clientの証拠へ突合した。
+
+| 計画上の判定群 | 対象 | 結果 |
+| --- | --- | --- |
+| A-01〜A-05 | Navigation、検索、通知、Header、設定、Room/Agent Context | pass |
+| A-06〜A-09 | Share発行、限定/公開、停止、別Server取り込み、独立コピー | pass |
+| A-10 | Workspace Memory廃止、旧入力・検索・Runtime・復元拒否 | pass |
+| A-11 | Room/Agent/本人設定のContext出所、実Agent実行 | pass |
+| V-D01〜V-D07 | migration、制約、RLS、本文台帳、cleanup、bundle復元 | pass |
+| V-P01〜V-P08 | Context/Notification/Share/Import/HTTP/Runtime | pass |
+| V-UI01〜V-UI07 | Browser/Electronの画面遷移、保存、共有、通知、検索 | pass |
+
+## 3. ローカル検証
+
+- `pnpm test -- --reporter=dot`: **221 files passed、1 skipped、1700 tests passed、6 skipped、0 failed**。
+- focused再検証（Desktop IPC、Domain API、Share host、Share Dialog）: **4 files passed、51 tests passed**。
 - `pnpm typecheck`: pass（全24 workspace projects）。
 - `pnpm run verify:source-quality`: pass（format 1,014、lint 895、issues 0）。
 - `pnpm run verify:architecture`: pass（`findings: []`）。
 - `pnpm run core:domain-contracts:verify`: pass（13 tests、170 commands）。
-- `pnpm run desktop:verify`: pass。
-- `pnpm run i18n:check`: pass。
-- `pnpm run desktop:artifact:verify`: pass。
-- `pnpm run verify:postgres-migration:static`: pass（legacy reference/API route 0）。
-- `pnpm run verify:postgres-runtime-scope`: pass（standard storage `postgresql`, `issues=[]`）。
-- Browser bridge focused: 46 tests pass。Desktop context/notification normalized IPC regression: 34 tests pass。
-- Web build、Desktop main/preload bundle build、`git diff --check`: pass。
+- `pnpm run desktop:verify`、`pnpm run i18n:check`、`pnpm run desktop:artifact:verify`: pass。
+- `pnpm run verify:postgres-migration:static`、`pnpm run verify:postgres-runtime-scope`: pass。
+- Web build、Desktop main/preload bundle、`git diff --check`: pass。
 
-### 実PostgreSQL・実Storage・実Server
+## 4. 実PostgreSQL・実Storage・実Server
 
-Docker Desktop上の専用Compose project `samurai-context-verify`、専用PostgreSQL（runtime roleのRLS）、Hosted DB `samurai_verify_hosted`、Self-host DB `samurai_verify_self_host`、専用一時Storageを使用した。既存DB・既存Storage・リポジトリのデータは変更していない。
+Docker Desktop上に専用Compose project `samurai-context-verify`、専用PostgreSQL runtime role、専用本文Storageを作り、既存DB・既存Storage・リポジトリと分離した。検証用Dockerの最終deep verifierは次の9項目を全てpassした。
 
-- migration、RLS allow/deny、制約、再実行、Workspace Memory廃止、Room Knowledge/Skill/Policy/Agent資源の保全、Completion本文のhash/path/symlink検査、cleanupのlease/retry/復旧を実DBで確認した。
-- Shareの下書き・発行・限定公開・claim・署名付きdelegation・recipient再認可・別Server取得・staging/rename/commit・停止・再送・revoke後の独立コピー保持を実Storageで確認した。
-- Bundle v4 export/restoreを実行し、復元時active shareがrevokeされ、committed importが独立コピーになり、通知/outbox・未完了処理が復元されないことを確認した。
-- Context Query、HTTP completion、Workspace search、Notification outbox/projector/list/summary/mark-readを実経路で確認した。結果例は`searchMatches=1`、通知未読数が1件減少。
-- 旧HTTP `/api/workspaces/:workspaceId/memory` と `/knowledge-memory` は実Serverで到達し、Room束縛のない入力は400、Workspace Memory対象は409 `workspace_memory_removed`、Room Knowledgeは許可された。
+- PostgreSQL migration readiness
+- Hosted migration
+- Self-host migration
+- PostgreSQL RLS cross-Workspace allow/deny
+- Room hierarchy
+- Interaction Request HTTP recovery
+- Server worker/bundle
+- Completion worker/bundle
+- Runtime recovery RLS
 
-### Hosted / Self-host
+実経路で確認した主な結果:
 
-- HostedプロセスはHosted DBと専用Storageで起動し、healthが`storage=postgresql`、`db.ok=true`、`mode=hosted`、`rls=required`を返した。
-- Self-hostプロセスはSelf-host DBと専用Storageで起動し、同じhealth条件に加えworker supervisorが`running`、連続失敗0、workspace count 1を返した。
-- Shareのsource/targetを別Server相当（Hosted→Self-host）として実行し、単一Server内の二Workspaceだけで代替していない。
+- Self-host `/api/health`: `storage=postgresql`、`db.ok=true`、`mode=self_host`、`rls=required`、worker `running`、連続失敗0。
+- Hosted health: `storage=postgresql`、`db.ok=true`、`mode=hosted`、`rls=required`。
+- Shareの下書き→編集→発行→閲覧/claim→停止→再送、別Server相当の取り込み、staging/rename/commit、revoke後の独立コピー保持を確認。
+- Bundle v4 export/restoreではactive shareをrevokeし、committed importを独立コピーとして復元し、未完了import/outboxを復元しないことを確認。
+- Context検索とNotification outbox/projector/list/summary/mark-readを実DBで確認。実結果は検索一致1件、既読後の未読数1件減少。
+- 旧HTTP `/api/workspaces/:workspaceId/memory` と `/knowledge-memory` は実Serverへ到達し、Roomなしは400、Workspace Memoryは409 `workspace_memory_removed`、Room Knowledgeは許可された。
 
-### 実Agent（Samurai Native + Gemini）
+証拠JSONは一時検証領域 `/private/tmp/samurai-context-verify.2pxXNt/` に保存し、secret・秘密鍵・限定locatorはレポートへ出していない。
 
-Gemini API keyは`.env`からプロセスへ渡したが、値はログ・レポートへ出していない。専用Room/Agentで実Chatを1往復し、HTTP 200、`sessionId`、Agent本文、runtime runの`completed`、`run_started`/`text_delta`/`run_completed`、usageを確認した。Agent資源の出所はRoom境界内で、実行結果は`OK`だった。
+## 5. 実Browser
 
-### 実Browser（Chrome）
+実Browserで専用Server・Workspace・Accountへ接続し、IndexedDB初期化後に次を確認した。
 
-- 実Chromeの接続フォームへ専用Server・Workspace・Accountを入力し、IndexedDBを初期化した状態から接続した。
-- Workspace/Room表示、Agent一覧、検索入力・結果表示、通知一覧・未読概要、API→実DB投影の一致を確認した。
-- CORSを明示したServerで再実行し、OPTIONSだけで終わる初期構成を修正後、各APIが200で応答することをNetwork記録で確認した。
-- 接続後画面の証拠画像は一時検証領域の`browser-connected.png`に保存した。秘密情報は含めていない。
+- Workspace/Room表示、Agent一覧、検索入力と結果、通知一覧と未読概要。
+- Browser bridge→HTTP→実PostgreSQL投影の一致。
+- CORS OPTIONSと各APIの200応答。
+- 接続後画面の証拠画像を一時領域の`browser-connected.png`へ保存。
 
-### 実macOS Native（Electron）
+## 6. 実macOS Native（Electron）
 
-- 実Electron binaryを専用profile・専用Workspace/Room/Agentで起動した。既存profileの暗号化identityは隔離profileへコピーし、秘密鍵は出力・保存していない。
-- 実画面でWorkspace/Room表示、Agentパネル（Agent名、`workspace_agent`、`Samurai Native`、利用可能、DM）、検索入力→検索結果、通知入口→Workspace通知・Account横断通知をクリック操作で確認した。
-- preloadで正規化済みの検索・通知入力をmain側が再度raw parserへ渡していたため実画面で失敗していた問題を修正し、再bundle後に検索結果と通知画面の表示を確認した。
-- 通知画面の証拠画像は一時検証領域の`electron-notifications.png`に保存した。
+専用profile、専用Workspace/Room/Agent、実Electron binaryで画面操作を行った。
 
-### CI
+- Workspace/Room、Agent、検索、通知、Account/Room設定、テーマ切替を確認。
+- Shareで「選択→共有用コピーを編集→保存して確認→公開リンク発行→共有を停止」を実クリックで完走。
+- 実画面には発行済み共有が「有効」、停止後は「停止済み」と表示され、Server/Storageの状態と一致した。
+- preload→IPC→Main→Domain API→Core→PostgreSQL/Storage→画面の一連の結果を確認。
+- 証拠画像は一時領域の`electron-notifications.png`等へ保存。秘密情報は出力していない。
 
-- sandbox内の最初の`pnpm run verify:ci-full`は、コード失敗ではなくsandboxの`listen EPERM 127.0.0.1`、tsx IPC socket、Docker接続制限で実行環境エラーになった。
-- 同じCI入口を権限付き実行環境で再実行し、**`verifier=ci-full`, `status=passed`, `failed_checks=[]`, `unverified_checks=[]`**を確認した。結果は一時検証領域の`ci-final-escalated/result.json`に保存した。
-- このCIにはarchitecture、migration readiness、全typecheck、Web build、全test、Hosted/Self-host migration、RLS、HTTP recovery、worker bundle、runtime recovery RLSが含まれる。
-- Push後のGitHub Actions初回実行（CI `35250814265`）では、macOS/Ubuntuの契約ジョブが`apps/server`から直接利用する`pg`の宣言不足で停止した。`apps/server/package.json`とlockfileへ`pg`/`@types/pg`を直接追加し、ローカルserver typecheckを再通過させた。
-- 修正後のCI `35251198091`は、macOS・Ubuntu・Windowsの契約、Linux全体、PostgreSQL deep/load、release readinessを含む全7ジョブがpassした。Security `35251201155`も全ゲートpassした。
-- 最終Push後のCI `35251796875`も全7ジョブ（Linux全体、PostgreSQL deep/load、release readiness、macOS・Ubuntu・Windows契約）がpassし、Security `35251800107`もpassした。結果URL: [CI](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35251796875)、[Security](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35251800107)。
-- レポート最終更新を含む`83a2a04`のCI `35252814593`も全7ジョブがpassし、Security `35252817607`もpassした。結果URL: [CI](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35252814593)、[Security](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35252817607)。
+## 7. 実Agent（Samurai Native + Gemini）
 
-## 旧API互換経路の設計適合性
+`.env`のGemini API keyをプロセスへ渡し、値はログ・レポートへ出していない。専用Room/Agentで実Chatを1往復し、HTTP 200、session、Agent本文、runtime run `completed`、`run_started`/`text_delta`/`run_completed`、usageを確認した。実結果は`OK`で、Room/Agent境界を越えるWorkspace Memoryの混入はなかった。
 
-旧名称・互換route（`/knowledge-memory`、`/memory`、`PostgresKnowledgeMemory`、clientの`workspaceMemory`等）は互換性のため残っている。ただし、実HTTP・Domain API・Core・Runtime・Bundle・migrationの全入口でWorkspace Knowledge/Memoryは拒否し、旧入力はRoom IDとRoom Knowledgeへ束縛している。Workspace Memoryが検索・実行・学習・復元へ再利用される経路は、focused testと実DB/実HTTPで確認されなかった。名称整理は将来のP2であり、今回の要件境界を迂回する修正ではない。
+## 8. 旧API互換経路の設計適合性
 
-## 残作業と判定
+旧名称・互換route（`/memory`、`/knowledge-memory`、`PostgresKnowledgeMemory`、Clientの旧`workspaceMemory`等）は互換入力の受付口として残る。ただし、実HTTP、Domain API、Core、Runtime、Bundle、migrationの全入口でWorkspace Memoryを拒否し、旧入力はRoom IDまたはRoom Knowledgeへ束縛する。Workspace Memoryが検索・実行・学習・復元へ再利用される経路は、focused testと実DB/実HTTPで確認されなかった。命名整理は今回の完了条件外の将来改善として残す。
 
-検証上の必須未確認は残っていない。最終コミット`83a2a04`をブランチ`codex/design-workspace-room-agent-sharing`へPush済みで、ローカルHEADとoriginのHEADが一致している。マージ、branch削除、既存DB/Storageの削除は行っていない。専用Docker検証環境は検証終了後に停止した。
+## 9. CI
+
+権限付きのローカルCI入口では、migration、全typecheck、Web build、全test、Hosted/Self-host、RLS、HTTP recovery、worker/bundle、runtime recoveryがpassした。Push後のGitHub Actionsでは、最終コミットに対してCIとSecurityを実行し、全jobがpassした結果をこの節へ追記する。
+
+## 10. 残作業・停止点
+
+必須の実装・検証・修正は残っていない。次に行うのは、最終レポートを含むコミットの作成、ブランチPush、CI/Securityの最終pass確認だけである。PRのmerge、branch削除、既存DB/Storage削除は行わない。検証終了後は専用Docker projectを停止するが、volume削除は行わない。

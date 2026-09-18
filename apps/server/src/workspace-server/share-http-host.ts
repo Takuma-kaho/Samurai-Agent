@@ -55,6 +55,8 @@ export interface WorkspaceShareHostOptions {
   store: WorkspaceServerStore;
   completion: Pick<WorkspaceCompletionService, "getResourceBody" | "listSkillFiles" | "getSkillFile" | "commitImportedShare">;
   storageRoot: string;
+  /** Server-owned secret used to bind share list cursors to their query. */
+  cursorSecret?: string;
   origin?: string;
   allowedSourceOrigins?: readonly string[];
   importHttpClient?: WorkspaceShareHttpClient;
@@ -78,6 +80,15 @@ export interface WorkspaceShareHostComposition {
   http: WorkspaceShareHttpCore;
   resolvePublicIdentity: WorkspaceShareHttpIdentityResolver;
   resolveAccountIdentity: WorkspaceShareHttpIdentityResolver;
+}
+
+/** Derive a purpose-specific cursor key without reusing the invitation key as
+ * a raw signing key for another protocol. */
+export function workspaceShareCursorSecret(serverSecret: string): string {
+  return createHash("sha256")
+    .update("samurai.workspace-share.cursor\0", "utf8")
+    .update(serverSecret, "utf8")
+    .digest("hex");
 }
 
 /** Construct the single Share Core instance used by both V1 Domain API and
@@ -119,6 +130,7 @@ export function createWorkspaceShareHost(options: WorkspaceShareHostOptions): Wo
     importTransport,
     importCommitter: createPostgresWorkspaceShareImportCommitter(database, completionImportWriter),
     delegationVerifier: (delegation) => verifyImportDelegation(delegation),
+    ...(options.cursorSecret ? { cursorSecret: workspaceShareCursorSecret(options.cursorSecret) } : {}),
     ...(options.origin ? { origin: options.origin } : {})
   });
   const identities = createShareIdentityResolvers(options.store);

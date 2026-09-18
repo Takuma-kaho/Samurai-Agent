@@ -531,7 +531,10 @@ export default function WorkspaceShareDialog({
         <div className="workspace-share-dialog__card">
           <h3>共有用コピーを編集</h3>
           <p className="workspace-share-dialog__muted">元データとは別の固定コピーです。ここでの編集は元のRoomやAgentを変更しません。</p>
-          <label>共有題名<input value={activeDraft.manifest.title} onChange={(event) => setManifest((manifest) => ({ ...manifest, title: event.currentTarget.value }))} maxLength={200} /></label>
+          <label>共有題名<input value={activeDraft.manifest.title} onChange={(event) => {
+            const value = event.currentTarget.value;
+            setManifest((manifest) => ({ ...manifest, title: value }));
+          }} maxLength={200} /></label>
           <fieldset className="workspace-share-dialog__visibility">
             <legend>公開範囲</legend>
             <label><input type="radio" name="workspace-share-visibility" checked={activeDraft.visibility === "restricted"} onChange={() => updateVisibility("restricted")} />限定共有</label>
@@ -547,15 +550,30 @@ export default function WorkspaceShareDialog({
         <div className="workspace-share-dialog__card">
           <h3>内容</h3>
           {activeDraft.manifest.agent ? <div className="workspace-share-dialog__agent-editor">
-            <label>Agent名<input value={activeDraft.manifest.agent.name} onChange={(event) => setManifest((manifest) => ({ ...manifest, agent: manifest.agent ? { ...manifest.agent, name: event.currentTarget.value } : undefined }))} /></label>
-            <label>役割<input value={activeDraft.manifest.agent.role} onChange={(event) => setManifest((manifest) => ({ ...manifest, agent: manifest.agent ? { ...manifest.agent, role: event.currentTarget.value } : undefined }))} /></label>
-            <label>指示<textarea value={activeDraft.manifest.agent.instructions} onChange={(event) => setManifest((manifest) => ({ ...manifest, agent: manifest.agent ? { ...manifest.agent, instructions: event.currentTarget.value } : undefined }))} /></label>
+            <label>Agent名<input value={activeDraft.manifest.agent.name} onChange={(event) => {
+              const value = event.currentTarget.value;
+              setManifest((manifest) => ({ ...manifest, agent: manifest.agent ? { ...manifest.agent, name: value } : undefined }));
+            }} /></label>
+            <label>役割<input value={activeDraft.manifest.agent.role} onChange={(event) => {
+              const value = event.currentTarget.value;
+              setManifest((manifest) => ({ ...manifest, agent: manifest.agent ? { ...manifest.agent, role: value } : undefined }));
+            }} /></label>
+            <label>指示<textarea value={activeDraft.manifest.agent.instructions} onChange={(event) => {
+              const value = event.currentTarget.value;
+              setManifest((manifest) => ({ ...manifest, agent: manifest.agent ? { ...manifest.agent, instructions: value } : undefined }));
+            }} /></label>
           </div> : null}
           <ul className="workspace-share-dialog__entry-editor">
             {activeDraft.manifest.entries.map((entry, index) => <li key={entry.entry_id}>
               <span className="workspace-share-dialog__entry-kind">{entry.kind === "knowledge" ? "Knowledge" : "Skill"}</span>
-              <label>題名<input value={entry.title} onChange={(event) => setManifest((manifest) => ({ ...manifest, entries: manifest.entries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, title: event.currentTarget.value } : candidate) }))} /></label>
-              <label>本文<textarea value={entry.content} onChange={(event) => setManifest((manifest) => ({ ...manifest, entries: manifest.entries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, content: event.currentTarget.value } : candidate) }))} /></label>
+              <label>題名<input value={entry.title} onChange={(event) => {
+                const value = event.currentTarget.value;
+                setManifest((manifest) => ({ ...manifest, entries: manifest.entries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, title: value } : candidate) }));
+              }} /></label>
+              <label>本文<textarea value={entry.content} onChange={(event) => {
+                const value = event.currentTarget.value;
+                setManifest((manifest) => ({ ...manifest, entries: manifest.entries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, content: value } : candidate) }));
+              }} /></label>
               {entry.files.length ? <p className="workspace-share-dialog__muted">添付ファイル {entry.files.length}件（内容は固定コピーに含まれます）</p> : null}
             </li>)}
           </ul>

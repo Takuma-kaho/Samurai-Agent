@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { PublicShareManifestSchema } from "@samurai-agent/domain-api";
 import { accountIdFromPublicKey, canonicalJson, createAccountSignaturePayload } from "@samurai-agent/workspace-server";
-import { createWorkspaceShareHost, WorkspaceShareFileStore } from "./share-http-host";
+import { createWorkspaceShareHost, WorkspaceShareFileStore, workspaceShareCursorSecret } from "./share-http-host";
 import { PostgresWorkspaceShareCompletionImportWriter } from "./share-completion-import-writer";
 
 describe("Workspace Share HTTP host composition", () => {
@@ -90,6 +90,22 @@ describe("Workspace Share HTTP host composition", () => {
     const serviceOptions = (host.service as unknown as { options: { importCommitter?: { writer?: unknown } } }).options;
     expect(serviceOptions.importCommitter).toBeDefined();
     expect(serviceOptions.importCommitter?.writer).toBeInstanceOf(PostgresWorkspaceShareCompletionImportWriter);
+  });
+
+  it("derives a purpose-specific cursor key when the server secret is configured", async () => {
+    const database = {
+      withContext: vi.fn(async (_context: unknown, action: (sql: { query: () => Promise<{ rows: never[] }> }) => Promise<unknown>) => action({ query: async () => ({ rows: [] }) }))
+    };
+    const host = createWorkspaceShareHost({
+      database,
+      store: fakeStore() as never,
+      completion: {} as never,
+      storageRoot: "/tmp/samurai-share-host-cursor-test",
+      cursorSecret: "x".repeat(32)
+    });
+    const serviceOptions = (host.service as unknown as { options: { cursorSecret?: string } }).options;
+    expect(serviceOptions.cursorSecret).toEqual(workspaceShareCursorSecret("x".repeat(32)));
+    expect(serviceOptions.cursorSecret).not.toEqual(new TextEncoder().encode("x".repeat(32)));
   });
 
   it("reads only a public/restricted projection and rejects a revoked or wrong recipient", async () => {

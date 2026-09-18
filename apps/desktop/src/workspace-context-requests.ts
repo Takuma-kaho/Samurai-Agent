@@ -1081,6 +1081,118 @@ export function workspaceShareLinkImportRequest(input: unknown): WorkspaceShareL
   return { ...(target ? { target } : {}), ...source, ...(targetRoomId ? { targetRoomId } : {}), operationId };
 }
 
+/**
+ * The preload has already converted the renderer's camelCase share request
+ * into the `{ target, body, operationId }` form before it crosses the IPC
+ * boundary.  Main must validate that normalized form without feeding it back
+ * through the renderer-facing parser (which would reject the normalized keys).
+ */
+function normalizedShareRecord(input: unknown, errorCode: string, keys: readonly string[]): Record<string, unknown> {
+  const value = strictRecord(input, errorCode);
+  assertAllowedKeys(value, keys, errorCode);
+  return value;
+}
+
+function normalizedShareBody(value: Record<string, unknown>, errorCode: string, keys: readonly string[]): Record<string, unknown> {
+  const body = strictRecord(value.body, errorCode);
+  assertAllowedKeys(body, keys, errorCode);
+  return body;
+}
+
+export function workspaceShareDraftCreateRequestFromPreload(input: unknown): WorkspaceShareDraftCreateRequest {
+  const value = normalizedShareRecord(input, "workspace_share_draft_create_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_draft_create_input_invalid", ["base_share_id", "source_kind", "source_id", "resource_refs"]);
+  const parsed = PublicShareDraftCreateInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_draft_create_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareDraftViewRequestFromPreload(input: unknown): WorkspaceShareDraftViewRequest {
+  const value = normalizedShareRecord(input, "workspace_share_draft_view_input_invalid", ["target", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_draft_view_input_invalid", ["draft_id"]);
+  const parsed = PublicShareDraftViewInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_draft_view_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), body: parsed.data };
+}
+
+export function workspaceShareDraftUpdateRequestFromPreload(input: unknown): WorkspaceShareDraftUpdateRequest {
+  const value = normalizedShareRecord(input, "workspace_share_draft_update_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_draft_update_input_invalid", ["draft_id", "expected_version", "manifest", "visibility", "recipient_account_ids"]);
+  const parsed = PublicShareDraftUpdateInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_draft_update_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareDraftDiscardRequestFromPreload(input: unknown): WorkspaceShareDraftDiscardRequest {
+  const value = normalizedShareRecord(input, "workspace_share_draft_discard_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_draft_discard_input_invalid", ["draft_id", "expected_version"]);
+  const parsed = PublicShareDraftDiscardInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_draft_discard_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareListRequestFromPreload(input: unknown): WorkspaceShareListRequest {
+  const value = normalizedShareRecord(input, "workspace_share_list_input_invalid", ["target", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_list_input_invalid", ["source_kind", "source_id", "limit", "cursor"]);
+  const parsed = PublicShareListInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_list_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), body: parsed.data };
+}
+
+export function workspaceSharePublishRequestFromPreload(input: unknown): WorkspaceSharePublishRequest {
+  const value = normalizedShareRecord(input, "workspace_share_publish_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_publish_input_invalid", ["draft_id", "expected_version", "expected_content_hash"]);
+  const parsed = PublicSharePublishInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_publish_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareRevokeRequestFromPreload(input: unknown): WorkspaceShareRevokeRequest {
+  const value = normalizedShareRecord(input, "workspace_share_revoke_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_revoke_input_invalid", ["share_id", "expected_version"]);
+  const parsed = PublicShareRevokeInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_revoke_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareImportRequestFromPreload(input: unknown): WorkspaceShareImportRequest {
+  const value = normalizedShareRecord(input, "workspace_share_import_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_import_input_invalid", ["source_origin", "locator", "claim_id", "content_hash", "delegation", "target_room_id"]);
+  const parsed = PublicShareImportInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_import_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareImportStatusRequestFromPreload(input: unknown): WorkspaceShareImportStatusRequest {
+  const value = normalizedShareRecord(input, "workspace_share_import_status_input_invalid", ["target", "operationId", "body"]);
+  const body = normalizedShareBody(value, "workspace_share_import_status_input_invalid", ["operation_id"]);
+  if (body.operation_id !== value.operationId) throw new Error("workspace_share_import_status_input_invalid");
+  const parsed = PublicShareImportStatusInputSchema.safeParse(body);
+  if (!parsed.success) throw new Error("workspace_share_import_status_input_invalid");
+  return { ...(sanitizeTarget(value.target) ? { target: sanitizeTarget(value.target) } : {}), operationId: requiredId(value.operationId, "workspace_share_operation_id_invalid"), body: parsed.data };
+}
+
+export function workspaceShareLinkViewRequestFromPreload(input: unknown): WorkspaceShareLinkViewRequest {
+  const value = normalizedShareRecord(input, "workspace_share_link_input_invalid", ["target", "sourceUrl", "sourceOrigin", "locator"]);
+  const sourceOrigin = normalizeWorkspaceShareOrigin(value.sourceOrigin, "workspace_share_link_source_invalid");
+  const locator = normalizeWorkspaceShareLocator(value.locator, "workspace_share_link_source_invalid");
+  const sourceUrl = new URL(`/s/${locator}`, sourceOrigin).toString();
+  return workspaceShareLinkViewRequest({ sourceUrl, ...(value.target === undefined ? {} : { target: value.target }) });
+}
+
+export function workspaceShareLinkImportRequestFromPreload(input: unknown): WorkspaceShareLinkImportRequest {
+  const value = normalizedShareRecord(input, "workspace_share_link_import_input_invalid", ["target", "sourceUrl", "sourceOrigin", "locator", "targetRoomId", "operationId"]);
+  const sourceOrigin = normalizeWorkspaceShareOrigin(value.sourceOrigin, "workspace_share_link_source_invalid");
+  const locator = normalizeWorkspaceShareLocator(value.locator, "workspace_share_link_source_invalid");
+  const sourceUrl = new URL(`/s/${locator}`, sourceOrigin).toString();
+  return workspaceShareLinkImportRequest({
+    sourceUrl,
+    ...(value.targetRoomId === undefined ? {} : { targetRoomId: value.targetRoomId }),
+    operationId: value.operationId,
+    ...(value.target === undefined ? {} : { target: value.target })
+  });
+}
+
 export function sanitizeWorkspaceContextSearchResponse(value: unknown): WorkspaceContextSearchPage {
   const result = domainResult(value, "workspace_context_search_response_invalid");
   const parsed = PublicWorkspaceSearchPageSchema.safeParse(result);

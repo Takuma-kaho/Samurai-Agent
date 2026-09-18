@@ -543,6 +543,7 @@ export async function createWorkspaceServerHttp(
     store,
     completion,
     storageRoot: config.storageRoot,
+    cursorSecret: config.invitationTokenSecret,
     ...(configuredShareOrigin ? { origin: configuredShareOrigin } : {}),
     ...(options.share?.allowedSourceOrigins ? { allowedSourceOrigins: options.share.allowedSourceOrigins } : {}),
     ...(options.share?.importHttpClient ? { importHttpClient: options.share.importHttpClient } : {}),

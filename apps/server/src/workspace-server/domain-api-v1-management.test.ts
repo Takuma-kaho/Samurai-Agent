@@ -399,6 +399,24 @@ describe("Domain API v1 management boundary", () => {
         "room_1"
       );
 
+      // A fresh Workspace has no persisted settings row. The Core's default
+      // marker is internal-only and must still satisfy the public contract.
+      mounted.learning.getSettingsLayers.mockResolvedValueOnce({
+        effective: {
+          ...learningSettings,
+          id: "workspace",
+          scope: { kind: "workspace" },
+          version: 0,
+          updatedBy: "",
+          updatedAt: "1970-01-01T00:00:00.000Z",
+          enabledInheritsWorkspace: true
+        }
+      });
+      const defaultLearningResponse = await request(baseUrl, "GET", "/api/v1/workspaces/workspace_1/learning/settings?room_id=room_1");
+      expect(defaultLearningResponse.status).toBe(200);
+      expect(defaultLearningResponse.body).toMatchObject({ settings: { updatedBy: "system", version: 0, scope: { kind: "workspace" } } });
+      expect(defaultLearningResponse.body.settings).not.toHaveProperty("enabledInheritsWorkspace");
+
       const learningPatch = await request(baseUrl, "PATCH", "/api/v1/workspaces/workspace_1/learning/settings", { scope_kind: "room", room_id: "room_1", enabled: false, expected_version: 1 }, "learning_patch");
       expect(learningPatch.status).toBe(201);
       expect(learningPatch.body).toMatchObject({ settings: { scope: { roomId: "room_1" } }, replayed: false });

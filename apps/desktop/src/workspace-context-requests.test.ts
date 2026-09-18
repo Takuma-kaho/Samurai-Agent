@@ -38,16 +38,27 @@ import {
   accountInvitationNotificationListRequestFromPreload,
   accountInvitationNotificationReadRequestFromPreload,
   workspaceShareDraftCreateRequest,
+  workspaceShareDraftCreateRequestFromPreload,
   workspaceShareDraftDiscardRequest,
+  workspaceShareDraftDiscardRequestFromPreload,
   workspaceShareDraftUpdateRequest,
+  workspaceShareDraftUpdateRequestFromPreload,
   workspaceShareDraftViewRequest,
+  workspaceShareDraftViewRequestFromPreload,
   workspaceShareImportRequest,
+  workspaceShareImportRequestFromPreload,
   workspaceShareImportStatusRequest,
+  workspaceShareImportStatusRequestFromPreload,
   workspaceShareLinkImportRequest,
+  workspaceShareLinkImportRequestFromPreload,
   workspaceShareLinkViewRequest,
+  workspaceShareLinkViewRequestFromPreload,
   workspaceShareListRequest,
+  workspaceShareListRequestFromPreload,
   workspaceSharePublishRequest,
-  workspaceShareRevokeRequest
+  workspaceSharePublishRequestFromPreload,
+  workspaceShareRevokeRequest,
+  workspaceShareRevokeRequestFromPreload
 } from "./workspace-context-requests";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
@@ -511,6 +522,53 @@ describe("Desktop Workspace Share request and response sanitation", () => {
     expect(() => workspaceSharePublishRequest({ draftId: "draft_1", expectedVersion: 0, expectedContentHash: hash, operationId: "publish_1", target })).toThrow("workspace_share_expected_version_invalid");
     expect(() => workspaceShareImportRequest({ sourceOrigin: "http://source.example/", locator, claimId: "claim_1", contentHash: hash, delegation, operationId: "import_1", target })).toThrow("workspace_share_source_origin_invalid");
     expect(() => workspaceShareImportRequest({ sourceOrigin: "https://source.example/", locator: "short", claimId: "claim_1", contentHash: hash, delegation, operationId: "import_1", target })).toThrow("workspace_share_locator_invalid");
+  });
+
+  it("accepts the normalized preload shape exactly once in Main", () => {
+    const listed = workspaceShareListRequestFromPreload({ target, body: { source_kind: "agent", source_id: "agent_1", limit: 10 } });
+    expect(listed).toEqual({ target, body: { source_kind: "agent", source_id: "agent_1", limit: 10 } });
+    expect(workspaceShareDraftViewRequestFromPreload({ target, body: { draft_id: "draft_1" } })).toEqual({ target, body: { draft_id: "draft_1" } });
+    expect(workspaceShareDraftCreateRequestFromPreload({ target, operationId: "draft_create_1", body: { source_kind: "room_knowledge", source_id: "room_1", resource_refs: [{ id: "resource_1", version: 1 }] } })).toEqual({
+      target,
+      operationId: "draft_create_1",
+      body: { source_kind: "room_knowledge", source_id: "room_1", resource_refs: [{ id: "resource_1", version: 1 }] }
+    });
+    expect(workspaceShareDraftDiscardRequestFromPreload({ target, operationId: "discard_1", body: { draft_id: "draft_1", expected_version: 1 } }).body)
+      .toEqual({ draft_id: "draft_1", expected_version: 1 });
+    expect(workspaceShareDraftUpdateRequestFromPreload({ target, operationId: "update_1", body: { draft_id: "draft_1", expected_version: 1, manifest, visibility: "public", recipient_account_ids: [] } }).body)
+      .toMatchObject({ draft_id: "draft_1", expected_version: 1, visibility: "public" });
+    expect(workspaceSharePublishRequestFromPreload({ target, operationId: "publish_1", body: { draft_id: "draft_1", expected_version: 1, expected_content_hash: hash } }).body)
+      .toEqual({ draft_id: "draft_1", expected_version: 1, expected_content_hash: hash });
+    expect(workspaceShareRevokeRequestFromPreload({ target, operationId: "revoke_1", body: { share_id: "share_1", expected_version: 1 } }).body)
+      .toEqual({ share_id: "share_1", expected_version: 1 });
+    expect(workspaceShareImportRequestFromPreload({ target, operationId: "import_1", body: {
+      source_origin: "https://source.example/",
+      locator,
+      claim_id: "claim_1",
+      content_hash: hash,
+      delegation: {
+        payload: {
+          version: 1,
+          source_origin: "https://source.example/",
+          share_id: "share_1",
+          claim_id: "claim_1",
+          recipient_account_id: "account_1",
+          target_origin: "https://workspace.example/",
+          target_workspace_id: "workspace_1",
+          operation_id: "import_1",
+          content_hash: hash,
+          issued_at: timestamp,
+          expires_at: "2026-09-18T00:00:00.000Z"
+        },
+        public_key: "public-key",
+        signature: "signature"
+      }
+    } }).body)
+      .toMatchObject({ source_origin: "https://source.example/", locator, claim_id: "claim_1" });
+    expect(workspaceShareImportStatusRequestFromPreload({ target, operationId: "import_1", body: { operation_id: "import_1" } })).toEqual({ target, operationId: "import_1", body: { operation_id: "import_1" } });
+    expect(workspaceShareLinkViewRequestFromPreload({ target, sourceUrl: `https://source.example/s/${locator}`, sourceOrigin: "https://source.example/", locator })).toMatchObject({ target, locator });
+    expect(workspaceShareLinkImportRequestFromPreload({ target, sourceUrl: `https://source.example/s/${locator}`, sourceOrigin: "https://source.example/", locator, operationId: "link_import_1" })).toMatchObject({ target, locator, operationId: "link_import_1" });
+    expect(() => workspaceShareListRequestFromPreload({ target, body: { source_kind: "agent", source_id: "agent_1" }, workspaceId: "leak" } as never)).toThrow("workspace_share_list_input_invalid");
   });
 
   it("accepts only the strict source link shape and sanitizes the public projection", () => {

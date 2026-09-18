@@ -197,17 +197,18 @@ import {
   accountWorkspaceNotificationSummaryRequestFromPreload,
   accountInvitationNotificationListRequestFromPreload,
   accountInvitationNotificationReadRequestFromPreload,
-  workspaceShareDraftCreateRequest,
-  workspaceShareDraftDiscardRequest,
-  workspaceShareDraftUpdateRequest,
-  workspaceShareDraftViewRequest,
+  workspaceShareDraftCreateRequestFromPreload,
+  workspaceShareDraftDiscardRequestFromPreload,
+  workspaceShareDraftUpdateRequestFromPreload,
+  workspaceShareDraftViewRequestFromPreload,
   workspaceShareImportRequest,
-  workspaceShareImportStatusRequest,
-  workspaceShareLinkImportRequest,
-  workspaceShareLinkViewRequest,
-  workspaceShareListRequest,
-  workspaceSharePublishRequest,
-  workspaceShareRevokeRequest,
+  workspaceShareImportRequestFromPreload,
+  workspaceShareImportStatusRequestFromPreload,
+  workspaceShareLinkImportRequestFromPreload,
+  workspaceShareLinkViewRequestFromPreload,
+  workspaceShareListRequestFromPreload,
+  workspaceSharePublishRequestFromPreload,
+  workspaceShareRevokeRequestFromPreload,
   type WorkspaceContextTargetRequest
 } from "./workspace-context-requests.js";
 import {
@@ -1387,7 +1388,7 @@ function registerIpcHandlers(): void {
     return sanitizeAccountInvitationNotificationMarkReadResponse(response, request.notificationIds);
   });
   ipcMain.handle("samurai:workspace-server:share:draft:create", async (_event, input: unknown) => {
-    const request = workspaceShareDraftCreateRequest(input);
+    const request = workspaceShareDraftCreateRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).createShareDraft(workspaceSnapshot.workspaceId, request.body, {
       operationId: request.operationId,
@@ -1397,14 +1398,14 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceShareDraftResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:draft:view", async (_event, input: unknown) => {
-    const request = workspaceShareDraftViewRequest(input);
+    const request = workspaceShareDraftViewRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).viewShareDraft(workspaceSnapshot.workspaceId, request.body);
     assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return sanitizeWorkspaceShareDraftResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:draft:update", async (_event, input: unknown) => {
-    const request = workspaceShareDraftUpdateRequest(input);
+    const request = workspaceShareDraftUpdateRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).updateShareDraft(workspaceSnapshot.workspaceId, request.body, {
       operationId: request.operationId,
@@ -1414,7 +1415,7 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceShareDraftResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:draft:discard", async (_event, input: unknown) => {
-    const request = workspaceShareDraftDiscardRequest(input);
+    const request = workspaceShareDraftDiscardRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).discardShareDraft(workspaceSnapshot.workspaceId, request.body, {
       operationId: request.operationId,
@@ -1424,14 +1425,14 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceShareDraftDiscardResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:list", async (_event, input: unknown) => {
-    const request = workspaceShareListRequest(input);
+    const request = workspaceShareListRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).listShares(workspaceSnapshot.workspaceId, request.body);
     assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return sanitizeWorkspaceSharePageResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:publish", async (_event, input: unknown) => {
-    const request = workspaceSharePublishRequest(input);
+    const request = workspaceSharePublishRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).publishShare(workspaceSnapshot.workspaceId, request.body, {
       operationId: request.operationId,
@@ -1441,7 +1442,7 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceSharePublishResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:revoke", async (_event, input: unknown) => {
-    const request = workspaceShareRevokeRequest(input);
+    const request = workspaceShareRevokeRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).revokeShare(workspaceSnapshot.workspaceId, request.body, {
       operationId: request.operationId,
@@ -1451,7 +1452,7 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceShareRevokeResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:import", async (_event, input: unknown) => {
-    const request = workspaceShareImportRequest(input);
+    const request = workspaceShareImportRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     assertWorkspaceShareDelegationTarget(workspaceSnapshot, request.body, request.operationId);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).importShare(workspaceSnapshot.workspaceId, request.body, {
@@ -1462,14 +1463,14 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceShareImportResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:import:status", async (_event, input: unknown) => {
-    const request = workspaceShareImportStatusRequest(input);
+    const request = workspaceShareImportStatusRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).getShareImportStatus(workspaceSnapshot.workspaceId, request.body);
     assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return sanitizeWorkspaceShareImportResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:share:link:view", async (_event, input: unknown) => {
-    const request = workspaceShareLinkViewRequest(input);
+    const request = workspaceShareLinkViewRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceShareTargetSnapshot(request.target);
     const connection = requireWorkspaceConnectionForSnapshot(workspaceSnapshot);
     const privateKey = await requireActiveWorkspacePrivateKey(connection);
@@ -1485,7 +1486,7 @@ function registerIpcHandlers(): void {
     return sanitizeWorkspaceShareLinkViewResponse(response.body, request);
   });
   ipcMain.handle("samurai:workspace-server:share:link:import", async (_event, input: unknown) => {
-    const request = workspaceShareLinkImportRequest(input);
+    const request = workspaceShareLinkImportRequestFromPreload(input);
     const workspaceSnapshot = captureWorkspaceShareTargetSnapshot(request.target);
     const connection = requireWorkspaceConnectionForSnapshot(workspaceSnapshot);
     const privateKey = await requireActiveWorkspacePrivateKey(connection);

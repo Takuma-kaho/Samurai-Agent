@@ -3447,8 +3447,20 @@ function publicRuntimeSettings(value: unknown): JsonValue {
 
 function publicLearningSettings(value: unknown): JsonValue {
   const body = recordValue(value);
-  const { secretRef: _secretRef, ...safe } = body;
-  return PublicLearningSettingsSchema.parse(safe) as JsonValue;
+  const {
+    secretRef: _secretRef,
+    // This is an internal inheritance resolver flag. The public contract
+    // exposes the resolved settings, not the layer-resolution mechanism.
+    enabledInheritsWorkspace: _enabledInheritsWorkspace,
+    ...safe
+  } = body;
+  // A new Workspace has no persisted settings row yet. The Core represents
+  // that inherited default with an empty updatedBy value, while the public
+  // contract requires a non-empty opaque identifier. Keep the marker explicit
+  // at this projection boundary; it is not an Account or an authorization
+  // selector and is never written back to PostgreSQL.
+  const updatedBy = body.updatedBy === "" ? "system" : body.updatedBy;
+  return PublicLearningSettingsSchema.parse({ ...safe, updatedBy }) as JsonValue;
 }
 
 function publicLearningSettingsLayers(value: WorkspaceLearningSettingsLayers | unknown): JsonValue {
