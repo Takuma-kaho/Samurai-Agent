@@ -3,6 +3,7 @@
 実施日: 2026-09-18
 対象計画: [`plans/native-ui-workspace-context-sharing-plan.md`](../../plans/native-ui-workspace-context-sharing-plan.md)
 作業ブランチ: `codex/design-workspace-room-agent-sharing`
+検証対象コミット: `aba7c17`
 判定: 必須実装・実DB・実Storage・実Browser・実macOS Native・実Agent・Hosted/Self-host・CIの技術確認を完了。マージは未実施。
 
 ## 1. 実装結果
@@ -101,7 +102,11 @@ Docker Desktop上に専用Compose project `samurai-context-verify`、専用Postg
 
 ## 9. CI
 
-権限付きのローカルCI入口では、migration、全typecheck、Web build、全test、Hosted/Self-host、RLS、HTTP recovery、worker/bundle、runtime recoveryがpassした。Push後のGitHub Actionsでは、最終コミットに対してCIとSecurityを実行し、全jobがpassした結果をこの節へ追記する。
+権限付きのローカルCI入口では、migration、全typecheck、Web build、全test、Hosted/Self-host、RLS、HTTP recovery、worker/bundle、runtime recoveryがpassした。最終コードコミット`aba7c17`に対するGitHub Actionsも全jobがpassした。
+
+- CI `35298035631`: 7 jobs（Linux全体、PostgreSQL deep/load、release readiness、macOS/Ubuntu/Windows契約）pass。
+- Security `35298036120`: dependency、secret/release hygiene、source quality、PostgreSQL scope/migrationの全ゲートpass。
+- [CI](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35298035631) / [Security](https://github.com/Takuma-kaho/Samurai-Agent/actions/runs/35298036120)
 
 ## 10. 残作業・停止点
 
