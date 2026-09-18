@@ -4,6 +4,15 @@ import { ResourceRefSchema, SupportedLocaleSchema } from "@samurai-agent/core-sc
 import { domainJsonValueSchema, defineCommand, type DomainResult, type TrustedDomainContext } from "../../../definition/index.js";
 import { chatTurnValueSchema } from "../../../value-objects/chat.js";
 
+/** A signed Account-owned settings snapshot for one execution admission. */
+const PersonalPreferencesSnapshot = z.object({
+  "schema_version": z.literal(1),
+  "revision": z.number().int().nonnegative().safe(),
+  "display_name": z.string().trim().min(1).max(200),
+  "output_locale": SupportedLocaleSchema.nullable(),
+  "instructions": z.string().max(20_000)
+}).strict();
+
 const Input = z.object({
   "attachments": z.array(ResourceRefSchema.strict()).default([]),
   "agent_id": z.string().trim().min(1).optional(),
@@ -12,6 +21,7 @@ const Input = z.object({
   "input_locale": SupportedLocaleSchema.optional(),
   "metadata": z.record(domainJsonValueSchema).default({}),
   "output_locale": SupportedLocaleSchema.optional(),
+  "personal_preferences": PersonalPreferencesSnapshot.optional(),
   "temporary_context": z.array(z.object({
     id: z.string().trim().min(1), kind: z.literal("desktop_screenshot"), label: z.string().optional(),
     source_name: z.string().optional(), mime_type: z.string().trim().min(1), data_url: z.string().optional(),
@@ -26,7 +36,7 @@ type OutputValue = z.infer<typeof Output>;
 export interface ChatTurnRunPorts {
   runChatTurn(context: TrustedDomainContext, input: {
     sessionId: string; content: string; idempotencyKey: string; backend_id?: string; agent_id?: string; input_locale?: InputValue["input_locale"];
-    output_locale?: InputValue["output_locale"]; attachments: InputValue["attachments"];
+    output_locale?: InputValue["output_locale"]; personal_preferences?: InputValue["personal_preferences"]; attachments: InputValue["attachments"];
     temporary_context: InputValue["temporary_context"]; metadata: InputValue["metadata"];
   }): Promise<OutputValue>;
 }
@@ -35,7 +45,7 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
   ...{
   "kind": "command",
   "id": "chat.turn.run",
-  "version": "5.2",
+  "version": "5.3",
   "availability": "active",
   "runtimeRequirements": ["agent_backend"],
   "title": "Run chat turn",
@@ -96,7 +106,9 @@ const chatTurnRun = defineCommand<ChatTurnRunPorts>()({
         };
         return { ok: true, value: await ports.runChatTurn(context, {
           sessionId, content: input.content, idempotencyKey: context.idempotencyKey, backend_id: input.backend_id, agent_id: input.agent_id, input_locale: input.input_locale,
-          output_locale: input.output_locale, attachments: input.attachments,
+          output_locale: input.output_locale,
+          ...(input.personal_preferences === undefined ? {} : { personal_preferences: input.personal_preferences }),
+          attachments: input.attachments,
           temporary_context: input.temporary_context, metadata
         }) };
       }

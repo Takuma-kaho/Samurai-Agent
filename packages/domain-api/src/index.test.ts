@@ -5,6 +5,7 @@ import {
   DomainApiRequestSchema,
   DomainApiTransportRequest,
   DomainApiClient,
+  PersonalPreferencesSnapshotSchema,
   PublicRoomCreateInputSchema,
   PublicRoomRecordSchema,
   PublicRoomAgentPermissionSetInputSchema,
@@ -13,10 +14,30 @@ import {
   PublicAgentBackendRecordSchema,
   PublicAutomationJobListSchema,
   PublicAutomationRunSchema,
+  PublicAccountInvitationNotificationReadInputSchema,
+  PublicAccountWorkspaceNotificationSummariesInputSchema,
+  PublicNotificationMarkReadInputSchema,
+  PublicNotificationPageSchema,
+  PublicNotificationSummarySchema,
+  PublicShareDraftCreateInputSchema,
+  PublicShareDraftSchema,
+  PublicShareDraftUpdateInputSchema,
+  PublicShareImportInputSchema,
+  PublicShareImportResultSchema,
+  PublicShareManifestSchema,
+  PublicSharePageSchema,
+  PublicSharePublishInputSchema,
+  PublicShareRevokeInputSchema,
+  PublicShareViewSchema,
+  PublicWorkspaceSearchInputSchema,
+  PublicWorkspaceSearchPageSchema,
   PublicCompletionResourceBodySchema,
   PublicCompletionResourceCreateInputSchema,
   PublicCompletionResourceDetailSchema,
   PublicCompletionResourcePageSchema,
+  PublicCompletionResourceListInputSchema,
+  PublicCompletionResourceViewInputSchema,
+  PublicCompletionResourceStateInputSchema,
   PublicCompletionResourceMutationResultSchema,
   PublicLearningSettingsLayersSchema,
   PublicLearningSettingsPatchInputSchema,
@@ -42,6 +63,7 @@ import {
   publicDomainOperationIds,
   publicOperationOutputSchemaFor,
   publicOperationInputSchemaFor,
+  schemaForPublicContract,
   PublicRuntimeSettingsSchema,
   runControlRequestSchemaFor
 } from "./index";
@@ -56,6 +78,19 @@ const activityBase = {
   verification: [],
   domain_operation_ids: [],
   resource_usage: []
+};
+
+const shareManifest = {
+  format_version: 1 as const,
+  kind: "room_knowledge" as const,
+  title: "Room knowledge",
+  entries: [{
+    entry_id: "entry_1",
+    kind: "knowledge" as const,
+    title: "A fact",
+    content: "The fact body",
+    knowledge_kind: "fact" as const
+  }]
 };
 
 describe("public Domain API contract", () => {
@@ -78,6 +113,36 @@ describe("public Domain API contract", () => {
   it("keeps authority out of the public request context", () => {
     expect(DomainApiRequestSchema.safeParse({
       context: { room_id: "room_1", actor_id: "spoofed" },
+      input: {}
+    }).success).toBe(false);
+  });
+
+  it("accepts only the strict Account preferences snapshot in an execution context", () => {
+    const personalPreferences = {
+      schema_version: 1 as const,
+      revision: 3,
+      display_name: "  Takuma  ",
+      output_locale: "ja" as const,
+      instructions: "Keep answers concise."
+    };
+    expect(PersonalPreferencesSnapshotSchema.parse(personalPreferences)).toEqual({
+      ...personalPreferences,
+      display_name: "Takuma"
+    });
+    expect(DomainApiRequestSchema.safeParse({
+      context: { room_id: "room_1", personal_preferences: personalPreferences },
+      input: {}
+    }).success).toBe(true);
+    expect(DomainApiRequestSchema.safeParse({
+      context: { personal_preferences: { ...personalPreferences, revision: -1 } },
+      input: {}
+    }).success).toBe(false);
+    expect(DomainApiRequestSchema.safeParse({
+      context: { personal_preferences: { ...personalPreferences, unexpected: true } },
+      input: {}
+    }).success).toBe(false);
+    expect(DomainApiRequestSchema.safeParse({
+      context: { personal_preferences: { ...personalPreferences, instructions: "x".repeat(20_001) } },
       input: {}
     }).success).toBe(false);
   });
@@ -550,12 +615,35 @@ describe("public Domain API contract", () => {
       title: "A fact", content: "The body", reason: "human edit"
     }).success).toBe(true);
     expect(PublicCompletionResourceCreateInputSchema.safeParse({
-      scope_kind: "workspace", room_id: "room_1", kind: "skill", title: "A skill", content: "# Skill", reason: "human edit"
+      scope_kind: "workspace", kind: "skill", title: "A skill", content: "# Skill", reason: "human edit"
+    }).success).toBe(true);
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "workspace", kind: "knowledge", knowledge_kind: "fact", title: "Retired", content: "body", reason: "human edit"
     }).success).toBe(false);
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "agent", agent_id: "agent_1", kind: "knowledge", knowledge_kind: "fact",
+      title: "Agent fact", content: "The body", reason: "human edit"
+    }).success).toBe(true);
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "agent", agent_id: "agent_1", room_id: "room_1", kind: "knowledge", knowledge_kind: "fact",
+      title: "Agent fact", content: "The body", reason: "human edit"
+    }).success).toBe(false);
+    expect(PublicCompletionResourceCreateInputSchema.safeParse({
+      scope_kind: "agent", agent_id: "agent_1", kind: "knowledge", knowledge_kind: "fact", ai_managed: true,
+      title: "Agent fact", content: "The body", reason: "human edit"
+    }).success).toBe(false);
+    expect(PublicCompletionResourceListInputSchema.safeParse({ scope_kind: "agent", agent_id: "agent_1", kind: "knowledge" }).success).toBe(true);
+    expect(PublicCompletionResourceListInputSchema.safeParse({ scope_kind: "agent", agent_id: "agent_1", room_id: "room_1" }).success).toBe(false);
+    expect(PublicCompletionResourceListInputSchema.safeParse({ scope_kind: "workspace", kind: "skill" }).success).toBe(true);
+    expect(PublicCompletionResourceListInputSchema.safeParse({ scope_kind: "workspace", kind: "knowledge" }).success).toBe(false);
+    expect(PublicCompletionResourceViewInputSchema.safeParse({ resource_id: "workspace_skill_1", scope_kind: "workspace", kind: "skill" }).success).toBe(true);
+    expect(PublicCompletionResourceViewInputSchema.safeParse({ resource_id: "workspace_memory_1", scope_kind: "workspace", kind: "knowledge" }).success).toBe(false);
+    expect(PublicCompletionResourceViewInputSchema.safeParse({ resource_id: "agent_resource_1", scope_kind: "agent", agent_id: "agent_1" }).success).toBe(true);
+    expect(PublicCompletionResourceStateInputSchema.safeParse({ resource_id: "agent_resource_1", scope_kind: "agent", agent_id: "agent_1", expected_version: 1, reason: "fix", fixed: true }).success).toBe(true);
     expect(PublicCompletionResourcePageSchema.safeParse({ resources: [], next_cursor: "cursor_1" }).success).toBe(true);
     expect(PublicCompletionResourceDetailSchema.safeParse({
       resource: {
-        workspaceId: "workspace_1", id: "resource_1", scope: { kind: "room", roomId: "room_1" }, kind: "knowledge", knowledgeKind: "fact",
+        workspaceId: "workspace_1", id: "resource_1", scope: { kind: "agent", agentId: "agent_1" }, kind: "knowledge", knowledgeKind: "fact",
         title: "A fact", evidenceState: "confirmed", lifecycleState: "active", aiProtection: "editable", creationSource: "human", aiManaged: false,
         version: 2, createdBy: "account_1", updatedBy: "account_1", createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
       },
@@ -599,6 +687,88 @@ describe("public Domain API contract", () => {
     expect(PublicCompletionResourceMutationResultSchema.safeParse({ resource: {} }).success).toBe(false);
   });
 
+  it("publishes strict search, notification, account, and share contracts", () => {
+    const searchInput = PublicWorkspaceSearchInputSchema.parse({ q: "  knowledge  " });
+    expect(searchInput).toMatchObject({ q: "knowledge", types: ["room", "conversation", "knowledge"], limit: 30 });
+    expect(PublicWorkspaceSearchInputSchema.safeParse({ q: "knowledge", unknown: true }).success).toBe(false);
+    expect(PublicWorkspaceSearchInputSchema.safeParse({ q: "knowledge", types: ["room", "room"] }).success).toBe(false);
+    expect(PublicWorkspaceSearchPageSchema.safeParse({ items: [], next_cursor: null }).success).toBe(true);
+    expect(PublicWorkspaceSearchPageSchema.safeParse({ items: [], next_cursor: "x".repeat(4_097) }).success).toBe(false);
+
+    expect(PublicNotificationPageSchema.safeParse({ items: [], next_cursor: null }).success).toBe(true);
+    expect(PublicNotificationSummarySchema.safeParse({ unread_count: 0, as_of: "2026-09-17T00:00:00.000Z" }).success).toBe(true);
+    expect(eventCatalog.map((entry) => entry.event_type)).toContain("notification.changed");
+    expect(eventPayloadSchemaFor("notification.changed").safeParse({ notification_id: "notification_1", workspace_id: null }).success).toBe(true);
+    expect(eventPayloadSchemaFor("notification.changed").safeParse({ notification_id: "notification_1", workspace_id: "workspace_1", content: "private" }).success).toBe(false);
+    expect(PublicNotificationMarkReadInputSchema.safeParse({ notification_ids: ["notification_1", "notification_1"] }).success).toBe(false);
+    expect(PublicNotificationMarkReadInputSchema.safeParse({ notification_ids: [], extra: true }).success).toBe(false);
+    expect(PublicAccountWorkspaceNotificationSummariesInputSchema.safeParse({ workspace_ids: ["workspace_1"], workspace_id: "spoofed" }).success).toBe(false);
+    expect(PublicAccountInvitationNotificationReadInputSchema.safeParse({ notification_ids: ["invitation_notification_1"] }).success).toBe(true);
+
+    expect(PublicShareManifestSchema.safeParse(shareManifest).success).toBe(true);
+    expect(PublicShareManifestSchema.safeParse({ ...shareManifest, unknown: true }).success).toBe(false);
+    expect(PublicShareManifestSchema.safeParse({ ...shareManifest, agent: { name: "Agent", role: "role", instructions: "instructions" } }).success).toBe(false);
+    expect(PublicShareManifestSchema.safeParse({ ...shareManifest, kind: "agent" }).success).toBe(false);
+    expect(PublicShareDraftCreateInputSchema.safeParse({ source_kind: "room_knowledge", source_id: "room_1", resource_refs: [{ id: "resource_1", version: 1 }] }).success).toBe(true);
+    expect(PublicShareDraftCreateInputSchema.safeParse({ base_share_id: "share_1", source_kind: "agent" }).success).toBe(false);
+    expect(PublicShareDraftUpdateInputSchema.safeParse({ draft_id: "draft_1", expected_version: 1, manifest: shareManifest, visibility: "restricted", recipient_account_ids: [] }).success).toBe(true);
+    expect(PublicShareDraftUpdateInputSchema.safeParse({ draft_id: "draft_1", expected_version: 0, manifest: shareManifest, visibility: "restricted", recipient_account_ids: [] }).success).toBe(false);
+    expect(PublicSharePublishInputSchema.safeParse({ draft_id: "draft_1", expected_version: 1, expected_content_hash: "a".repeat(64) }).success).toBe(true);
+    expect(PublicSharePublishInputSchema.safeParse({ draft_id: "draft_1", expected_version: 1, expected_content_hash: "A".repeat(64) }).success).toBe(false);
+    expect(PublicShareRevokeInputSchema.safeParse({ share_id: "share_1", expected_version: 1, extra: true }).success).toBe(false);
+    expect(PublicSharePageSchema.safeParse({ items: [], next_cursor: null }).success).toBe(true);
+    expect(PublicShareViewSchema.safeParse({
+      share_id: "share_1", version: 1, title: "Shared", status: "active", visibility: "public",
+      recipient_account_ids: [], url: "https://server.example/s/locator", created_at: "2026-09-17T00:00:00.000Z",
+      published_at: "2026-09-17T00:00:00.000Z", revoked_at: null, manifest: { ...shareManifest, kind: "agent", agent: { name: "Agent", role: "role", instructions: "instructions" } }, content_hash: "a".repeat(64)
+    }).success).toBe(true);
+    expect(PublicShareImportInputSchema.safeParse({
+      source_origin: "https://source.example",
+      locator: "A".repeat(43),
+      claim_id: "claim_1",
+      content_hash: "a".repeat(64),
+      delegation: {
+        payload: {
+          version: 1,
+          source_origin: "https://source.example",
+          share_id: "share_1",
+          claim_id: "claim_1",
+          recipient_account_id: "account_1",
+          target_origin: "https://target.example",
+          target_workspace_id: "workspace_2",
+          operation_id: "import_1",
+          content_hash: "a".repeat(64),
+          issued_at: "2026-09-17T00:00:00.000Z",
+          expires_at: "2026-09-17T00:04:00.000Z"
+        },
+        public_key: "public-key",
+        signature: "signature"
+      },
+      target_room_id: "room_2"
+    }).success).toBe(true);
+    expect(PublicShareImportResultSchema.safeParse({
+      import_id: "import_1", kind: "room_knowledge", status: "staging", phase: "fetch", retryable: true,
+      failure_code: null, created_resource_ids: [], created_agent_id: null, committed_at: null
+    }).success).toBe(true);
+
+    const requiredIds = [
+      "workspace.search", "notification.list", "notification.summary", "notification.mark_read",
+      "account.workspace_notification_summaries", "account.invitation_notifications", "account.invitation_notification_read",
+      "share.draft.create", "share.draft.update", "share.draft.view", "share.draft.discard", "share.publish",
+      "share.list", "share.view", "share.revoke", "share.import", "share.import.status"
+    ];
+    expect(publicDomainOperationIds).toEqual(expect.arrayContaining(requiredIds));
+    expect(publicManagementContractDefinitions.map((definition) => definition.id)).toEqual(expect.arrayContaining(requiredIds));
+    for (const id of requiredIds) {
+      const definition = publicManagementContractDefinitions.find((candidate) => candidate.id === id);
+      expect(definition).toBeDefined();
+      expect(publicOperationInputSchemaFor(id, z.never())).toBe(definition?.input);
+      expect(publicOperationOutputSchemaFor(id, z.never())).toBe(definition?.output);
+      expect(() => schemaForPublicContract(definition!.input, `${id}.input`)).not.toThrow();
+      expect(() => schemaForPublicContract(definition!.output, `${id}.output`)).not.toThrow();
+    }
+  });
+
   it("routes typed management client calls to the versioned GET/POST/PATCH paths", async () => {
     const requests: DomainApiTransportRequest[] = [];
     const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
@@ -634,6 +804,102 @@ describe("public Domain API contract", () => {
     expect(requests[2]).toMatchObject({ method: "PATCH", operationId: "completion_update", idempotencyKey: "completion_update" });
     expect(requests[9]).toMatchObject({ method: "POST", operationId: "completion_archive", idempotencyKey: "completion_archive", body: expect.objectContaining({ room_id: "room_1" }) });
     expect(requests[10]).toMatchObject({ method: "POST", operationId: "completion_fix", idempotencyKey: "completion_fix", body: expect.objectContaining({ room_id: "room_1" }) });
+  });
+
+  it("routes Context, Notification, Account, and Share client calls through v1", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    });
+    await client.searchWorkspace("workspace_1", { q: "knowledge" });
+    await client.listNotifications("workspace_1");
+    await client.getNotificationSummary("workspace_1");
+    await client.markNotificationsRead("workspace_1", { notification_ids: ["notification_1"] }, { operationId: "notification_read" });
+    await client.getAccountWorkspaceNotificationSummaries({ workspace_ids: ["workspace_1"] });
+    await client.listAccountInvitationNotifications();
+    await client.markAccountInvitationNotificationsRead({ notification_ids: ["invitation_notification_1"] }, { operationId: "invitation_read" });
+    await client.createShareDraft("workspace_1", { base_share_id: "share_1" }, { operationId: "draft_create" });
+    await client.updateShareDraft("workspace_1", { draft_id: "draft_1", expected_version: 1, manifest: shareManifest, visibility: "restricted", recipient_account_ids: [] }, { operationId: "draft_update" });
+    await client.viewShareDraft("workspace_1", { draft_id: "draft_1" });
+    await client.discardShareDraft("workspace_1", { draft_id: "draft_1", expected_version: 1 }, { operationId: "draft_discard" });
+    await client.publishShare("workspace_1", { draft_id: "draft_1", expected_version: 1, expected_content_hash: "a".repeat(64) }, { operationId: "share_publish" });
+    await client.listShares("workspace_1", { source_kind: "room_knowledge", source_id: "room_1" });
+    await client.viewShare("workspace_1", { share_id: "share_1" });
+    await client.revokeShare("workspace_1", { share_id: "share_1", expected_version: 1 }, { operationId: "share_revoke" });
+    await client.importShare("workspace_1", PublicShareImportInputSchema.parse({
+      source_origin: "https://source.example",
+      locator: "A".repeat(43),
+      claim_id: "claim_1",
+      content_hash: "a".repeat(64),
+      delegation: {
+        payload: {
+          version: 1,
+          source_origin: "https://source.example",
+          share_id: "share_1",
+          claim_id: "claim_1",
+          recipient_account_id: "account_1",
+          target_origin: "https://target.example",
+          target_workspace_id: "workspace_1",
+          operation_id: "share_import",
+          content_hash: "a".repeat(64),
+          issued_at: "2026-09-17T00:00:00.000Z",
+          expires_at: "2026-09-17T00:04:00.000Z"
+        },
+        public_key: "public-key",
+        signature: "signature"
+      },
+      target_room_id: "room_1"
+    }), { operationId: "share_import" });
+    await client.getShareImportStatus("workspace_1", { operation_id: "share_import" });
+
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "POST /api/v1/workspaces/workspace_1/domain/queries/workspace.search",
+      "POST /api/v1/workspaces/workspace_1/domain/queries/notification.list",
+      "POST /api/v1/workspaces/workspace_1/domain/queries/notification.summary",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/notification.mark_read",
+      "POST /api/v1/domain/queries/account.workspace_notification_summaries",
+      "POST /api/v1/domain/queries/account.invitation_notifications",
+      "POST /api/v1/domain/operations/account.invitation_notification_read",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/share.draft.create",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/share.draft.update",
+      "POST /api/v1/workspaces/workspace_1/domain/queries/share.draft.view",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/share.draft.discard",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/share.publish",
+      "POST /api/v1/workspaces/workspace_1/domain/queries/share.list",
+      "POST /api/v1/workspaces/workspace_1/domain/queries/share.view",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/share.revoke",
+      "POST /api/v1/workspaces/workspace_1/domain/operations/share.import",
+      "POST /api/v1/workspaces/workspace_1/domain/queries/share.import.status"
+    ]);
+    expect(requests[3]).toMatchObject({ operationId: "notification_read", idempotencyKey: "notification_read" });
+    expect(requests[6]).toMatchObject({ operationId: "invitation_read", idempotencyKey: "invitation_read" });
+    expect(requests[15]).toMatchObject({ operationId: "share_import", idempotencyKey: "share_import" });
+  });
+
+  it("forwards the authenticated preferences snapshot only in Room Work context", async () => {
+    const requests: DomainApiTransportRequest[] = [];
+    const client = new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+      requests.push(request);
+      return {} as T;
+    });
+    const personalPreferences = {
+      schema_version: 1 as const,
+      revision: 4,
+      display_name: "Takuma",
+      output_locale: "ja" as const,
+      instructions: "Use the saved style."
+    };
+    await client.createRoomWork("workspace_1", "room_1", { instruction: "Create" }, {
+      operationId: "work_create",
+      personalPreferences
+    });
+    await client.replyRoomWork("workspace_1", "room_1", { work_id: "work_1", instruction: "Reply" }, {
+      operationId: "work_reply",
+      personalPreferences
+    });
+    expect(requests[0]?.body).toEqual({ context: { room_id: "room_1", personal_preferences: personalPreferences }, input: { instruction: "Create" } });
+    expect(requests[1]?.body).toEqual({ context: { room_id: "room_1", personal_preferences: personalPreferences }, input: { work_id: "work_1", instruction: "Reply" } });
   });
 
   it("validates transfer proof and keeps cutover stages explicit", () => {

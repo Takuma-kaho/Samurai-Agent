@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "./auth";
+import { WorkspaceServerError } from "./errors";
 import type { WorkspaceServerStore } from "./workspace-server-store";
 import {
   readWorkspaceBundleV3Transport,
@@ -123,6 +124,75 @@ describe("Workspace Bundle v3 credential boundary", () => {
       expect(membership.updated_at).toBe(timestamp.toISOString());
       const audit = JSON.parse((await readFile(path.join(root, "bundle", "audits.jsonl"), "utf8")).trim()) as Record<string, unknown>;
       expect(audit.details).toEqual({ nested: { retained: true } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters retired Workspace Knowledge/Memory from export and writes enabled_inherits_workspace", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-export-"));
+    try {
+      const resourceContent = { title: "Room knowledge", content: "Keep room context", payload: {} };
+      const resourceHash = hash(canonicalJson(resourceContent));
+      const sql = {
+        query: async <T extends Record<string, unknown>>(query: string): Promise<{ rows: T[] }> => {
+          if (query.includes("samurai_can_workspace")) return { rows: [{ allowed: true } as T] };
+          if (query.includes("FROM workspaces")) return { rows: [{
+            id: workspaceId, name: "Export context", organization_id: null, hosting_mode: "self_host",
+            database_placement: "dedicated", storage_namespace: `workspaces/${workspaceId}`,
+            created_by: accountId, version: 1, created_at: timestamp, updated_at: timestamp
+          } as T] };
+          if (query.includes("samurai_server_schema_migrations")) return { rows: [{ revision: 129 } as T] };
+          if (query.includes("FROM workspace_members")) return { rows: [{
+            workspace_id: workspaceId, account_id: accountId, role: "owner", state: "active", version: 1,
+            created_at: timestamp, updated_at: timestamp, revoked_at: null
+          } as T] };
+          if (query.includes("FROM room_members")) return { rows: [roomMembership("room_root") as T] };
+          if (query.includes("FROM rooms")) return { rows: [room("room_root") as T] };
+          if (query.includes("FROM workspace_learning_resources")) return { rows: [{
+            workspace_id: workspaceId, id: "room_resource", scope_kind: "room", room_id: "room_root", resource_kind: "knowledge",
+            state: "active", is_absolute_rule: false, ai_update_locked: false, confidence: null, source_job_id: null,
+            source_attempt_id: null, ...resourceContent, version: 1, created_by: accountId, updated_by: accountId,
+            archived_at: null, created_at: timestamp, updated_at: timestamp
+          } as T, {
+            workspace_id: workspaceId, id: "retired_workspace_memory", scope_kind: "workspace", room_id: null, resource_kind: "memory",
+            state: "active", is_absolute_rule: false, ai_update_locked: false, confidence: null, source_job_id: null,
+            source_attempt_id: null, title: "Old memory", content: "Do not export", payload: {}, version: 1,
+            created_by: accountId, updated_by: accountId, archived_at: null, created_at: timestamp, updated_at: timestamp
+          } as T] };
+          if (query.includes("FROM workspace_learning_resource_versions")) return { rows: [{
+            workspace_id: workspaceId, id: "room_resource_v1", resource_id: "room_resource", version: 1,
+            change_kind: "created", scope_kind: "room", room_id: "room_root", state: "active", ai_update_locked: false,
+            confidence: null, source_job_id: null, source_attempt_id: null, ...resourceContent,
+            content_hash: resourceHash, reason: "created", actor_account_id: accountId, created_at: timestamp
+          } as T] };
+          if (query.includes("FROM workspace_learning_settings")) return { rows: [{
+            workspace_id: workspaceId, id: "room:room_root", scope_kind: "room", room_id: "room_root", enabled: true,
+            enabled_inherits_workspace: true, engine_id: "engine_local", model: "model_one", currency_limit: 10,
+            token_limit: 1000, currency_used: 7, tokens_used: 70, currency_reserved: 0, tokens_reserved: 0,
+            version: 1, updated_by: accountId, updated_at: timestamp
+          } as T] };
+          return { rows: [] };
+        }
+      };
+      const store = {
+        mode: "self_host",
+        storageRoot: root,
+        database: {
+          withContext: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql),
+          withReadSnapshot: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql)
+        }
+      } as unknown as WorkspaceServerStore;
+
+      const exported = await new WorkspaceBundleV3Service(store).writePortableSnapshot({
+        workspaceId, accountId, operationId: "operation_export_context"
+      }, { destination: path.join(root, "bundle") });
+      const resources = (await readFile(path.join(root, "bundle", "learning-resources.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(resources).toHaveLength(1);
+      expect(resources[0]?.id).toBe("room_resource");
+      const settings = JSON.parse((await readFile(path.join(root, "bundle", "learning-settings.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(settings).toMatchObject({ enabled_inherits_workspace: true, currency_used: 7, tokens_used: 70 });
+      expect(exported.manifest.record_counts.learning_resources).toBe(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -497,6 +567,484 @@ describe("Workspace Bundle v3 credential boundary", () => {
     }
   });
 
+  it("rejects retired Workspace Knowledge/Memory while retaining Room learning and settings inheritance", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        learning: {
+          "learning-resources.jsonl": [{
+            workspace_id: workspaceId, id: "workspace_memory", scope_kind: "workspace", room_id: null,
+            resource_kind: "memory", state: "active", is_absolute_rule: false, ai_update_locked: false,
+            title: "Retired memory", content: "must be rejected", payload: {}, version: 1,
+            created_by: accountId, updated_by: accountId, archived_at: null, created_at: timestamp, updated_at: timestamp
+          }],
+          "learning-settings.jsonl": [{
+            workspace_id: workspaceId, id: "workspace", scope_kind: "workspace", room_id: null, enabled: true,
+            enabled_inherits_workspace: false, engine_id: "engine_local", model: "model_one",
+            currency_limit: 10, token_limit: 1000, currency_used: 3, tokens_used: 42,
+            version: 1, updated_by: accountId, updated_at: timestamp
+          }]
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_memory_removed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves Room Knowledge/Skill and the inherit flag in portable validation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      const roomContent = { title: "Room knowledge", content: "Keep this", payload: {} };
+      const skillContent = { title: "Workspace skill", content: "Keep this too", payload: {} };
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        learning: {
+          "learning-resources.jsonl": [
+            {
+              workspace_id: workspaceId, id: "room_knowledge", scope_kind: "room", room_id: "room_root",
+              resource_kind: "knowledge", state: "active", is_absolute_rule: false, ai_update_locked: false,
+              ...roomContent, version: 1, created_by: accountId, updated_by: accountId,
+              archived_at: null, created_at: timestamp, updated_at: timestamp
+            },
+            {
+              workspace_id: workspaceId, id: "workspace_skill", scope_kind: "workspace", room_id: null,
+              resource_kind: "skill", state: "active", is_absolute_rule: false, ai_update_locked: false,
+              ...skillContent, version: 1, created_by: accountId, updated_by: accountId,
+              archived_at: null, created_at: timestamp, updated_at: timestamp
+            }
+          ],
+          "learning-resource-versions.jsonl": [
+            {
+              workspace_id: workspaceId, id: "room_knowledge_v1", resource_id: "room_knowledge", version: 1,
+              change_kind: "created", scope_kind: "room", room_id: "room_root", state: "active", ai_update_locked: false,
+              ...roomContent, content_hash: hash(canonicalJson(roomContent)), reason: "created",
+              actor_account_id: accountId, created_at: timestamp
+            },
+            {
+              workspace_id: workspaceId, id: "workspace_skill_v1", resource_id: "workspace_skill", version: 1,
+              change_kind: "created", scope_kind: "workspace", room_id: null, state: "active", ai_update_locked: false,
+              ...skillContent, content_hash: hash(canonicalJson(skillContent)), reason: "created",
+              actor_account_id: accountId, created_at: timestamp
+            }
+          ],
+          "learning-settings.jsonl": [
+            {
+              workspace_id: workspaceId, id: "workspace", scope_kind: "workspace", room_id: null, enabled: true,
+              enabled_inherits_workspace: false, engine_id: "engine_local", model: "model_one",
+              currency_limit: 10, token_limit: 1000, currency_used: 3, tokens_used: 42,
+              version: 1, updated_by: accountId, updated_at: timestamp
+            },
+            {
+              workspace_id: workspaceId, id: "room:room_root", scope_kind: "room", room_id: "room_root", enabled: true,
+              enabled_inherits_workspace: true, engine_id: "engine_local", model: "model_one",
+              currency_limit: 20, token_limit: 2000, currency_used: 4, tokens_used: 84,
+              version: 1, updated_by: accountId, updated_at: timestamp
+            }
+          ]
+        }
+      });
+
+      await expect(verifyWorkspaceBundleV3(root)).resolves.toMatchObject({
+        manifest: { record_counts: { learning_resources: 2, learning_resource_versions: 2, learning_settings: 2 } }
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies sharing records while excluding notification and outbox files", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        sharing: {
+          "workspace-shares.jsonl": [{
+            workspace_id: workspaceId, id: "share_one", source_kind: "room_knowledge", source_room_id: "room_root",
+            source_agent_id: null, created_by: accountId, title: "Shared room knowledge", status: "active",
+            visibility: "restricted", revision: 1, source_versions: [], manifest_path: "shares/share_one/1.json",
+            content_hash: "a".repeat(64), byte_size: 12, public_locator: "l".repeat(43), created_at: timestamp,
+            updated_at: timestamp, published_at: timestamp, revoked_at: null
+          }],
+          "workspace-share-recipients.jsonl": [{ workspace_id: workspaceId, share_id: "share_one", recipient_account_id: "recipient_external" }],
+          "workspace-share-claims.jsonl": [{
+            workspace_id: workspaceId, id: "claim_one", share_id: "share_one", recipient_account_id: "recipient_external",
+            target_origin: "https://target.example", target_workspace_id: "target_workspace", operation_id: "operation_claim",
+            request_hash: "b".repeat(64), content_hash: "a".repeat(64), created_at: timestamp
+          }],
+          "workspace-share-imports.jsonl": [{
+            workspace_id: workspaceId, operation_id: "operation_import", recipient_account_id: accountId, kind: "room_knowledge",
+            source_origin: "https://source.example", source_share_id: "share_one", source_locator: "locator_one",
+            claim_id: "claim_one", request_hash: "b".repeat(64), content_hash: "a".repeat(64), target_room_id: "room_root",
+            reserved_agent_id: null, reserved_resource_ids: [{ entryId: "entry_one", resourceId: "completion_resource_one" }], manifest_path: "shares/imports/operation_import.json",
+            status: "committed", phase: "done", retryable: false, failure_code: null, lease_token: null, lease_until: null,
+            result: { imported: true }, created_at: timestamp, updated_at: timestamp, committed_at: timestamp
+          }],
+          "workspace-share-import-resources.jsonl": [{ workspace_id: workspaceId, operation_id: "operation_import", entry_id: "entry_one", resource_id: "completion_resource_one" }],
+          "workspace-share-file-transactions.jsonl": [{
+            workspace_id: workspaceId, id: "file_transaction_one", owner_kind: "import", owner_id: "operation_import",
+            actor_account_id: accountId, status: "committed", entries: [], created_at: timestamp, updated_at: timestamp, last_error_code: null
+          }]
+        }
+      });
+
+      const verified = await verifyWorkspaceBundleV3(root);
+      expect(verified.manifest.record_counts).toMatchObject({
+        share_records: 1, share_recipients: 1, share_claims: 1, share_imports: 1,
+        share_import_resources: 1, share_file_transactions: 1
+      });
+      await expect(readFile(path.join(root, "account-notifications.jsonl"))).rejects.toThrow();
+      await expect(readFile(path.join(root, "account-notification-outbox.jsonl"))).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exports share manifest bytes under bundle paths instead of source storage paths", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-share-files-"));
+    const storageRoot = path.join(root, "storage");
+    const sourceWorkspaceRoot = path.join(storageRoot, "workspaces", workspaceId);
+    const sourcePath = "workspace-shares/pending/share_one/source/manifest.json";
+    const body = Buffer.from(JSON.stringify({ schema_version: 1, entries: [] }));
+    try {
+      await mkdir(path.join(sourceWorkspaceRoot, path.dirname(sourcePath)), { recursive: true });
+      await writeFile(path.join(sourceWorkspaceRoot, sourcePath), body);
+      const sql = {
+        query: async <T extends Record<string, unknown>>(query: string): Promise<{ rows: T[] }> => {
+          if (query.includes("samurai_can_workspace")) return { rows: [{ allowed: true } as T] };
+          if (query.includes("FROM workspaces")) return { rows: [{
+            id: workspaceId, name: "Share export", organization_id: null, hosting_mode: "self_host",
+            database_placement: "dedicated", storage_namespace: `workspaces/${workspaceId}`,
+            created_by: accountId, version: 1, created_at: timestamp, updated_at: timestamp
+          } as T] };
+          if (query.includes("samurai_server_schema_migrations")) return { rows: [{ revision: 134 } as T] };
+          if (query.includes("FROM workspace_members")) return { rows: [{
+            workspace_id: workspaceId, account_id: accountId, role: "owner", state: "active", version: 1,
+            created_at: timestamp, updated_at: timestamp, revoked_at: null
+          } as T] };
+          if (query.includes("FROM room_members")) return { rows: [roomMembership("room_root") as T] };
+          if (query.includes("FROM rooms")) return { rows: [room("room_root") as T] };
+          if (query.includes("FROM workspace_shares")) return { rows: [{
+            workspace_id: workspaceId, id: "share_one", source_kind: "room_knowledge", source_room_id: "room_root",
+            source_agent_id: null, created_by: accountId, title: "Shared", status: "active", visibility: "public",
+            revision: 1, source_versions: [], manifest_path: sourcePath, content_hash: hash(body), byte_size: body.byteLength,
+            public_locator: "l".repeat(43), created_at: timestamp, updated_at: timestamp, published_at: timestamp, revoked_at: null
+          } as T] };
+          return { rows: [] };
+        }
+      };
+      const store = {
+        mode: "self_host",
+        storageRoot,
+        database: {
+          withContext: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql),
+          withReadSnapshot: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql)
+        }
+      } as unknown as WorkspaceServerStore;
+
+      const exported = await new WorkspaceBundleV3Service(store).writePortableSnapshot({
+        workspaceId, accountId, operationId: "operation_share_export"
+      }, { destination: path.join(root, "bundle") });
+      const row = JSON.parse((await readFile(path.join(root, "bundle", "workspace-shares.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(row.manifest_path).toMatch(/^share-files\/manifests\//);
+      expect(row.manifest_path).not.toBe(sourcePath);
+      expect(await readFile(path.join(root, "bundle", String(row.manifest_path)))).toEqual(body);
+      await expect(verifyWorkspaceBundleV3(exported.directory)).resolves.toBeTruthy();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("revokes an active share during restore without republishing its locator", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    const shareBody = Buffer.from(JSON.stringify({ schema_version: 1, entries: [] }));
+    const shareBundlePath = `share-files/manifests/${hash("manifests:share_restore")}.json`;
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        shareFiles: [{ path: shareBundlePath, content: shareBody }],
+        sharing: {
+          "workspace-shares.jsonl": [{
+            workspace_id: workspaceId, id: "share_restore", source_kind: "room_knowledge", source_room_id: "room_root",
+            source_agent_id: null, created_by: accountId, title: "Restore share", status: "active", visibility: "restricted",
+            revision: 1, source_versions: [], manifest_path: shareBundlePath, content_hash: hash(shareBody),
+            byte_size: shareBody.byteLength, public_locator: "r".repeat(43), created_at: timestamp, updated_at: timestamp,
+            published_at: timestamp, revoked_at: null
+          }],
+          "workspace-share-recipients.jsonl": [{ workspace_id: workspaceId, share_id: "share_restore", recipient_account_id: "recipient_external" }],
+          "workspace-share-claims.jsonl": [{
+            workspace_id: workspaceId, id: "claim_restore", share_id: "share_restore", recipient_account_id: "recipient_external",
+            target_origin: "https://target.example", target_workspace_id: "target_workspace", operation_id: "operation_restore_claim",
+            request_hash: "b".repeat(64), content_hash: "a".repeat(64), created_at: timestamp
+          }]
+        }
+      });
+
+      const updates: unknown[][] = [];
+      let shareInserted = false;
+      let locatorChecks = 0;
+      let insertedLocator: unknown;
+      const sql = {
+        query: async <T extends Record<string, unknown>>(query: string, parameters: unknown[] = []): Promise<{ rows: T[] }> => {
+          if (query.includes("FROM pg_proc")) return { rows: [{ pronargs: 6, proargnames: null } as T] };
+          if (query.includes("samurai_can_workspace")) return { rows: [{ allowed: true } as T] };
+          if (query.includes("UPDATE workspace_shares")) {
+            updates.push(parameters);
+            return { rows: [] };
+          }
+          if (query.includes("INSERT INTO workspace_shares")) {
+            shareInserted = true;
+            insertedLocator = parameters[14];
+            return { rows: [] };
+          }
+          if (query.includes("SELECT EXISTS(SELECT 1 FROM workspace_shares WHERE public_locator")) {
+            locatorChecks += 1;
+            return { rows: [{ exists: locatorChecks === 1 } as T] };
+          }
+          if (query.includes("COUNT(*)")) {
+            const table = query.match(/FROM ([a-z_]+)/)?.[1];
+            const count = table === "rooms" || table === "room_members" ? 1
+              : table === "workspace_members" ? 1
+              : (table === "workspace_shares" || table === "workspace_share_recipients" || table === "workspace_share_claims") && shareInserted ? 1
+              : 0;
+            return { rows: [{ count: String(count) } as T] };
+          }
+          if (query.includes("FROM workspaces")) return { rows: [] };
+          return { rows: [] };
+        }
+      };
+      const store = {
+        mode: "self_host",
+        storageRoot: root,
+        getWorkspace: async () => { throw new WorkspaceServerError("workspace_not_found", 404); },
+        insertAudit: async () => undefined,
+        database: {
+          withContext: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql),
+          withReadSnapshot: async <T>(_context: unknown, action: (value: typeof sql) => Promise<T>): Promise<T> => action(sql)
+        }
+      } as unknown as WorkspaceServerStore;
+
+      await new WorkspaceBundleV3Service(store).importNew({
+        accountId,
+        operationId: "operation_restore_bundle"
+      }, {
+        sourceDirectory: root,
+        targetWorkspaceId: "workspace_restore_target"
+      });
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.[0]).toBe("workspace_restore_target");
+      expect(updates[0]?.[1]).toBe("share_restore");
+      expect(updates[0]?.[2]).toBe(2);
+      expect(updates[0]?.[3]).not.toBe(timestamp);
+      expect(locatorChecks).toBe(2);
+      expect(typeof insertedLocator).toBe("string");
+      expect(insertedLocator).not.toBe("r".repeat(43));
+      expect(String(insertedLocator)).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      const restoredShareBody = await readFile(path.join(root, "workspaces", "workspace_restore_target", "workspace-shares", "restored", "manifests", `${hash("manifests:share_restore")}.json`));
+      expect(restoredShareBody).toEqual(shareBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an incomplete share import or file transaction before restore", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        sharing: {
+          "workspace-share-imports.jsonl": [{
+            workspace_id: workspaceId, operation_id: "operation_pending", recipient_account_id: accountId, kind: "room_knowledge",
+            source_origin: "https://source.example", source_share_id: "share_one", source_locator: "locator_one",
+            claim_id: "claim_one", request_hash: "b".repeat(64), content_hash: "a".repeat(64), target_room_id: "room_root",
+            reserved_agent_id: null, reserved_resource_ids: [], manifest_path: null,
+            status: "staging", phase: "fetch", retryable: true, failure_code: null, lease_token: null, lease_until: null,
+            result: null, created_at: timestamp, updated_at: timestamp, committed_at: null
+          }]
+        }
+      });
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_incomplete_share_operation");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+
+    const fileRoot = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
+    try {
+      await writeHierarchyBundle(fileRoot, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        sharing: {
+          "workspace-share-file-transactions.jsonl": [{
+            workspace_id: workspaceId, id: "file_transaction_pending", owner_kind: "draft", owner_id: "share_one",
+            actor_account_id: accountId, status: "prepared", entries: [], created_at: timestamp, updated_at: timestamp, last_error_code: null
+          }]
+        }
+      });
+      await expect(verifyWorkspaceBundleV3(fileRoot)).rejects.toThrow("workspace_bundle_incomplete_share_file_transaction");
+    } finally {
+      await rm(fileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a failed import that still has retry state", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-failed-import-state-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        sharing: {
+          "workspace-share-imports.jsonl": [{
+            workspace_id: workspaceId, operation_id: "operation_failed_nonterminal", recipient_account_id: accountId,
+            kind: "room_knowledge", source_origin: "https://source.example", source_share_id: "share_one", source_locator: "locator_one",
+            claim_id: "claim_one", request_hash: "b".repeat(64), content_hash: "a".repeat(64), target_room_id: "room_root",
+            reserved_agent_id: null, reserved_resource_ids: [], manifest_path: null,
+            status: "failed", phase: "files", retryable: true, failure_code: "failed_once", lease_token: "lease_one", lease_until: timestamp,
+            result: null, created_at: timestamp, updated_at: timestamp, committed_at: null
+          }]
+        }
+      });
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_failed_share_import_not_terminal");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects import-resource rows unless their import is committed", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-import-resource-state-"));
+    try {
+      await writeHierarchyBundle(root, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        sharing: {
+          "workspace-share-imports.jsonl": [{
+            workspace_id: workspaceId, operation_id: "operation_failed_resource", recipient_account_id: accountId,
+            kind: "room_knowledge", source_origin: "https://source.example", source_share_id: "share_one", source_locator: "locator_one",
+            claim_id: "claim_one", request_hash: "b".repeat(64), content_hash: "a".repeat(64), target_room_id: "room_root",
+            reserved_agent_id: null, reserved_resource_ids: [{ entryId: "entry_one", resourceId: "resource_one" }], manifest_path: null,
+            status: "failed", phase: "cleanup", retryable: false, failure_code: "failed_once", lease_token: null, lease_until: null,
+            result: null, created_at: timestamp, updated_at: timestamp, committed_at: null
+          }],
+          "workspace-share-import-resources.jsonl": [{
+            workspace_id: workspaceId, operation_id: "operation_failed_resource", entry_id: "entry_one", resource_id: "resource_one"
+          }]
+        }
+      });
+      await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_v3_relation_invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires committed import reservations and link rows to match exactly", async () => {
+    const cases = [
+      {
+        name: "duplicate reservation",
+        reserved: [{ entryId: "entry_one", resourceId: "resource_one" }, { entryId: "entry_one", resourceId: "resource_one" }],
+        links: [{ entry_id: "entry_one", resource_id: "resource_one" }]
+      },
+      {
+        name: "reservation without a link",
+        reserved: [{ entryId: "entry_one", resourceId: "resource_one" }, { entryId: "entry_two", resourceId: "resource_two" }],
+        links: [{ entry_id: "entry_one", resource_id: "resource_one" }]
+      },
+      {
+        name: "link without a reservation",
+        reserved: [{ entryId: "entry_one", resourceId: "resource_one" }],
+        links: [{ entry_id: "entry_one", resource_id: "resource_one" }, { entry_id: "entry_two", resource_id: "resource_two" }]
+      }
+    ] as const;
+    for (const testCase of cases) {
+      const root = await mkdtemp(path.join(os.tmpdir(), `samurai-bundle-v3-import-mapping-${testCase.name.replaceAll(" ", "-")}-`));
+      try {
+        await writeHierarchyBundle(root, {
+          rooms: [room("room_root")],
+          roomMemberships: [roomMembership("room_root")],
+          sharing: {
+            "workspace-share-imports.jsonl": [{
+              workspace_id: workspaceId, operation_id: "operation_import_mapping", recipient_account_id: accountId,
+              kind: "room_knowledge", source_origin: "https://source.example", source_share_id: "share_one", source_locator: "locator_one",
+              claim_id: "claim_one", request_hash: "b".repeat(64), content_hash: "a".repeat(64), target_room_id: "room_root",
+              reserved_agent_id: null, reserved_resource_ids: testCase.reserved, manifest_path: "shares/imports/operation_import_mapping.json",
+              status: "committed", phase: "done", retryable: false, failure_code: null, lease_token: null, lease_until: null,
+              result: { imported: true }, created_at: timestamp, updated_at: timestamp, committed_at: timestamp
+            }],
+            "workspace-share-import-resources.jsonl": [{
+              workspace_id: workspaceId, operation_id: "operation_import_mapping", ...testCase.links[0]
+            }, ...testCase.links.slice(1).map((link) => ({
+              workspace_id: workspaceId, operation_id: "operation_import_mapping", ...link
+            }))]
+          }
+        });
+        await expect(verifyWorkspaceBundleV3(root)).rejects.toThrow("workspace_bundle_v3_relation_invalid");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("requires committed file transaction bodies and verifies their type, hash, and byte size", async () => {
+    const body = Buffer.from("committed share body\n");
+    const bodyPath = "share-files/transactions/transaction_body/final";
+    const transaction = {
+      workspace_id: workspaceId, id: "transaction_body", owner_kind: "draft", owner_id: "share_one",
+      actor_account_id: accountId, status: "committed", entries: [{
+        staged_path: "workspace-shares/pending/transaction_body/staged",
+        final_path: bodyPath,
+        sha256: hash(body),
+        byte_size: body.byteLength,
+        manifest: { kind: "room_knowledge", entries: [] }
+      }], created_at: timestamp, updated_at: timestamp, last_error_code: null
+    };
+    const missingRoot = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-transaction-missing-"));
+    try {
+      await writeHierarchyBundle(missingRoot, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        sharing: { "workspace-share-file-transactions.jsonl": [transaction] }
+      });
+      await expect(verifyWorkspaceBundleV3(missingRoot)).rejects.toThrow("workspace_bundle_share_file_transaction_body_missing");
+    } finally {
+      await rm(missingRoot, { recursive: true, force: true });
+    }
+
+    const validRoot = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-transaction-valid-"));
+    try {
+      await writeHierarchyBundle(validRoot, {
+        rooms: [room("room_root")],
+        roomMemberships: [roomMembership("room_root")],
+        shareFiles: [{ path: bodyPath, content: body }],
+        sharing: { "workspace-share-file-transactions.jsonl": [transaction] }
+      });
+      await expect(verifyWorkspaceBundleV3(validRoot)).resolves.toMatchObject({ manifest: { format_version: 3 } });
+      const wrongSizeRoot = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-transaction-size-"));
+      try {
+        await writeHierarchyBundle(wrongSizeRoot, {
+          rooms: [room("room_root")],
+          roomMemberships: [roomMembership("room_root")],
+          shareFiles: [{ path: bodyPath, content: body }],
+          sharing: {
+            "workspace-share-file-transactions.jsonl": [{
+              ...transaction,
+              entries: [{ ...(transaction.entries[0] as Record<string, unknown>), byte_size: body.byteLength + 1 }]
+            }]
+          }
+        });
+        await expect(verifyWorkspaceBundleV3(wrongSizeRoot)).rejects.toThrow("workspace_bundle_share_file_transaction_body_mismatch");
+      } finally {
+        await rm(wrongSizeRoot, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(validRoot, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips a transport entry at exactly 8 MiB", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "samurai-bundle-v3-"));
     const destination = path.join(root, "restored");
@@ -576,10 +1124,13 @@ async function writeHierarchyBundle(
     roomMemberships: Record<string, unknown>[];
     events?: Record<string, unknown>[];
     workspaceFiles?: Array<{ path: string; content: Uint8Array }>;
+    shareFiles?: Array<{ path: string; content: Uint8Array }>;
     learning?: Partial<Record<LearningFile, Record<string, unknown>[]>>;
+    sharing?: Partial<Record<SharingFile, Record<string, unknown>[]>>;
   }
 ): Promise<void> {
   const workspaceFiles = input.workspaceFiles ?? [];
+  const shareFiles = input.shareFiles ?? [];
   const files = new Map<string, string>([
     ["workspace.json", canonicalJson({
       id: workspaceId,
@@ -627,6 +1178,9 @@ async function writeHierarchyBundle(
   if (input.learning) {
     for (const file of learningFiles) files.set(file, jsonLines(input.learning[file] ?? []));
   }
+  if (input.sharing) {
+    for (const file of sharingFiles) files.set(file, jsonLines(input.sharing[file] ?? []));
+  }
   const recordCounts = {
     rooms: input.rooms.length,
     memberships: 1,
@@ -638,16 +1192,22 @@ async function writeHierarchyBundle(
     invitations: 0,
     audits: 0,
     files: workspaceFiles.length,
-    ...(input.learning ? Object.fromEntries(learningFiles.map((file) => [learningCountName(file), input.learning?.[file]?.length ?? 0])) : {})
+    ...(input.learning ? Object.fromEntries(learningFiles.map((file) => [learningCountName(file), input.learning?.[file]?.length ?? 0])) : {}),
+    ...(input.sharing ? Object.fromEntries(sharingFiles.map((file) => [sharingCountName(file), input.sharing?.[file]?.length ?? 0])) : {})
   };
   const hashes = Object.fromEntries([
     ...[...files.entries()].map(([name, content]) => [name, hash(content)] as const),
-    ...workspaceFiles.map(({ path: filePath, content }) => [`files/${filePath}`, hash(content)] as const)
+    ...workspaceFiles.map(({ path: filePath, content }) => [`files/${filePath}`, hash(content)] as const),
+    ...shareFiles.map(({ path: filePath, content }) => [filePath, hash(content)] as const)
   ].sort(([left], [right]) => left.localeCompare(right)));
   for (const [name, content] of files) await writeFile(path.join(root, name), content, "utf8");
   if (workspaceFiles.length > 0) await mkdir(path.join(root, "files"), { recursive: true });
   for (const { path: filePath, content } of workspaceFiles) {
     await writeFile(path.join(root, "files", filePath), content);
+  }
+  for (const { path: filePath, content } of shareFiles) {
+    await mkdir(path.dirname(path.join(root, filePath)), { recursive: true });
+    await writeFile(path.join(root, filePath), content);
   }
   const schemaVersion = input.schemaVersion ?? (input.learning ? 27 : 22);
   const sourceOrganizationId = input.sourceOrganizationId;
@@ -699,8 +1259,24 @@ const learningFiles = [
 
 type LearningFile = (typeof learningFiles)[number];
 
+const sharingFiles = [
+  "workspace-shares.jsonl",
+  "workspace-share-recipients.jsonl",
+  "workspace-share-claims.jsonl",
+  "workspace-share-imports.jsonl",
+  "workspace-share-import-resources.jsonl",
+  "workspace-share-file-transactions.jsonl"
+] as const;
+
+type SharingFile = (typeof sharingFiles)[number];
+
 function learningCountName(file: LearningFile): string {
   return file.replace(".jsonl", "").replaceAll("-", "_");
+}
+
+function sharingCountName(file: SharingFile): string {
+  if (file === "workspace-shares.jsonl") return "share_records";
+  return file.replace("workspace-", "").replace(".jsonl", "").replaceAll("-", "_");
 }
 
 function jsonLines(rows: Record<string, unknown>[]): string {

@@ -40,6 +40,13 @@ function makeRoomWorkStopWorker() {
   };
 }
 
+function makeShareImportWorker() {
+  return {
+    runTick: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined)
+  };
+}
+
 const context = { workspaceId: "workspace_one", accountId: "account_one" };
 
 describe("WorkspaceWorkerSupervisor", () => {
@@ -210,6 +217,42 @@ describe("WorkspaceWorkerSupervisor", () => {
 
     await supervisor.stop();
     expect(roomWorkWorker.close).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("runs bounded Share import work before Completion maintenance and closes the lane", async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner();
+    const maintenance = makeMaintenance();
+    const shareImportWorker = makeShareImportWorker();
+    const order: string[] = [];
+    vi.mocked(shareImportWorker.runTick).mockImplementation(async () => {
+      order.push("share_import");
+    });
+    vi.mocked(maintenance.runTick).mockImplementation(async () => {
+      order.push("maintenance");
+    });
+    const supervisor = new WorkspaceWorkerSupervisor({
+      learningRunner: runner,
+      maintenance,
+      shareImportWorker,
+      resolveContext: async () => ({ state: "enabled", context }),
+      maxRuns: 3,
+      intervalMs: 10_000
+    });
+
+    await supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(shareImportWorker.runTick).toHaveBeenCalledWith(expect.objectContaining(context), {
+      workerId: expect.stringMatching(/^workspace_worker_/),
+      maxRuns: 3,
+      signal: expect.any(AbortSignal)
+    });
+    expect(order).toEqual(["share_import", "maintenance"]);
+
+    await supervisor.stop();
+    expect(shareImportWorker.close).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
 

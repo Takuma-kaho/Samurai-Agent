@@ -18,6 +18,9 @@ import type {
   NativeRoomWorkStatus,
   NativeArtifactWorkspaceInitialResource
 } from "./types";
+import type { NativeRoomParticipant } from "./use-native-room-participants";
+
+export type NativeRoomPanelState = "closed" | "artifacts" | "room_settings";
 
 export interface RoomWorkSurfaceProps {
   room?: NativeRoom;
@@ -71,6 +74,16 @@ export interface RoomWorkSurfaceProps {
   onSetDefaultAgent?: (agentId: string) => void | Promise<void>;
   onOpenAgentDm?: (agentId: string) => void | Promise<void>;
   onOpenAgentSettings?: () => void;
+  participants?: readonly NativeRoomParticipant[];
+  participantsLoading?: boolean;
+  participantsError?: string | null;
+  roomPanelState?: NativeRoomPanelState;
+  onToggleRoomPanel?: () => void;
+  onOpenRoomArtifacts?: () => void;
+  onOpenRoomSettings?: () => void;
+  onOpenRoomKnowledge?: () => void;
+  onOpenRoomShare?: () => void;
+  roomKnowledgeShareAvailable?: boolean;
   /** The selected Room's minimal header-level tool entry. */
   roomToolLinks?: ReactNode;
   onOpenResultResource?: (resource: NativeArtifactWorkspaceInitialResource) => void;
@@ -916,6 +929,22 @@ const roomWorkStyles = [
   ".native-work-attachment-button:hover:not(:disabled) { border-color: var(--native-line-strong); color: var(--native-copy); }",
   ".native-work-attachment-button:disabled { cursor: default; opacity: .55; }",
   ".native-work-reconnect { margin-left: auto; }",
+  ".native-work-recovery { margin-left: 8px; }",
+  ".native-work-header-action { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 11px; min-height: 30px; padding: 0 9px; }",
+  ".native-work-header-action:hover { border-color: var(--native-line-strong); color: var(--native-copy); }",
+  ".native-work-header-action[aria-expanded='true'] { border-color: var(--native-accent); color: var(--native-accent); }",
+  ".native-work-header-controls { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; position: relative; }",
+  ".native-work-header-popover { background: var(--native-panel, #18211c); border: 1px solid var(--native-line-strong); border-radius: 10px; box-shadow: 0 12px 28px var(--native-shadow, #0000003d); color: var(--native-copy); min-width: 245px; padding: 11px; position: absolute; right: 0; top: calc(100% + 8px); z-index: 20; }",
+  ".native-work-header-popover h2 { color: var(--native-muted); font-size: 11px; letter-spacing: .08em; margin: 0 0 8px; text-transform: uppercase; }",
+  ".native-work-header-popover ul { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; }",
+  ".native-work-header-participant { align-items: center; display: flex; gap: 8px; justify-content: space-between; padding: 5px 0; }",
+  ".native-work-header-participant-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }",
+  ".native-work-header-participant-state { color: var(--native-muted); font-size: 10px; white-space: nowrap; }",
+  ".native-work-room-menu { display: grid; gap: 4px; }",
+  ".native-work-room-menu button { background: transparent; border: 0; border-radius: 6px; color: inherit; cursor: pointer; font: inherit; padding: 7px; text-align: left; width: 100%; }",
+  ".native-work-room-menu button:hover { background: var(--native-hover, #ffffff12); }",
+  ".native-work-default-button { align-items: center; background: transparent; border: 0; border-radius: 7px; color: inherit; cursor: pointer; display: inline-flex; gap: 7px; padding: 3px 5px; }",
+  ".native-work-default-button:hover { background: var(--native-hover, #ffffff12); }",
   ".native-work-surface .native-banner { margin-inline: clamp(22px, 5vw, 72px); }",
   "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-thread-switcher { max-height: 112px; } .native-work-conversation-header { align-items: flex-start; flex-direction: column; } .native-work-conversation-actions { align-items: flex-start; flex-direction: row; } }",
   "@media (max-width: 560px) { .native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; } .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list { padding-inline: 18px; } }"
@@ -964,6 +993,16 @@ export function RoomWorkSurface({
   onSetDefaultAgent,
   onOpenAgentDm,
   onOpenAgentSettings,
+  participants = [],
+  participantsLoading = false,
+  participantsError,
+  roomPanelState = "closed",
+  onToggleRoomPanel,
+  onOpenRoomArtifacts,
+  onOpenRoomSettings,
+  onOpenRoomKnowledge,
+  onOpenRoomShare,
+  roomKnowledgeShareAvailable = false,
   roomToolLinks,
   onOpenResultResource,
   onReconnect
@@ -983,6 +1022,8 @@ export function RoomWorkSurface({
   const [delegateReceipt, setDelegateReceipt] = useState<string>();
   const [workAttachmentDrafts, setWorkAttachmentDrafts] = useState<RoomAttachmentDraft[]>([]);
   const [commentAttachmentDrafts, setCommentAttachmentDrafts] = useState<RoomAttachmentDraft[]>([]);
+  const [participantsOpen, setParticipantsOpen] = useState(false);
+  const [roomMenuOpen, setRoomMenuOpen] = useState(false);
   const workAttachmentInputRef = useRef<HTMLInputElement>(null);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const attachmentContextRef = useRef("");
@@ -1373,14 +1414,20 @@ export function RoomWorkSurface({
   };
 
   const renderWarning = () => {
-    if (archived) return <div className="native-banner native-banner-warning" role="status"><strong>このWorkspaceはアーカイブ済みです。</strong> 履歴は確認できますが、仕事の書き込みはできません。</div>;
-    if (readOnly) return <div className="native-banner native-banner-warning" role="status"><strong>このWorkspaceは読み取り専用です。</strong> 仕事の書き込みはできません。</div>;
-    if (!roomIsDm && roomCapabilityKnown(room, "canExecute") && !roomCapability(room, "canExecute")) return <div className="native-banner native-banner-warning" role="status"><strong>このRoomへの実行権限がありません。</strong> 権限が付与されるまで新しい仕事を依頼できません。</div>;
-    if (!roomIsDm && !roomCapabilityKnown(room, "canExecute")) return <div className="native-banner native-banner-warning" role="status"><strong>このRoomの実行権限を確認できません。</strong> Serverから権限を受け取るまで仕事の依頼・返信・反映はできません。</div>;
-    if (!defaultAgentId && !roomIsDm) return <div className="native-banner native-banner-warning" role="status"><strong>既定Agent未設定。</strong> Roomに既定Agentを設定すると新しい仕事を依頼できます。</div>;
-    if (defaultAgentId && !defaultAgentKnown && !roomIsDm) return <div className="native-banner native-banner-warning" role="status"><strong>既定Agentの状態を確認できません。</strong> Serverから実行可否を受け取るまで送信できません。</div>;
-    if (defaultAgentId && defaultAgentKnown && !defaultAgentReady) return <div className="native-banner native-banner-warning" role="status"><strong>既定Agentは無効または実行不可です。</strong> 別のAgentをRoomの既定に設定してください。</div>;
-    if (connectionState === "offline") return <div className="native-banner native-banner-warning" role="status"><strong>Serverに接続できません。</strong> 送信前に再接続してください。</div>;
+    const warning = (title: string, body: string, recovery = false) => (
+      <div className="native-banner native-banner-warning" role="status">
+        <strong>{title}</strong> {body}
+        {recovery && onOpenRoomSettings ? <button type="button" className="native-button native-button-quiet native-work-recovery" onClick={onOpenRoomSettings}>Room設定を確認</button> : null}
+      </div>
+    );
+    if (archived) return warning("このWorkspaceはアーカイブ済みです。", "履歴は確認できますが、仕事の書き込みはできません。");
+    if (readOnly) return warning("このWorkspaceは読み取り専用です。", "仕事の書き込みはできません。");
+    if (!roomIsDm && roomCapabilityKnown(room, "canExecute") && !roomCapability(room, "canExecute")) return warning("このRoomへの実行権限がありません。", "権限が付与されるまで新しい仕事を依頼できません。", true);
+    if (!roomIsDm && !roomCapabilityKnown(room, "canExecute")) return warning("このRoomの実行権限を確認できません。", "Serverから権限を受け取るまで仕事の依頼・返信・反映はできません。", true);
+    if (!defaultAgentId && !roomIsDm) return warning("既定Agent未設定。", "Roomに既定Agentを設定すると新しい仕事を依頼できます。", true);
+    if (defaultAgentId && !defaultAgentKnown && !roomIsDm) return warning("既定Agentの状態を確認できません。", "Serverから実行可否を受け取るまで送信できません。", true);
+    if (defaultAgentId && defaultAgentKnown && !defaultAgentReady) return warning("既定Agentは無効または実行不可です。", "別のAgentをRoomの既定に設定してください。", true);
+    if (connectionState === "offline") return warning("Serverに接続できません。", "送信前に再接続してください。");
     return null;
   };
 
@@ -1684,10 +1731,67 @@ export function RoomWorkSurface({
         <div className="native-work-header-meta">
           <div className="native-work-default">
             <span className="native-work-default-avatar" aria-hidden="true">{actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}</span>
-            <span className="native-work-default-value" data-agent-id={defaultAgentId ?? undefined}>{defaultAgent ? agentLabel(defaultAgent.id, agents) : "Agent"}</span>
+            {onOpenAgentSettings && !roomIsDm ? (
+              <button type="button" className="native-work-default-button" onClick={onOpenAgentSettings} aria-label="既定Agentの設定を開く">
+                {renderDefaultAgentState()}
+              </button>
+            ) : renderDefaultAgentState()}
           </div>
           {roomIsDm ? <div className="native-work-private-note">Private Room · あなたとこのAgentだけが参加できます</div> : null}
-          {roomToolLinks}
+          {!roomIsDm ? (
+            <div className="native-work-header-controls" aria-label="Room操作">
+              <button
+                type="button"
+                className="native-work-header-action"
+                onClick={() => setParticipantsOpen((open) => !open)}
+                aria-expanded={participantsOpen}
+                aria-haspopup="dialog"
+                aria-label="Roomの参加者を表示"
+              >参加者{participants.length > 0 ? ` ${participants.length}` : ""}</button>
+              <button
+                type="button"
+                className="native-work-header-action"
+                onClick={() => setRoomMenuOpen((open) => !open)}
+                aria-expanded={roomMenuOpen}
+                aria-haspopup="menu"
+                aria-label="Roomメニューを開く"
+              >•••</button>
+              {onToggleRoomPanel ? (
+                <button
+                  type="button"
+                  className="native-work-header-action"
+                  onClick={onToggleRoomPanel}
+                  aria-expanded={roomPanelState !== "closed"}
+                  aria-label={roomPanelState === "closed" ? "Roomの右パネルを開く" : "Roomの右パネルを閉じる"}
+                >{roomPanelState === "closed" ? "パネル" : "閉じる"}</button>
+              ) : null}
+              {participantsOpen ? (
+                <div className="native-work-header-popover" role="dialog" aria-label="Roomの参加者">
+                  <h2>参加者</h2>
+                  {participantsLoading ? <p className="native-work-header-participant-state" role="status">確認中…</p> : null}
+                  {participantsError ? <p className="native-work-header-participant-state" role="alert">{participantsError}</p> : null}
+                  {!participantsLoading && !participantsError && participants.length === 0 ? <p className="native-work-header-participant-state">参加者を確認できません。</p> : null}
+                  <ul>
+                    {participants.map((participant) => (
+                      <li className="native-work-header-participant" key={`${participant.kind}:${participant.id}`}>
+                        <span className="native-work-header-participant-name">{participant.label}</span>
+                        <span className="native-work-header-participant-state">{participant.kind === "agent" ? "Agent" : participant.role ?? "参加者"}・{participant.state === "active" || participant.state === "available" ? "利用可能" : participant.state === "revoked" ? "解除済み" : "利用不可"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {roomMenuOpen ? (
+                <div className="native-work-header-popover native-work-room-menu" role="menu" aria-label="Roomメニュー">
+                  {onOpenRoomSettings ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomSettings(); }}>Room設定</button> : null}
+                  {onToggleRoomPanel || onOpenRoomArtifacts ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); if (roomPanelState === "artifacts") onToggleRoomPanel?.(); else onOpenRoomArtifacts?.(); }}>{roomPanelState === "artifacts" ? "成果物パネルを閉じる" : "成果物を開く"}</button> : null}
+                  {onOpenRoomKnowledge ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomKnowledge(); }}>Room Knowledge</button> : null}
+                  {roomKnowledgeShareAvailable && onOpenRoomShare ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomShare(); }}>Room Knowledgeを共有</button> : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {!onToggleRoomPanel ? roomToolLinks : null}
         </div>
       </header>
 

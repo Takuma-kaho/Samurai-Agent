@@ -418,23 +418,46 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       kind: "soul", content: "Protect Room boundaries and preserve evidence.", expectedVersion: 0
     });
     assert(soul.version === 1, "server04_completion_soul_version_missing");
-    const workspaceKnowledge = await completion.createResource(ownerContext("workspace-knowledge"), {
-      id: `completion_workspace_knowledge_${suffix.slice(0, 20)}`,
-      scope: { kind: "workspace" },
+    // Workspace-scoped Knowledge was intentionally retired by the native
+    // context-sharing plan. Keep the denial contract in the live probe, then
+    // verify the replacement Room-scoped resource is visible only to members
+    // of the selected Room.
+    await expectCode("workspace_memory_removed", async () => {
+      await completion.createResource(ownerContext("workspace-knowledge-retired"), {
+        id: `completion_workspace_knowledge_retired_${suffix.slice(0, 20)}`,
+        scope: { kind: "workspace" },
+        kind: "knowledge",
+        knowledgeKind: "decision",
+        title: "Retired workspace decision",
+        content: "This Workspace-wide memory must remain unavailable.",
+        metadata: { scope: "workspace" },
+        reason: "Verify retired Workspace Knowledge is rejected."
+      });
+    });
+    await store.setRoomMember(ownerContext("root-room-member"), {
+      roomId: created.defaultRoom.id, accountId: otherRoomMember.id, role: "member", state: "active", expectedVersion: 0
+    });
+    const roomKnowledge = await completion.createResource(ownerContext("room-knowledge"), {
+      id: `completion_room_knowledge_${suffix.slice(0, 20)}`,
+      scope: { kind: "room", roomId: rootRoom.id },
       kind: "knowledge",
       knowledgeKind: "decision",
-      title: "Workspace-wide decision",
-      content: "Every Workspace member may read this decision regardless of Room membership.",
-      metadata: { scope: "workspace" },
-      reason: "Workspace owner shared this decision."
+      title: "Room-shared decision",
+      content: "Every member of this Room may read this decision.",
+      metadata: { scope: "room", room_id: rootRoom.id },
+      reason: "Room owner shared this decision."
     });
-    const sharedBody = await completion.getResourceBody({ workspaceId, accountId: otherRoomMember.id }, workspaceKnowledge.resource.id);
-    assert(sharedBody.content.includes("Every Workspace member"), "server04_completion_workspace_common_resource_hidden");
+    const sharedBody = await completion.getResourceBody({ workspaceId, accountId: otherRoomMember.id }, roomKnowledge.resource.id);
+    assert(sharedBody.content.includes("Every member of this Room"), "server04_completion_room_common_resource_hidden");
     const otherProfile = await completion.getWorkspaceDocument({ workspaceId, accountId: otherRoomMember.id }, "profile");
     const otherSoul = await completion.getWorkspaceDocument({ workspaceId, accountId: otherRoomMember.id }, "soul");
     assert(otherProfile.content.includes("evidence-backed") && otherSoul.content.includes("Room boundaries"), "server04_completion_workspace_documents_hidden");
-    const otherVisible = await completion.listResourcesPage({ workspaceId, accountId: otherRoomMember.id }, { roomId: privateRoom.id, limit: 50 });
-    assert(otherVisible.items.some((resource) => resource.id === workspaceKnowledge.resource.id) && !otherVisible.items.some((resource) => resource.id === knowledge.resource.id), "server04_completion_batch_scope_visibility_mismatch");
+    const otherVisible = await completion.listResourcesPage({ workspaceId, accountId: otherRoomMember.id }, { roomId: rootRoom.id, limit: 50 });
+    assert(
+      otherVisible.items.some((resource) => resource.id === roomKnowledge.resource.id)
+        && otherVisible.items.some((resource) => resource.id === knowledge.resource.id),
+      "server04_completion_batch_scope_visibility_mismatch"
+    );
     const appliedPolicy = await verifyHttpPolicyIngress({
       target,
       storageRoot: root,
@@ -522,16 +545,16 @@ async function runProbe(target: ProbeTarget): Promise<void> {
       highWatermarkActivityId: longReviewSnapshot.highWatermarkActivityId
     });
     assert(exactWatermarkSnapshot.digest === longReviewSnapshot.digest && exactWatermarkSnapshot.activityCount === 101, "server04_completion_review_high_watermark_mismatch");
-    const workspaceKnowledgeBeforeStaleReview = await completion.getResource({ workspaceId, accountId: owner.id }, workspaceKnowledge.resource.id);
-    await completion.updateResource(ownerContext("review-stale-human-update"), workspaceKnowledge.resource.id, {
-      scope: { kind: "workspace" },
+    const roomKnowledgeBeforeStaleReview = await completion.getResource({ workspaceId, accountId: owner.id }, roomKnowledge.resource.id);
+    await completion.updateResource(ownerContext("review-stale-human-update"), roomKnowledge.resource.id, {
+      scope: { kind: "room", roomId: rootRoom.id },
       kind: "knowledge",
       knowledgeKind: "decision",
-      title: workspaceKnowledgeBeforeStaleReview.resource.title,
-      content: "A human changed this Workspace decision after the Review snapshot.",
-      metadata: { scope: "workspace", changed_after_review_snapshot: true },
-      reason: "Protect the newer human Workspace decision.",
-      expectedVersion: workspaceKnowledgeBeforeStaleReview.resource.version
+      title: roomKnowledgeBeforeStaleReview.resource.title,
+      content: "A human changed this Room decision after the Review snapshot.",
+      metadata: { scope: "room", room_id: rootRoom.id, changed_after_review_snapshot: true },
+      reason: "Protect the newer human Room decision.",
+      expectedVersion: roomKnowledgeBeforeStaleReview.resource.version
     });
     await expectCode("workspace_completion_review_stale_input", async () => {
       await completion.applyReviewResult(ownerContext("review-stale-apply"), {
@@ -539,8 +562,8 @@ async function runProbe(target: ProbeTarget): Promise<void> {
         result: { reviewer: "probe", summary: "This old Review must not apply.", candidates: [] }
       });
     });
-    const workspaceKnowledgeAfterStaleReview = await completion.getResource({ workspaceId, accountId: owner.id }, workspaceKnowledge.resource.id);
-    assert(workspaceKnowledgeAfterStaleReview.resource.version === workspaceKnowledgeBeforeStaleReview.resource.version + 1, "server04_completion_review_stale_human_edit_lost");
+    const roomKnowledgeAfterStaleReview = await completion.getResource({ workspaceId, accountId: owner.id }, roomKnowledge.resource.id);
+    assert(roomKnowledgeAfterStaleReview.resource.version === roomKnowledgeBeforeStaleReview.resource.version + 1, "server04_completion_review_stale_human_edit_lost");
 
     // An explicit snapshot cap must block the selected Job rather than give
     // an incomplete Episode to a Review Port.

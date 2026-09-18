@@ -7,15 +7,22 @@ import {
   assertSafeLearningPayload,
   assertSafeLearningText,
   classifyLearningActivity,
+  assertAutomaticLearningResourceScope,
+  assertResourceReferenceAllowed,
+  assertWorkspaceMemoryAllowed,
   isRetryableLearningError,
   learningContentHash,
   learningRetryDelayMs,
   rankKnowledgeForCurrentRoom,
+  resolveWorkspaceLearningSettings,
   validateWorkspaceKnowledgeReviewResult,
   type WorkspaceKnowledgeReviewPort,
   type WorkspaceKnowledgeReviewResult,
-  type WorkspaceKnowledgeReviewSnapshot
+  type WorkspaceKnowledgeReviewSnapshot,
+  type WorkspaceLearningSettingsLayers,
+  type WorkspaceLearningSettingsWithInheritance
 } from "./workspace-learning-policy";
+export type { WorkspaceLearningSettingsLayers } from "./workspace-learning-policy";
 import { WorkspaceServerStore } from "./workspace-server-store";
 import type {
   WorkspaceLearningActivity,
@@ -44,7 +51,6 @@ const verificationStates = new Set<WorkspaceLearningVerificationState>(["confirm
 const failureStates = new Set<WorkspaceLearningFailureState>(["none", "resolved", "unresolved"]);
 const maxSnapshotActivities = 100;
 const maxSnapshotRules = 80;
-const maxSnapshotWorkspaceKnowledge = 80;
 const maxSnapshotRoomKnowledge = 160;
 const maxSnapshotBytes = 1_000_000;
 
@@ -90,6 +96,8 @@ export interface PutWorkspaceLearningResourceInput {
 export interface UpdateWorkspaceLearningSettingsInput {
   scope: WorkspaceLearningScope;
   enabled?: boolean;
+  /** Changes only the Room enabled inheritance flag. */
+  inheritEnabled?: boolean;
   engineId?: string;
   model?: string;
   /** Opaque operator secret reference only. Never accepts secret content. */
@@ -123,12 +131,6 @@ export interface ClaimedWorkspaceLearningJob {
   attempt?: WorkspaceLearningJobAttempt;
   snapshot: WorkspaceKnowledgeReviewSnapshot;
   settings: WorkspaceLearningSettings;
-}
-
-export interface WorkspaceLearningSettingsLayers {
-  workspace?: WorkspaceLearningSettings;
-  room?: WorkspaceLearningSettings;
-  effective: WorkspaceLearningSettings;
 }
 
 export interface ApplyWorkspaceLearningReviewInput {
@@ -251,7 +253,9 @@ export class WorkspaceLearningService {
       const result = await sql.query<ResourceRow>("SELECT * FROM workspace_learning_resources WHERE workspace_id = $1 AND id = $2", [context.workspaceId, resourceId]);
       const row = result.rows[0];
       if (!row) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
-      return resourceFromRow(row);
+      const resource = resourceFromRow(row);
+      assertResourceReferenceAllowed(resource);
+      return resource;
     });
   }
 
@@ -263,11 +267,13 @@ export class WorkspaceLearningService {
   }): Promise<WorkspaceLearningResource[]> {
     assertScope(input.scope);
     if (input.kind && !resourceKinds.has(input.kind)) throw new WorkspaceServerError("workspace_learning_resource_kind_invalid", 400);
+    if (input.scope.kind === "workspace" && input.kind) assertWorkspaceMemoryAllowed(input.scope, input.kind);
     const limit = boundedLimit(input.limit);
     return this.store.database.withContext(context, async (sql) => {
       const result = await sql.query<ResourceRow>(
         `SELECT * FROM workspace_learning_resources
          WHERE workspace_id = $1 AND scope_kind = $2 AND room_id IS NOT DISTINCT FROM $3
+           AND ($2 <> 'workspace' OR resource_kind NOT IN ('knowledge', 'memory'))
            AND ($4::TEXT IS NULL OR resource_kind = $4)
            AND ($5::BOOLEAN OR state <> 'archived')
          ORDER BY is_absolute_rule DESC, updated_at DESC, id ASC LIMIT $6`,
@@ -280,6 +286,7 @@ export class WorkspaceLearningService {
   async listResourceVersions(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, resourceId: string): Promise<WorkspaceLearningResourceVersion[]> {
     assertOpaqueId(resourceId, "workspace_learning_resource_id_invalid");
     return this.store.database.withContext(context, async (sql) => {
+      await assertResourceReferenceById(sql, context.workspaceId, resourceId);
       const result = await sql.query<ResourceVersionRow>(
         "SELECT * FROM workspace_learning_resource_versions WHERE workspace_id = $1 AND resource_id = $2 ORDER BY version DESC",
         [context.workspaceId, resourceId]
@@ -291,6 +298,7 @@ export class WorkspaceLearningService {
   async listEvidence(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, resourceId: string): Promise<WorkspaceLearningEvidence[]> {
     assertOpaqueId(resourceId, "workspace_learning_resource_id_invalid");
     return this.store.database.withContext(context, async (sql) => {
+      await assertResourceReferenceById(sql, context.workspaceId, resourceId);
       const result = await sql.query<EvidenceRow>(
         "SELECT * FROM workspace_learning_evidence WHERE workspace_id = $1 AND resource_id = $2 ORDER BY created_at DESC, id DESC",
         [context.workspaceId, resourceId]
@@ -321,6 +329,7 @@ export class WorkspaceLearningService {
       const activityRow = activityResult.rows[0];
       if (!resourceRow || !activityRow || !versionResult.rows[0]) throw new WorkspaceServerError("workspace_learning_resource_use_target_not_found", 404);
       const resource = resourceFromRow(resourceRow);
+      assertResourceReferenceAllowed(resource);
       const activity = activityFromRow(activityRow);
       if (resource.scope.kind === "room" && resource.scope.roomId !== activity.roomId) {
         throw new WorkspaceServerError("workspace_learning_resource_use_cross_room_denied", 403);
@@ -384,6 +393,7 @@ export class WorkspaceLearningService {
   async putResource(context: WorkspaceRequestContext, input: PutWorkspaceLearningResourceInput): Promise<{ resource: WorkspaceLearningResource; replayed: boolean }> {
     assertScope(input.scope);
     if (!resourceKinds.has(input.kind)) throw new WorkspaceServerError("workspace_learning_resource_kind_invalid", 400);
+    assertWorkspaceMemoryAllowed(input.scope, input.kind);
     assertSafeLearningText(input.title);
     assertSafeLearningText(input.content);
     assertSafeLearningText(input.reason);
@@ -429,6 +439,7 @@ export class WorkspaceLearningService {
         return created;
       }
       const current = resourceFromRow(existing);
+      assertResourceReferenceAllowed(current);
       if (current.version !== expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: current.version });
       if (current.scope.kind !== input.scope.kind || current.scope.roomId !== input.scope.roomId || current.kind !== input.kind || current.isAbsoluteRule !== isAbsoluteRule) {
         throw new WorkspaceServerError("workspace_learning_resource_identity_change_forbidden", 409);
@@ -468,6 +479,7 @@ export class WorkspaceLearningService {
       const row = await selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!row) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
       const current = resourceFromRow(row);
+      assertResourceReferenceAllowed(current);
       if (current.version !== input.expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: current.version });
       const updated = await updateResource(sql, context, current, {
         aiUpdateLocked: input.fixed,
@@ -502,6 +514,7 @@ export class WorkspaceLearningService {
       const row = await selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!row) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
       const current = resourceFromRow(row);
+      assertResourceReferenceAllowed(current);
       if (current.version !== input.expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: current.version });
       const updated = await updateResource(sql, context, current, {
         state: input.archived ? "archived" : "active",
@@ -537,7 +550,9 @@ export class WorkspaceLearningService {
       const sourceRow = await selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!sourceRow) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
       const source = resourceFromRow(sourceRow);
+      assertResourceReferenceAllowed(source);
       if (source.version !== input.expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: source.version });
+      assertWorkspaceMemoryAllowed(input.targetScope, source.kind);
       if (source.kind === "workspace_rule" && input.targetScope.kind !== "workspace") throw new WorkspaceServerError("workspace_learning_resource_scope_invalid", 400);
       const copied = await insertResource(sql, context, {
         id: targetId,
@@ -582,6 +597,7 @@ export class WorkspaceLearningService {
       const sourceRow = await selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!sourceRow) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
       const source = resourceFromRow(sourceRow);
+      assertResourceReferenceAllowed(source);
       if (source.scope.kind !== "room") throw new WorkspaceServerError("workspace_learning_resource_move_scope_invalid", 409);
       if (source.version !== input.expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: source.version });
       if (source.scope.roomId === input.targetRoomId) throw new WorkspaceServerError("workspace_learning_resource_move_noop", 409);
@@ -640,11 +656,14 @@ export class WorkspaceLearningService {
       const sourceRow = await selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!sourceRow) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
       const source = resourceFromRow(sourceRow);
+      assertResourceReferenceAllowed(source);
       if (source.version !== input.expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: source.version });
+      const promotedKind = source.kind === "workspace_rule" ? "knowledge" : source.kind;
+      assertWorkspaceMemoryAllowed({ kind: "workspace" }, promotedKind);
       const promoted = await insertResource(sql, context, {
         id: targetId,
         scope: { kind: "workspace" },
-        kind: source.kind === "workspace_rule" ? "knowledge" : source.kind,
+        kind: promotedKind,
         isAbsoluteRule: false,
         title: source.title,
         content: source.content,
@@ -676,22 +695,21 @@ export class WorkspaceLearningService {
     if (!input.query.trim()) return [];
     const limit = boundedLimit(input.limit);
     return this.store.database.withContext(context, async (sql) => {
-      const [rules, room, workspace] = await Promise.all([
+      const [rules, room] = await Promise.all([
         listResourcesForSearch(sql, context.workspaceId, { kind: "workspace", absolute: true }, input.query, limit),
-        listResourcesForSearch(sql, context.workspaceId, { kind: "room", roomId: input.roomId }, input.query, limit),
-        listResourcesForSearch(sql, context.workspaceId, { kind: "workspace", absolute: false }, input.query, limit)
+        listResourcesForSearch(sql, context.workspaceId, { kind: "room", roomId: input.roomId }, input.query, limit)
       ]);
       return rankKnowledgeForCurrentRoom({
         query: input.query,
         workspaceRules: rules,
         roomKnowledge: room,
-        workspaceKnowledge: workspace,
+        workspaceKnowledge: [],
         limit
       });
     });
   }
 
-  async getEffectiveSettings(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string): Promise<WorkspaceLearningSettings> {
+  async getEffectiveSettings(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, roomId: string): Promise<WorkspaceLearningSettingsWithInheritance> {
     assertOpaqueId(roomId, "room_id_invalid");
     return this.store.database.withContext(context, async (sql) => (await this.getSettingsLayersInTransaction(sql, context.workspaceId, roomId)).effective);
   }
@@ -704,8 +722,9 @@ export class WorkspaceLearningService {
     return this.store.database.withContext(context, async (sql) => this.getSettingsLayersInTransaction(sql, context.workspaceId, roomId));
   }
 
-  async updateSettings(context: WorkspaceRequestContext, input: UpdateWorkspaceLearningSettingsInput): Promise<{ settings: WorkspaceLearningSettings; replayed: boolean }> {
+  async updateSettings(context: WorkspaceRequestContext, input: UpdateWorkspaceLearningSettingsInput): Promise<{ settings: WorkspaceLearningSettingsWithInheritance; replayed: boolean }> {
     assertScope(input.scope);
+    assertInheritSettingsInput(input);
     if (input.removeOverride === true) {
       assertRemoveSettingsOverrideInput(input);
       return this.removeSettingsOverride(context, input);
@@ -745,20 +764,24 @@ export class WorkspaceLearningService {
       const tokenLimit = input.clearTokenLimit ? null : (input.tokenLimit ?? previous?.tokenLimit ?? null);
       assertSettingsBudgetFloor(previous, currencyLimit, tokenLimit);
       const enabled = input.enabled ?? previous?.enabled ?? true;
+      const enabledInheritsWorkspace = input.scope.kind === "room"
+        ? (input.enabled === undefined ? (input.inheritEnabled ?? previous?.enabledInheritsWorkspace ?? false) : false)
+        : false;
       const saved = await sql.query<SettingsRow>(
         `INSERT INTO workspace_learning_settings(
-           workspace_id, id, scope_kind, room_id, enabled, engine_id, model, secret_ref,
+           workspace_id, id, scope_kind, room_id, enabled, enabled_inherits_workspace, engine_id, model, secret_ref,
            currency_limit, token_limit, updated_by
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (workspace_id, id) DO UPDATE SET
-           enabled = EXCLUDED.enabled, engine_id = EXCLUDED.engine_id, model = EXCLUDED.model,
+           enabled = EXCLUDED.enabled, enabled_inherits_workspace = EXCLUDED.enabled_inherits_workspace,
+           engine_id = EXCLUDED.engine_id, model = EXCLUDED.model,
            secret_ref = EXCLUDED.secret_ref, currency_limit = EXCLUDED.currency_limit,
            token_limit = EXCLUDED.token_limit, version = workspace_learning_settings.version + 1,
            updated_by = EXCLUDED.updated_by, updated_at = NOW()
-         WHERE workspace_learning_settings.version = $12
+         WHERE workspace_learning_settings.version = $13
          RETURNING *`,
         [
-          context.workspaceId, id, input.scope.kind, input.scope.roomId ?? null, enabled,
+          context.workspaceId, id, input.scope.kind, input.scope.roomId ?? null, enabled, enabledInheritsWorkspace,
           engineId, model, secretRef, currencyLimit, tokenLimit, context.accountId, expectedVersion
         ]
       );
@@ -776,6 +799,7 @@ export class WorkspaceLearningService {
         details: {
           scope_kind: settings.scope.kind,
           enabled: settings.enabled,
+          enabled_inherits_workspace: settings.enabledInheritsWorkspace,
           engine_id: settings.engineId ?? null,
           model: settings.model ?? null,
           requeued_job_count: requeuedJobCount
@@ -786,7 +810,7 @@ export class WorkspaceLearningService {
     return { settings: result.value, replayed: result.replayed };
   }
 
-  private async removeSettingsOverride(context: WorkspaceRequestContext, input: UpdateWorkspaceLearningSettingsInput): Promise<{ settings: WorkspaceLearningSettings; replayed: boolean }> {
+  private async removeSettingsOverride(context: WorkspaceRequestContext, input: UpdateWorkspaceLearningSettingsInput): Promise<{ settings: WorkspaceLearningSettingsWithInheritance; replayed: boolean }> {
     if (input.scope.kind !== "room") throw new WorkspaceServerError("workspace_learning_settings_override_scope_invalid", 400);
     const expectedVersion = input.expectedVersion ?? 0;
     assertExpectedVersion(expectedVersion);
@@ -1208,12 +1232,11 @@ export class WorkspaceLearningService {
       current.push(use);
       usesByActivityId.set(use.activityId, current);
     }
-    const [rules, common, room] = await Promise.all([
+    const [rules, room] = await Promise.all([
       listResourcesForSearch(sql, workspaceId, { kind: "workspace", absolute: true }, "", maxSnapshotRules + 1),
-      listResourcesForSearch(sql, workspaceId, { kind: "workspace", absolute: false }, "", maxSnapshotWorkspaceKnowledge + 1),
       listResourcesForSearch(sql, workspaceId, { kind: "room", roomId: job.roomId }, "", maxSnapshotRoomKnowledge + 1)
     ]);
-    if (rules.length > maxSnapshotRules || common.length > maxSnapshotWorkspaceKnowledge || room.length > maxSnapshotRoomKnowledge) {
+    if (rules.length > maxSnapshotRules || room.length > maxSnapshotRoomKnowledge) {
       throw new WorkspaceServerError("workspace_learning_snapshot_too_large", 409);
     }
     const eligibleRecords = activityRecords.filter((record) => {
@@ -1258,7 +1281,9 @@ export class WorkspaceLearningService {
         };
       }),
       workspaceRules: rules,
-      workspaceKnowledge: common,
+      // Workspace Knowledge/Memory is removed.  The empty field remains in
+      // the review contract for compatibility, but is never populated.
+      workspaceKnowledge: [],
       roomKnowledge: room
     };
     if (Buffer.byteLength(canonicalJson(snapshot), "utf8") > maxSnapshotBytes) {
@@ -1281,46 +1306,11 @@ export class WorkspaceLearningService {
     );
     const room = result.rows.find((row) => row.scope_kind === "room");
     const workspace = result.rows.find((row) => row.scope_kind === "workspace");
-    const roomSettings = room ? settingsFromRow(room) : undefined;
-    const workspaceSettings = workspace ? settingsFromRow(workspace) : undefined;
-    if (roomSettings || workspaceSettings) {
-      const preferred = roomSettings ?? workspaceSettings!;
-      const engineId = roomSettings?.engineId ?? workspaceSettings?.engineId;
-      const model = roomSettings?.model ?? workspaceSettings?.model;
-      const secretRef = roomSettings?.secretRef ?? workspaceSettings?.secretRef;
-      const currencyLimit = roomSettings?.currencyLimit ?? workspaceSettings?.currencyLimit;
-      const tokenLimit = roomSettings?.tokenLimit ?? workspaceSettings?.tokenLimit;
-      return {
-        ...(workspaceSettings ? { workspace: workspaceSettings } : {}),
-        ...(roomSettings ? { room: roomSettings } : {}),
-        effective: {
-          ...preferred,
-          enabled: roomSettings?.enabled ?? workspaceSettings?.enabled ?? true,
-          ...(engineId !== undefined ? { engineId } : {}),
-          ...(model !== undefined ? { model } : {}),
-          ...(secretRef !== undefined ? { secretRef } : {}),
-          ...(currencyLimit !== undefined ? { currencyLimit } : {}),
-          ...(tokenLimit !== undefined ? { tokenLimit } : {})
-        }
-      };
-    }
-    // No settings means learning is configured but not executable. A caller
-    // must make an explicit engine choice; we never quietly reuse a chat key.
-    return {
-      effective: {
-        workspaceId,
-        id: settingsId({ kind: "workspace" }),
-        scope: { kind: "workspace" },
-        enabled: true,
-        currencyUsed: 0,
-        tokensUsed: 0,
-        currencyReserved: 0,
-        tokensReserved: 0,
-        version: 0,
-        updatedBy: "",
-        updatedAt: new Date(0).toISOString()
-      }
-    };
+    return resolveWorkspaceLearningSettings({
+      ...(workspace ? { workspace: settingsFromRow(workspace) } : {}),
+      ...(room ? { room: settingsFromRow(room) } : {}),
+      fallback: defaultLearningSettings(workspaceId)
+    });
   }
 
   private async finishBlockedJob(
@@ -1359,10 +1349,12 @@ export class WorkspaceLearningService {
     if (mutation.kind === "no_change") return;
     const context: WorkspaceRequestContext = { workspaceId: input.workspaceId, accountId: input.accountId, operationId: `learning:${input.job.id}` };
     if (mutation.kind === "create") {
+      const targetScope: WorkspaceLearningScope = { kind: "room", roomId: input.job.roomId };
+      assertAutomaticLearningResourceScope(targetScope, input.job.roomId);
       const id = scopedId("learning_resource", input.workspaceId, `${input.job.id}:${mutation.title}:${mutation.content}:${hashJson(mutation.payload ?? {})}`);
       const resource = await insertResource(sql, context, {
         id,
-        scope: { kind: "room", roomId: input.job.roomId },
+        scope: targetScope,
         kind: mutation.resourceKind!,
         isAbsoluteRule: false,
         title: mutation.title!,
@@ -1382,9 +1374,11 @@ export class WorkspaceLearningService {
     const row = await selectResourceForUpdate(sql, input.workspaceId, mutation.resourceId!);
     if (!row) throw new WorkspaceServerError("workspace_learning_resource_not_found", 404);
     const current = resourceFromRow(row);
+    assertResourceReferenceAllowed(current);
     if (current.scope.kind !== "room" || current.scope.roomId !== input.job.roomId) {
       throw new WorkspaceServerError("workspace_learning_review_cross_room_resource_denied", 422);
     }
+    assertAutomaticLearningResourceScope(current.scope, input.job.roomId);
     if (mutation.kind === "update") {
       if (current.aiUpdateLocked) throw new WorkspaceServerError("workspace_learning_resource_ai_update_locked", 409);
       if (current.version !== mutation.expectedVersion) throw new WorkspaceServerError("workspace_learning_resource_version_conflict", 409, { latest_version: current.version });
@@ -1477,6 +1471,7 @@ export class WorkspaceLearningWorker {
     }, 20_000);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
+      assertLearningSnapshotReferences(claimed.snapshot);
       const review = Promise.resolve().then(() => this.reviewPort.review(claimed.snapshot, { signal: reviewAbort.signal }));
       // A cassette that ignores AbortSignal must not keep a lease forever.
       // Handle its later rejection explicitly after the bounded race settles.
@@ -1510,6 +1505,12 @@ export class WorkspaceLearningWorker {
       clearInterval(heartbeatTimer);
       input.signal?.removeEventListener("abort", abortFromCaller);
     }
+  }
+}
+
+function assertLearningSnapshotReferences(snapshot: WorkspaceKnowledgeReviewSnapshot): void {
+  for (const resource of [...snapshot.workspaceRules, ...snapshot.workspaceKnowledge, ...snapshot.roomKnowledge]) {
+    assertResourceReferenceAllowed(resource);
   }
 }
 
@@ -1667,6 +1668,7 @@ interface InsertResourceInput {
 
 async function insertResource(sql: WorkspaceSql, context: WorkspaceRequestContext, input: InsertResourceInput): Promise<WorkspaceLearningResource> {
   assertScope(input.scope);
+  assertWorkspaceMemoryAllowed(input.scope, input.kind);
   const saved = await sql.query<ResourceRow>(
     `INSERT INTO workspace_learning_resources(
        workspace_id, id, scope_kind, room_id, resource_kind, state, is_absolute_rule, ai_update_locked,
@@ -1697,6 +1699,8 @@ async function updateResource(
 ): Promise<WorkspaceLearningResource> {
   const scope = patch.scope ?? current.scope;
   assertScope(scope);
+  assertWorkspaceMemoryAllowed(scope, current.kind);
+  assertResourceReferenceAllowed(current);
   const state = patch.state ?? current.state;
   const title = patch.title ?? current.title;
   const content = patch.content ?? current.content;
@@ -1816,6 +1820,15 @@ async function selectResourceForUpdate(sql: WorkspaceSql, workspaceId: string, r
   return result.rows[0];
 }
 
+async function assertResourceReferenceById(sql: WorkspaceSql, workspaceId: string, resourceId: string): Promise<void> {
+  const result = await sql.query<ResourceRow>(
+    "SELECT * FROM workspace_learning_resources WHERE workspace_id = $1 AND id = $2",
+    [workspaceId, resourceId]
+  );
+  const row = result.rows[0];
+  if (row) assertResourceReferenceAllowed(resourceFromRow(row));
+}
+
 async function listResourcesForSearch(
   sql: WorkspaceSql,
   workspaceId: string,
@@ -1826,7 +1839,9 @@ async function listResourcesForSearch(
   const result = input.kind === "workspace"
     ? await sql.query<ResourceRow>(
       `SELECT * FROM workspace_learning_resources
-       WHERE workspace_id = $1 AND scope_kind = 'workspace' AND is_absolute_rule = $2 AND state NOT IN ('archived', 'conflict')
+       WHERE workspace_id = $1 AND scope_kind = 'workspace' AND is_absolute_rule = $2
+         AND ($2 OR resource_kind NOT IN ('knowledge', 'memory'))
+         AND state NOT IN ('archived', 'conflict')
          AND ($3 = '' OR (title || ' ' || content) ILIKE '%' || $3 || '%')
        ORDER BY updated_at DESC LIMIT $4`,
       [workspaceId, input.absolute, query.trim(), limit]
@@ -2071,6 +2086,7 @@ function assertSettingsBudgetFloor(
 function assertRemoveSettingsOverrideInput(input: UpdateWorkspaceLearningSettingsInput): void {
   if (input.scope.kind !== "room"
     || input.enabled !== undefined
+    || input.inheritEnabled !== undefined
     || input.engineId !== undefined
     || input.model !== undefined
     || input.secretRef !== undefined
@@ -2082,6 +2098,26 @@ function assertRemoveSettingsOverrideInput(input: UpdateWorkspaceLearningSetting
     || input.clearCurrencyLimit === true
     || input.clearTokenLimit === true) {
     throw new WorkspaceServerError("workspace_learning_settings_override_remove_invalid", 400);
+  }
+}
+
+function assertInheritSettingsInput(input: UpdateWorkspaceLearningSettingsInput): void {
+  if (input.inheritEnabled === undefined) return;
+  if (typeof input.inheritEnabled !== "boolean"
+    || input.scope.kind !== "room"
+    || input.enabled !== undefined
+    || input.engineId !== undefined
+    || input.model !== undefined
+    || input.secretRef !== undefined
+    || input.currencyLimit !== undefined
+    || input.tokenLimit !== undefined
+    || input.clearEngineId === true
+    || input.clearModel === true
+    || input.clearSecretRef === true
+    || input.clearCurrencyLimit === true
+    || input.clearTokenLimit === true
+    || input.removeOverride === true) {
+    throw new WorkspaceServerError("workspace_learning_settings_inherit_invalid", 400);
   }
 }
 
@@ -2124,44 +2160,11 @@ async function getSettingsLayersForRoom(
   );
   const room = result.rows.find((row) => row.scope_kind === "room");
   const workspace = result.rows.find((row) => row.scope_kind === "workspace");
-  const roomSettings = room ? settingsFromRow(room) : undefined;
-  const workspaceSettings = workspace ? settingsFromRow(workspace) : undefined;
-  if (roomSettings || workspaceSettings) {
-    const preferred = roomSettings ?? workspaceSettings!;
-    const engineId = roomSettings?.engineId ?? workspaceSettings?.engineId;
-    const model = roomSettings?.model ?? workspaceSettings?.model;
-    const secretRef = roomSettings?.secretRef ?? workspaceSettings?.secretRef;
-    const currencyLimit = roomSettings?.currencyLimit ?? workspaceSettings?.currencyLimit;
-    const tokenLimit = roomSettings?.tokenLimit ?? workspaceSettings?.tokenLimit;
-    return {
-      ...(workspaceSettings ? { workspace: workspaceSettings } : {}),
-      ...(roomSettings ? { room: roomSettings } : {}),
-      effective: {
-        ...preferred,
-        enabled: roomSettings?.enabled ?? workspaceSettings?.enabled ?? true,
-        ...(engineId !== undefined ? { engineId } : {}),
-        ...(model !== undefined ? { model } : {}),
-        ...(secretRef !== undefined ? { secretRef } : {}),
-        ...(currencyLimit !== undefined ? { currencyLimit } : {}),
-        ...(tokenLimit !== undefined ? { tokenLimit } : {})
-      }
-    };
-  }
-  return {
-    effective: {
-      workspaceId,
-      id: settingsId({ kind: "workspace" }),
-      scope: { kind: "workspace" },
-      enabled: true,
-      currencyUsed: 0,
-      tokensUsed: 0,
-      currencyReserved: 0,
-      tokensReserved: 0,
-      version: 0,
-      updatedBy: "",
-      updatedAt: new Date(0).toISOString()
-    }
-  };
+  return resolveWorkspaceLearningSettings({
+    ...(workspace ? { workspace: settingsFromRow(workspace) } : {}),
+    ...(room ? { room: settingsFromRow(room) } : {}),
+    fallback: defaultLearningSettings(workspaceId)
+  });
 }
 
 function normalizeUsage(input: WorkspaceKnowledgeReviewResult["usage"] | undefined): { currency: number; tokens: number } {
@@ -2170,6 +2173,22 @@ function normalizeUsage(input: WorkspaceKnowledgeReviewResult["usage"] | undefin
   assertNonnegative(currency, "workspace_learning_usage_invalid");
   assertNonnegativeInteger(tokens, "workspace_learning_usage_invalid");
   return { currency, tokens };
+}
+
+function defaultLearningSettings(workspaceId: string): WorkspaceLearningSettings {
+  return {
+    workspaceId,
+    id: settingsId({ kind: "workspace" }),
+    scope: { kind: "workspace" },
+    enabled: true,
+    currencyUsed: 0,
+    tokensUsed: 0,
+    currencyReserved: 0,
+    tokensReserved: 0,
+    version: 0,
+    updatedBy: "",
+    updatedAt: new Date(0).toISOString()
+  };
 }
 
 function validateActivityInput(input: IngestWorkspaceLearningActivityInput): void {
@@ -2419,6 +2438,7 @@ interface SettingsRow {
   scope_kind: WorkspaceLearningScope["kind"];
   room_id: string | null;
   enabled: boolean;
+  enabled_inherits_workspace?: boolean | null;
   engine_id: string | null;
   model: string | null;
   secret_ref: string | null;
@@ -2527,11 +2547,13 @@ function attemptFromRow(row: AttemptRow): WorkspaceLearningJobAttempt {
   };
 }
 
-function settingsFromRow(row: SettingsRow): WorkspaceLearningSettings {
+function settingsFromRow(row: SettingsRow): WorkspaceLearningSettingsWithInheritance {
   return {
     workspaceId: row.workspace_id, id: row.id,
     scope: row.scope_kind === "room" ? { kind: "room", roomId: row.room_id! } : { kind: "workspace" },
-    enabled: row.enabled, ...(row.engine_id ? { engineId: row.engine_id } : {}), ...(row.model ? { model: row.model } : {}),
+    enabled: row.enabled,
+    enabledInheritsWorkspace: row.scope_kind === "room" && row.enabled_inherits_workspace === true,
+    ...(row.engine_id ? { engineId: row.engine_id } : {}), ...(row.model ? { model: row.model } : {}),
     ...(row.secret_ref ? { secretRef: row.secret_ref } : {}),
     ...(row.currency_limit === null ? {} : { currencyLimit: Number(row.currency_limit) }),
     ...(row.token_limit === null ? {} : { tokenLimit: Number(row.token_limit) }),

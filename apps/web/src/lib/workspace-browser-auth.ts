@@ -38,6 +38,57 @@ export interface BrowserWorkspaceBinaryResponse {
   encoding?: string;
 }
 
+/**
+ * Narrow transport used only by the external Share client.  The operation is
+ * a closed union so callers cannot turn the Browser key store into an
+ * arbitrary cross-origin HTTP or signing proxy.
+ */
+export type BrowserShareSourceRequestInput =
+  | {
+    connectionId: string;
+    operation: "view";
+    sourceOrigin: string;
+    locator: string;
+  }
+  | {
+    connectionId: string;
+    operation: "claim";
+    sourceOrigin: string;
+    locator: string;
+    operationId: string;
+    body: {
+      target_origin: string;
+      target_workspace_id: string;
+      operation_id: string;
+      content_hash: string;
+    };
+  };
+
+export interface BrowserShareSourceResponse {
+  status: number;
+  body: unknown;
+}
+
+export interface BrowserShareDelegationPayload {
+  version: 1;
+  source_origin: string;
+  share_id: string;
+  claim_id: string;
+  recipient_account_id: string;
+  target_origin: string;
+  target_workspace_id: string;
+  operation_id: string;
+  content_hash: string;
+  issued_at: string;
+  expires_at: string;
+}
+
+export interface BrowserShareDelegation {
+  payload: BrowserShareDelegationPayload;
+  publicKey: string;
+  signature: string;
+}
+
 export interface BrowserWorkspaceRealtimeEvent {
   type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
   workspaceId: string;
@@ -188,8 +239,12 @@ async function signedBrowserWorkspaceFetch(input: BrowserWorkspaceRequestInput):
     ? (await loadStoredConnections()).find((item) => item.id === input.connectionId)
     : await loadStoredConnection();
   if (!connection) throw new Error("workspace_connection_required");
-  const url = new URL(input.path, `${connection.serverUrl}/`);
-  const base = new URL(connection.serverUrl);
+  // Connections may have been persisted by an older build.  Re-validate the
+  // server origin at the signing boundary so an arbitrary HTTP endpoint can
+  // never receive Account headers or a signature after a migration.
+  const serverUrl = normalizeServerUrl(connection.serverUrl);
+  const url = new URL(input.path, `${serverUrl}/`);
+  const base = new URL(serverUrl);
   if (url.origin !== base.origin || !url.pathname.startsWith("/api/")) {
     throw new Error("workspace_server_request_origin_invalid");
   }
@@ -260,6 +315,99 @@ export async function browserWorkspaceRequest<T = unknown>(input: BrowserWorkspa
     }
   }
   return responseBody as T;
+}
+
+/** Fetch one of the fixed public Share endpoints using the selected Account
+ * key.  This deliberately has no path/URL parameter and never returns key
+ * material; the bridge is responsible for verifying the active target before
+ * and after this request. */
+export async function browserShareSourceRequest(input: BrowserShareSourceRequestInput): Promise<BrowserShareSourceResponse> {
+  const connection = (await loadStoredConnections()).find((item) => item.id === input.connectionId);
+  if (!connection) throw new Error("workspace_connection_required");
+  // Validate the selected connection even though the Share source origin is a
+  // separate public host.  This keeps a stale/migrated HTTP connection from
+  // becoming a way to sign or publish the Account key to an arbitrary host.
+  normalizeServerUrl(connection.serverUrl);
+  const sourceOrigin = normalizeShareOrigin(input.sourceOrigin);
+  const locator = normalizeShareLocator(input.locator);
+  const operationId = input.operation === "claim"
+    ? requiredOpaqueId(input.operationId, "workspace_share_operation_id_invalid")
+    : undefined;
+  const path = input.operation === "view"
+    ? `/api/v1/shares/${locator}`
+    : `/api/v1/shares/${locator}/claims`;
+  const body = input.operation === "view" ? {} : validateShareClaimBody(input.body, operationId!);
+  const requestId = `share_request_${crypto.randomUUID()}`;
+  const timestamp = String(Date.now());
+  const payload = await createSignaturePayload({
+    method: input.operation === "view" ? "GET" : "POST",
+    path,
+    ...(operationId ? { operationId, idempotencyKey: operationId } : {}),
+    requestId,
+    timestamp,
+    body
+  });
+  const signature = encodeBase64Url(new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" },
+    connection.privateKey,
+    new TextEncoder().encode(payload)
+  )));
+  const url = new URL(path, sourceOrigin);
+  const response = await fetch(url, {
+    method: input.operation === "view" ? "GET" : "POST",
+    redirect: "error",
+    credentials: "omit",
+    mode: "cors",
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      "content-type": "application/json",
+      "x-samurai-account-id": connection.accountId,
+      "x-samurai-public-key": connection.publicKey,
+      "x-samurai-request-id": requestId,
+      "x-samurai-timestamp": timestamp,
+      "x-samurai-signature": signature,
+      ...(operationId ? { "x-samurai-operation-id": operationId, "idempotency-key": operationId } : {})
+    },
+    ...(input.operation === "view" ? {} : { body: JSON.stringify(body) })
+  });
+  const text = await response.text();
+  let responseBody: unknown = undefined;
+  if (text) {
+    try {
+      responseBody = JSON.parse(text);
+    } catch {
+      responseBody = undefined;
+    }
+  }
+  if (!response.ok) {
+    const errorValue = responseBody && typeof responseBody === "object" ? (responseBody as { error?: unknown }).error : undefined;
+    const code = typeof errorValue === "string"
+      ? errorValue
+      : errorValue && typeof errorValue === "object" && typeof (errorValue as { code?: unknown }).code === "string"
+        ? (errorValue as { code: string }).code
+        : "workspace_share_source_request_failed";
+    throw new Error(`${code}:${response.status}`);
+  }
+  return { status: response.status, body: responseBody };
+}
+
+/** Sign only the Share import delegation purpose string.  The private key
+ * remains a non-exportable CryptoKey held by IndexedDB. */
+export async function createBrowserShareDelegation(
+  connectionId: string,
+  payload: BrowserShareDelegationPayload
+): Promise<BrowserShareDelegation> {
+  const connection = (await loadStoredConnections()).find((item) => item.id === connectionId);
+  if (!connection) throw new Error("workspace_connection_required");
+  validateShareDelegationPayload(payload);
+  const canonicalPayload = canonicalShareJson(payload);
+  const signature = encodeBase64Url(new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" },
+    connection.privateKey,
+    new TextEncoder().encode(`samurai-share-import-v1\n${canonicalPayload}`)
+  )));
+  return { payload, publicKey: connection.publicKey, signature };
 }
 
 /** Fetch an authenticated artifact payload without forcing binary data through
@@ -528,8 +676,9 @@ async function ensureBrowserWorkspaceRealtime(): Promise<void> {
   if (browserRealtimeSocket || browserRealtimeListeners.size === 0) return;
   const connection = await loadStoredConnection();
   if (!connection || browserRealtimeListeners.size === 0) return;
+  const serverUrl = normalizeServerUrl(connection.serverUrl);
   const generation = ++browserRealtimeGeneration;
-  const socket = io(connection.serverUrl, {
+  const socket = io(serverUrl, {
     autoConnect: false,
     transports: ["websocket", "polling"],
     timeout: 10_000,
@@ -753,10 +902,101 @@ function canonicalJson(value: unknown): string {
 
 function normalizeServerUrl(value: string): string {
   const url = new URL(requiredText(value, "workspace_server_url_required", 2_000));
-  if (url.protocol !== "http:" && url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+  const loopback = url.hostname === "localhost"
+    || url.hostname === "127.0.0.1"
+    || url.hostname === "::1"
+    || url.hostname === "[::1]";
+  if (url.username || url.password || url.pathname !== "/" || url.search || url.hash
+    || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) {
     throw new Error("workspace_server_url_invalid");
   }
   return url.toString().replace(/\/$/, "");
+}
+
+function normalizeShareOrigin(value: string): string {
+  if (typeof value !== "string" || value.length > 2_048) throw new Error("workspace_share_source_origin_invalid");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("workspace_share_source_origin_invalid");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("workspace_share_source_origin_invalid");
+  }
+  return new URL("/", url.origin).toString();
+}
+
+function normalizeShareLocator(value: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) throw new Error("workspace_share_locator_invalid");
+  return value;
+}
+
+function validateShareClaimBody(
+  value: unknown,
+  operationId: string
+): { target_origin: string; target_workspace_id: string; operation_id: string; content_hash: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("workspace_share_claim_input_invalid");
+  const record = value as Record<string, unknown>;
+  const keys = ["target_origin", "target_workspace_id", "operation_id", "content_hash"];
+  if (Object.keys(record).some((key) => !keys.includes(key)) || record.operation_id !== operationId) {
+    throw new Error("workspace_share_claim_input_invalid");
+  }
+  if (typeof record.target_origin !== "string") throw new Error("workspace_share_target_origin_invalid");
+  const targetOrigin = normalizeShareOrigin(record.target_origin);
+  if (typeof record.target_workspace_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.target_workspace_id)) {
+    throw new Error("workspace_share_target_workspace_invalid");
+  }
+  if (typeof record.content_hash !== "string" || !/^[a-f0-9]{64}$/.test(record.content_hash)) {
+    throw new Error("workspace_share_content_hash_invalid");
+  }
+  return {
+    target_origin: targetOrigin,
+    target_workspace_id: record.target_workspace_id,
+    operation_id: operationId,
+    content_hash: record.content_hash
+  };
+}
+
+function validateShareDelegationPayload(payload: BrowserShareDelegationPayload): void {
+  const keys = [
+    "version", "source_origin", "share_id", "claim_id", "recipient_account_id", "target_origin",
+    "target_workspace_id", "operation_id", "content_hash", "issued_at", "expires_at"
+  ];
+  if (!payload || typeof payload !== "object" || Object.keys(payload).some((key) => !keys.includes(key)) || payload.version !== 1) {
+    throw new Error("workspace_share_delegation_invalid");
+  }
+  normalizeShareOrigin(payload.source_origin);
+  normalizeShareOrigin(payload.target_origin);
+  for (const value of [payload.share_id, payload.claim_id, payload.recipient_account_id, payload.target_workspace_id, payload.operation_id]) {
+    if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(value)) {
+      throw new Error("workspace_share_delegation_invalid");
+    }
+  }
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "version" || key === "source_origin" || key === "target_origin" || key === "content_hash") continue;
+    if (typeof value !== "string" || !value || value.length > 512) throw new Error("workspace_share_delegation_invalid");
+  }
+  if (!/^[a-f0-9]{64}$/.test(payload.content_hash)) throw new Error("workspace_share_delegation_invalid");
+  const issuedAt = Date.parse(payload.issued_at);
+  const expiresAt = Date.parse(payload.expires_at);
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt || expiresAt - issuedAt > 5 * 60_000 || expiresAt <= Date.now()) {
+    throw new Error("workspace_share_delegation_expired");
+  }
+}
+
+function canonicalShareJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("workspace_share_delegation_invalid");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalShareJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalShareJson(record[key])}`).join(",")}}`;
+  }
+  throw new Error("workspace_share_delegation_invalid");
 }
 
 function requiredText(value: string, code: string, maxLength: number): string {

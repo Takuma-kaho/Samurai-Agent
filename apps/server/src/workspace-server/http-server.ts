@@ -18,7 +18,7 @@ import {
 } from "@samurai-agent/runtime";
 import type { RunChatTurnResult } from "@samurai-agent/runtime";
 import { createSurfaceRenderSpec, parseSurfaceOperation, type SurfaceOperation, type SurfaceRenderSpec } from "@samurai-agent/ui-protocol";
-import { PublicWorkspaceTransferManifestResultSchema, PublicWorkspaceTransferStartResultSchema } from "@samurai-agent/domain-api";
+import { PublicShareOriginSchema, PublicWorkspaceTransferManifestResultSchema, PublicWorkspaceTransferStartResultSchema } from "@samurai-agent/domain-api";
 import {
   WorkspaceServerError,
   WorkspaceFileStore,
@@ -74,12 +74,13 @@ import {
   type OrganizationApiRequestContext
 } from "./domain-api-v1";
 import { WorkspaceWorkerSupervisor } from "../workers/workspace-worker-supervisor";
+import { createPostgresWorkspaceShareImportWorker } from "./share-import-worker-adapter";
 import { PostgresRoomWorkWorker } from "../workers/postgres-room-work-worker";
 import { createWorkspaceCompletionBackendReviewPort } from "../workers/workspace-completion-review-port";
 import { createWorkspaceLearningBackendReviewPort } from "../workers/workspace-learning-review-port";
 import { PostgresRuntimeExecutionWorker } from "../workers/postgres-runtime-execution-worker";
 import { WorkspaceInteractionRequestMaintenanceWorker } from "../workers/workspace-interaction-request-maintenance-worker";
-import { PostgresRuntimeCommandService, type PostgresRuntimeChatCompletionEvent, type PostgresRuntimeToolExecutionPort } from "../adapters/runtime/postgres-runtime-chat";
+import { PostgresRuntimeCommandService, type PostgresRuntimeChatCompletionEvent, type PostgresRuntimeExecutionContextPort, type PostgresRuntimeToolExecutionPort } from "../adapters/runtime/postgres-runtime-chat";
 import { runPostgresChatTurnThroughDomainOperation } from "../adapters/runtime/postgres-chat-domain-operation";
 import { createPostgresChatSessionThroughDomainOperation } from "../adapters/runtime/postgres-session-domain-operation";
 import { PostgresRuntimeClientEvents } from "../adapters/runtime/postgres-runtime-client-events";
@@ -95,6 +96,16 @@ import { PostgresGatewayDomainOperations } from "../adapters/runtime/postgres-ga
 import { PostgresSkillDomainOperations } from "../adapters/runtime/postgres-skill-domain-operation";
 import { PostgresGatewayMaintenanceWorker } from "../workers/postgres-gateway-maintenance-worker";
 import { PostgresSkillOptimizationWorker } from "../workers/postgres-skill-optimization-worker";
+import {
+  createPostgresRuntimeExecutionContextSelector,
+  createOrganizationNotificationAwareCommands,
+  createPostgresOrganizationNotificationBridge,
+  createPostgresWorkspaceContextQueryService,
+  createPostgresWorkspaceNotificationOutboxPort,
+  createPostgresWorkspaceNotificationService,
+  createWorkspaceNotificationProjectionWorker,
+  type WorkspaceNotificationOutboxPort
+} from "./context-notification-postgres";
 import type { OAuthAccountAuthorizationPort, OAuthBrowserSessionPort } from "@samurai-agent/external-integration";
 import {
   createPostgresExternalIntegrationRuntime,
@@ -103,10 +114,24 @@ import {
 } from "../adapters/external/postgres-external-integration";
 import { PostgresExternalAppIngressFactory } from "../adapters/external/postgres-external-app-ingress";
 import { runPostgresExternalIntegrationContext } from "../adapters/external/postgres-external-integration-store";
+import { mountWorkspaceShareHttpRoutes } from "./share-http";
+import {
+  createWorkspaceShareHost,
+  type WorkspaceShareHostComposition,
+  type WorkspaceSharePublicAccess
+} from "./share-http-host";
+import type { WorkspaceShareHttpClient, WorkspaceShareImportWriter } from "./share-postgres";
 
 const automationJobKinds = ["memory_review", "learning_evaluation", "skill_curator", "wiki_reindex", "daily_digest", "custom_instruction", "resource_translation"] as const;
 const postgresTemporaryContextMaxBytes = 8 * 1024 * 1024;
 const internalWorkspaceRecordTypes = new Set(["artifact_transaction"]);
+
+// Runtime command construction is shared by the legacy compatibility routes
+// and the Domain API factory. Keying the selector by the concrete DB keeps
+// multiple test/host compositions isolated without widening their public
+// request context.
+const runtimeExecutionContexts = new WeakMap<object, PostgresRuntimeExecutionContextPort>();
+const runtimeNotificationOutboxes = new WeakMap<object, WorkspaceNotificationOutboxPort>();
 
 interface AuthenticatedRequest extends Request {
   samurai?: {
@@ -165,6 +190,15 @@ export interface WorkspaceServerHttpOptions {
     allowedOrigins?: readonly string[];
     trustedProxy?: boolean;
     hookRelayCommand?: string;
+  };
+  /** Share Core composition. The origin must be the fixed HTTPS Server
+   * origin; without one the dedicated locator routes stay unmounted. */
+  share?: {
+    origin?: string;
+    allowedSourceOrigins?: readonly string[];
+    importHttpClient?: WorkspaceShareHttpClient;
+    completionImportWriter?: WorkspaceShareImportWriter;
+    publicAccess?: WorkspaceSharePublicAccess;
   };
 }
 
@@ -373,7 +407,74 @@ export async function createWorkspaceServerHttp(
       });
   });
   const io = new SocketServer(httpServer, { cors: { origin: corsOrigins.length > 0 ? [...corsOrigins] : false, credentials: false } });
+  const accountSocketRateGuard = createRateGuard({ windowMs: 60_000, limit: config.publicNetwork ? 30 : 120 });
+  // Account-scoped notifications intentionally use a separate Socket.IO
+  // namespace.  It has no Workspace selector, so an unjoined Account can
+  // receive only its own bodyless invalidation event.
+  const accountNotificationIo = io.of("/account-notifications");
+  accountNotificationIo.use(async (socket, next) => {
+    try {
+      if (!accountSocketRateGuard(socket.handshake.address || "unknown")) throw new WorkspaceServerError("workspace_rate_limit_exceeded", 429);
+      const auth = objectBody(socket.handshake.auth);
+      const accountId = stringField(auth, "account_id");
+      if (optionalStringField(auth, "workspace_id")) {
+        throw new WorkspaceServerError("account_notification_workspace_forbidden", 400);
+      }
+      const requestId = stringField(auth, "request_id");
+      const timestamp = stringField(auth, "timestamp");
+      const signature = stringField(auth, "signature");
+      const publicKey = await store.getAccountPublicKey(accountId);
+      if (!publicKey) throw new WorkspaceServerError("account_not_found", 401);
+      verifyAccountSignature({
+        signed: { accountId, requestId, timestamp, signature },
+        publicKey,
+        payload: { method: "SOCKET", path: "/socket.io/account-notifications", requestId, timestamp, body: {} }
+      });
+      socket.data.samurai = { accountId };
+      next();
+    } catch (error) {
+      next(error instanceof Error ? error : new Error("account_notification_socket_authentication_failed"));
+    }
+  });
+  accountNotificationIo.on("connection", (socket) => {
+    const identity = socket.data.samurai as { accountId: string };
+    socket.join(accountNotificationSocketRoom(identity.accountId));
+  });
   const realtimeGate = new WorkspaceRealtimeGate();
+  const resolveNotificationWorkerContexts = async () => {
+    const resolved = await resolveWorkerContexts(new AbortController().signal);
+    return resolved.state === "enabled" ? resolved.contexts : [];
+  };
+  const contextQuery = createPostgresWorkspaceContextQueryService(core.database, config);
+  const runtimeExecutionContext = createPostgresRuntimeExecutionContextSelector(completion);
+  runtimeExecutionContexts.set(core.database, runtimeExecutionContext);
+  const notificationOutbox = createPostgresWorkspaceNotificationOutboxPort(core.database, resolveNotificationWorkerContexts);
+  runtimeNotificationOutboxes.set(core.database, notificationOutbox);
+  const notifications = createPostgresWorkspaceNotificationService(core.database, {
+    resolveWorkerContexts: resolveNotificationWorkerContexts,
+    onProjected: async (outbox) => {
+      // This event contains no title/body/source data. Account invitation
+      // notifications are deliberately emitted through the Account namespace,
+      // never through a Workspace room.
+      for (const recipientAccountId of outbox.recipientAccountIds) {
+        const notificationId = await projectedNotificationId(core.database, outbox, recipientAccountId);
+        const payload = {
+          notification_id: notificationId,
+          workspace_id: outbox.workspaceId ?? null
+        };
+        accountNotificationIo.to(accountNotificationSocketRoom(recipientAccountId)).emit("notification.changed", payload);
+        // Existing Workspace sockets also join this Account-scoped room. It
+        // preserves the established socket transport without broadcasting a
+        // private notification invalidation to every Workspace member.
+        io.to(accountNotificationSocketRoom(recipientAccountId)).emit("notification.changed", payload);
+      }
+    }
+  });
+  const notificationProjectionWorker = createWorkspaceNotificationProjectionWorker(notifications, {
+    onError: (error) => console.error("workspace_notification_projection_failed", error)
+  });
+  const organizationNotificationBridge = createPostgresOrganizationNotificationBridge(core.database, notificationOutbox);
+  const notificationAwareCommands = createOrganizationNotificationAwareCommands(commands, organizationNotificationBridge);
   learningRunner = new WorkspaceLearningRunner(learning, options.reviewPorts ?? (learningReviewPort ? [learningReviewPort] : []), {
     onSettled: async ({ context, job }) => {
       await realtimeGate.run(context.workspaceId, async () => {
@@ -392,11 +493,34 @@ export async function createWorkspaceServerHttp(
     (event) => recordPostgresChatCompletionActivity(commands, context, event),
     createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context)
   );
+  const interactionNotificationPort = createWorkspaceInteractionRequestNotificationPort({ io, store, commands, realtimeGate });
+  const interactionNotifications = {
+    ...interactionNotificationPort,
+    onInteractionRequestChanged: async (
+      context: WorkspaceRequestContext,
+      request: import("@samurai-agent/workspace-server").WorkspaceInteractionRequest,
+      action: import("./interaction-request-workflow").WorkspaceInteractionRequestEventAction,
+      eventOptions?: import("./interaction-request-workflow").WorkspaceInteractionRequestEventOptions
+    ) => {
+      await interactionNotificationPort.onInteractionRequestChanged?.(context, request, action, eventOptions);
+      const kind = request.kind === "approval" ? "approval_required" : "input_required";
+      await notificationOutbox.enqueue({
+        workspaceId: context.workspaceId,
+        roomId: request.roomId,
+        sourceKind: "interaction_request",
+        sourceId: request.id,
+        sourceRevision: request.version,
+        kind,
+        action: action === "created" ? "create" : "invalidate",
+        recipientAccountIds: [request.requestedAccountId]
+      });
+    }
+  };
   const interactionWorkflow = createWorkspaceInteractionRequestWorkflow({
     authorization: store,
     interactionRequests,
     generatedSurfaces,
-    notifications: createWorkspaceInteractionRequestNotificationPort({ io, store, commands, realtimeGate })
+    notifications: interactionNotifications
   });
   const roomWorkWorker = new PostgresRoomWorkWorker({
     store,
@@ -411,6 +535,20 @@ export async function createWorkspaceServerHttp(
       (event) => recordPostgresChatCompletionActivity(commands, { ...context, operationId }, event),
       createPostgresRuntimeToolExecutionPort(commands, artifacts, generatedSurfaces, store, context)
     )
+  });
+  const configuredShareOrigin = options.share?.origin
+    ?? (config.publicBaseUrl && PublicShareOriginSchema.safeParse(config.publicBaseUrl).success ? config.publicBaseUrl : undefined);
+  const shareHost: WorkspaceShareHostComposition = createWorkspaceShareHost({
+    database: core.database,
+    store,
+    completion,
+    storageRoot: config.storageRoot,
+    cursorSecret: config.invitationTokenSecret,
+    ...(configuredShareOrigin ? { origin: configuredShareOrigin } : {}),
+    ...(options.share?.allowedSourceOrigins ? { allowedSourceOrigins: options.share.allowedSourceOrigins } : {}),
+    ...(options.share?.importHttpClient ? { importHttpClient: options.share.importHttpClient } : {}),
+    ...(options.share?.completionImportWriter ? { completionImportWriter: options.share.completionImportWriter } : {}),
+    ...(options.share?.publicAccess ? { publicAccess: options.share.publicAccess } : {})
   });
   const workerSupervisor = new WorkspaceWorkerSupervisor({
     learningRunner,
@@ -445,6 +583,7 @@ export async function createWorkspaceServerHttp(
       repoRoot: process.cwd(),
       hostComplete: skillOptimizationHostComplete
     }),
+    shareImportWorker: createPostgresWorkspaceShareImportWorker({ service: shareHost.service }),
     automationScheduler: automation,
     clientEventQueue: {
       runTick: async (context, { signal }) => {
@@ -525,7 +664,7 @@ export async function createWorkspaceServerHttp(
     app,
     io,
     store,
-    commands,
+    commands: notificationAwareCommands,
     artifacts,
     generatedSurfaces,
     interactionRequests,
@@ -544,6 +683,9 @@ export async function createWorkspaceServerHttp(
     learningRunner,
     automation,
     interactionWorkflow,
+    contextQuery,
+    notifications,
+    share: shareHost.service,
     runtimeFor: (req) => {
       const context = operationContext(req);
       return postgresRuntimeCommands(
@@ -560,11 +702,26 @@ export async function createWorkspaceServerHttp(
     }
   });
 
+  // Locator/claim/content HTTP needs the fixed HTTPS origin.  When no such
+  // origin is configured, management/status still use the V1 Core service but
+  // the public surface is not guessed from a bind address or an HTTP URL.
+  if (configuredShareOrigin) {
+    mountWorkspaceShareHttpRoutes({
+      app,
+      service: shareHost.http,
+      resolvePublicIdentity: shareHost.resolvePublicIdentity,
+      resolveAccountIdentity: shareHost.resolveAccountIdentity,
+      asyncRoute,
+      requestId: (req) => req.header("x-samurai-request-id")?.trim() || createId("share_request"),
+      origin: configuredShareOrigin
+    });
+  }
+
   mountOrganizationRestRoutes({
     app,
     authenticateAccount: authenticate,
     asyncRoute,
-    commands,
+    commands: notificationAwareCommands,
     organizationContext: (req, organizationId, options) => organizationRequestContext(req, organizationId, options)
   });
 
@@ -1503,11 +1660,15 @@ export async function createWorkspaceServerHttp(
       : await knowledgeMemory.list(workspaceContext(req), roomId, false) });
   }));
   app.get("/api/workspaces/:workspaceId/knowledge-memory/:memoryId", authenticateWorkspace, asyncRoute(async (req, res) => {
-    res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId")));
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_memory_room_id_required", 400);
+    res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId"), roomId));
   }));
   app.post("/api/workspaces/:workspaceId/knowledge-memory/:memoryId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
     const context = operationContext(req);
-    res.json(await knowledgeMemory.archive(context, pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner"));
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("knowledge_memory_room_id_required", 400);
+    res.json(await knowledgeMemory.archive(context, pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner", roomId));
   }));
   // Compatibility aliases keep the former resource names on the PostgreSQL
   // server while all reads and writes remain Completion-backed.
@@ -1523,10 +1684,14 @@ export async function createWorkspaceServerHttp(
     res.json({ memories: query ? await knowledgeMemory.search(workspaceContext(req), roomId, query, queryNumber(req, "limit") ?? 50) : await knowledgeMemory.list(workspaceContext(req), roomId, false) });
   }));
   app.get("/api/workspaces/:workspaceId/memory/:memoryId", authenticateWorkspace, asyncRoute(async (req, res) => {
-    res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId")));
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("memory_room_id_required", 400);
+    res.json(await knowledgeMemory.get(workspaceContext(req), pathParam(req, "memoryId"), roomId));
   }));
   app.post("/api/workspaces/:workspaceId/memory/:memoryId/archive", authenticateWorkspace, asyncRoute(async (req, res) => {
-    res.json(await knowledgeMemory.archive(operationContext(req), pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner"));
+    const roomId = queryString(req, "room_id");
+    if (!roomId) throw new WorkspaceServerError("memory_room_id_required", 400);
+    res.json(await knowledgeMemory.archive(operationContext(req), pathParam(req, "memoryId"), optionalStringField(objectBody(req.body), "reason") ?? "Memory archived by owner", roomId));
   }));
 
   app.get("/api/workspaces/:workspaceId/skills", authenticateWorkspace, asyncRoute(async (req, res) => {
@@ -3300,6 +3465,7 @@ export async function createWorkspaceServerHttp(
   io.on("connection", (socket) => {
     const identity = socket.data.samurai as { workspaceId: string; accountId: string };
     socket.join(workspaceSocketRoom(identity.workspaceId));
+    socket.join(accountNotificationSocketRoom(identity.accountId));
     socket.on("workspace:subscribe-room", async (input: unknown, acknowledge?: (result: unknown) => void) => {
       try {
         const body = objectBody(input);
@@ -3347,6 +3513,7 @@ export async function createWorkspaceServerHttp(
     res.status(normalized.status).json({ error: normalized.code, ...(normalized.details ? { details: normalized.details } : {}) });
   });
 
+  await notificationProjectionWorker.start();
   await workerSupervisor.start();
 
   return {
@@ -3357,6 +3524,11 @@ export async function createWorkspaceServerHttp(
     workerSupervisor,
     async close(): Promise<void> {
       const failures: unknown[] = [];
+      try {
+        await notificationProjectionWorker.stop();
+      } catch (error) {
+        failures.push(error);
+      }
       try {
         await workerSupervisor.stop();
         const workerStatus = workerSupervisor.status();
@@ -3951,6 +4123,8 @@ function postgresRuntimeCommands(
 ): PostgresRuntimeCommandService {
   const clientEvents = new PostgresRuntimeClientEvents(database, store);
   const interactionRequests = new WorkspaceInteractionRequestService(store);
+  const executionContext = runtimeExecutionContexts.get(database);
+  const notificationOutbox = runtimeNotificationOutboxes.get(database);
   let runtimeCommands: PostgresRuntimeCommandService;
   runtimeCommands = new PostgresRuntimeCommandService({
     database,
@@ -3959,6 +4133,7 @@ function postgresRuntimeCommands(
     ...(context.operationId ? { operationId: context.operationId } : {}),
     backendRegistry,
     knowledgeMemory,
+    ...(executionContext ? { executionContext } : {}),
     ...(toolExecution ? { toolExecution, availableTools: runtimeChatAvailableProviderTools({ roomWorkBinding: true }) } : {}),
     agentWorktreeRoot: path.join(config.storageRoot, "agent-worktrees", context.workspaceId),
     coreWorkspaceRoot: path.join(config.storageRoot, "workspaces"),
@@ -4001,6 +4176,17 @@ function postgresRuntimeCommands(
           }
         });
         if (!created.replayed) {
+          await notificationOutbox?.enqueue({
+            workspaceId: context.workspaceId,
+            roomId,
+            sourceKind: "interaction_request",
+            sourceId: created.request.id,
+            sourceRevision: created.request.version,
+            kind: "input_required",
+            recipientAccountIds: [created.request.requestedAccountId]
+          });
+        }
+        if (!created.replayed) {
           const eventContext = {
             workspaceId: context.workspaceId,
             accountId: context.accountId,
@@ -4032,6 +4218,15 @@ function postgresRuntimeCommands(
       if (!run) return;
       const notification = PostgresRuntimeClientEvents.notificationForRun(run);
       if (!notification) return;
+      await notificationOutbox?.enqueue({
+        workspaceId: context.workspaceId,
+        roomId,
+        sourceKind: "work",
+        sourceId: run.id,
+        sourceRevision: Number(run.current_attempt ?? 1),
+        kind: event.event_type === "run_failed" ? "work_failed" : "work_completed",
+        recipientAccountIds: [context.accountId]
+      });
       const operationId = `client_event_save_${createHash("sha256").update(`${context.workspaceId}|${notification.id}`).digest("hex").slice(0, 40)}`;
       await clientEvents.save({ workspaceId: context.workspaceId, accountId: context.accountId, operationId }, notification);
     }
@@ -4602,6 +4797,61 @@ async function revalidateRoomMemberSockets(io: SocketServer, store: WorkspaceSer
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<void>): (req: Request, res: Response, next: NextFunction) => void {
   return (req, res, next) => { void handler(req, res, next).catch(next); };
+}
+
+function accountNotificationSocketRoom(accountId: string): string {
+  return `account:${accountId}:notifications`;
+}
+
+async function projectedNotificationId(
+  database: WorkspaceServerCore["database"],
+  outbox: {
+    workspaceId?: string;
+    sourceKind: string;
+    sourceId: string;
+    sourceRevision: number;
+    kind: string;
+  },
+  recipientAccountId: string
+): Promise<string> {
+  const result = await database.withContext({ accountId: recipientAccountId }, async (sql) => sql.query<{ id: string }>(
+    `SELECT id
+       FROM account_notifications
+      WHERE recipient_account_id = $1
+        AND workspace_id IS NOT DISTINCT FROM $2::TEXT
+        AND source_kind = $3
+        AND source_id = $4
+        AND kind = $5
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`,
+    [recipientAccountId, outbox.workspaceId ?? null, outbox.sourceKind, outbox.sourceId, outbox.kind]
+  ));
+  const id = result.rows[0]?.id;
+  if (typeof id === "string" && id.length > 0) return id;
+  // An invalidate may race the original create projection. Keep the event
+  // bodyless and deterministic so a later Query still recovers the state.
+  return stableNotificationProjectionId(outbox, recipientAccountId);
+}
+
+function stableNotificationProjectionId(
+  outbox: {
+    workspaceId?: string;
+    sourceKind: string;
+    sourceId: string;
+    sourceRevision: number;
+    kind: string;
+  },
+  recipientAccountId: string
+): string {
+  const digest = createHash("sha256").update(JSON.stringify({
+    recipientAccountId,
+    workspaceId: outbox.workspaceId ?? null,
+    sourceKind: outbox.sourceKind,
+    sourceId: outbox.sourceId,
+    sourceRevision: outbox.sourceRevision,
+    kind: outbox.kind
+  })).digest("hex").slice(0, 40);
+  return `notification_${digest}`;
 }
 
 function requestRateGuard(options: { windowMs: number; limit: number }): (req: Request, res: Response, next: NextFunction) => void {

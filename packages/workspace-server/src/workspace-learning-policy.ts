@@ -4,11 +4,122 @@ import { WorkspaceServerError } from "./errors";
 import type {
   WorkspaceLearningActivityOutcome,
   WorkspaceLearningFailureState,
+  WorkspaceLearningScope,
   WorkspaceLearningResource,
   WorkspaceLearningResourceKind,
+  WorkspaceLearningSettings,
   WorkspaceLearningVerificationState,
   WorkspaceRecordPayload
 } from "./types";
+
+/**
+ * The settings row is owned by the Workspace/Room configuration domain, but
+ * the inheritance decision must be shared by every learning entry point
+ * (query, runner and worker).  Keep the new flag local until the public
+ * settings type is extended by the contract owner.
+ */
+export type WorkspaceLearningSettingsWithInheritance = WorkspaceLearningSettings & {
+  enabledInheritsWorkspace: boolean;
+};
+
+export interface WorkspaceLearningSettingsLayers {
+  workspace?: WorkspaceLearningSettingsWithInheritance;
+  room?: WorkspaceLearningSettingsWithInheritance;
+  effective: WorkspaceLearningSettingsWithInheritance;
+}
+
+/**
+ * Resolves the two learning settings layers without merging their ownership.
+ * Only `enabled` is inherited from Workspace when the Room flag is enabled;
+ * engine/model/budget/usage remain the values of their existing layers.
+ */
+export function resolveWorkspaceLearningSettings(input: {
+  workspace?: WorkspaceLearningSettings;
+  room?: WorkspaceLearningSettings;
+  fallback?: WorkspaceLearningSettings;
+}): WorkspaceLearningSettingsLayers {
+  const workspace = input.workspace ? withInheritanceFlag(input.workspace, false) : undefined;
+  const room = input.room ? withInheritanceFlag(input.room, readInheritanceFlag(input.room)) : undefined;
+  const fallback = input.fallback
+    ? withInheritanceFlag(input.fallback, true)
+    : undefined;
+  const preferred = room ?? workspace ?? fallback ?? defaultLearningSettings();
+  const inherited = room ? room.enabledInheritsWorkspace : true;
+  const effective = withInheritanceFlag({
+    ...preferred,
+    enabled: inherited ? (workspace?.enabled ?? true) : (room?.enabled ?? workspace?.enabled ?? true),
+    ...((room?.engineId ?? workspace?.engineId) !== undefined
+      ? { engineId: room?.engineId ?? workspace?.engineId }
+      : {}),
+    ...((room?.model ?? workspace?.model) !== undefined
+      ? { model: room?.model ?? workspace?.model }
+      : {}),
+    ...((room?.secretRef ?? workspace?.secretRef) !== undefined
+      ? { secretRef: room?.secretRef ?? workspace?.secretRef }
+      : {}),
+    ...((room?.currencyLimit ?? workspace?.currencyLimit) !== undefined
+      ? { currencyLimit: room?.currencyLimit ?? workspace?.currencyLimit }
+      : {}),
+    ...((room?.tokenLimit ?? workspace?.tokenLimit) !== undefined
+      ? { tokenLimit: room?.tokenLimit ?? workspace?.tokenLimit }
+      : {})
+  }, inherited);
+  return {
+    ...(workspace ? { workspace } : {}),
+    ...(room ? { room } : {}),
+    effective
+  };
+}
+
+function readInheritanceFlag(value: WorkspaceLearningSettings): boolean {
+  const candidate = value as WorkspaceLearningSettings & { enabledInheritsWorkspace?: unknown };
+  return candidate.enabledInheritsWorkspace === true;
+}
+
+function withInheritanceFlag(
+  value: WorkspaceLearningSettings,
+  enabledInheritsWorkspace: boolean
+): WorkspaceLearningSettingsWithInheritance {
+  return { ...value, enabledInheritsWorkspace };
+}
+
+function defaultLearningSettings(): WorkspaceLearningSettings {
+  return {
+    workspaceId: "",
+    id: "workspace",
+    scope: { kind: "workspace" },
+    enabled: true,
+    currencyUsed: 0,
+    tokensUsed: 0,
+    currencyReserved: 0,
+    tokensReserved: 0,
+    version: 0,
+    updatedBy: "",
+    updatedAt: new Date(0).toISOString()
+  };
+}
+
+/** Workspace Knowledge and Memory were removed as a shared scope.  Keep the
+ * rejection in policy so direct Core callers cannot bypass an HTTP guard. */
+export function assertWorkspaceMemoryAllowed(scope: WorkspaceLearningScope, kind: WorkspaceLearningResourceKind): void {
+  if (scope.kind === "workspace" && (kind === "knowledge" || kind === "memory")) {
+    throw new WorkspaceServerError("workspace_memory_removed", 409, {
+      scope_kind: scope.kind,
+      resource_kind: kind
+    });
+  }
+}
+
+export function assertResourceReferenceAllowed(resource: Pick<WorkspaceLearningResource, "scope" | "kind">): void {
+  assertWorkspaceMemoryAllowed(resource.scope, resource.kind);
+}
+
+/** Automatic review output has one and only one persistence boundary. */
+export function assertAutomaticLearningResourceScope(scope: WorkspaceLearningScope, roomId: string): void {
+  if (scope.kind !== "room" || scope.roomId !== roomId) {
+    throw new WorkspaceServerError("workspace_learning_auto_resource_scope_invalid", 422);
+  }
+}
 
 export interface LearningActivityEligibilityInput {
   outcome: WorkspaceLearningActivityOutcome;
@@ -244,6 +355,7 @@ export function rankKnowledgeForCurrentRoom(input: {
   limit: number;
 }): WorkspaceLearningResource[] {
   const query = input.query.trim().toLocaleLowerCase();
+  for (const resource of input.workspaceKnowledge) assertResourceReferenceAllowed(resource);
   const ranked = [
     ...scoreResources(input.workspaceRules, query, 3),
     ...scoreResources(input.roomKnowledge, query, 2),

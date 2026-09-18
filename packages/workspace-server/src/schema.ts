@@ -687,7 +687,7 @@ const migrations: readonly WorkspaceServerMigration[] = [
         IF NOT samurai_workspace_is_writable(target_workspace_id) THEN
           RAISE EXCEPTION 'workspace_read_only';
         END IF;
-      END
+      END;
       $$`,
       `CREATE OR REPLACE FUNCTION samurai_is_import_session(target_workspace_id TEXT)
       RETURNS BOOLEAN LANGUAGE SQL STABLE SECURITY DEFINER SET search_path = public AS $$
@@ -21725,6 +21725,2189 @@ const migrations: readonly WorkspaceServerMigration[] = [
       "REVOKE EXECUTE ON FUNCTION samurai_import_workspace_human_work_v2(TEXT, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB, JSONB) FROM PUBLIC"
     ]
   },
+  {
+    // Native UI context sharing adds Agent-owned Completion resources and the
+    // durable records used by fixed-copy sharing, cross-Server import, and the
+    // Account notification projection.  Existing Workspace/Room rows remain
+    // valid; retired Workspace Knowledge/Memory rows are removed first so the
+    // new ownership checks can be installed without rewriting them into a
+    // different scope.
+    version: 129,
+    name: "workspace_server_native_ui_context_sharing_schema",
+    statements: [
+      // Workspace Knowledge retirement removes the DB rows that used to own
+      // these completion files.  Record every eligible physical path before
+      // deleting its batch in this same migration transaction.  The
+      // source_batch_id is intentionally historical (there is no FK back to a
+      // row removed by the following statements); the workspace/hash/path
+      // tuple is sufficient for the hash-checked cleanup worker to retry
+      // safely.  Room and Agent batches are never selected here.
+      `CREATE TABLE workspace_completion_file_cleanup_queue (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        source_batch_id TEXT,
+        path TEXT NOT NULL CHECK (btrim(path) <> '' AND path !~ '(^/|(^|/)\\.\\.?(/|$))'),
+        sha256 TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+        size BIGINT NOT NULL CHECK (size >= 0),
+        reason TEXT NOT NULL CHECK (reason IN ('workspace_knowledge_retired', 'workspace_memory_retired', 'completion_orphaned_batch')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'cleaned', 'preserved')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        lease_token TEXT,
+        lease_until TIMESTAMPTZ,
+        last_error_code TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, path, sha256),
+        CHECK ((lease_token IS NULL) = (lease_until IS NULL)),
+        CHECK ((status = 'pending' AND completed_at IS NULL) OR (status IN ('cleaned', 'preserved') AND completed_at IS NOT NULL)),
+        CHECK (status <> 'cleaned' OR last_error_code IS NULL)
+      )`,
+      // This predicate includes both Knowledge-only batches that become
+      // unreferenced below and already-orphaned Workspace batches.  Any
+      // retained Completion version, Skill file, or Workspace document keeps
+      // the batch and therefore cannot be physically removed by this ledger.
+      `INSERT INTO workspace_completion_file_cleanup_queue (
+        workspace_id, id, source_batch_id, path, sha256, size, reason
+      )
+      SELECT entry.workspace_id,
+             'completion_cleanup_' || md5(entry.workspace_id || ':' || entry.batch_id || ':' || entry.path || ':' || entry.sha256),
+             entry.batch_id,
+             entry.path,
+             entry.sha256,
+             entry.size,
+             CASE WHEN EXISTS (
+               SELECT 1
+               FROM workspace_completion_resource_versions retired_version
+               JOIN workspace_completion_resources retired_resource
+                 ON retired_resource.workspace_id = retired_version.workspace_id
+                AND retired_resource.id = retired_version.resource_id
+               WHERE retired_version.workspace_id = batch.workspace_id
+                 AND retired_version.file_batch_id = batch.id
+                 AND retired_resource.scope_kind = 'workspace'
+                 AND retired_resource.resource_kind = 'knowledge'
+             ) THEN 'workspace_knowledge_retired' ELSE 'completion_orphaned_batch' END
+      FROM workspace_completion_file_batch_entries entry
+      JOIN workspace_completion_file_batches batch
+        ON batch.workspace_id = entry.workspace_id
+       AND batch.id = entry.batch_id
+      WHERE batch.scope_kind = 'workspace'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM workspace_completion_resource_versions retained_version
+          LEFT JOIN workspace_completion_resources retained_resource
+            ON retained_resource.workspace_id = retained_version.workspace_id
+           AND retained_resource.id = retained_version.resource_id
+          WHERE retained_version.workspace_id = batch.workspace_id
+            AND retained_version.file_batch_id = batch.id
+            AND NOT (
+              retained_resource.scope_kind = 'workspace'
+              AND retained_resource.resource_kind = 'knowledge'
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM workspace_completion_skill_files skill_file
+          WHERE skill_file.workspace_id = batch.workspace_id
+            AND skill_file.file_batch_id = batch.id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM workspace_completion_workspace_documents document
+          WHERE document.workspace_id = batch.workspace_id
+            AND document.file_batch_id = batch.id
+        )
+      ON CONFLICT (workspace_id, path, sha256) DO NOTHING`,
+      // Retire only the old Workspace Knowledge/Memory rows.  Room resources,
+      // Skills, Policies, settings, Activities, and their files are retained.
+      "DELETE FROM workspace_completion_search_projection projection WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = projection.workspace_id AND resource.id = projection.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_policy_approvals approval WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = approval.workspace_id AND resource.id = approval.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_attestations attestation WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = attestation.workspace_id AND resource.id = attestation.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_skill_files skill_file WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = skill_file.workspace_id AND resource.id = skill_file.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_evidence evidence WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = evidence.workspace_id AND resource.id = evidence.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_resource_links link WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = link.workspace_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge' AND (resource.id = link.from_resource_id OR resource.id = link.to_resource_id))",
+      "DELETE FROM workspace_completion_policy_rules rule_row WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = rule_row.workspace_id AND resource.id = rule_row.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_uses use_row WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = use_row.workspace_id AND resource.id = use_row.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_evaluations evaluation WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = evaluation.workspace_id AND resource.id = evaluation.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_redactions redaction WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = redaction.workspace_id AND resource.id = redaction.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "UPDATE workspace_completion_resources resource SET current_confirmed_version = NULL, current_provisional_version = NULL, candidate_version = NULL WHERE resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge'",
+      "DELETE FROM workspace_completion_resource_versions version_row WHERE EXISTS (SELECT 1 FROM workspace_completion_resources resource WHERE resource.workspace_id = version_row.workspace_id AND resource.id = version_row.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge')",
+      "DELETE FROM workspace_completion_resources resource WHERE resource.scope_kind = 'workspace' AND resource.resource_kind = 'knowledge'",
+      "DELETE FROM workspace_completion_file_batch_entries entry WHERE EXISTS (SELECT 1 FROM workspace_completion_file_batches batch WHERE batch.workspace_id = entry.workspace_id AND batch.id = entry.batch_id AND batch.scope_kind = 'workspace' AND NOT EXISTS (SELECT 1 FROM workspace_completion_resource_versions version_row WHERE version_row.workspace_id = batch.workspace_id AND version_row.file_batch_id = batch.id) AND NOT EXISTS (SELECT 1 FROM workspace_completion_skill_files skill_file WHERE skill_file.workspace_id = batch.workspace_id AND skill_file.file_batch_id = batch.id) AND NOT EXISTS (SELECT 1 FROM workspace_completion_workspace_documents document WHERE document.workspace_id = batch.workspace_id AND document.file_batch_id = batch.id))",
+      "DELETE FROM workspace_completion_file_batches batch WHERE batch.scope_kind = 'workspace' AND NOT EXISTS (SELECT 1 FROM workspace_completion_resource_versions version_row WHERE version_row.workspace_id = batch.workspace_id AND version_row.file_batch_id = batch.id) AND NOT EXISTS (SELECT 1 FROM workspace_completion_skill_files skill_file WHERE skill_file.workspace_id = batch.workspace_id AND skill_file.file_batch_id = batch.id) AND NOT EXISTS (SELECT 1 FROM workspace_completion_workspace_documents document WHERE document.workspace_id = batch.workspace_id AND document.file_batch_id = batch.id)",
+      "DELETE FROM workspace_learning_resource_uses use_row WHERE EXISTS (SELECT 1 FROM workspace_learning_resources resource WHERE resource.workspace_id = use_row.workspace_id AND resource.id = use_row.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind IN ('knowledge', 'memory'))",
+      "DELETE FROM workspace_learning_evidence evidence WHERE EXISTS (SELECT 1 FROM workspace_learning_resources resource WHERE resource.workspace_id = evidence.workspace_id AND resource.id = evidence.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind IN ('knowledge', 'memory'))",
+      "DELETE FROM workspace_learning_resource_links link WHERE EXISTS (SELECT 1 FROM workspace_learning_resources resource WHERE resource.workspace_id = link.workspace_id AND resource.scope_kind = 'workspace' AND resource.resource_kind IN ('knowledge', 'memory') AND (resource.id = link.from_resource_id OR resource.id = link.to_resource_id))",
+      "DELETE FROM workspace_learning_resource_versions version_row WHERE EXISTS (SELECT 1 FROM workspace_learning_resources resource WHERE resource.workspace_id = version_row.workspace_id AND resource.id = version_row.resource_id AND resource.scope_kind = 'workspace' AND resource.resource_kind IN ('knowledge', 'memory'))",
+      "DELETE FROM workspace_learning_resources resource WHERE resource.scope_kind = 'workspace' AND resource.resource_kind IN ('knowledge', 'memory')",
+
+      // Existing rows have NULL agent_id and keep their Workspace/Room scope.
+      "ALTER TABLE workspace_completion_resources ADD COLUMN agent_id TEXT",
+      "ALTER TABLE workspace_completion_file_batches ADD COLUMN agent_id TEXT",
+      "ALTER TABLE workspace_completion_search_projection ADD COLUMN agent_id TEXT",
+      "ALTER TABLE workspace_learning_settings ADD COLUMN enabled_inherits_workspace BOOLEAN NOT NULL DEFAULT FALSE",
+      `DO $$
+      DECLARE constraint_name TEXT;
+      BEGIN
+        FOR constraint_name IN
+          SELECT conname
+          FROM pg_constraint
+          WHERE conrelid = 'workspace_completion_resources'::REGCLASS
+            AND contype = 'c'
+            AND pg_get_constraintdef(oid) LIKE '%scope_kind%'
+        LOOP
+          EXECUTE format('ALTER TABLE workspace_completion_resources DROP CONSTRAINT %I', constraint_name);
+        END LOOP;
+      END
+      $$`,
+      "ALTER TABLE workspace_completion_resources ADD CONSTRAINT workspace_completion_resources_scope_kind_check CHECK (scope_kind IN ('workspace', 'room', 'agent'))",
+      "ALTER TABLE workspace_completion_resources ADD CONSTRAINT workspace_completion_resources_scope_agent_check CHECK ((scope_kind = 'workspace' AND room_id IS NULL AND agent_id IS NULL) OR (scope_kind = 'room' AND room_id IS NOT NULL AND agent_id IS NULL) OR (scope_kind = 'agent' AND room_id IS NULL AND agent_id IS NOT NULL))",
+      "ALTER TABLE workspace_completion_resources ADD CONSTRAINT workspace_completion_resources_agent_fkey FOREIGN KEY (workspace_id, agent_id) REFERENCES workspace_agents(workspace_id, id) ON DELETE RESTRICT",
+      "ALTER TABLE workspace_completion_resources ADD CONSTRAINT workspace_completion_resources_workspace_knowledge_retired_check CHECK (NOT (scope_kind = 'workspace' AND resource_kind = 'knowledge'))",
+      "ALTER TABLE workspace_completion_resources ADD CONSTRAINT workspace_completion_resources_agent_kind_check CHECK (scope_kind <> 'agent' OR (resource_kind IN ('knowledge', 'skill') AND NOT ai_managed))",
+      "CREATE INDEX workspace_completion_resources_agent_index ON workspace_completion_resources(workspace_id, agent_id, resource_kind, lifecycle_state, updated_at DESC, id) WHERE scope_kind = 'agent'",
+      `DO $$
+      DECLARE constraint_name TEXT;
+      BEGIN
+        FOR constraint_name IN
+          SELECT conname
+          FROM pg_constraint
+          WHERE conrelid = 'workspace_completion_file_batches'::REGCLASS
+            AND contype = 'c'
+            AND pg_get_constraintdef(oid) LIKE '%scope_kind%'
+        LOOP
+          EXECUTE format('ALTER TABLE workspace_completion_file_batches DROP CONSTRAINT %I', constraint_name);
+        END LOOP;
+      END
+      $$`,
+      "ALTER TABLE workspace_completion_file_batches ADD CONSTRAINT workspace_completion_file_batches_scope_kind_check CHECK (scope_kind IN ('workspace', 'room', 'agent'))",
+      "ALTER TABLE workspace_completion_file_batches ADD CONSTRAINT workspace_completion_file_batches_scope_agent_check CHECK ((scope_kind = 'workspace' AND room_id IS NULL AND agent_id IS NULL) OR (scope_kind = 'room' AND room_id IS NOT NULL AND agent_id IS NULL) OR (scope_kind = 'agent' AND room_id IS NULL AND agent_id IS NOT NULL))",
+      "ALTER TABLE workspace_completion_file_batches ADD CONSTRAINT workspace_completion_file_batches_agent_fkey FOREIGN KEY (workspace_id, agent_id) REFERENCES workspace_agents(workspace_id, id) ON DELETE RESTRICT",
+      "CREATE INDEX workspace_completion_file_batches_agent_index ON workspace_completion_file_batches(workspace_id, agent_id, status, updated_at DESC) WHERE scope_kind = 'agent'",
+      "ALTER TABLE workspace_completion_search_projection ADD CONSTRAINT workspace_completion_search_projection_agent_fkey FOREIGN KEY (workspace_id, agent_id) REFERENCES workspace_agents(workspace_id, id) ON DELETE RESTRICT",
+      "CREATE INDEX workspace_completion_search_agent_index ON workspace_completion_search_projection(workspace_id, agent_id, resource_id, resource_version) WHERE agent_id IS NOT NULL",
+      "ALTER TABLE workspace_learning_resources ADD CONSTRAINT workspace_learning_resources_workspace_knowledge_retired_check CHECK (NOT (scope_kind = 'workspace' AND resource_kind IN ('knowledge', 'memory')))",
+      "ALTER TABLE workspace_learning_settings ADD CONSTRAINT workspace_learning_settings_workspace_inherit_check CHECK (scope_kind <> 'workspace' OR enabled_inherits_workspace = FALSE)",
+
+      // The existing Completion RLS policies predate Agent scope. Extend the
+      // same Workspace/Room policies without granting an Agent a new Room ACL.
+      "DROP POLICY workspace_completion_resources_access ON workspace_completion_resources",
+      `CREATE POLICY workspace_completion_resources_access ON workspace_completion_resources FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+          OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'guest'))
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR (samurai_workspace_is_writable(workspace_id) AND (
+            (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+            OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'edit'))
+            OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+          ))
+        )
+      )`,
+      "DROP POLICY workspace_completion_versions_access ON workspace_completion_resource_versions",
+      `CREATE POLICY workspace_completion_versions_access ON workspace_completion_resource_versions FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_resource_versions.workspace_id
+            AND resource.id = workspace_completion_resource_versions.resource_id
+            AND (
+              (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read'))
+              OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_completion_resources resource
+            WHERE resource.workspace_id = workspace_completion_resource_versions.workspace_id
+              AND resource.id = workspace_completion_resource_versions.resource_id
+              AND samurai_workspace_is_writable(resource.workspace_id)
+              AND (
+                (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+                OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit'))
+                OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'admin'))
+              )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_completion_evidence_access ON workspace_completion_evidence",
+      `CREATE POLICY workspace_completion_evidence_access ON workspace_completion_evidence FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_evidence.workspace_id
+            AND resource.id = workspace_completion_evidence.resource_id
+            AND (
+              (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read'))
+              OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_completion_resources resource
+            WHERE resource.workspace_id = workspace_completion_evidence.workspace_id
+              AND resource.id = workspace_completion_evidence.resource_id
+              AND samurai_workspace_is_writable(resource.workspace_id)
+              AND (
+                (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+                OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit'))
+                OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'admin'))
+              )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_completion_links_access ON workspace_completion_resource_links",
+      `CREATE POLICY workspace_completion_links_access ON workspace_completion_resource_links FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1
+          FROM workspace_completion_resources source
+          JOIN workspace_completion_resources target
+            ON target.workspace_id = source.workspace_id AND target.id = workspace_completion_resource_links.to_resource_id
+          WHERE source.workspace_id = workspace_completion_resource_links.workspace_id
+            AND source.id = workspace_completion_resource_links.from_resource_id
+            AND (
+              (source.scope_kind = 'workspace' AND samurai_can_workspace(source.workspace_id, 'guest'))
+              OR (source.scope_kind = 'room' AND source.room_id IS NOT NULL AND samurai_can_room(source.workspace_id, source.room_id, 'read'))
+              OR (source.scope_kind = 'agent' AND source.agent_id IS NOT NULL AND samurai_can_workspace(source.workspace_id, 'guest'))
+            )
+            AND (
+              (target.scope_kind = 'workspace' AND samurai_can_workspace(target.workspace_id, 'guest'))
+              OR (target.scope_kind = 'room' AND target.room_id IS NOT NULL AND samurai_can_room(target.workspace_id, target.room_id, 'read'))
+              OR (target.scope_kind = 'agent' AND target.agent_id IS NOT NULL AND samurai_can_workspace(target.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_workspace_is_writable(workspace_id)))`,
+      "DROP POLICY workspace_completion_uses_access ON workspace_completion_uses",
+      `CREATE POLICY workspace_completion_uses_access ON workspace_completion_uses FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_uses.workspace_id
+            AND resource.id = workspace_completion_uses.resource_id
+            AND (
+              (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read'))
+              OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))`,
+      "DROP POLICY workspace_completion_evaluations_access ON workspace_completion_evaluations",
+      `CREATE POLICY workspace_completion_evaluations_access ON workspace_completion_evaluations FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_evaluations.workspace_id
+            AND resource.id = workspace_completion_evaluations.resource_id
+            AND (
+              (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read'))
+              OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))`,
+      "DROP POLICY workspace_completion_search_access ON workspace_completion_search_projection",
+      `CREATE POLICY workspace_completion_search_access ON workspace_completion_search_projection FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_search_projection.workspace_id
+            AND resource.id = workspace_completion_search_projection.resource_id
+            AND (
+              (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read'))
+              OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id) OR samurai_workspace_is_writable(workspace_id)))`,
+      "DROP POLICY workspace_completion_skill_files_access ON workspace_completion_skill_files",
+      `CREATE POLICY workspace_completion_skill_files_access ON workspace_completion_skill_files FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_resources resource
+          WHERE resource.workspace_id = workspace_completion_skill_files.workspace_id
+            AND resource.id = workspace_completion_skill_files.resource_id
+            AND resource.resource_kind = 'skill'
+            AND (
+              (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'guest'))
+              OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'read'))
+              OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'guest'))
+            )
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_completion_resources resource
+            WHERE resource.workspace_id = workspace_completion_skill_files.workspace_id
+              AND resource.id = workspace_completion_skill_files.resource_id
+              AND resource.resource_kind = 'skill'
+              AND samurai_workspace_is_writable(resource.workspace_id)
+              AND (
+                (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+                OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit'))
+                OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'admin'))
+              )
+          )
+        )
+      )`,
+
+      // File batches now carry the same mutually-exclusive ownership scope.
+      "DROP POLICY workspace_completion_file_batches_access ON workspace_completion_file_batches",
+      "DROP POLICY workspace_completion_file_batches_insert ON workspace_completion_file_batches",
+      "DROP POLICY workspace_completion_file_batches_update ON workspace_completion_file_batches",
+      "DROP POLICY workspace_completion_file_batches_delete ON workspace_completion_file_batches",
+      `CREATE POLICY workspace_completion_file_batches_access ON workspace_completion_file_batches FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+          OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'guest'))
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batches_insert ON workspace_completion_file_batches FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR samurai_completion_migration_write_allowed(workspace_id)
+          OR (samurai_workspace_is_writable(workspace_id) AND (
+            (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+            OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+            OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+          ))
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batches_update ON workspace_completion_file_batches FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_completion_migration_write_allowed(workspace_id)
+          OR (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'guest'))
+          OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'read'))
+          OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'guest'))
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR samurai_completion_migration_write_allowed(workspace_id)
+          OR (samurai_workspace_is_writable(workspace_id) AND (
+            (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+            OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'execute'))
+            OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+          ))
+        )
+      )`,
+      "CREATE POLICY workspace_completion_file_batches_delete ON workspace_completion_file_batches FOR DELETE USING (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id)))",
+      "DROP POLICY workspace_completion_file_batch_entries_access ON workspace_completion_file_batch_entries",
+      "DROP POLICY workspace_completion_file_batch_entries_insert ON workspace_completion_file_batch_entries",
+      "DROP POLICY workspace_completion_file_batch_entries_delete ON workspace_completion_file_batch_entries",
+      `CREATE POLICY workspace_completion_file_batch_entries_access ON workspace_completion_file_batch_entries FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_completion_migration_write_allowed(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_completion_file_batches batch
+            WHERE batch.workspace_id = workspace_completion_file_batch_entries.workspace_id
+              AND batch.id = workspace_completion_file_batch_entries.batch_id
+              AND (
+                (batch.scope_kind = 'workspace' AND samurai_can_workspace(batch.workspace_id, 'guest'))
+                OR (batch.scope_kind = 'room' AND batch.room_id IS NOT NULL AND samurai_can_room(batch.workspace_id, batch.room_id, 'read'))
+                OR (batch.scope_kind = 'agent' AND batch.agent_id IS NOT NULL AND samurai_can_workspace(batch.workspace_id, 'guest'))
+              )
+          )
+        )
+      )`,
+      `CREATE POLICY workspace_completion_file_batch_entries_insert ON workspace_completion_file_batch_entries FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (
+          SELECT 1 FROM workspace_completion_file_batches batch
+          WHERE batch.workspace_id = workspace_completion_file_batch_entries.workspace_id
+            AND batch.id = workspace_completion_file_batch_entries.batch_id
+            AND (
+              samurai_is_import_session(batch.workspace_id)
+              OR samurai_completion_migration_write_allowed(batch.workspace_id)
+              OR (samurai_workspace_is_writable(batch.workspace_id) AND (
+                (batch.scope_kind = 'workspace' AND samurai_can_workspace(batch.workspace_id, 'admin'))
+                OR (batch.scope_kind = 'room' AND batch.room_id IS NOT NULL AND samurai_can_room(batch.workspace_id, batch.room_id, 'execute'))
+                OR (batch.scope_kind = 'agent' AND batch.agent_id IS NOT NULL AND samurai_can_workspace(batch.workspace_id, 'admin'))
+              ))
+            )
+        )
+      )`,
+      "CREATE POLICY workspace_completion_file_batch_entries_delete ON workspace_completion_file_batch_entries FOR DELETE USING (workspace_id = samurai_current_workspace_id() AND (samurai_is_import_session(workspace_id) OR samurai_completion_migration_write_allowed(workspace_id)))",
+
+      // Shared copies are never readable through the anonymous/default table
+      // role. Public access is a dedicated Core operation that can run with a
+      // narrowly scoped security-definer function later.
+      `CREATE TABLE workspace_shares (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('room_knowledge', 'agent')),
+        source_room_id TEXT,
+        source_agent_id TEXT,
+        created_by TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        title TEXT NOT NULL CHECK (btrim(title) <> '' AND length(btrim(title)) <= 200),
+        status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'revoked')),
+        visibility TEXT NOT NULL DEFAULT 'restricted' CHECK (visibility IN ('restricted', 'public')),
+        revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+        source_versions JSONB NOT NULL DEFAULT '[]'::JSONB CHECK (jsonb_typeof(source_versions) = 'array'),
+        manifest_path TEXT,
+        content_hash TEXT CHECK (content_hash IS NULL OR content_hash ~ '^[0-9a-f]{64}$'),
+        byte_size BIGINT CHECK (byte_size IS NULL OR byte_size >= 0),
+        public_locator TEXT UNIQUE CHECK (public_locator IS NULL OR public_locator ~ '^[A-Za-z0-9_-]{43}$'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        published_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        PRIMARY KEY (workspace_id, id),
+        FOREIGN KEY (workspace_id, source_room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, source_agent_id) REFERENCES workspace_agents(workspace_id, id) ON DELETE RESTRICT,
+        CHECK ((source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND source_agent_id IS NULL) OR (source_kind = 'agent' AND source_room_id IS NULL AND source_agent_id IS NOT NULL)),
+        CHECK ((status = 'draft' AND manifest_path IS NULL AND content_hash IS NULL AND byte_size IS NULL AND public_locator IS NULL AND published_at IS NULL AND revoked_at IS NULL) OR (status = 'active' AND manifest_path IS NOT NULL AND btrim(manifest_path) <> '' AND content_hash IS NOT NULL AND byte_size IS NOT NULL AND public_locator IS NOT NULL AND published_at IS NOT NULL AND revoked_at IS NULL) OR (status = 'revoked' AND manifest_path IS NOT NULL AND btrim(manifest_path) <> '' AND content_hash IS NOT NULL AND byte_size IS NOT NULL AND public_locator IS NOT NULL AND published_at IS NOT NULL AND revoked_at IS NOT NULL))
+      )`,
+      "CREATE INDEX workspace_shares_source_index ON workspace_shares(workspace_id, source_kind, source_room_id, source_agent_id, created_at DESC, id)",
+      "CREATE INDEX workspace_shares_drafts_index ON workspace_shares(workspace_id, created_by, updated_at DESC, id) WHERE status = 'draft'",
+      `CREATE TABLE workspace_share_recipients (
+        workspace_id TEXT NOT NULL,
+        share_id TEXT NOT NULL,
+        recipient_account_id TEXT NOT NULL CHECK (btrim(recipient_account_id) <> ''),
+        PRIMARY KEY (workspace_id, share_id, recipient_account_id),
+        FOREIGN KEY (workspace_id, share_id) REFERENCES workspace_shares(workspace_id, id) ON DELETE CASCADE
+      )`,
+      `CREATE TABLE workspace_share_claims (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        share_id TEXT NOT NULL,
+        recipient_account_id TEXT NOT NULL CHECK (btrim(recipient_account_id) <> ''),
+        target_origin TEXT NOT NULL CHECK (target_origin ~ '^https?://[^/?#@]+$'),
+        target_workspace_id TEXT NOT NULL CHECK (btrim(target_workspace_id) <> ''),
+        operation_id TEXT NOT NULL CHECK (btrim(operation_id) <> ''),
+        request_hash TEXT NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+        content_hash TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (id),
+        UNIQUE (workspace_id, share_id, recipient_account_id, target_origin, target_workspace_id, operation_id),
+        FOREIGN KEY (workspace_id, share_id) REFERENCES workspace_shares(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      `CREATE TABLE workspace_share_file_transactions (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        owner_kind TEXT NOT NULL CHECK (owner_kind IN ('draft', 'import')),
+        owner_id TEXT NOT NULL CHECK (btrim(owner_id) <> ''),
+        actor_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL DEFAULT 'prepared' CHECK (status IN ('prepared', 'renamed', 'committed', 'cleanup_pending', 'cleaned')),
+        entries JSONB NOT NULL CHECK (jsonb_typeof(entries) = 'array'),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_error_code TEXT,
+        PRIMARY KEY (workspace_id, id)
+      )`,
+      "CREATE INDEX workspace_share_file_transactions_recovery_index ON workspace_share_file_transactions(status, updated_at, workspace_id, id)",
+      `CREATE TABLE workspace_share_imports (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        operation_id TEXT NOT NULL,
+        recipient_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK (kind IN ('room_knowledge', 'agent')),
+        source_origin TEXT NOT NULL CHECK (source_origin ~ '^https?://[^/?#@]+$'),
+        source_share_id TEXT NOT NULL CHECK (btrim(source_share_id) <> ''),
+        source_locator TEXT NOT NULL CHECK (btrim(source_locator) <> ''),
+        claim_id TEXT NOT NULL CHECK (btrim(claim_id) <> ''),
+        request_hash TEXT NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+        content_hash TEXT NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+        target_room_id TEXT,
+        reserved_agent_id TEXT,
+        reserved_resource_ids JSONB NOT NULL DEFAULT '[]'::JSONB CHECK (jsonb_typeof(reserved_resource_ids) = 'array'),
+        manifest_path TEXT,
+        status TEXT NOT NULL DEFAULT 'staging' CHECK (status IN ('staging', 'committed', 'failed')),
+        phase TEXT NOT NULL DEFAULT 'fetch' CHECK (phase IN ('fetch', 'files', 'commit', 'done', 'cleanup')),
+        retryable BOOLEAN NOT NULL DEFAULT TRUE,
+        failure_code TEXT,
+        lease_token TEXT,
+        lease_until TIMESTAMPTZ,
+        result JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        committed_at TIMESTAMPTZ,
+        PRIMARY KEY (workspace_id, operation_id),
+        FOREIGN KEY (workspace_id, target_room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT,
+        CHECK ((kind = 'room_knowledge' AND target_room_id IS NOT NULL AND reserved_agent_id IS NULL) OR (kind = 'agent' AND target_room_id IS NULL AND reserved_agent_id IS NOT NULL)),
+        CHECK ((status = 'committed') = (phase = 'done' AND result IS NOT NULL AND committed_at IS NOT NULL)),
+        CHECK (status <> 'failed' OR failure_code IS NOT NULL),
+        CHECK ((lease_token IS NULL) = (lease_until IS NULL))
+      )`,
+      "CREATE INDEX workspace_share_imports_due_index ON workspace_share_imports(status, phase, updated_at)",
+      "CREATE INDEX workspace_share_imports_account_index ON workspace_share_imports(workspace_id, recipient_account_id, created_at DESC, operation_id)",
+      `CREATE TABLE workspace_share_import_resources (
+        workspace_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL CHECK (btrim(entry_id) <> ''),
+        resource_id TEXT NOT NULL CHECK (btrim(resource_id) <> ''),
+        PRIMARY KEY (workspace_id, operation_id, entry_id),
+        UNIQUE (workspace_id, resource_id),
+        FOREIGN KEY (workspace_id, operation_id) REFERENCES workspace_share_imports(workspace_id, operation_id) ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, resource_id) REFERENCES workspace_completion_resources(workspace_id, id) ON DELETE RESTRICT
+      )`,
+      `CREATE TABLE account_notifications (
+        id TEXT PRIMARY KEY,
+        recipient_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE RESTRICT,
+        room_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('work_completed', 'work_failed', 'approval_required', 'input_required', 'invitation')),
+        source_kind TEXT NOT NULL CHECK (btrim(source_kind) <> ''),
+        source_id TEXT NOT NULL CHECK (btrim(source_id) <> ''),
+        source_revision BIGINT NOT NULL CHECK (source_revision > 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        read_at TIMESTAMPTZ,
+        FOREIGN KEY (workspace_id, room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT,
+        CHECK (room_id IS NULL OR workspace_id IS NOT NULL),
+        CHECK ((kind IN ('work_completed', 'work_failed', 'approval_required', 'input_required') AND workspace_id IS NOT NULL AND room_id IS NOT NULL) OR (kind = 'invitation' AND room_id IS NULL))
+      )`,
+      "CREATE INDEX account_notifications_list_index ON account_notifications(recipient_account_id, workspace_id, created_at DESC, id DESC)",
+      "CREATE INDEX account_notifications_unread_index ON account_notifications(recipient_account_id, workspace_id, created_at DESC, id DESC) WHERE read_at IS NULL",
+      "CREATE UNIQUE INDEX account_notifications_workspace_source_unique ON account_notifications(recipient_account_id, workspace_id, source_kind, source_id, source_revision, kind) WHERE workspace_id IS NOT NULL",
+      "CREATE UNIQUE INDEX account_notifications_account_source_unique ON account_notifications(recipient_account_id, source_kind, source_id, source_revision, kind) WHERE workspace_id IS NULL",
+      `CREATE TABLE account_notification_outbox (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE RESTRICT,
+        room_id TEXT,
+        source_kind TEXT NOT NULL CHECK (btrim(source_kind) <> ''),
+        source_id TEXT NOT NULL CHECK (btrim(source_id) <> ''),
+        source_revision BIGINT NOT NULL CHECK (source_revision > 0),
+        kind TEXT NOT NULL CHECK (kind IN ('work_completed', 'work_failed', 'approval_required', 'input_required', 'invitation')),
+        action TEXT NOT NULL DEFAULT 'create' CHECK (action IN ('create', 'invalidate')),
+        recipient_account_ids JSONB NOT NULL CHECK (jsonb_typeof(recipient_account_ids) = 'array' AND jsonb_array_length(recipient_account_ids) > 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        processed_at TIMESTAMPTZ,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_error_code TEXT,
+        FOREIGN KEY (workspace_id, room_id) REFERENCES rooms(workspace_id, id) ON DELETE RESTRICT,
+        CHECK (room_id IS NULL OR workspace_id IS NOT NULL),
+        CHECK ((kind IN ('work_completed', 'work_failed', 'approval_required', 'input_required') AND workspace_id IS NOT NULL AND room_id IS NOT NULL) OR (kind = 'invitation' AND room_id IS NULL))
+      )`,
+      "CREATE INDEX account_notification_outbox_due_index ON account_notification_outbox(next_attempt_at, id) WHERE processed_at IS NULL",
+
+      // Share state and recipient cardinality are Core-owned invariants. These
+      // guards prevent a direct table write from mutating a published copy or
+      // creating a restricted/public share with the wrong recipient shape.
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_update() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE recipient_count BIGINT;
+      BEGIN
+        IF OLD.workspace_id IS DISTINCT FROM NEW.workspace_id OR OLD.id IS DISTINCT FROM NEW.id OR OLD.created_by IS DISTINCT FROM NEW.created_by OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+          RAISE EXCEPTION 'workspace_share_identity_immutable';
+        END IF;
+        IF OLD.status = 'draft' AND NEW.status NOT IN ('draft', 'active') THEN
+          RAISE EXCEPTION 'workspace_share_transition_invalid';
+        END IF;
+        IF OLD.status = 'active' AND NEW.status NOT IN ('active', 'revoked') THEN
+          RAISE EXCEPTION 'workspace_share_transition_invalid';
+        END IF;
+        IF OLD.status = 'active' THEN
+          IF OLD.source_kind IS DISTINCT FROM NEW.source_kind OR OLD.source_room_id IS DISTINCT FROM NEW.source_room_id OR OLD.source_agent_id IS DISTINCT FROM NEW.source_agent_id OR OLD.title IS DISTINCT FROM NEW.title OR OLD.visibility IS DISTINCT FROM NEW.visibility OR OLD.source_versions IS DISTINCT FROM NEW.source_versions OR OLD.manifest_path IS DISTINCT FROM NEW.manifest_path OR OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.byte_size IS DISTINCT FROM NEW.byte_size OR OLD.public_locator IS DISTINCT FROM NEW.public_locator OR OLD.published_at IS DISTINCT FROM NEW.published_at THEN
+            RAISE EXCEPTION 'workspace_share_published_immutable';
+          END IF;
+        END IF;
+        IF OLD.status = 'revoked' THEN
+          RAISE EXCEPTION 'workspace_share_revoked_immutable';
+        END IF;
+        IF OLD.status = 'draft' AND NEW.status = 'active' AND NEW.published_at IS NULL THEN
+          RAISE EXCEPTION 'workspace_share_published_at_required';
+        END IF;
+        IF OLD.status = 'draft' AND NEW.status = 'active' THEN
+          SELECT COUNT(*) INTO recipient_count
+          FROM workspace_share_recipients
+          WHERE workspace_id = NEW.workspace_id AND share_id = NEW.id;
+          IF NEW.visibility = 'restricted' AND recipient_count = 0 THEN
+            RAISE EXCEPTION 'workspace_share_restricted_recipient_required';
+          END IF;
+          IF NEW.visibility = 'public' AND recipient_count > 0 THEN
+            RAISE EXCEPTION 'workspace_share_public_recipient_forbidden';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "CREATE TRIGGER workspace_shares_update_guard BEFORE UPDATE ON workspace_shares FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_share_update()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_update() FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_recipients() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE share_row workspace_shares%ROWTYPE;
+      BEGIN
+        SELECT * INTO share_row FROM workspace_shares WHERE workspace_id = COALESCE(NEW.workspace_id, OLD.workspace_id) AND id = COALESCE(NEW.share_id, OLD.share_id);
+        IF NOT FOUND OR share_row.status = 'draft' THEN RETURN NULL; END IF;
+        RAISE EXCEPTION 'workspace_share_recipients_immutable';
+      END
+      $$`,
+      "CREATE CONSTRAINT TRIGGER workspace_share_recipients_shape_guard AFTER INSERT OR UPDATE OR DELETE ON workspace_share_recipients DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_share_recipients()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_recipients() FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_claim_insert() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE share_row workspace_shares%ROWTYPE;
+      BEGIN
+        SELECT * INTO share_row FROM workspace_shares WHERE workspace_id = NEW.workspace_id AND id = NEW.share_id FOR UPDATE;
+        IF NOT FOUND OR share_row.status <> 'active' OR share_row.content_hash IS DISTINCT FROM NEW.content_hash THEN
+          RAISE EXCEPTION 'workspace_share_claim_not_active';
+        END IF;
+        IF share_row.visibility = 'restricted' AND NOT EXISTS (
+          SELECT 1 FROM workspace_share_recipients recipient
+          WHERE recipient.workspace_id = NEW.workspace_id
+            AND recipient.share_id = NEW.share_id
+            AND recipient.recipient_account_id = NEW.recipient_account_id
+        ) THEN
+          RAISE EXCEPTION 'workspace_share_claim_recipient_not_allowed';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "CREATE TRIGGER workspace_share_claim_insert_guard BEFORE INSERT ON workspace_share_claims FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_share_claim_insert()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_claim_insert() FROM PUBLIC",
+
+      // Account notifications are private to the recipient. Outbox and file
+      // transaction rows are internal worker state; normal Client SELECT is
+      // deliberately absent from their policies.
+      "ALTER TABLE workspace_shares ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_shares FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_recipients ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_recipients FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_claims ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_claims FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_file_transactions ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_file_transactions FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_imports ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_imports FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_import_resources ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_share_import_resources FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE account_notifications ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE account_notifications FORCE ROW LEVEL SECURITY",
+      "ALTER TABLE account_notification_outbox ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE account_notification_outbox FORCE ROW LEVEL SECURITY",
+      `CREATE POLICY workspace_shares_read ON workspace_shares FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+          OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+        )
+        AND (status <> 'draft' OR created_by = samurai_current_account_id())
+      )`,
+      `CREATE POLICY workspace_shares_insert ON workspace_shares FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND samurai_workspace_is_writable(workspace_id)
+        AND status = 'draft'
+        AND created_by = samurai_current_account_id()
+        AND (
+          (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+          OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+        )
+      )`,
+      `CREATE POLICY workspace_shares_update ON workspace_shares FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+          OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+        )
+        AND (status <> 'draft' OR created_by = samurai_current_account_id())
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND samurai_workspace_is_writable(workspace_id)
+        AND (
+          (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+          OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+        )
+        AND (status <> 'draft' OR created_by = samurai_current_account_id())
+      )`,
+      `CREATE POLICY workspace_shares_delete ON workspace_shares FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND status = 'draft'
+        AND created_by = samurai_current_account_id()
+        AND samurai_workspace_is_writable(workspace_id)
+        AND (
+          (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+          OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+        )
+      )`,
+      `CREATE POLICY workspace_share_recipients_manage ON workspace_share_recipients FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (SELECT 1 FROM workspace_shares share_row WHERE share_row.workspace_id = workspace_share_recipients.workspace_id AND share_row.id = workspace_share_recipients.share_id AND share_row.status = 'draft' AND share_row.created_by = samurai_current_account_id() AND ((share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage')) OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))))
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (SELECT 1 FROM workspace_shares share_row WHERE share_row.workspace_id = workspace_share_recipients.workspace_id AND share_row.id = workspace_share_recipients.share_id AND share_row.status = 'draft' AND share_row.created_by = samurai_current_account_id() AND samurai_workspace_is_writable(share_row.workspace_id) AND ((share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage')) OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))))
+      )`,
+      `CREATE POLICY workspace_share_claims_read ON workspace_share_claims FOR SELECT USING (
+        recipient_account_id = samurai_current_account_id() OR (workspace_id = samurai_current_workspace_id() AND samurai_can_workspace(workspace_id, 'admin'))
+      )`,
+      `CREATE POLICY workspace_share_claims_insert ON workspace_share_claims FOR INSERT WITH CHECK (
+        recipient_account_id = samurai_current_account_id() OR (workspace_id = samurai_current_workspace_id() AND samurai_can_workspace(workspace_id, 'admin'))
+      )`,
+      `CREATE POLICY workspace_share_file_transactions_internal ON workspace_share_file_transactions FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND (samurai_is_completion_maintenance_identity(workspace_id) OR samurai_is_import_session(workspace_id) OR current_setting('samurai.internal_access', true) = '1')
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (samurai_is_completion_maintenance_identity(workspace_id) OR samurai_is_import_session(workspace_id) OR current_setting('samurai.internal_access', true) = '1')
+      )`,
+      `CREATE POLICY workspace_share_imports_read ON workspace_share_imports FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND (recipient_account_id = samurai_current_account_id() OR samurai_can_workspace(workspace_id, 'admin') OR samurai_is_completion_maintenance_identity(workspace_id))
+      )`,
+      `CREATE POLICY workspace_share_imports_write ON workspace_share_imports FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND recipient_account_id = samurai_current_account_id() AND samurai_workspace_is_writable(workspace_id) AND (kind = 'agent' AND samurai_can_workspace(workspace_id, 'admin') OR kind = 'room_knowledge' AND target_room_id IS NOT NULL AND samurai_can_room(workspace_id, target_room_id, 'manage'))
+      )`,
+      `CREATE POLICY workspace_share_imports_update ON workspace_share_imports FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id() AND (recipient_account_id = samurai_current_account_id() OR samurai_can_workspace(workspace_id, 'admin') OR samurai_is_completion_maintenance_identity(workspace_id))
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (recipient_account_id = samurai_current_account_id() OR samurai_can_workspace(workspace_id, 'admin') OR samurai_is_completion_maintenance_identity(workspace_id))
+      )`,
+      `CREATE POLICY workspace_share_import_resources_read ON workspace_share_import_resources FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (SELECT 1 FROM workspace_share_imports import_row WHERE import_row.workspace_id = workspace_share_import_resources.workspace_id AND import_row.operation_id = workspace_share_import_resources.operation_id AND (import_row.recipient_account_id = samurai_current_account_id() OR samurai_can_workspace(import_row.workspace_id, 'admin') OR samurai_is_completion_maintenance_identity(import_row.workspace_id)))
+      )`,
+      `CREATE POLICY workspace_share_import_resources_insert ON workspace_share_import_resources FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND EXISTS (SELECT 1 FROM workspace_share_imports import_row WHERE import_row.workspace_id = workspace_share_import_resources.workspace_id AND import_row.operation_id = workspace_share_import_resources.operation_id AND (import_row.recipient_account_id = samurai_current_account_id() OR samurai_can_workspace(import_row.workspace_id, 'admin') OR samurai_is_completion_maintenance_identity(import_row.workspace_id)))
+      )`,
+      `CREATE POLICY account_notifications_recipient_read ON account_notifications FOR SELECT USING (recipient_account_id = samurai_current_account_id())`,
+      `CREATE POLICY account_notifications_recipient_update ON account_notifications FOR UPDATE USING (recipient_account_id = samurai_current_account_id()) WITH CHECK (recipient_account_id = samurai_current_account_id())`,
+      `CREATE POLICY account_notifications_internal_insert ON account_notifications FOR INSERT WITH CHECK (
+        (workspace_id IS NOT NULL AND samurai_is_completion_maintenance_identity(workspace_id)) OR current_setting('samurai.internal_access', true) = '1'
+      )`,
+      `CREATE POLICY account_notification_outbox_internal ON account_notification_outbox FOR ALL USING (
+        (workspace_id IS NOT NULL AND samurai_is_completion_maintenance_identity(workspace_id)) OR current_setting('samurai.internal_access', true) = '1'
+      ) WITH CHECK (
+        (workspace_id IS NOT NULL AND samurai_is_completion_maintenance_identity(workspace_id)) OR current_setting('samurai.internal_access', true) = '1'
+      )`,
+      `CREATE OR REPLACE FUNCTION samurai_guard_account_notification_update() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF ROW(NEW.id, NEW.recipient_account_id, NEW.workspace_id, NEW.room_id, NEW.kind, NEW.source_kind, NEW.source_id, NEW.source_revision, NEW.created_at)
+          IS DISTINCT FROM ROW(OLD.id, OLD.recipient_account_id, OLD.workspace_id, OLD.room_id, OLD.kind, OLD.source_kind, OLD.source_id, OLD.source_revision, OLD.created_at) THEN
+          RAISE EXCEPTION 'account_notification_immutable';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "CREATE TRIGGER account_notifications_update_guard BEFORE UPDATE ON account_notifications FOR EACH ROW EXECUTE FUNCTION samurai_guard_account_notification_update()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_account_notification_update() FROM PUBLIC",
+      "CREATE INDEX workspace_completion_file_cleanup_queue_due_index ON workspace_completion_file_cleanup_queue(workspace_id, status, lease_until, updated_at, id) WHERE status = 'pending'",
+      "ALTER TABLE workspace_completion_file_cleanup_queue ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_completion_file_cleanup_queue FORCE ROW LEVEL SECURITY",
+      `CREATE POLICY workspace_completion_file_cleanup_queue_internal ON workspace_completion_file_cleanup_queue FOR ALL
+       USING (
+         (workspace_id = samurai_current_workspace_id() AND samurai_is_completion_maintenance_identity(workspace_id))
+         OR (workspace_id IS NOT NULL AND current_setting('samurai.internal_access', true) = '1')
+       )
+       WITH CHECK (
+         (workspace_id = samurai_current_workspace_id() AND samurai_is_completion_maintenance_identity(workspace_id))
+         OR (workspace_id IS NOT NULL AND current_setting('samurai.internal_access', true) = '1')
+       )`
+    ]
+  },
+  {
+    // V3 Restore writes the sharing projection while the target Workspace is
+    // held in the short-lived PostgreSQL import session.  The runtime role is
+    // deliberately non-owner/non-BYPASSRLS, so direct Bundle INSERTs need an
+    // explicit import-session branch; normal Account/Runtime paths retain the
+    // published/draft/source ACLs above.  No notification or outbox policy is
+    // changed because those rows are not portable Bundle state.
+    version: 130,
+    name: "workspace_server_native_ui_context_sharing_import_rls",
+    statements: [
+      "DROP POLICY workspace_shares_read ON workspace_shares",
+      `CREATE POLICY workspace_shares_read ON workspace_shares FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            (
+              (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+              OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+            )
+            AND (status <> 'draft' OR created_by = samurai_current_account_id())
+          )
+        )
+      )`,
+      "DROP POLICY workspace_shares_insert ON workspace_shares",
+      `CREATE POLICY workspace_shares_insert ON workspace_shares FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            samurai_workspace_is_writable(workspace_id)
+            AND status = 'draft'
+            AND created_by = samurai_current_account_id()
+            AND (
+              (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+              OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+            )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_shares_update ON workspace_shares",
+      `CREATE POLICY workspace_shares_update ON workspace_shares FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            (
+              (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+              OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+            )
+            AND (status <> 'draft' OR created_by = samurai_current_account_id())
+          )
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            samurai_workspace_is_writable(workspace_id)
+            AND (
+              (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+              OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+            )
+            AND (status <> 'draft' OR created_by = samurai_current_account_id())
+          )
+        )
+      )`,
+      "DROP POLICY workspace_shares_delete ON workspace_shares",
+      `CREATE POLICY workspace_shares_delete ON workspace_shares FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            status = 'draft'
+            AND created_by = samurai_current_account_id()
+            AND samurai_workspace_is_writable(workspace_id)
+            AND (
+              (source_kind = 'room_knowledge' AND source_room_id IS NOT NULL AND samurai_can_room(workspace_id, source_room_id, 'manage'))
+              OR (source_kind = 'agent' AND source_agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+            )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_share_recipients_manage ON workspace_share_recipients",
+      `CREATE POLICY workspace_share_recipients_manage ON workspace_share_recipients FOR ALL USING (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_shares share_row
+            WHERE share_row.workspace_id = workspace_share_recipients.workspace_id
+              AND share_row.id = workspace_share_recipients.share_id
+              AND share_row.status = 'draft'
+              AND share_row.created_by = samurai_current_account_id()
+              AND (
+                (share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage'))
+                OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))
+              )
+          )
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id() AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_shares share_row
+            WHERE share_row.workspace_id = workspace_share_recipients.workspace_id
+              AND share_row.id = workspace_share_recipients.share_id
+              AND share_row.status = 'draft'
+              AND share_row.created_by = samurai_current_account_id()
+              AND samurai_workspace_is_writable(share_row.workspace_id)
+              AND (
+                (share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage'))
+                OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))
+              )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_share_claims_read ON workspace_share_claims",
+      `CREATE POLICY workspace_share_claims_read ON workspace_share_claims FOR SELECT USING (
+        samurai_is_import_session(workspace_id)
+        OR recipient_account_id = samurai_current_account_id()
+        OR (workspace_id = samurai_current_workspace_id() AND samurai_can_workspace(workspace_id, 'admin'))
+      )`,
+      "DROP POLICY workspace_share_claims_insert ON workspace_share_claims",
+      `CREATE POLICY workspace_share_claims_insert ON workspace_share_claims FOR INSERT WITH CHECK (
+        samurai_is_import_session(workspace_id)
+        OR recipient_account_id = samurai_current_account_id()
+        OR (workspace_id = samurai_current_workspace_id() AND samurai_can_workspace(workspace_id, 'admin'))
+      )`,
+      `CREATE POLICY workspace_share_claims_import_delete ON workspace_share_claims FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND samurai_is_import_session(workspace_id)
+      )`,
+      "DROP POLICY workspace_share_imports_read ON workspace_share_imports",
+      `CREATE POLICY workspace_share_imports_read ON workspace_share_imports FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR recipient_account_id = samurai_current_account_id()
+          OR samurai_can_workspace(workspace_id, 'admin')
+          OR samurai_is_completion_maintenance_identity(workspace_id)
+        )
+      )`,
+      "DROP POLICY workspace_share_imports_write ON workspace_share_imports",
+      `CREATE POLICY workspace_share_imports_write ON workspace_share_imports FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR (
+            recipient_account_id = samurai_current_account_id()
+            AND samurai_workspace_is_writable(workspace_id)
+            AND (
+              (kind = 'agent' AND samurai_can_workspace(workspace_id, 'admin'))
+              OR (kind = 'room_knowledge' AND target_room_id IS NOT NULL AND samurai_can_room(workspace_id, target_room_id, 'manage'))
+            )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_share_imports_update ON workspace_share_imports",
+      `CREATE POLICY workspace_share_imports_update ON workspace_share_imports FOR UPDATE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR recipient_account_id = samurai_current_account_id()
+          OR samurai_can_workspace(workspace_id, 'admin')
+          OR samurai_is_completion_maintenance_identity(workspace_id)
+        )
+      ) WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR recipient_account_id = samurai_current_account_id()
+          OR samurai_can_workspace(workspace_id, 'admin')
+          OR samurai_is_completion_maintenance_identity(workspace_id)
+        )
+      )`,
+      `CREATE POLICY workspace_share_imports_import_delete ON workspace_share_imports FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND samurai_is_import_session(workspace_id)
+      )`,
+      "DROP POLICY workspace_share_import_resources_read ON workspace_share_import_resources",
+      `CREATE POLICY workspace_share_import_resources_read ON workspace_share_import_resources FOR SELECT USING (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_share_imports import_row
+            WHERE import_row.workspace_id = workspace_share_import_resources.workspace_id
+              AND import_row.operation_id = workspace_share_import_resources.operation_id
+              AND (
+                import_row.recipient_account_id = samurai_current_account_id()
+                OR samurai_can_workspace(import_row.workspace_id, 'admin')
+                OR samurai_is_completion_maintenance_identity(import_row.workspace_id)
+              )
+          )
+        )
+      )`,
+      "DROP POLICY workspace_share_import_resources_insert ON workspace_share_import_resources",
+      `CREATE POLICY workspace_share_import_resources_insert ON workspace_share_import_resources FOR INSERT WITH CHECK (
+        workspace_id = samurai_current_workspace_id()
+        AND (
+          samurai_is_import_session(workspace_id)
+          OR EXISTS (
+            SELECT 1 FROM workspace_share_imports import_row
+            WHERE import_row.workspace_id = workspace_share_import_resources.workspace_id
+              AND import_row.operation_id = workspace_share_import_resources.operation_id
+              AND (
+                import_row.recipient_account_id = samurai_current_account_id()
+                OR samurai_can_workspace(import_row.workspace_id, 'admin')
+                OR samurai_is_completion_maintenance_identity(import_row.workspace_id)
+              )
+          )
+        )
+      )`,
+      `CREATE POLICY workspace_share_import_resources_import_delete ON workspace_share_import_resources FOR DELETE USING (
+        workspace_id = samurai_current_workspace_id()
+        AND samurai_is_import_session(workspace_id)
+      )`,
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_recipients() RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE share_row workspace_shares%ROWTYPE;
+      BEGIN
+        SELECT * INTO share_row
+        FROM workspace_shares
+        WHERE workspace_id = COALESCE(NEW.workspace_id, OLD.workspace_id)
+          AND id = COALESCE(NEW.share_id, OLD.share_id);
+        IF NOT FOUND OR share_row.status = 'draft' OR samurai_is_import_session(share_row.workspace_id) THEN
+          RETURN NULL;
+        END IF;
+        RAISE EXCEPTION 'workspace_share_recipients_immutable';
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_recipients() FROM PUBLIC",
+
+      // Import abort is the only cleanup path that runs after the first
+      // transaction has committed. Remove the new dependent rows before the
+      // existing Room/Agent cleanup so a failed restore cannot leave a share
+      // projection behind for a retry.
+      `CREATE OR REPLACE FUNCTION samurai_abort_workspace_import(
+        target_workspace_id TEXT,
+        import_session_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE workspace_key TEXT := target_workspace_id;
+      DECLARE import_key TEXT := import_session_id;
+      BEGIN
+        IF workspace_key IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_import_session(workspace_key) THEN
+          RAISE EXCEPTION 'workspace_import_session_invalid';
+        END IF;
+        DELETE FROM workspace_share_import_resources WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_share_imports WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_share_file_transactions WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_share_claims WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_share_recipients WHERE workspace_id = workspace_key;
+        DELETE FROM workspace_shares WHERE workspace_id = workspace_key;
+        PERFORM samurai_abort_workspace_import_v89(workspace_key, import_key);
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_abort_workspace_import(TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // Public locator reads and claims intentionally do not add an anonymous
+    // table policy.  The runtime role can call only these small, definer-owned
+    // projections; every other share/recipient/claim row remains behind the
+    // existing tenant RLS policies.
+    version: 131,
+    name: "workspace_server_share_public_locator_and_claim_functions",
+    statements: [
+      `CREATE OR REPLACE FUNCTION samurai_workspace_share_public_lookup(
+        p_locator TEXT,
+        p_recipient_account_id TEXT
+      ) RETURNS TABLE(
+        workspace_id TEXT,
+        share_id TEXT,
+        title TEXT,
+        visibility TEXT,
+        manifest_path TEXT,
+        content_hash TEXT,
+        published_at TIMESTAMPTZ
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF p_locator IS NULL OR p_locator !~ '^[A-Za-z0-9_-]{43}$' THEN
+          RETURN;
+        END IF;
+        IF p_recipient_account_id IS NOT NULL AND btrim(p_recipient_account_id) = '' THEN
+          RETURN;
+        END IF;
+        RETURN QUERY
+        SELECT share.workspace_id, share.id, share.title, share.visibility,
+               share.manifest_path, share.content_hash, share.published_at
+          FROM public.workspace_shares AS share
+         WHERE share.public_locator = p_locator
+           AND share.status = 'active'
+           AND (
+             share.visibility = 'public'
+             OR (
+               share.visibility = 'restricted'
+               AND p_recipient_account_id IS NOT NULL
+               AND EXISTS (
+                 SELECT 1
+                   FROM public.workspace_share_recipients AS recipient
+                  WHERE recipient.workspace_id = share.workspace_id
+                    AND recipient.share_id = share.id
+                    AND recipient.recipient_account_id = p_recipient_account_id
+               )
+             )
+           );
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_workspace_share_public_lookup(TEXT, TEXT) FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_workspace_share_claim(
+        p_locator TEXT,
+        p_recipient_account_id TEXT,
+        p_target_origin TEXT,
+        p_target_workspace_id TEXT,
+        p_operation_id TEXT,
+        p_request_hash TEXT,
+        p_content_hash TEXT,
+        p_claim_id TEXT
+      ) RETURNS TABLE(
+        claim_id TEXT,
+        share_id TEXT,
+        recipient_account_id TEXT,
+        target_origin TEXT,
+        target_workspace_id TEXT,
+        operation_id TEXT,
+        content_hash TEXT,
+        created_at TIMESTAMPTZ,
+        replayed BOOLEAN
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      DECLARE
+        share_row public.workspace_shares%ROWTYPE;
+        prior_row public.workspace_share_claims%ROWTYPE;
+      BEGIN
+        IF p_locator IS NULL OR p_locator !~ '^[A-Za-z0-9_-]{43}$'
+          OR p_recipient_account_id IS NULL OR btrim(p_recipient_account_id) = '' OR length(p_recipient_account_id) > 512
+          OR p_target_origin IS NULL OR p_target_origin !~ '^https?://[^/?#@]+$'
+          OR p_target_workspace_id IS NULL OR btrim(p_target_workspace_id) = '' OR length(p_target_workspace_id) > 512
+          OR p_operation_id IS NULL OR btrim(p_operation_id) = '' OR length(p_operation_id) > 512
+          OR p_request_hash IS NULL OR p_request_hash !~ '^[a-f0-9]{64}$'
+          OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$'
+          OR p_claim_id IS NULL OR btrim(p_claim_id) = '' OR length(p_claim_id) > 512 THEN
+          RAISE EXCEPTION 'workspace_share_claim_input_invalid';
+        END IF;
+
+        SELECT share.* INTO share_row
+          FROM public.workspace_shares AS share
+         WHERE share.public_locator = p_locator
+         FOR UPDATE;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'share_unavailable';
+        END IF;
+
+        -- Locking the share row serializes both a first claim and all
+        -- idempotent retries against a concurrent revoke/publish operation.
+        SELECT claim.* INTO prior_row
+          FROM public.workspace_share_claims AS claim
+         WHERE claim.workspace_id = share_row.workspace_id
+           AND claim.share_id = share_row.id
+           AND claim.recipient_account_id = p_recipient_account_id
+           AND claim.target_origin = p_target_origin
+           AND claim.target_workspace_id = p_target_workspace_id
+           AND claim.operation_id = p_operation_id
+         FOR UPDATE;
+        IF FOUND THEN
+          IF prior_row.request_hash IS DISTINCT FROM p_request_hash
+             OR prior_row.content_hash IS DISTINCT FROM p_content_hash THEN
+            RAISE EXCEPTION 'workspace_share_claim_conflict';
+          END IF;
+          RETURN QUERY SELECT prior_row.id, prior_row.share_id, prior_row.recipient_account_id,
+                              prior_row.target_origin, prior_row.target_workspace_id,
+                              prior_row.operation_id, prior_row.content_hash,
+                              prior_row.created_at, TRUE;
+          RETURN;
+        END IF;
+
+        IF share_row.visibility = 'restricted' AND NOT EXISTS (
+          SELECT 1
+            FROM public.workspace_share_recipients AS recipient
+           WHERE recipient.workspace_id = share_row.workspace_id
+             AND recipient.share_id = share_row.id
+             AND recipient.recipient_account_id = p_recipient_account_id
+        ) THEN
+          RAISE EXCEPTION 'share_unavailable';
+        END IF;
+        IF share_row.status <> 'active' THEN
+          RAISE EXCEPTION 'share_revoked';
+        END IF;
+        IF share_row.content_hash IS DISTINCT FROM p_content_hash THEN
+          RAISE EXCEPTION 'workspace_share_content_hash_conflict';
+        END IF;
+
+        INSERT INTO public.workspace_share_claims(
+          workspace_id, id, share_id, recipient_account_id, target_origin,
+          target_workspace_id, operation_id, request_hash, content_hash
+        ) VALUES (
+          share_row.workspace_id, p_claim_id, share_row.id, p_recipient_account_id,
+          p_target_origin, p_target_workspace_id, p_operation_id, p_request_hash,
+          p_content_hash
+        );
+        SELECT claim.* INTO prior_row
+          FROM public.workspace_share_claims AS claim
+         WHERE claim.workspace_id = share_row.workspace_id
+           AND claim.id = p_claim_id;
+        RETURN QUERY SELECT prior_row.id, prior_row.share_id, prior_row.recipient_account_id,
+                            prior_row.target_origin, prior_row.target_workspace_id,
+                            prior_row.operation_id, prior_row.content_hash,
+                            prior_row.created_at, FALSE;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_workspace_share_claim(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_workspace_share_claim_content(
+        p_locator TEXT,
+        p_claim_id TEXT,
+        p_recipient_account_id TEXT,
+        p_target_origin TEXT,
+        p_target_workspace_id TEXT,
+        p_operation_id TEXT,
+        p_content_hash TEXT
+      ) RETURNS TABLE(
+        workspace_id TEXT,
+        share_id TEXT,
+        manifest_path TEXT,
+        content_hash TEXT,
+        recipient_account_id TEXT,
+        target_origin TEXT,
+        target_workspace_id TEXT,
+        operation_id TEXT
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF p_locator IS NULL OR p_locator !~ '^[A-Za-z0-9_-]{43}$'
+          OR p_claim_id IS NULL OR btrim(p_claim_id) = '' OR length(p_claim_id) > 512
+          OR p_recipient_account_id IS NULL OR btrim(p_recipient_account_id) = '' OR length(p_recipient_account_id) > 512
+          OR p_target_origin IS NULL OR p_target_origin !~ '^https?://[^/?#@]+$'
+          OR p_target_workspace_id IS NULL OR btrim(p_target_workspace_id) = '' OR length(p_target_workspace_id) > 512
+          OR p_operation_id IS NULL OR btrim(p_operation_id) = '' OR length(p_operation_id) > 512
+          OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$' THEN
+          RETURN;
+        END IF;
+        -- Claims are immutable.  The join deliberately includes every
+        -- recipient/target/operation/hash binding, so a delegation cannot
+        -- be replayed for another target or another fixed manifest.
+        RETURN QUERY
+        SELECT share.workspace_id, share.id, share.manifest_path, share.content_hash,
+               claim.recipient_account_id, claim.target_origin,
+               claim.target_workspace_id, claim.operation_id
+          FROM public.workspace_shares AS share
+          JOIN public.workspace_share_claims AS claim
+            ON claim.workspace_id = share.workspace_id
+           AND claim.share_id = share.id
+         WHERE share.public_locator = p_locator
+           AND claim.id = p_claim_id
+           AND claim.recipient_account_id = p_recipient_account_id
+           AND claim.target_origin = p_target_origin
+           AND claim.target_workspace_id = p_target_workspace_id
+           AND claim.operation_id = p_operation_id
+           AND claim.content_hash = p_content_hash
+           AND share.content_hash = p_content_hash
+           AND share.manifest_path IS NOT NULL;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_workspace_share_claim_content(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // Personal preferences are an immutable, Account-owned snapshot on the
+    // instruction that started a human Work.  The column is nullable so old
+    // instructions and requests that did not carry preferences remain
+    // untouched; only the guarded function may set a first snapshot.
+    version: 132,
+    name: "workspace_server_human_work_personal_preferences_snapshot",
+    statements: [
+      "ALTER TABLE workspace_human_work_instructions ADD COLUMN IF NOT EXISTS personal_preferences_snapshot JSONB NULL",
+      `DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conrelid = 'workspace_human_work_instructions'::REGCLASS
+            AND conname = 'workspace_human_work_instructions_personal_preferences_snapshot_check'
+        ) THEN
+          ALTER TABLE workspace_human_work_instructions
+          ADD CONSTRAINT workspace_human_work_instructions_personal_preferences_snapshot_check CHECK (
+            personal_preferences_snapshot IS NULL
+            OR (
+              jsonb_typeof(personal_preferences_snapshot) = 'object'
+              AND personal_preferences_snapshot ?& ARRAY['schema_version', 'revision', 'display_name', 'output_locale', 'instructions']
+              AND personal_preferences_snapshot - ARRAY['schema_version', 'revision', 'display_name', 'output_locale', 'instructions'] = '{}'::JSONB
+              AND CASE
+                WHEN jsonb_typeof(personal_preferences_snapshot->'schema_version') = 'number'
+                THEN (personal_preferences_snapshot->>'schema_version')::NUMERIC = 1
+                ELSE FALSE
+              END
+              AND CASE
+                WHEN jsonb_typeof(personal_preferences_snapshot->'revision') = 'number'
+                THEN (personal_preferences_snapshot->>'revision')::NUMERIC >= 0
+                  AND trunc((personal_preferences_snapshot->>'revision')::NUMERIC) = (personal_preferences_snapshot->>'revision')::NUMERIC
+                  AND (personal_preferences_snapshot->>'revision')::NUMERIC <= 9007199254740991
+                ELSE FALSE
+              END
+              AND jsonb_typeof(personal_preferences_snapshot->'display_name') = 'string'
+              AND btrim(personal_preferences_snapshot->>'display_name') <> ''
+              AND char_length(btrim(personal_preferences_snapshot->>'display_name')) <= 200
+              AND (
+                personal_preferences_snapshot->'output_locale' = 'null'::JSONB
+                OR (
+                  jsonb_typeof(personal_preferences_snapshot->'output_locale') = 'string'
+                  AND personal_preferences_snapshot->>'output_locale' IN ('en', 'ja', 'zh', 'ko', 'es', 'pt-BR', 'fr', 'de')
+                )
+              )
+              AND jsonb_typeof(personal_preferences_snapshot->'instructions') = 'string'
+              AND char_length(personal_preferences_snapshot->>'instructions') <= 20000
+            )
+          );
+        END IF;
+      END;
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_set_human_work_instruction_personal_preferences(
+        target_workspace_id TEXT,
+        target_instruction_id TEXT,
+        target_work_id TEXT,
+        snapshot_json JSONB,
+        target_operation_id TEXT
+      ) RETURNS VOID
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      DECLARE
+        work_row workspace_human_works%ROWTYPE;
+        instruction_row workspace_human_work_instructions%ROWTYPE;
+      BEGIN
+        -- This function is called from the Store's already-ledgered operation.
+        -- Re-check every binding here because a direct SQL caller must not be
+        -- able to turn an arbitrary instruction into an Account preference.
+        IF target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR btrim(COALESCE(target_instruction_id, '')) = ''
+          OR btrim(COALESCE(target_work_id, '')) = ''
+          OR btrim(COALESCE(target_operation_id, '')) = ''
+          OR snapshot_json IS NULL
+          OR jsonb_typeof(snapshot_json) <> 'object'
+          OR NOT (snapshot_json ?& ARRAY['schema_version', 'revision', 'display_name', 'output_locale', 'instructions'])
+          OR snapshot_json - ARRAY['schema_version', 'revision', 'display_name', 'output_locale', 'instructions'] <> '{}'::JSONB
+          OR (CASE
+            WHEN jsonb_typeof(snapshot_json->'schema_version') = 'number'
+            THEN (snapshot_json->>'schema_version')::NUMERIC <> 1
+            ELSE TRUE
+          END)
+          OR (CASE
+            WHEN jsonb_typeof(snapshot_json->'revision') = 'number'
+            THEN (snapshot_json->>'revision')::NUMERIC < 0
+              OR trunc((snapshot_json->>'revision')::NUMERIC) <> (snapshot_json->>'revision')::NUMERIC
+              OR (snapshot_json->>'revision')::NUMERIC > 9007199254740991
+            ELSE TRUE
+          END)
+          OR jsonb_typeof(snapshot_json->'display_name') <> 'string'
+          OR btrim(COALESCE(snapshot_json->>'display_name', '')) = ''
+          OR char_length(btrim(COALESCE(snapshot_json->>'display_name', ''))) > 200
+          OR (
+            snapshot_json->'output_locale' <> 'null'::JSONB
+            AND (
+              jsonb_typeof(snapshot_json->'output_locale') <> 'string'
+              OR snapshot_json->>'output_locale' NOT IN ('en', 'ja', 'zh', 'ko', 'es', 'pt-BR', 'fr', 'de')
+            )
+          )
+          OR jsonb_typeof(snapshot_json->'instructions') <> 'string'
+          OR char_length(COALESCE(snapshot_json->>'instructions', '')) > 20000
+          OR NOT EXISTS (
+            SELECT 1
+            FROM workspace_operations AS operation_row
+            WHERE operation_row.workspace_id = target_workspace_id
+              AND operation_row.id = target_operation_id
+              AND operation_row.idempotency_key = target_operation_id
+              AND operation_row.actor_account_id = samurai_current_account_id()
+              AND operation_row.status = 'running'
+          )
+          OR NOT samurai_can_human_work_control(target_workspace_id, target_work_id)
+          OR NOT EXISTS (
+            SELECT 1
+            FROM workspace_human_works AS control_work
+            WHERE control_work.workspace_id = target_workspace_id
+              AND control_work.id = target_work_id
+              AND samurai_can_room(target_workspace_id, control_work.room_id, 'execute')
+          ) THEN
+          RAISE EXCEPTION 'human_work_personal_preferences_permission_denied';
+        END IF;
+        PERFORM samurai_assert_workspace_writable(target_workspace_id);
+
+        SELECT * INTO work_row
+        FROM workspace_human_works
+        WHERE workspace_id = target_workspace_id AND id = target_work_id
+        FOR UPDATE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'human_work_not_found'; END IF;
+
+        SELECT * INTO instruction_row
+        FROM workspace_human_work_instructions
+        WHERE workspace_id = target_workspace_id AND id = target_instruction_id
+        FOR UPDATE;
+        IF NOT FOUND
+          OR instruction_row.work_id IS DISTINCT FROM target_work_id
+          OR instruction_row.room_id IS DISTINCT FROM work_row.room_id THEN
+          RAISE EXCEPTION 'human_work_not_found';
+        END IF;
+        IF instruction_row.created_by IS DISTINCT FROM samurai_current_account_id() THEN
+          RAISE EXCEPTION 'human_work_personal_preferences_permission_denied';
+        END IF;
+
+        IF instruction_row.personal_preferences_snapshot IS NULL THEN
+          UPDATE workspace_human_work_instructions
+          SET personal_preferences_snapshot = snapshot_json
+          WHERE workspace_id = target_workspace_id
+            AND id = target_instruction_id
+            AND personal_preferences_snapshot IS NULL;
+          RETURN;
+        END IF;
+        IF instruction_row.personal_preferences_snapshot IS DISTINCT FROM snapshot_json THEN
+          -- Reuse the existing Room Work conflict code so the Store maps this
+          -- immutable-write violation to HTTP 409 without a new public DTO.
+          RAISE EXCEPTION 'human_work_instruction_version_conflict';
+        END IF;
+      END;
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_set_human_work_instruction_personal_preferences(TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // Share origins are the canonical Server origin used by Domain/Core:
+    // HTTPS only, authority only, and an explicit trailing slash.  The v129
+    // checks accepted legacy HTTP/no-slash values and also rejected the
+    // canonical slash form.  Keep old values as audit history instead of
+    // rewriting or deleting them; NOT VALID enforces the new contract for all
+    // new and updated rows while an operator can remediate legacy rows before
+    // a later validation-only migration.
+    version: 133,
+    name: "workspace_server_share_origin_canonicalization",
+    statements: [
+      "ALTER TABLE workspace_share_claims DROP CONSTRAINT IF EXISTS workspace_share_claims_target_origin_check",
+      "ALTER TABLE workspace_share_imports DROP CONSTRAINT IF EXISTS workspace_share_imports_source_origin_check",
+      "ALTER TABLE workspace_share_claims ADD CONSTRAINT workspace_share_claims_target_origin_canonical_check CHECK (target_origin ~ '^https://[^/?#@]+/$') NOT VALID",
+      "ALTER TABLE workspace_share_imports ADD CONSTRAINT workspace_share_imports_source_origin_canonical_check CHECK (source_origin ~ '^https://[^/?#@]+/$') NOT VALID",
+      `CREATE OR REPLACE FUNCTION samurai_normalize_workspace_share_claim_origin()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        -- Older Domain/Core callers used an origin without the URL root slash.
+        -- This lossless normalization lets those retries converge while the
+        -- new CHECK still rejects HTTP, credentials, paths, queries, and
+        -- fragments.
+        IF NEW.target_origin ~ '^https://[^/?#@]+$' THEN
+          NEW.target_origin := NEW.target_origin || '/';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_share_claims_origin_canonicalization ON workspace_share_claims",
+      `CREATE TRIGGER workspace_share_claims_origin_canonicalization
+      BEFORE INSERT OR UPDATE ON workspace_share_claims
+      FOR EACH ROW EXECUTE FUNCTION samurai_normalize_workspace_share_claim_origin()`,
+      `CREATE OR REPLACE FUNCTION samurai_normalize_workspace_share_import_origin()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF NEW.source_origin ~ '^https://[^/?#@]+$' THEN
+          NEW.source_origin := NEW.source_origin || '/';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_share_imports_origin_canonicalization ON workspace_share_imports",
+      `CREATE TRIGGER workspace_share_imports_origin_canonicalization
+      BEFORE INSERT OR UPDATE ON workspace_share_imports
+      FOR EACH ROW EXECUTE FUNCTION samurai_normalize_workspace_share_import_origin()`,
+      `DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM workspace_share_claims
+          WHERE NOT (target_origin ~ '^https://[^/?#@]+/$')
+        ) THEN
+          ALTER TABLE workspace_share_claims
+          VALIDATE CONSTRAINT workspace_share_claims_target_origin_canonical_check;
+        END IF;
+      END
+      $$`,
+      `DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM workspace_share_imports
+          WHERE NOT (source_origin ~ '^https://[^/?#@]+/$')
+        ) THEN
+          ALTER TABLE workspace_share_imports
+          VALIDATE CONSTRAINT workspace_share_imports_source_origin_canonical_check;
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_workspace_share_claim(
+        p_locator TEXT,
+        p_recipient_account_id TEXT,
+        p_target_origin TEXT,
+        p_target_workspace_id TEXT,
+        p_operation_id TEXT,
+        p_request_hash TEXT,
+        p_content_hash TEXT,
+        p_claim_id TEXT
+      ) RETURNS TABLE(
+        claim_id TEXT,
+        share_id TEXT,
+        recipient_account_id TEXT,
+        target_origin TEXT,
+        target_workspace_id TEXT,
+        operation_id TEXT,
+        content_hash TEXT,
+        created_at TIMESTAMPTZ,
+        replayed BOOLEAN
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      DECLARE
+        share_row public.workspace_shares%ROWTYPE;
+        prior_row public.workspace_share_claims%ROWTYPE;
+      BEGIN
+        IF p_locator IS NULL OR p_locator !~ '^[A-Za-z0-9_-]{43}$'
+          OR p_recipient_account_id IS NULL OR btrim(p_recipient_account_id) = '' OR length(p_recipient_account_id) > 512
+          OR p_target_origin IS NULL OR p_target_origin !~ '^https://[^/?#@]+/$'
+          OR p_target_workspace_id IS NULL OR btrim(p_target_workspace_id) = '' OR length(p_target_workspace_id) > 512
+          OR p_operation_id IS NULL OR btrim(p_operation_id) = '' OR length(p_operation_id) > 512
+          OR p_request_hash IS NULL OR p_request_hash !~ '^[a-f0-9]{64}$'
+          OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$'
+          OR p_claim_id IS NULL OR btrim(p_claim_id) = '' OR length(p_claim_id) > 512 THEN
+          RAISE EXCEPTION 'workspace_share_claim_input_invalid';
+        END IF;
+
+        SELECT share.* INTO share_row
+          FROM public.workspace_shares AS share
+         WHERE share.public_locator = p_locator
+         FOR UPDATE;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'share_unavailable';
+        END IF;
+
+        -- Locking the share row serializes both a first claim and all
+        -- idempotent retries against a concurrent revoke/publish operation.
+        SELECT claim.* INTO prior_row
+          FROM public.workspace_share_claims AS claim
+         WHERE claim.workspace_id = share_row.workspace_id
+           AND claim.share_id = share_row.id
+           AND claim.recipient_account_id = p_recipient_account_id
+           AND claim.target_origin = p_target_origin
+           AND claim.target_workspace_id = p_target_workspace_id
+           AND claim.operation_id = p_operation_id
+         FOR UPDATE;
+        IF FOUND THEN
+          IF prior_row.request_hash IS DISTINCT FROM p_request_hash
+             OR prior_row.content_hash IS DISTINCT FROM p_content_hash THEN
+            RAISE EXCEPTION 'workspace_share_claim_conflict';
+          END IF;
+          RETURN QUERY SELECT prior_row.id, prior_row.share_id, prior_row.recipient_account_id,
+                              prior_row.target_origin, prior_row.target_workspace_id,
+                              prior_row.operation_id, prior_row.content_hash,
+                              prior_row.created_at, TRUE;
+          RETURN;
+        END IF;
+
+        IF share_row.visibility = 'restricted' AND NOT EXISTS (
+          SELECT 1
+            FROM public.workspace_share_recipients AS recipient
+           WHERE recipient.workspace_id = share_row.workspace_id
+             AND recipient.share_id = share_row.id
+             AND recipient.recipient_account_id = p_recipient_account_id
+        ) THEN
+          RAISE EXCEPTION 'share_unavailable';
+        END IF;
+        IF share_row.status <> 'active' THEN
+          RAISE EXCEPTION 'share_revoked';
+        END IF;
+        IF share_row.content_hash IS DISTINCT FROM p_content_hash THEN
+          RAISE EXCEPTION 'workspace_share_content_hash_conflict';
+        END IF;
+
+        INSERT INTO public.workspace_share_claims(
+          workspace_id, id, share_id, recipient_account_id, target_origin,
+          target_workspace_id, operation_id, request_hash, content_hash
+        ) VALUES (
+          share_row.workspace_id, p_claim_id, share_row.id, p_recipient_account_id,
+          p_target_origin, p_target_workspace_id, p_operation_id, p_request_hash,
+          p_content_hash
+        );
+        SELECT claim.* INTO prior_row
+          FROM public.workspace_share_claims AS claim
+         WHERE claim.workspace_id = share_row.workspace_id
+           AND claim.id = p_claim_id;
+        RETURN QUERY SELECT prior_row.id, prior_row.share_id, prior_row.recipient_account_id,
+                            prior_row.target_origin, prior_row.target_workspace_id,
+                            prior_row.operation_id, prior_row.content_hash,
+                            prior_row.created_at, FALSE;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_workspace_share_claim(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_workspace_share_claim_content(
+        p_locator TEXT,
+        p_claim_id TEXT,
+        p_recipient_account_id TEXT,
+        p_target_origin TEXT,
+        p_target_workspace_id TEXT,
+        p_operation_id TEXT,
+        p_content_hash TEXT
+      ) RETURNS TABLE(
+        workspace_id TEXT,
+        share_id TEXT,
+        manifest_path TEXT,
+        content_hash TEXT,
+        recipient_account_id TEXT,
+        target_origin TEXT,
+        target_workspace_id TEXT,
+        operation_id TEXT
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF p_locator IS NULL OR p_locator !~ '^[A-Za-z0-9_-]{43}$'
+          OR p_claim_id IS NULL OR btrim(p_claim_id) = '' OR length(p_claim_id) > 512
+          OR p_recipient_account_id IS NULL OR btrim(p_recipient_account_id) = '' OR length(p_recipient_account_id) > 512
+          OR p_target_origin IS NULL OR p_target_origin !~ '^https://[^/?#@]+/$'
+          OR p_target_workspace_id IS NULL OR btrim(p_target_workspace_id) = '' OR length(p_target_workspace_id) > 512
+          OR p_operation_id IS NULL OR btrim(p_operation_id) = '' OR length(p_operation_id) > 512
+          OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$' THEN
+          RETURN;
+        END IF;
+        -- Claims are immutable.  The join deliberately includes every
+        -- recipient/target/operation/hash binding, so a delegation cannot
+        -- be replayed for another target or another fixed manifest.
+        RETURN QUERY
+        SELECT share.workspace_id, share.id, share.manifest_path, share.content_hash,
+               claim.recipient_account_id, claim.target_origin,
+               claim.target_workspace_id, claim.operation_id
+          FROM public.workspace_shares AS share
+          JOIN public.workspace_share_claims AS claim
+            ON claim.workspace_id = share.workspace_id
+           AND claim.share_id = share.id
+         WHERE share.public_locator = p_locator
+           AND claim.id = p_claim_id
+           AND claim.recipient_account_id = p_recipient_account_id
+           AND claim.target_origin = p_target_origin
+           AND claim.target_workspace_id = p_target_workspace_id
+           AND claim.operation_id = p_operation_id
+           AND claim.content_hash = p_content_hash
+           AND share.content_hash = p_content_hash
+           AND share.manifest_path IS NOT NULL;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_workspace_share_claim_content(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // A committed import is terminal audit state.  Older databases could
+    // retain a retryable lease or failure marker on such a row; converge that
+    // legacy state first, then enforce the invariant for every future write.
+    version: 134,
+    name: "workspace_server_share_committed_import_terminal_state",
+    statements: [
+      `UPDATE workspace_share_imports
+       SET retryable = FALSE, failure_code = NULL, lease_token = NULL, lease_until = NULL
+       WHERE status = 'committed'
+         AND (retryable IS DISTINCT FROM FALSE OR failure_code IS NOT NULL OR lease_token IS NOT NULL OR lease_until IS NOT NULL)`,
+      `ALTER TABLE workspace_share_imports
+       ADD CONSTRAINT workspace_share_imports_committed_terminal_state_check
+       CHECK (status <> 'committed' OR (retryable = FALSE AND failure_code IS NULL)) NOT VALID`,
+      `DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_share_imports
+          WHERE status = 'committed' AND (retryable IS DISTINCT FROM FALSE OR failure_code IS NOT NULL)
+        ) THEN
+          ALTER TABLE workspace_share_imports
+          VALIDATE CONSTRAINT workspace_share_imports_committed_terminal_state_check;
+        END IF;
+      END
+      $$`
+    ]
+  },
+  {
+    // Import reservations are deliberately provisional while an import is
+    // staging: the Agent row is created by the atomic Completion committer at
+    // the same time the import becomes committed.  Enforce the final
+    // Workspace Agent ownership at that transition instead of adding an
+    // unconditional FK that would reject a valid pre-commit reservation.
+    version: 135,
+    name: "workspace_server_share_import_scope_and_failed_terminal_guards",
+    statements: [
+      `UPDATE workspace_share_imports
+       SET phase = 'cleanup', retryable = FALSE, lease_token = NULL, lease_until = NULL
+       WHERE status = 'failed'
+         AND (phase IS DISTINCT FROM 'cleanup' OR retryable IS DISTINCT FROM FALSE OR lease_token IS NOT NULL OR lease_until IS NOT NULL)`,
+      `ALTER TABLE workspace_share_imports
+       ADD CONSTRAINT workspace_share_imports_failed_terminal_state_check
+       CHECK (status <> 'failed' OR (phase = 'cleanup' AND retryable = FALSE AND failure_code IS NOT NULL AND lease_token IS NULL AND lease_until IS NULL)) NOT VALID`,
+      `DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM workspace_share_imports
+          WHERE status = 'failed'
+            AND (phase IS DISTINCT FROM 'cleanup' OR retryable IS DISTINCT FROM FALSE OR failure_code IS NULL OR lease_token IS NOT NULL OR lease_until IS NOT NULL)
+        ) THEN
+          ALTER TABLE workspace_share_imports
+          VALIDATE CONSTRAINT workspace_share_imports_failed_terminal_state_check;
+        END IF;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_import_agent_scope()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF NEW.status = 'committed' AND NEW.kind = 'agent' THEN
+          IF NEW.reserved_agent_id IS NULL OR NOT EXISTS (
+            SELECT 1
+            FROM workspace_agents agent
+            WHERE agent.workspace_id = NEW.workspace_id
+              AND agent.id = NEW.reserved_agent_id
+          ) THEN
+            RAISE EXCEPTION 'workspace_share_import_agent_not_found';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_share_import_agent_scope_guard ON workspace_share_imports",
+      "CREATE TRIGGER workspace_share_import_agent_scope_guard BEFORE INSERT OR UPDATE ON workspace_share_imports FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_share_import_agent_scope()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_import_agent_scope() FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_import_resource()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      DECLARE
+        import_row workspace_share_imports%ROWTYPE;
+        resource_row workspace_completion_resources%ROWTYPE;
+      BEGIN
+        SELECT * INTO import_row
+        FROM workspace_share_imports
+        WHERE workspace_id = NEW.workspace_id AND operation_id = NEW.operation_id;
+        IF NOT FOUND
+          OR import_row.status <> 'committed'
+          OR import_row.phase <> 'done'
+          OR import_row.retryable
+          OR import_row.failure_code IS NOT NULL
+          OR import_row.lease_token IS NOT NULL
+          OR import_row.lease_until IS NOT NULL THEN
+          RAISE EXCEPTION 'workspace_share_import_resource_import_not_committed';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(import_row.reserved_resource_ids) AS reserved(item)
+          WHERE (reserved.item ->> 'entryId' = NEW.entry_id OR reserved.item ->> 'entry_id' = NEW.entry_id)
+            AND (reserved.item ->> 'resourceId' = NEW.resource_id OR reserved.item ->> 'resource_id' = NEW.resource_id)
+        ) THEN
+          RAISE EXCEPTION 'workspace_share_import_resource_reservation_mismatch';
+        END IF;
+        SELECT * INTO resource_row
+        FROM workspace_completion_resources
+        WHERE workspace_id = NEW.workspace_id AND id = NEW.resource_id;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'workspace_share_import_resource_not_found';
+        END IF;
+        IF import_row.kind = 'agent' THEN
+          IF resource_row.scope_kind <> 'agent' OR resource_row.agent_id IS DISTINCT FROM import_row.reserved_agent_id THEN
+            RAISE EXCEPTION 'workspace_share_import_agent_resource_scope_mismatch';
+          END IF;
+        ELSIF resource_row.scope_kind <> 'room' OR resource_row.room_id IS DISTINCT FROM import_row.target_room_id THEN
+          RAISE EXCEPTION 'workspace_share_import_room_resource_scope_mismatch';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_share_import_resource_scope_guard ON workspace_share_import_resources",
+      "CREATE TRIGGER workspace_share_import_resource_scope_guard BEFORE INSERT OR UPDATE ON workspace_share_import_resources FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_share_import_resource()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_import_resource() FROM PUBLIC",
+      `CREATE OR REPLACE FUNCTION samurai_guard_workspace_share_import_resource_parent()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF (NEW.status <> 'committed' OR NEW.phase <> 'done' OR NEW.retryable OR NEW.failure_code IS NOT NULL OR NEW.lease_token IS NOT NULL OR NEW.lease_until IS NOT NULL)
+          AND EXISTS (
+            SELECT 1
+            FROM workspace_share_import_resources resource
+            WHERE resource.workspace_id = NEW.workspace_id AND resource.operation_id = NEW.operation_id
+          ) THEN
+          RAISE EXCEPTION 'workspace_share_import_resource_import_not_committed';
+        END IF;
+        RETURN NEW;
+      END
+      $$`,
+      "DROP TRIGGER IF EXISTS workspace_share_import_resource_parent_guard ON workspace_share_imports",
+      "CREATE TRIGGER workspace_share_import_resource_parent_guard BEFORE UPDATE ON workspace_share_imports FOR EACH ROW EXECUTE FUNCTION samurai_guard_workspace_share_import_resource_parent()",
+      "REVOKE EXECUTE ON FUNCTION samurai_guard_workspace_share_import_resource_parent() FROM PUBLIC"
+    ]
+  },
+  {
+    // The v129 ledger is present on fresh databases.  This additive repair is
+    // also safe for a database that already applied v129 before the ledger was
+    // introduced: it creates the queue if necessary, records any remaining
+    // unreferenced Workspace batch entries before deleting their DB rows, and
+    // exposes only the maintenance-worker claim/complete/retry seam.
+    version: 136,
+    name: "workspace_server_completion_file_cleanup_ledger",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS workspace_completion_file_cleanup_queue (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        id TEXT NOT NULL,
+        source_batch_id TEXT,
+        path TEXT NOT NULL CHECK (btrim(path) <> '' AND path !~ '(^/|(^|/)\\.\\.?(/|$))'),
+        sha256 TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+        size BIGINT NOT NULL CHECK (size >= 0),
+        reason TEXT NOT NULL CHECK (reason IN ('workspace_knowledge_retired', 'workspace_memory_retired', 'completion_orphaned_batch')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'cleaned', 'preserved')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        lease_token TEXT,
+        lease_until TIMESTAMPTZ,
+        last_error_code TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (workspace_id, id),
+        UNIQUE (workspace_id, path, sha256),
+        CHECK ((lease_token IS NULL) = (lease_until IS NULL)),
+        CHECK ((status = 'pending' AND completed_at IS NULL) OR (status IN ('cleaned', 'preserved') AND completed_at IS NOT NULL)),
+        CHECK (status <> 'cleaned' OR last_error_code IS NULL)
+      )`,
+      "CREATE INDEX IF NOT EXISTS workspace_completion_file_cleanup_queue_due_index ON workspace_completion_file_cleanup_queue(workspace_id, status, lease_until, updated_at, id) WHERE status = 'pending'",
+      "ALTER TABLE workspace_completion_file_cleanup_queue ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE workspace_completion_file_cleanup_queue FORCE ROW LEVEL SECURITY",
+      "DROP POLICY IF EXISTS workspace_completion_file_cleanup_queue_internal ON workspace_completion_file_cleanup_queue",
+      `CREATE POLICY workspace_completion_file_cleanup_queue_internal ON workspace_completion_file_cleanup_queue FOR ALL
+       USING (
+         (workspace_id = samurai_current_workspace_id() AND samurai_is_completion_maintenance_identity(workspace_id))
+         OR (workspace_id IS NOT NULL AND current_setting('samurai.internal_access', true) = '1')
+       )
+       WITH CHECK (
+         (workspace_id = samurai_current_workspace_id() AND samurai_is_completion_maintenance_identity(workspace_id))
+         OR (workspace_id IS NOT NULL AND current_setting('samurai.internal_access', true) = '1')
+       )`,
+      // An older v129 may have removed the Knowledge rows but left a stale
+      // Workspace batch behind.  Queue it and delete its DB metadata in this
+      // one transaction.  Room and Agent scopes are intentionally excluded.
+      "SELECT set_config('samurai.internal_access', '1', true)",
+      `INSERT INTO workspace_completion_file_cleanup_queue (
+        workspace_id, id, source_batch_id, path, sha256, size, reason
+      )
+      SELECT entry.workspace_id,
+             'completion_cleanup_' || md5(entry.workspace_id || ':' || entry.batch_id || ':' || entry.path || ':' || entry.sha256),
+             entry.batch_id,
+             entry.path,
+             entry.sha256,
+             entry.size,
+             'completion_orphaned_batch'
+      FROM workspace_completion_file_batch_entries entry
+      JOIN workspace_completion_file_batches batch
+        ON batch.workspace_id = entry.workspace_id
+       AND batch.id = entry.batch_id
+      WHERE batch.scope_kind = 'workspace'
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_completion_resource_versions version_row
+          WHERE version_row.workspace_id = batch.workspace_id AND version_row.file_batch_id = batch.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_completion_skill_files skill_file
+          WHERE skill_file.workspace_id = batch.workspace_id AND skill_file.file_batch_id = batch.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_completion_workspace_documents document
+          WHERE document.workspace_id = batch.workspace_id AND document.file_batch_id = batch.id
+        )
+      ON CONFLICT (workspace_id, path, sha256) DO NOTHING`,
+      `DELETE FROM workspace_completion_file_batch_entries entry
+       WHERE EXISTS (
+         SELECT 1 FROM workspace_completion_file_batches batch
+         WHERE batch.workspace_id = entry.workspace_id
+           AND batch.id = entry.batch_id
+           AND batch.scope_kind = 'workspace'
+           AND NOT EXISTS (
+             SELECT 1 FROM workspace_completion_resource_versions version_row
+             WHERE version_row.workspace_id = batch.workspace_id AND version_row.file_batch_id = batch.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM workspace_completion_skill_files skill_file
+             WHERE skill_file.workspace_id = batch.workspace_id AND skill_file.file_batch_id = batch.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM workspace_completion_workspace_documents document
+             WHERE document.workspace_id = batch.workspace_id AND document.file_batch_id = batch.id
+           )
+       )`,
+      `DELETE FROM workspace_completion_file_batches batch
+       WHERE batch.scope_kind = 'workspace'
+         AND NOT EXISTS (
+           SELECT 1 FROM workspace_completion_resource_versions version_row
+           WHERE version_row.workspace_id = batch.workspace_id AND version_row.file_batch_id = batch.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM workspace_completion_skill_files skill_file
+           WHERE skill_file.workspace_id = batch.workspace_id AND skill_file.file_batch_id = batch.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM workspace_completion_workspace_documents document
+           WHERE document.workspace_id = batch.workspace_id AND document.file_batch_id = batch.id
+         )`,
+      `CREATE OR REPLACE FUNCTION samurai_claim_workspace_completion_file_cleanup(
+        target_workspace_id TEXT,
+        target_claim_token TEXT,
+        target_limit INTEGER DEFAULT 100
+      ) RETURNS TABLE (
+        id TEXT,
+        path TEXT,
+        sha256 TEXT,
+        byte_size BIGINT,
+        reason TEXT,
+        attempt_count INTEGER
+      )
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF target_workspace_id IS NULL
+          OR target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_completion_maintenance_identity(target_workspace_id)
+          OR target_claim_token IS NULL OR btrim(target_claim_token) = '' OR length(target_claim_token) > 512
+          OR target_limit IS NULL OR target_limit < 1 OR target_limit > 1000 THEN
+          RAISE EXCEPTION 'workspace_completion_file_cleanup_claim_invalid';
+        END IF;
+        RETURN QUERY
+        WITH candidate AS (
+          SELECT queue.workspace_id, queue.id
+          FROM workspace_completion_file_cleanup_queue queue
+          WHERE queue.workspace_id = target_workspace_id
+            AND queue.status = 'pending'
+            AND (queue.lease_until IS NULL OR queue.lease_until <= NOW())
+          ORDER BY queue.updated_at ASC, queue.id ASC
+          LIMIT target_limit
+          FOR UPDATE SKIP LOCKED
+        )
+        UPDATE workspace_completion_file_cleanup_queue queue
+        SET attempt_count = queue.attempt_count + 1,
+            lease_token = target_claim_token,
+            lease_until = NOW() + INTERVAL '5 minutes',
+            updated_at = NOW()
+        FROM candidate
+        WHERE queue.workspace_id = candidate.workspace_id
+          AND queue.id = candidate.id
+        RETURNING queue.id, queue.path, queue.sha256, queue.size, queue.reason, queue.attempt_count;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_complete_workspace_completion_file_cleanup(
+        target_workspace_id TEXT,
+        target_id TEXT,
+        target_claim_token TEXT,
+        target_status TEXT,
+        target_error_code TEXT
+      ) RETURNS BOOLEAN
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF target_workspace_id IS NULL
+          OR target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_completion_maintenance_identity(target_workspace_id)
+          OR target_id IS NULL OR btrim(target_id) = ''
+          OR target_claim_token IS NULL OR btrim(target_claim_token) = ''
+          OR target_status NOT IN ('cleaned', 'preserved')
+          OR (target_status = 'cleaned' AND target_error_code IS NOT NULL) THEN
+          RAISE EXCEPTION 'workspace_completion_file_cleanup_completion_invalid';
+        END IF;
+        UPDATE workspace_completion_file_cleanup_queue
+        SET status = target_status,
+            last_error_code = CASE WHEN target_status = 'preserved' THEN NULLIF(btrim(target_error_code), '') ELSE NULL END,
+            lease_token = NULL,
+            lease_until = NULL,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE workspace_id = target_workspace_id
+          AND id = target_id
+          AND status = 'pending'
+          AND lease_token = target_claim_token;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'workspace_completion_file_cleanup_claim_invalid';
+        END IF;
+        RETURN TRUE;
+      END
+      $$`,
+      `CREATE OR REPLACE FUNCTION samurai_release_workspace_completion_file_cleanup(
+        target_workspace_id TEXT,
+        target_id TEXT,
+        target_claim_token TEXT,
+        target_error_code TEXT
+      ) RETURNS BOOLEAN
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      BEGIN
+        IF target_workspace_id IS NULL
+          OR target_workspace_id IS DISTINCT FROM samurai_current_workspace_id()
+          OR NOT samurai_is_completion_maintenance_identity(target_workspace_id)
+          OR target_id IS NULL OR btrim(target_id) = ''
+          OR target_claim_token IS NULL OR btrim(target_claim_token) = '' THEN
+          RAISE EXCEPTION 'workspace_completion_file_cleanup_release_invalid';
+        END IF;
+        UPDATE workspace_completion_file_cleanup_queue
+        SET lease_token = NULL,
+            lease_until = NULL,
+            last_error_code = NULLIF(btrim(target_error_code), ''),
+            updated_at = NOW()
+        WHERE workspace_id = target_workspace_id
+          AND id = target_id
+          AND status = 'pending'
+          AND lease_token = target_claim_token;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'workspace_completion_file_cleanup_claim_invalid';
+        END IF;
+        RETURN TRUE;
+      END
+      $$`,
+      "REVOKE EXECUTE ON FUNCTION samurai_claim_workspace_completion_file_cleanup(TEXT, TEXT, INTEGER) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_complete_workspace_completion_file_cleanup(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC",
+      "REVOKE EXECUTE ON FUNCTION samurai_release_workspace_completion_file_cleanup(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC"
+    ]
+  },
+  {
+    // Migration 129 rebuilt the Agent-scope Completion policies but omitted
+    // the migration-run capability from four resource-owned tables.  Keep the
+    // repair append-only so databases that already applied v129 retain their
+    // history while Completion legacy migration/rollback can write through
+    // the same bounded capability as fresh databases.
+    version: 137,
+    name: "workspace_server_completion_migration_resource_rls_boundary",
+    statements: [
+      `ALTER POLICY workspace_completion_resources_access ON workspace_completion_resources
+       WITH CHECK (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_import_session(workspace_id)
+           OR samurai_completion_migration_write_allowed(workspace_id)
+           OR (samurai_workspace_is_writable(workspace_id) AND (
+             (scope_kind = 'workspace' AND samurai_can_workspace(workspace_id, 'admin'))
+             OR (scope_kind = 'room' AND room_id IS NOT NULL AND samurai_can_room(workspace_id, room_id, 'edit'))
+             OR (scope_kind = 'agent' AND agent_id IS NOT NULL AND samurai_can_workspace(workspace_id, 'admin'))
+           ))
+         )
+       )`,
+      `ALTER POLICY workspace_completion_versions_access ON workspace_completion_resource_versions
+       WITH CHECK (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_import_session(workspace_id)
+           OR samurai_completion_migration_write_allowed(workspace_id)
+           OR EXISTS (
+             SELECT 1 FROM workspace_completion_resources resource
+             WHERE resource.workspace_id = workspace_completion_resource_versions.workspace_id
+               AND resource.id = workspace_completion_resource_versions.resource_id
+               AND samurai_workspace_is_writable(resource.workspace_id)
+               AND (
+                 (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+                 OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit'))
+                 OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               )
+           )
+         )
+       )`,
+      `ALTER POLICY workspace_completion_evidence_access ON workspace_completion_evidence
+       WITH CHECK (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_import_session(workspace_id)
+           OR samurai_completion_migration_write_allowed(workspace_id)
+           OR EXISTS (
+             SELECT 1 FROM workspace_completion_resources resource
+             WHERE resource.workspace_id = workspace_completion_evidence.workspace_id
+               AND resource.id = workspace_completion_evidence.resource_id
+               AND samurai_workspace_is_writable(resource.workspace_id)
+               AND (
+                 (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+                 OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit'))
+                 OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               )
+           )
+         )
+       )`,
+      `ALTER POLICY workspace_completion_skill_files_access ON workspace_completion_skill_files
+       WITH CHECK (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_import_session(workspace_id)
+           OR samurai_completion_migration_write_allowed(workspace_id)
+           OR EXISTS (
+             SELECT 1 FROM workspace_completion_resources resource
+             WHERE resource.workspace_id = workspace_completion_skill_files.workspace_id
+               AND resource.id = workspace_completion_skill_files.resource_id
+               AND resource.resource_kind = 'skill'
+               AND samurai_workspace_is_writable(resource.workspace_id)
+               AND (
+                 (resource.scope_kind = 'workspace' AND samurai_can_workspace(resource.workspace_id, 'admin'))
+                 OR (resource.scope_kind = 'room' AND resource.room_id IS NOT NULL AND samurai_can_room(resource.workspace_id, resource.room_id, 'edit'))
+                 OR (resource.scope_kind = 'agent' AND resource.agent_id IS NOT NULL AND samurai_can_workspace(resource.workspace_id, 'admin'))
+               )
+           )
+         )
+      )`
+    ]
+  },
+  {
+    // Share file transactions are normally internal, but a draft Share owns
+    // its own staged/renamed manifest before publication.  Keep the existing
+    // import, maintenance, and explicitly internal paths, while allowing the
+    // Share Core to record only the current account's writable draft.
+    version: 138,
+    name: "workspace_server_share_draft_file_transaction_rls",
+    statements: [
+      `ALTER POLICY workspace_share_file_transactions_internal ON workspace_share_file_transactions
+       USING (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_completion_maintenance_identity(workspace_id)
+           OR samurai_is_import_session(workspace_id)
+           OR current_setting('samurai.internal_access', true) = '1'
+           OR current_setting('samurai.share_operation', true) = '1'
+           OR (
+             owner_kind = 'draft'
+             AND actor_account_id = samurai_current_account_id()
+             AND samurai_workspace_is_writable(workspace_id)
+             AND current_setting('samurai.share_operation', true) = '1'
+           )
+           OR (
+             owner_kind = 'draft'
+             AND samurai_workspace_is_writable(workspace_id)
+             AND EXISTS (
+               SELECT 1
+               FROM workspace_shares share_row
+               WHERE share_row.workspace_id = workspace_share_file_transactions.workspace_id
+                 AND share_row.id = workspace_share_file_transactions.owner_id
+                 AND share_row.status = 'draft'
+                 AND share_row.created_by = samurai_current_account_id()
+                 AND (
+                   (share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage'))
+                   OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))
+                 )
+             )
+           )
+         )
+       )
+       WITH CHECK (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_completion_maintenance_identity(workspace_id)
+           OR samurai_is_import_session(workspace_id)
+           OR current_setting('samurai.internal_access', true) = '1'
+           OR current_setting('samurai.share_operation', true) = '1'
+           OR (
+             owner_kind = 'draft'
+             AND actor_account_id = samurai_current_account_id()
+             AND samurai_workspace_is_writable(workspace_id)
+             AND current_setting('samurai.share_operation', true) = '1'
+           )
+           OR (
+             owner_kind = 'draft'
+             AND samurai_workspace_is_writable(workspace_id)
+             AND EXISTS (
+               SELECT 1
+               FROM workspace_shares share_row
+               WHERE share_row.workspace_id = workspace_share_file_transactions.workspace_id
+                 AND share_row.id = workspace_share_file_transactions.owner_id
+                 AND share_row.status = 'draft'
+                 AND share_row.created_by = samurai_current_account_id()
+                 AND (
+                   (share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage'))
+                   OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))
+                 )
+             )
+           )
+         )
+      )`
+    ]
+  },
+  {
+    // Active/revoked restricted Shares still need their recipient projection
+    // for the owner-facing view and portable Bundle export. Keep writes bound
+    // to drafts while extending only the read side to the source manager.
+    version: 139,
+    name: "workspace_server_share_recipient_read_projection_rls",
+    statements: [
+      `ALTER POLICY workspace_share_recipients_manage ON workspace_share_recipients
+       USING (
+         workspace_id = samurai_current_workspace_id() AND (
+           samurai_is_import_session(workspace_id)
+           OR EXISTS (
+             SELECT 1 FROM workspace_shares share_row
+             WHERE share_row.workspace_id = workspace_share_recipients.workspace_id
+               AND share_row.id = workspace_share_recipients.share_id
+               AND share_row.status IN ('draft','active','revoked')
+               AND (
+                 (share_row.created_by = samurai_current_account_id() AND (
+                   (share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage'))
+                   OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))
+                 ))
+                 OR (share_row.status IN ('active','revoked') AND (
+                   (share_row.source_kind = 'room_knowledge' AND share_row.source_room_id IS NOT NULL AND samurai_can_room(share_row.workspace_id, share_row.source_room_id, 'manage'))
+                   OR (share_row.source_kind = 'agent' AND share_row.source_agent_id IS NOT NULL AND samurai_can_workspace(share_row.workspace_id, 'admin'))
+                 ))
+               )
+           )
+         )
+      )`
+    ]
+  },
+  {
+    // PostgreSQL evaluates the unique-conflict probe of the idempotent
+    // notification INSERT under the table's SELECT policies as well. The
+    // projection worker is already bound to a configured maintenance
+    // identity; give that identity an internal read projection so
+    // `ON CONFLICT DO NOTHING` does not fail RLS before the INSERT check.
+    version: 140,
+    name: "workspace_server_notification_projection_rls",
+    statements: [
+      "DROP POLICY IF EXISTS account_notifications_internal_read ON account_notifications",
+      `CREATE POLICY account_notifications_internal_read ON account_notifications FOR SELECT USING (
+        (workspace_id IS NOT NULL AND samurai_is_completion_maintenance_identity(workspace_id))
+        OR current_setting('samurai.internal_access', true) = '1'
+      )`
+    ]
+  },
 ];
 
 function workspaceGatewayRlsStatements(): string[] {
@@ -22227,6 +24410,8 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "workspace_learning_jobs",
     "workspace_learning_job_attempts",
     "workspace_learning_resource_uses",
+    "account_notifications",
+    "account_notification_outbox",
     "workspace_completion_configurations",
     "workspace_completion_activities",
     "workspace_completion_episodes",
@@ -22246,6 +24431,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "workspace_completion_curator_snapshots",
     "workspace_completion_file_batches",
     "workspace_completion_file_batch_entries",
+    "workspace_completion_file_cleanup_queue",
     "workspace_completion_search_projection",
     "workspace_completion_migration_receipts",
     "workspace_completion_migration_runs",
@@ -22255,6 +24441,12 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "workspace_completion_maintenance_identities",
     "workspace_completion_policy_approvals",
     "workspace_completion_attestations",
+    "workspace_shares",
+    "workspace_share_recipients",
+    "workspace_share_claims",
+    "workspace_share_file_transactions",
+    "workspace_share_imports",
+    "workspace_share_import_resources",
     "workspace_agents",
     "workspace_agent_room_permissions",
     "workspace_human_works",
@@ -22358,6 +24550,7 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_add_human_work_comment(TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, BIGINT, TEXT)",
     "samurai_append_human_work_instruction(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, BIGINT, JSONB, BIGINT, TEXT)",
     "samurai_append_human_work_instruction(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, BIGINT, JSONB, JSONB, BIGINT, TEXT)",
+    "samurai_set_human_work_instruction_personal_preferences(TEXT, TEXT, TEXT, JSONB, TEXT)",
     "samurai_reflect_human_work_comment(TEXT, TEXT, TEXT, TEXT, BIGINT, BIGINT, JSONB, BIGINT, TEXT)",
     "samurai_control_human_work(TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, JSONB)",
     "samurai_assert_human_work_runtime_admission(TEXT, TEXT, TEXT, BIGINT)",
@@ -22439,11 +24632,17 @@ async function grantRuntimeRole(sql: WorkspaceSql, roleName: string): Promise<vo
     "samurai_complete_workspace_transfer(TEXT, TEXT)",
     "samurai_record_import_bundle(TEXT, TEXT, TEXT, TEXT, JSONB)",
     "samurai_reopen_workspace_import(TEXT, TEXT, TEXT)",
+    "samurai_workspace_share_public_lookup(TEXT, TEXT)",
+    "samurai_workspace_share_claim(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_workspace_share_claim_content(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)",
     "samurai_redact_completion_resource(TEXT, TEXT, TEXT, TEXT)",
     "samurai_rollback_completion_legacy_migration(TEXT, TEXT)",
     "samurai_completion_migration_write_allowed(TEXT)",
     "samurai_begin_completion_migration_run(TEXT, TEXT, TEXT)",
     "samurai_transition_completion_migration_run(TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, TEXT)",
+    "samurai_claim_workspace_completion_file_cleanup(TEXT, TEXT, INTEGER)",
+    "samurai_complete_workspace_completion_file_cleanup(TEXT, TEXT, TEXT, TEXT, TEXT)",
+    "samurai_release_workspace_completion_file_cleanup(TEXT, TEXT, TEXT, TEXT)",
     "samurai_configure_completion_maintenance_identity(TEXT, TEXT)",
     "samurai_is_completion_maintenance_identity(TEXT)",
     "samurai_list_completion_maintenance_identities()",
@@ -22493,6 +24692,13 @@ function migrationChecksum(migration: WorkspaceServerMigration): string {
 }
 
 function legacyMigrationChecksums(migration: WorkspaceServerMigration): readonly string[] {
+  // v9 was released with a PL/pgSQL block whose final `END` omitted the
+  // statement terminator. PostgreSQL accepted that body, so databases that
+  // already applied the released migration must be allowed to move to the
+  // corrected body without weakening the append-only ledger check.
+  if (migration.version === 9) {
+    return ["f4bad1fcebb407061d3b6686c5357bc604155d19d9b1dc9279201df80d45b9f4"];
+  }
   // Released/validated pre-fix binaries recorded these exact v109 bodies.
   // Accept only this finite allowlist so removing the misplaced trigger from
   // the fresh-database definition does not strand an already-applied
@@ -22502,6 +24708,32 @@ function legacyMigrationChecksums(migration: WorkspaceServerMigration): readonly
       "b08987e51ff8a5caa421b5ea76503b8698da1904afc1416a5f0ada5e40acc143",
       "7fe11386438f4bec2f6d5ad5403280ebd9975c07101995a2eae6208d0ac76e31"
     ];
+  }
+  if (migration.version === 129) {
+    // v129 was released once before the physical cleanup ledger was added.
+    // v136 creates/backfills the queue for those databases, so accepting this
+    // one known checksum preserves the append-only migration contract.
+    return ["c9691dde97e7a3879f2b72605a065cc42c46d9278b42eec75971eab6e2b5afde"];
+  }
+  if (migration.version === 137) {
+    // v137 was applied to the isolated verification databases before the
+    // completion-resource policy was tightened for the migration identity.
+    // Keep that exact released checksum compatible; the append-only v137
+    // policy update remains the source of truth for fresh databases.
+    return ["2bb6d87263392c98a22c813c5b126d87b7e28438da07d8b5d40f0cb0c4a547c0"];
+  }
+  if (migration.version === 138) {
+    // v138 was first applied before the dedicated Share transaction marker
+    // was added to the policy. Accept that exact checksum and converge the
+    // ledger while v139 applies the recipient projection separately.
+    return ["d385035832acb023677961e8fe861f031df5b3af6ab46c95b86bc6516a5d1c73"];
+  }
+  if (migration.version === 139) {
+    // v139 was applied to the isolated verification database before the
+    // owner-facing active/revoked recipient projection was tightened. Keep
+    // that exact released checksum compatible while the ledger converges and
+    // v140 adds the notification projection read policy.
+    return ["31ce21c15ef6dac97ca9d42f52b853f8d15ecda2d79a500c5a568f19cf5e2003"];
   }
   if (migration.version !== 78 && migration.version !== 79) return [];
   return [migrationChecksum({

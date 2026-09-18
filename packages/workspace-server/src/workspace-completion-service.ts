@@ -46,6 +46,9 @@ import type {
   WorkspaceCompletionJob,
   WorkspaceCompletionKnowledgeKind,
   WorkspaceCompletionLifecycleState,
+  WorkspaceCompletionImportEntry,
+  WorkspaceCompletionImportFile,
+  WorkspaceCompletionImportResourceReservation,
   WorkspaceCompletionPolicyOperation,
   WorkspaceCompletionPolicyChangeRequest,
   WorkspaceCompletionPolicyRule,
@@ -54,6 +57,7 @@ import type {
   WorkspaceCompletionResourceKind,
   WorkspaceCompletionResourceVersion,
   WorkspaceCompletionScope,
+  WorkspaceCompletionScopeKind,
   WorkspaceCompletionSkillFile,
   WorkspaceCompletionTuning,
   WorkspaceCompletionUseEvent,
@@ -99,6 +103,28 @@ export interface WorkspaceCompletionResourceInput {
    * the selected Episode snapshot, so a model cannot invent provenance. */
   evidenceActivityIds?: readonly string[];
   evidenceEpisodeId?: string;
+}
+
+/** Input for the Share import writer. The SQL object is supplied by the
+ * already-open Share transaction; this method never opens another database
+ * transaction or invokes a public create API. */
+export interface WorkspaceCompletionImportInput {
+  sql: WorkspaceSql;
+  context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "operationId">;
+  operationId: string;
+  scope: WorkspaceCompletionScope;
+  entries: readonly WorkspaceCompletionImportEntry[];
+  reservedResourceIds: readonly WorkspaceCompletionImportResourceReservation[];
+  agent?: {
+    name: string;
+    role: string;
+    instructions: string;
+  };
+}
+
+export interface WorkspaceCompletionImportResult {
+  createdResourceIds: readonly string[];
+  batchId: string;
 }
 
 /** A model-proposed Resource is never valid without Room-local evidence.
@@ -576,7 +602,8 @@ export class WorkspaceCompletionService {
         path: completionSkillSupportPath({
           id: prepared.current.resource.id,
           relativePath: support.relativePath,
-          version: prepared.current.version.version
+          version: prepared.current.version.version,
+          scope: prepared.current.resource.scope
         }),
         content: await this.files.read(context.workspaceId, support.filePath, support.contentHash)
       });
@@ -683,6 +710,184 @@ export class WorkspaceCompletionService {
     });
   }
 
+  /** Commits a fixed Share manifest into Completion using the caller's open
+   * import transaction. It stages one file batch for the whole manifest,
+   * creates only confirmed Room Knowledge or manual Agent Knowledge/Skill,
+   * and marks that batch visible only after every file has been published. */
+  async commitImportedShare(input: WorkspaceCompletionImportInput): Promise<WorkspaceCompletionImportResult> {
+    const context: WorkspaceRequestContext = {
+      workspaceId: input.context.workspaceId,
+      accountId: input.context.accountId,
+      operationId: input.operationId
+    };
+    assertOpaqueId(context.workspaceId, "workspace_id_invalid");
+    assertOpaqueId(context.accountId, "account_id_invalid");
+    assertOpaqueId(input.operationId, "workspace_share_operation_id_invalid");
+    if (input.context.operationId !== input.operationId) throw new WorkspaceServerError("workspace_completion_import_operation_conflict", 409);
+    assertScope(input.scope);
+    if (input.scope.kind === "workspace") throw new WorkspaceServerError("workspace_memory_removed", 409);
+    if (input.scope.kind === "agent" && !input.agent) throw new WorkspaceServerError("workspace_completion_import_agent_required", 422);
+    if (input.scope.kind === "room" && input.agent) throw new WorkspaceServerError("workspace_completion_import_agent_forbidden", 422);
+    if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > 1_000) {
+      throw new WorkspaceServerError("workspace_completion_import_entries_invalid", 422);
+    }
+    if (!Array.isArray(input.reservedResourceIds) || input.reservedResourceIds.length !== input.entries.length) {
+      throw new WorkspaceServerError("workspace_completion_import_reservations_invalid", 409);
+    }
+
+    const reservations = new Map<string, string>();
+    for (const reservation of input.reservedResourceIds) {
+      assertOpaqueId(reservation.entryId, "workspace_completion_import_entry_id_invalid");
+      assertCompletionId(reservation.resourceId, "workspace_completion_resource_id_invalid");
+      if (reservations.has(reservation.entryId) || [...reservations.values()].includes(reservation.resourceId)) {
+        throw new WorkspaceServerError("workspace_completion_import_reservations_invalid", 409);
+      }
+      reservations.set(reservation.entryId, reservation.resourceId);
+    }
+
+    const prepared = input.entries.map((entry) => {
+      if (!entry || typeof entry !== "object" || !Array.isArray(entry.files)) {
+        throw new WorkspaceServerError("workspace_completion_import_entry_invalid", 422);
+      }
+      assertOpaqueId(entry.entryId, "workspace_completion_import_entry_id_invalid");
+      const resourceId = reservations.get(entry.entryId);
+      if (!resourceId) throw new WorkspaceServerError("workspace_completion_import_reservations_invalid", 409);
+      if (typeof entry.title !== "string" || typeof entry.content !== "string") {
+        throw new WorkspaceServerError("workspace_completion_import_entry_invalid", 422);
+      }
+      const supportFiles = entry.files.map((file: WorkspaceCompletionImportFile) => {
+        if (!file || typeof file !== "object" || !(file.content instanceof Uint8Array) || typeof file.path !== "string"
+          || !Number.isSafeInteger(file.byteSize) || file.byteSize < 0 || file.byteSize !== file.content.byteLength
+          || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256) || hashBytes(file.content) !== file.sha256) {
+          throw new WorkspaceServerError("workspace_completion_import_file_hash_mismatch", 409, { entry_id: entry.entryId, path: file.path });
+        }
+        return { path: file.path, content: file.content };
+      });
+      const resource: WorkspaceCompletionResourceInput = {
+        id: resourceId,
+        scope: input.scope,
+        kind: entry.kind,
+        ...(entry.kind === "knowledge" ? { knowledgeKind: entry.knowledgeKind } : {}),
+        title: entry.title,
+        content: entry.content,
+        metadata: { imported_from_share: true },
+        reason: "Imported from Workspace Share",
+        aiManaged: false,
+        ...(supportFiles.length > 0 ? { supportFiles } : {})
+      };
+      validateResourceInput(resource, "import");
+      return { entry, resource, supportFiles };
+    });
+    if (new Set(prepared.map(({ entry }) => entry.entryId)).size !== prepared.length) {
+      throw new WorkspaceServerError("workspace_completion_import_entry_id_conflict", 409);
+    }
+
+    await this.assertImportedDestination(input.sql, context, input.scope);
+    await this.assertPolicyAllowed(
+      input.sql,
+      context,
+      scopeRoom(input.scope),
+      "file.import",
+      authorityForScope(input.scope),
+      { share_import: true, resource_count: prepared.length }
+    );
+    const existingResources = await input.sql.query<{ id: string }>(
+      "SELECT id FROM workspace_completion_resources WHERE workspace_id = $1 AND id = ANY($2::TEXT[]) FOR UPDATE",
+      [context.workspaceId, prepared.map(({ resource }) => resource.id)]
+    );
+    if (existingResources.rows.length > 0) {
+      throw new WorkspaceServerError("workspace_completion_import_resource_id_conflict", 409, { resource_id: existingResources.rows[0]!.id });
+    }
+    if (input.scope.kind === "agent") {
+      const agent = input.agent!;
+      assertSafeText(agent.name, "workspace_completion_import_agent_name_invalid");
+      assertSafeText(agent.role, "workspace_completion_import_agent_role_invalid");
+      assertSafeText(agent.instructions, "workspace_completion_import_agent_instructions_invalid");
+      if (agent.name.trim().length > 200 || agent.role.trim().length > 500 || agent.instructions.trim().length > 20_000) {
+        throw new WorkspaceServerError("workspace_completion_import_agent_invalid", 422);
+      }
+    }
+
+    const fileEntries: Array<{ path: string; content: Uint8Array }> = [];
+    for (const { resource, supportFiles } of prepared) {
+      const rendered = renderWorkspaceCompletionDocument({
+        id: resource.id!,
+        title: resource.title.trim(),
+        resourceKind: resource.kind,
+        metadata: resource.metadata,
+        body: resource.content.trim()
+      });
+      fileEntries.push({ path: completionResourcePath({ id: resource.id!, kind: resource.kind, scope: input.scope }), content: rendered });
+      fileEntries.push({ path: completionResourcePath({ id: resource.id!, kind: resource.kind, scope: input.scope, version: 1 }), content: rendered });
+      for (const support of supportFiles) {
+        fileEntries.push({ path: completionSkillSupportPath({ id: resource.id!, relativePath: support.path, scope: input.scope }), content: support.content });
+        fileEntries.push({ path: completionSkillSupportPath({ id: resource.id!, relativePath: support.path, scope: input.scope, version: 1 }), content: support.content });
+      }
+    }
+    if (new Set(fileEntries.map((entry) => entry.path)).size !== fileEntries.length) {
+      throw new WorkspaceServerError("workspace_completion_import_file_path_conflict", 409);
+    }
+
+    const batch = await this.files.stage(context.workspaceId, input.scope, fileEntries);
+    let finalizedPaths: readonly string[] = [];
+    try {
+      if (input.scope.kind === "agent") {
+        const existingAgent = await input.sql.query<{ id: string }>(
+          "SELECT id FROM workspace_agents WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+          [context.workspaceId, input.scope.agentId]
+        );
+        if (existingAgent.rows[0]) throw new WorkspaceServerError("workspace_completion_import_agent_id_conflict", 409);
+        await this.store.registerAgentInTransaction(input.sql, context, {
+          id: input.scope.agentId!,
+          displayName: input.agent!.name,
+          role: input.agent!.role,
+          instructions: input.agent!.instructions,
+          backendId: "samurai-native",
+          enabled: true
+        });
+        await this.assertAgentScope(input.sql, context.workspaceId, input.scope, true);
+      }
+      await this.assertFileBatchWriteAllowed(input.sql, context, batch);
+      await this.recordBatch(input.sql, batch);
+      const resources: WorkspaceCompletionResource[] = [];
+      for (const { resource, supportFiles } of prepared) {
+        const saved = await this.insertNewResource(
+          input.sql,
+          context,
+          resource.id!,
+          resource,
+          "import",
+          batch,
+          completionResourcePath({ id: resource.id!, kind: resource.kind, scope: input.scope }),
+          1,
+          supportFiles
+        );
+        resources.push(saved);
+        await this.store.insertAudit(input.sql, context, {
+          action: "workspace.completion.resource.share_import",
+          ...(saved.scope.roomId ? { roomId: saved.scope.roomId } : {}),
+          subjectKind: "completion_resource",
+          subjectId: saved.id,
+          afterVersion: saved.version,
+          details: { resource_kind: saved.kind, creation_source: "import", operation_id: input.operationId }
+        });
+      }
+      finalizedPaths = await this.files.finalizeExclusive(batch);
+      const renamed = await input.sql.query<{ id: string }>(
+        `UPDATE workspace_completion_file_batches SET status = 'renamed', updated_at = NOW()
+         WHERE workspace_id = $1 AND id = $2 AND status = 'db_committed'
+         RETURNING id`,
+        [context.workspaceId, batch.id]
+      );
+      if (!renamed.rows[0]) throw new WorkspaceServerError("workspace_completion_file_batch_finalize_conflict", 503);
+      return { createdResourceIds: resources.map((resource) => resource.id), batchId: batch.id };
+    } catch (error) {
+      if (finalizedPaths.length > 0) await this.files.removeFinalized(batch, finalizedPaths).catch(() => undefined);
+      await this.files.rollback(batch).catch(() => undefined);
+      throw error;
+    }
+  }
+
   /** Copy and explicit Workspace-common promotion always create a new stable
    * Resource. Nothing crosses a Room boundary automatically. */
   async copyResource(context: WorkspaceRequestContext, input: { resourceId: string; targetScope: WorkspaceCompletionScope; targetResourceId?: string; expectedVersion: number; reason: string }): Promise<WorkspaceCompletionResourceWriteResult> {
@@ -692,6 +897,7 @@ export class WorkspaceCompletionService {
     assertSafeText(input.reason, "workspace_completion_reason_invalid");
     const source = await this.readPackageSnapshot(context, input.resourceId, input.expectedVersion);
     if (source.resource.kind === "policy") throw new WorkspaceServerError("workspace_completion_policy_copy_forbidden", 409);
+    assertWorkspaceKnowledgeScope(input.targetScope, source.resource.kind);
     return this.writeResource(context, {
       id: input.targetResourceId,
       scope: input.targetScope,
@@ -714,9 +920,11 @@ export class WorkspaceCompletionService {
     return this.copyResource(context, { ...input, targetScope: { kind: "workspace" } });
   }
 
-  async moveResource(context: WorkspaceRequestContext, input: { resourceId: string; targetRoomId: string; targetResourceId?: string; expectedVersion: number; reason: string }): Promise<WorkspaceCompletionResourceWriteResult> {
+  async moveResource(context: WorkspaceRequestContext, input: { resourceId: string; targetRoomId?: string; targetAgentId?: string; targetResourceId?: string; expectedVersion: number; reason: string }): Promise<WorkspaceCompletionResourceWriteResult> {
     assertCompletionId(input.resourceId, "workspace_completion_resource_id_invalid");
-    assertOpaqueId(input.targetRoomId, "room_id_invalid");
+    if (input.targetRoomId) assertOpaqueId(input.targetRoomId, "room_id_invalid");
+    if (input.targetAgentId) assertOpaqueId(input.targetAgentId, "workspace_agent_id_invalid");
+    if (Boolean(input.targetRoomId) === Boolean(input.targetAgentId)) throw new WorkspaceServerError("workspace_completion_resource_move_target_invalid", 422);
     assertExpectedVersion(input.expectedVersion);
     assertSafeText(input.reason, "workspace_completion_reason_invalid");
     const source = await this.readPackageSnapshot(context, input.resourceId, input.expectedVersion);
@@ -725,7 +933,7 @@ export class WorkspaceCompletionService {
     if (source.resource.kind === "policy") throw new WorkspaceServerError("workspace_completion_policy_move_forbidden", 409);
     return this.writeResource(context, {
       id: input.targetResourceId,
-      scope: { kind: "room", roomId: input.targetRoomId },
+      scope: input.targetAgentId ? { kind: "agent", agentId: input.targetAgentId } : { kind: "room", roomId: input.targetRoomId! },
       kind: source.resource.kind,
       ...(source.resource.kind === "knowledge" ? { knowledgeKind: source.resource.knowledgeKind } : {}),
       title: source.resource.title,
@@ -779,15 +987,18 @@ export class WorkspaceCompletionService {
            AND resource.id = $2
            AND resource.resource_kind = $3
            AND resource.lifecycle_state <> 'archived'
-           AND (resource.scope_kind = 'workspace' OR resource.room_id = $4)`,
+           AND (resource.scope_kind = 'workspace' OR (resource.scope_kind = 'room' AND resource.room_id = $4))`,
         [context.workspaceId, input.resourceId, input.kind, input.targetRoomId]
       );
       if (!selected.rows[0]) throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
       const resource = resourceFromRow(selected.rows[0]);
+      if (isWorkspaceKnowledge(resource)) throw new WorkspaceServerError("workspace_memory_removed", 409);
       if (resource.workspaceId !== context.workspaceId
         || resource.kind !== input.kind
         || resource.lifecycleState === "archived"
-        || (resource.scope.kind === "room" && resource.scope.roomId !== input.targetRoomId)) {
+        || resource.scope.kind === "agent"
+        || (resource.scope.kind === "room" && resource.scope.roomId !== input.targetRoomId)
+        || isWorkspaceKnowledge(resource)) {
         throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
       }
 
@@ -947,9 +1158,13 @@ export class WorkspaceCompletionService {
     return { attestation: saved.value, replayed: saved.replayed };
   }
 
-  async listResources(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId?: string; kind?: WorkspaceCompletionResourceKind; includeArchived?: boolean; limit?: number } = {}): Promise<WorkspaceCompletionResource[]> {
+  async listResources(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId?: string; agentId?: string; scopeKind?: WorkspaceCompletionScopeKind; kind?: WorkspaceCompletionResourceKind; includeArchived?: boolean; limit?: number } = {}): Promise<WorkspaceCompletionResource[]> {
     if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    if (input.agentId) assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    assertResourceListTarget(input);
     if (input.kind && !completionResourceKinds.has(input.kind)) throw new WorkspaceServerError("workspace_completion_resource_kind_invalid", 400);
+    const scopeKind = resourceListScopeKind(input);
+    assertWorkspaceKnowledgeQuery(scopeKind, input.kind);
     return this.store.database.withContext(context, async (sql) => {
       const result = await sql.query<ResourceRow>(
         `SELECT resource.*
@@ -961,12 +1176,16 @@ export class WorkspaceCompletionService {
          LEFT JOIN workspace_completion_file_batches batch
            ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
          WHERE resource.workspace_id = $1
-           AND ($2::TEXT IS NULL OR resource.scope_kind = 'workspace' OR resource.room_id = $2)
-           AND ($3::TEXT IS NULL OR resource.resource_kind = $3)
-           AND ($4::BOOLEAN OR resource.lifecycle_state <> 'archived')
+           AND (
+             ($6::TEXT = 'agent' AND resource.scope_kind = 'agent' AND resource.agent_id = $3)
+             OR ($6::TEXT = 'room' AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge') OR (resource.scope_kind = 'room' AND resource.room_id = $2)))
+             OR ($6::TEXT = 'workspace' AND resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+           )
+           AND ($4::TEXT IS NULL OR resource.resource_kind = $4)
+           AND ($5::BOOLEAN OR resource.lifecycle_state <> 'archived')
            AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
-         ORDER BY resource.updated_at DESC, resource.id ASC LIMIT $5`,
-        [context.workspaceId, input.roomId ?? null, input.kind ?? null, input.includeArchived === true, boundedLimit(input.limit)]
+         ORDER BY resource.updated_at DESC, resource.id ASC LIMIT $7`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, input.kind ?? null, input.includeArchived === true, scopeKind, boundedLimit(input.limit)]
       );
       return result.rows.map(resourceFromRow);
     });
@@ -976,10 +1195,14 @@ export class WorkspaceCompletionService {
    * inserts or edits between requests cannot shift a cursor boundary. */
   async listResourcesPage(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-    input: { roomId?: string; kind?: WorkspaceCompletionResourceKind; includeArchived?: boolean; limit?: number; cursor?: string } = {}
+    input: { roomId?: string; agentId?: string; scopeKind?: WorkspaceCompletionScopeKind; kind?: WorkspaceCompletionResourceKind; includeArchived?: boolean; limit?: number; cursor?: string } = {}
   ): Promise<WorkspaceCompletionPage<WorkspaceCompletionResource>> {
     if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+    if (input.agentId) assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+    assertResourceListTarget(input);
     if (input.kind && !completionResourceKinds.has(input.kind)) throw new WorkspaceServerError("workspace_completion_resource_kind_invalid", 400);
+    const scopeKind = resourceListScopeKind(input);
+    assertWorkspaceKnowledgeQuery(scopeKind, input.kind);
     const limit = boundedLimit(input.limit);
     const afterId = decodeCompletionCursor(input.cursor);
     return this.store.database.withContext(context, async (sql) => {
@@ -993,13 +1216,17 @@ export class WorkspaceCompletionService {
          LEFT JOIN workspace_completion_file_batches batch
            ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
          WHERE resource.workspace_id = $1
-           AND ($2::TEXT IS NULL OR resource.scope_kind = 'workspace' OR resource.room_id = $2)
-           AND ($3::TEXT IS NULL OR resource.resource_kind = $3)
-           AND ($4::BOOLEAN OR resource.lifecycle_state <> 'archived')
+           AND (
+             ($7::TEXT = 'agent' AND resource.scope_kind = 'agent' AND resource.agent_id = $3)
+             OR ($7::TEXT = 'room' AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge') OR (resource.scope_kind = 'room' AND resource.room_id = $2)))
+             OR ($7::TEXT = 'workspace' AND resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+           )
+           AND ($4::TEXT IS NULL OR resource.resource_kind = $4)
+           AND ($5::BOOLEAN OR resource.lifecycle_state <> 'archived')
            AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
-           AND ($5::TEXT IS NULL OR resource.id > $5)
-         ORDER BY resource.id ASC LIMIT $6`,
-        [context.workspaceId, input.roomId ?? null, input.kind ?? null, input.includeArchived === true, afterId ?? null, limit + 1]
+           AND ($6::TEXT IS NULL OR resource.id > $6)
+         ORDER BY resource.id ASC LIMIT $8`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, input.kind ?? null, input.includeArchived === true, afterId ?? null, scopeKind, limit + 1]
       );
       const resources = result.rows.map(resourceFromRow);
       const items = resources.slice(0, limit);
@@ -1053,6 +1280,7 @@ export class WorkspaceCompletionService {
     assertCompletionId(resourceId, "workspace_completion_resource_id_invalid");
     const bounded = boundedLimit(limit);
     return this.store.database.withContext(context, async (sql) => {
+      await this.selectReadableResource(sql, context.workspaceId, resourceId, false);
       const rows = await sql.query<VersionRow>(
         `SELECT version.* FROM workspace_completion_resource_versions version
          LEFT JOIN workspace_completion_file_batches batch ON batch.workspace_id = version.workspace_id AND batch.id = version.file_batch_id
@@ -1069,6 +1297,7 @@ export class WorkspaceCompletionService {
     assertCompletionId(resourceId, "workspace_completion_resource_id_invalid");
     const bounded = boundedLimit(limit);
     return this.store.database.withContext(context, async (sql) => {
+      await this.selectReadableResource(sql, context.workspaceId, resourceId, false);
       const rows = await sql.query<EvidenceRow>(
         "SELECT * FROM workspace_completion_evidence WHERE workspace_id = $1 AND resource_id = $2 ORDER BY created_at DESC, id DESC LIMIT $3",
         [context.workspaceId, resourceId, bounded]
@@ -1134,6 +1363,7 @@ export class WorkspaceCompletionService {
     }, async (sql) => {
       const current = await this.selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!current) throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
+      assertResourceReadable(current);
       await this.assertPolicyAllowed(sql, context, scopeRoom(current.scope), "resource.update", authorityForScope(current.scope), { resource_kind: current.kind, fixed: input.fixed });
       if (current.version !== input.expectedVersion) throwVersionConflict(current.version);
       const updated = await sql.query<ResourceRow>(
@@ -1163,6 +1393,7 @@ export class WorkspaceCompletionService {
     }, async (sql) => {
       const current = await this.selectResourceForUpdate(sql, context.workspaceId, input.resourceId);
       if (!current) throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
+      assertResourceReadable(current);
       await this.assertPolicyAllowed(sql, context, scopeRoom(current.scope), "resource.archive", authorityForScope(current.scope), { resource_kind: current.kind, archived: input.archived });
       if (current.version !== input.expectedVersion) throwVersionConflict(current.version);
       const updated = await sql.query<ResourceRow>(
@@ -1185,12 +1416,12 @@ export class WorkspaceCompletionService {
     return { resource: saved.value, replayed: saved.replayed };
   }
 
-  async searchKnowledge(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; query: string; limit?: number }): Promise<Array<WorkspaceCompletionResource & { rank: number }>> {
-    assertOpaqueId(input.roomId, "room_id_invalid");
+  async searchKnowledge(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId?: string; agentId?: string; query: string; limit?: number }): Promise<Array<WorkspaceCompletionResource & { rank: number }>> {
+    assertSearchTarget(input);
     assertSafeText(input.query, "workspace_completion_search_query_invalid");
     return this.store.database.withContext(context, async (sql) => {
       const result = await sql.query<ResourceRow & { rank: number | string }>(
-        `SELECT resource.*, similarity(projection.search_text, $3) AS rank
+         `SELECT resource.*, similarity(projection.search_text, $4) AS rank
          FROM workspace_completion_resources resource
          JOIN workspace_completion_resource_versions current_version
            ON current_version.workspace_id = resource.workspace_id
@@ -1200,13 +1431,14 @@ export class WorkspaceCompletionService {
            ON projection.workspace_id = current_version.workspace_id AND projection.resource_id = current_version.resource_id AND projection.resource_version = current_version.version
          LEFT JOIN workspace_completion_file_batches batch ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
          WHERE resource.workspace_id = $1 AND resource.resource_kind = 'knowledge'
-           AND (resource.scope_kind = 'workspace' OR resource.room_id = $2)
+           AND ((resource.scope_kind = 'room' AND resource.room_id = $2)
+             OR (resource.scope_kind = 'agent' AND resource.agent_id = $3))
            AND resource.lifecycle_state <> 'archived' AND resource.evidence_state <> 'contradicted'
            AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
-           AND projection.search_text ILIKE ('%' || $3 || '%')
+           AND projection.search_text ILIKE ('%' || $4 || '%')
          ORDER BY CASE resource.evidence_state WHEN 'confirmed' THEN 0 ELSE 1 END, rank DESC, resource.updated_at DESC
-         LIMIT $4`,
-        [context.workspaceId, input.roomId, input.query.trim(), boundedLimit(input.limit)]
+           LIMIT $5`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, input.query.trim(), boundedLimit(input.limit)]
       );
       return result.rows.map((row) => ({ ...resourceFromRow(row), rank: Number(row.rank) }));
     });
@@ -1216,16 +1448,16 @@ export class WorkspaceCompletionService {
    * offset drift while retaining the visible confirmed-then-rank ordering. */
   async searchKnowledgePage(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-    input: { roomId: string; query: string; limit?: number; cursor?: string }
+    input: { roomId?: string; agentId?: string; query: string; limit?: number; cursor?: string }
   ): Promise<WorkspaceCompletionPage<WorkspaceCompletionResource & { rank: number }>> {
-    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertSearchTarget(input);
     assertSafeText(input.query, "workspace_completion_search_query_invalid");
     const limit = boundedLimit(input.limit);
     const after = decodeSearchCursor(input.cursor);
     return this.store.database.withContext(context, async (sql) => {
       const result = await sql.query<ResourceRow & { rank: number | string; evidence_bucket: number | string }>(
         `WITH scored AS (
-           SELECT resource.*, similarity(projection.search_text, $3) AS rank,
+           SELECT resource.*, similarity(projection.search_text, $4) AS rank,
              CASE resource.evidence_state WHEN 'confirmed' THEN 0 ELSE 1 END AS evidence_bucket
            FROM workspace_completion_resources resource
            JOIN workspace_completion_resource_versions current_version
@@ -1236,17 +1468,18 @@ export class WorkspaceCompletionService {
              ON projection.workspace_id = current_version.workspace_id AND projection.resource_id = current_version.resource_id AND projection.resource_version = current_version.version
            LEFT JOIN workspace_completion_file_batches batch ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
            WHERE resource.workspace_id = $1 AND resource.resource_kind = 'knowledge'
-             AND (resource.scope_kind = 'workspace' OR resource.room_id = $2)
+             AND ((resource.scope_kind = 'room' AND resource.room_id = $2)
+               OR (resource.scope_kind = 'agent' AND resource.agent_id = $3))
              AND resource.lifecycle_state <> 'archived' AND resource.evidence_state <> 'contradicted'
              AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
-             AND projection.search_text ILIKE ('%' || $3 || '%')
+             AND projection.search_text ILIKE ('%' || $4 || '%')
          )
          SELECT * FROM scored
-         WHERE ($4::INTEGER IS NULL OR evidence_bucket > $4
-           OR (evidence_bucket = $4 AND (rank < $5::REAL OR (rank = $5::REAL AND id > $6))))
+         WHERE ($5::INTEGER IS NULL OR evidence_bucket > $5
+           OR (evidence_bucket = $5 AND (rank < $6::REAL OR (rank = $6::REAL AND id > $7))))
          ORDER BY evidence_bucket ASC, rank DESC, id ASC
-         LIMIT $7`,
-        [context.workspaceId, input.roomId, input.query.trim(), after?.bucket ?? null, after?.rank ?? null, after?.id ?? null, limit + 1]
+         LIMIT $8`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, input.query.trim(), after?.bucket ?? null, after?.rank ?? null, after?.id ?? null, limit + 1]
       );
       const resources = result.rows.map((row) => ({ ...resourceFromRow(row), rank: Number(row.rank), bucket: Number(row.evidence_bucket) }));
       const visible = resources.slice(0, limit);
@@ -1263,16 +1496,16 @@ export class WorkspaceCompletionService {
    * package was requested. */
   async searchSkillsPage(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-    input: { roomId: string; query: string; limit?: number; cursor?: string }
+    input: { roomId?: string; agentId?: string; query: string; limit?: number; cursor?: string }
   ): Promise<WorkspaceCompletionPage<WorkspaceCompletionResource & { rank: number }>> {
-    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertSearchTarget(input);
     assertSafeText(input.query, "workspace_completion_search_query_invalid");
     const limit = boundedLimit(input.limit);
     const after = decodeSearchCursor(input.cursor);
     return this.store.database.withContext(context, async (sql) => {
       const result = await sql.query<ResourceRow & { rank: number | string; evidence_bucket: number | string }>(
         `WITH scored AS (
-           SELECT resource.*, similarity(projection.search_text, $3) AS rank,
+           SELECT resource.*, similarity(projection.search_text, $4) AS rank,
              CASE resource.evidence_state WHEN 'confirmed' THEN 0 ELSE 1 END AS evidence_bucket
            FROM workspace_completion_resources resource
            JOIN workspace_completion_resource_versions current_version
@@ -1283,18 +1516,20 @@ export class WorkspaceCompletionService {
              ON projection.workspace_id = current_version.workspace_id AND projection.resource_id = current_version.resource_id AND projection.resource_version = current_version.version
            LEFT JOIN workspace_completion_file_batches batch ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
            WHERE resource.workspace_id = $1 AND resource.resource_kind = 'skill'
-             AND (resource.scope_kind = 'workspace' OR resource.room_id = $2)
+             AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+               OR (resource.scope_kind = 'room' AND resource.room_id = $2)
+               OR (resource.scope_kind = 'agent' AND resource.agent_id = $3))
              AND resource.lifecycle_state <> 'archived'
              AND (current_version.metadata->>'migration_incomplete_skill') IS DISTINCT FROM 'true'
              AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
-             AND projection.search_text ILIKE ('%' || $3 || '%')
+             AND projection.search_text ILIKE ('%' || $4 || '%')
          )
          SELECT * FROM scored
-         WHERE ($4::INTEGER IS NULL OR evidence_bucket > $4
-           OR (evidence_bucket = $4 AND (rank < $5::REAL OR (rank = $5::REAL AND id > $6))))
+         WHERE ($5::INTEGER IS NULL OR evidence_bucket > $5
+           OR (evidence_bucket = $5 AND (rank < $6::REAL OR (rank = $6::REAL AND id > $7))))
          ORDER BY evidence_bucket ASC, rank DESC, id ASC
-         LIMIT $7`,
-        [context.workspaceId, input.roomId, input.query.trim(), after?.bucket ?? null, after?.rank ?? null, after?.id ?? null, limit + 1]
+         LIMIT $8`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, input.query.trim(), after?.bucket ?? null, after?.rank ?? null, after?.id ?? null, limit + 1]
       );
       const resources = result.rows.map((row) => ({ ...resourceFromRow(row), rank: Number(row.rank), bucket: Number(row.evidence_bucket) }));
       const visible = resources.slice(0, limit);
@@ -1306,8 +1541,8 @@ export class WorkspaceCompletionService {
     });
   }
 
-  async listSkills(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId: string; limit?: number }): Promise<WorkspaceCompletionResource[]> {
-    assertOpaqueId(input.roomId, "room_id_invalid");
+  async listSkills(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input: { roomId?: string; agentId?: string; limit?: number }): Promise<WorkspaceCompletionResource[]> {
+    assertSearchTarget(input);
     return this.store.database.withContext(context, async (sql) => {
       const result = await sql.query<ResourceRow>(
         `SELECT resource.*
@@ -1319,13 +1554,15 @@ export class WorkspaceCompletionService {
          LEFT JOIN workspace_completion_file_batches batch
            ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
          WHERE resource.workspace_id = $1 AND resource.resource_kind = 'skill'
-           AND (resource.scope_kind = 'workspace' OR resource.room_id = $2)
+           AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+             OR (resource.scope_kind = 'room' AND resource.room_id = $2)
+             OR (resource.scope_kind = 'agent' AND resource.agent_id = $3))
            AND resource.lifecycle_state <> 'archived'
            AND (current_version.metadata->>'migration_incomplete_skill') IS DISTINCT FROM 'true'
            AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
          ORDER BY CASE resource.evidence_state WHEN 'confirmed' THEN 0 ELSE 1 END, resource.updated_at DESC, resource.id ASC
-         LIMIT $3`,
-        [context.workspaceId, input.roomId, boundedLimit(input.limit)]
+         LIMIT $4`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, boundedLimit(input.limit)]
       );
       return result.rows.map(resourceFromRow);
     });
@@ -1333,9 +1570,9 @@ export class WorkspaceCompletionService {
 
   async listSkillsPage(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-    input: { roomId: string; limit?: number; cursor?: string }
+    input: { roomId?: string; agentId?: string; limit?: number; cursor?: string }
   ): Promise<WorkspaceCompletionPage<WorkspaceCompletionResource>> {
-    assertOpaqueId(input.roomId, "room_id_invalid");
+    assertSearchTarget(input);
     const limit = boundedLimit(input.limit);
     const afterId = decodeCompletionCursor(input.cursor);
     return this.store.database.withContext(context, async (sql) => {
@@ -1349,13 +1586,15 @@ export class WorkspaceCompletionService {
          LEFT JOIN workspace_completion_file_batches batch
            ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
          WHERE resource.workspace_id = $1 AND resource.resource_kind = 'skill'
-           AND (resource.scope_kind = 'workspace' OR resource.room_id = $2)
+           AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+             OR (resource.scope_kind = 'room' AND resource.room_id = $2)
+             OR (resource.scope_kind = 'agent' AND resource.agent_id = $3))
            AND resource.lifecycle_state <> 'archived'
            AND (current_version.metadata->>'migration_incomplete_skill') IS DISTINCT FROM 'true'
            AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
-           AND ($3::TEXT IS NULL OR resource.id > $3)
-         ORDER BY resource.id ASC LIMIT $4`,
-        [context.workspaceId, input.roomId, afterId ?? null, limit + 1]
+           AND ($4::TEXT IS NULL OR resource.id > $4)
+         ORDER BY resource.id ASC LIMIT $5`,
+        [context.workspaceId, input.roomId ?? null, input.agentId ?? null, afterId ?? null, limit + 1]
       );
       const skills = result.rows.map(resourceFromRow);
       const items = skills.slice(0, limit);
@@ -1767,6 +2006,7 @@ export class WorkspaceCompletionService {
 
   async updateConfiguration(context: WorkspaceRequestContext, input: { scope: WorkspaceCompletionScope; expectedVersion?: number; values: unknown }): Promise<{ configuration: WorkspaceCompletionConfiguration; replayed: boolean }> {
     assertScope(input.scope);
+    if (input.scope.kind === "agent") throw new WorkspaceServerError("workspace_completion_configuration_agent_scope_forbidden", 422);
     const values = validateWorkspaceCompletionTuning(input.values);
     const scopeKey = input.scope.kind === "workspace" ? "workspace" : input.scope.roomId!;
     const saved = await this.store.runIdempotentResult(context, { action: "workspace.completion.configuration.update", input: { scope: input.scope, expectedVersion: input.expectedVersion, values } }, async (sql) => {
@@ -2104,7 +2344,7 @@ export class WorkspaceCompletionService {
       ? await this.listSkillFiles(context, current.resource.id, current.version.version, maxPage)
       : [];
     for (const file of supportFiles) {
-      if (file.filePath !== completionSkillSupportPath({ id: current.resource.id, relativePath: file.relativePath })) {
+      if (file.filePath !== completionSkillSupportPath({ id: current.resource.id, relativePath: file.relativePath, scope: current.resource.scope })) {
         throw new WorkspaceServerError("workspace_completion_physical_import_state_invalid", 409);
       }
     }
@@ -2224,7 +2464,7 @@ export class WorkspaceCompletionService {
       if (existing.resource.kind === "skill") {
         const previousSupport = await this.listSkillFiles({ workspaceId: context.workspaceId, accountId: context.accountId }, existing.resource.id, existing.version.version, maxPage);
         for (const file of previousSupport) {
-          const previousSupportPath = completionSkillSupportPath({ id: existing.resource.id, relativePath: file.relativePath, version: existing.version.version });
+          const previousSupportPath = completionSkillSupportPath({ id: existing.resource.id, relativePath: file.relativePath, version: existing.version.version, scope: existing.resource.scope });
           const content = physicalImport
             ? await this.readPhysicalImportHistory(context.workspaceId, previousSupportPath, file.contentHash)
             : await this.files.read(context.workspaceId, file.filePath, file.contentHash);
@@ -2238,12 +2478,12 @@ export class WorkspaceCompletionService {
     }
     for (const file of supportFiles) {
       entries.push({
-        path: completionSkillSupportPath({ id: resourceId, relativePath: file.path, ...(candidate ? { version: nextVersion, candidate: true } : {}) }),
+        path: completionSkillSupportPath({ id: resourceId, relativePath: file.path, scope: input.scope, ...(candidate ? { version: nextVersion, candidate: true } : {}) }),
         content: file.content
       });
       if (!candidate) {
         entries.push({
-          path: completionSkillSupportPath({ id: resourceId, relativePath: file.path, version: nextVersion }),
+          path: completionSkillSupportPath({ id: resourceId, relativePath: file.path, version: nextVersion, scope: input.scope }),
           content: file.content
         });
       }
@@ -2252,6 +2492,7 @@ export class WorkspaceCompletionService {
     try {
       const saved = await this.executeBatch(context, batch, { action: options.action, input: { ...input, id: resourceId, expectedVersion, creationSource: options.creationSource } }, async (sql) => {
         if (options.creationSource === "ai") await this.assertAiEvidenceScope(sql, context.workspaceId, input);
+        await this.assertAgentScope(sql, context.workspaceId, input.scope, true);
         const current = await this.selectResourceForUpdate(sql, context.workspaceId, resourceId);
         if (!current) {
           if (expectedVersion !== 0) throwVersionConflict(null);
@@ -2267,7 +2508,7 @@ export class WorkspaceCompletionService {
           return resource;
         }
         if (current.version !== expectedVersion) throwVersionConflict(current.version);
-        if (current.kind !== input.kind || current.scope.kind !== input.scope.kind || current.scope.roomId !== input.scope.roomId || current.knowledgeKind !== input.knowledgeKind) {
+        if (current.kind !== input.kind || current.scope.kind !== input.scope.kind || current.scope.roomId !== input.scope.roomId || current.scope.agentId !== input.scope.agentId || current.knowledgeKind !== input.knowledgeKind) {
           throw new WorkspaceServerError("workspace_completion_resource_identity_change_forbidden", 409);
         }
         await this.assertPolicyAllowed(sql, context, scopeRoom(current.scope), options.updateOperation ?? "resource.update", authorityForScope(current.scope), { resource_kind: current.kind, creation_source: options.creationSource });
@@ -2525,7 +2766,8 @@ export class WorkspaceCompletionService {
          LEFT JOIN workspace_completion_file_batches batch
            ON batch.workspace_id = current_version.workspace_id AND batch.id = current_version.file_batch_id
          WHERE resource.workspace_id = $1
-           AND (resource.scope_kind = 'workspace' OR resource.room_id = $2)
+           AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+             OR (resource.scope_kind = 'room' AND resource.room_id = $2))
            AND resource.lifecycle_state <> 'archived'
            AND (current_version.file_batch_id IS NULL OR batch.status = 'renamed')
            AND ($3::TEXT IS NULL OR resource.id > $3)
@@ -2577,13 +2819,13 @@ export class WorkspaceCompletionService {
     const evidenceState: WorkspaceCompletionEvidenceState = immediate ? "confirmed" : "provisional";
     const resource = await sql.query<ResourceRow>(
       `INSERT INTO workspace_completion_resources(
-         workspace_id, id, scope_kind, room_id, resource_kind, knowledge_kind, title,
+         workspace_id, id, scope_kind, room_id, agent_id, resource_kind, knowledge_kind, title,
          evidence_state, lifecycle_state, ai_protection, creation_source, ai_managed, version,
          current_confirmed_version, current_provisional_version, candidate_version, created_by, updated_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'editable', $9, $10, $11, $12, $13, $14, $15, $15)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'editable', $10, $11, $12, $13, $14, $15, $16, $16)
        RETURNING *`,
       [
-        context.workspaceId, id, input.scope.kind, input.scope.roomId ?? null, input.kind, input.knowledgeKind ?? null, input.title.trim(),
+        context.workspaceId, id, input.scope.kind, input.scope.roomId ?? null, input.scope.agentId ?? null, input.kind, input.knowledgeKind ?? null, input.title.trim(),
         evidenceState, creationSource, input.aiManaged === true, version,
         immediate ? version : null, immediate ? null : version, creationSource === "ai" ? version : null, context.accountId
       ]
@@ -2676,9 +2918,9 @@ export class WorkspaceCompletionService {
       ]
     );
     await sql.query(
-      `INSERT INTO workspace_completion_search_projection(workspace_id, resource_id, resource_version, search_text)
-       VALUES ($1, $2, $3, $4)`,
-      [context.workspaceId, resource.id, input.version, searchableText(resource.title, input.metadata, input.content)]
+      `INSERT INTO workspace_completion_search_projection(workspace_id, resource_id, resource_version, agent_id, search_text)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [context.workspaceId, resource.id, input.version, resource.scope.agentId ?? null, searchableText(resource.title, input.metadata, input.content)]
     );
     return versionFromRow(inserted.rows[0]!);
   }
@@ -2697,7 +2939,7 @@ export class WorkspaceCompletionService {
       return;
     }
     for (const file of files) {
-      const filePath = completionSkillSupportPath({ id: resource.id, relativePath: file.path, ...(candidate ? { version: resourceVersion, candidate: true } : {}) });
+      const filePath = completionSkillSupportPath({ id: resource.id, relativePath: file.path, scope: resource.scope, ...(candidate ? { version: resourceVersion, candidate: true } : {}) });
       await sql.query(
         `INSERT INTO workspace_completion_skill_files(
            workspace_id, id, resource_id, resource_version, relative_path, file_path,
@@ -2791,10 +3033,11 @@ export class WorkspaceCompletionService {
            AND (
              ($2::TEXT = 'workspace' AND samurai_can_workspace($1, 'admin'))
              OR ($2::TEXT = 'room' AND $3::TEXT IS NOT NULL AND samurai_can_room($1, $3, 'execute'))
+             OR ($2::TEXT = 'agent' AND $4::TEXT IS NOT NULL AND samurai_can_workspace($1, 'admin'))
            )
          )
        ) AS allowed`,
-      [context.workspaceId, batch.scope.kind, batch.scope.roomId ?? null]
+      [context.workspaceId, batch.scope.kind, batch.scope.roomId ?? null, batch.scope.agentId ?? null]
     );
     if (allowed.rows[0]?.allowed !== true) {
       throw new WorkspaceServerError("workspace_completion_policy_denied", 403);
@@ -2803,9 +3046,9 @@ export class WorkspaceCompletionService {
 
   private async recordBatch(sql: WorkspaceSql, batch: StagedWorkspaceCompletionFileBatch): Promise<void> {
     await sql.query(
-      `INSERT INTO workspace_completion_file_batches(workspace_id, id, scope_kind, room_id, status)
-       VALUES ($1, $2, $3, $4, 'db_committed')`,
-      [batch.workspaceId, batch.id, batch.scope.kind, batch.scope.roomId ?? null]
+      `INSERT INTO workspace_completion_file_batches(workspace_id, id, scope_kind, room_id, agent_id, status)
+       VALUES ($1, $2, $3, $4, $5, 'db_committed')`,
+      [batch.workspaceId, batch.id, batch.scope.kind, batch.scope.roomId ?? null, batch.scope.agentId ?? null]
     );
     for (const entry of batch.entries) {
       await sql.query(
@@ -3076,8 +3319,8 @@ export class WorkspaceCompletionService {
     batchId: string
   ): Promise<void> {
     await this.store.database.withContext(context, async (sql) => {
-      const header = await sql.query<{ id: string; scope_kind: "workspace" | "room"; room_id: string | null; status: "db_committed" | "renamed" | "rolled_back" }>(
-        "SELECT id, scope_kind, room_id, status FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",
+      const header = await sql.query<{ id: string; scope_kind: "workspace" | "room" | "agent"; room_id: string | null; agent_id: string | null; status: "db_committed" | "renamed" | "rolled_back" }>(
+        "SELECT id, scope_kind, room_id, agent_id, status FROM workspace_completion_file_batches WHERE workspace_id = $1 AND id = $2",
         [context.workspaceId, batchId]
       );
       const row = header.rows[0];
@@ -3089,7 +3332,9 @@ export class WorkspaceCompletionService {
       );
       const scope = row.scope_kind === "workspace"
         ? { kind: "workspace" as const }
-        : { kind: "room" as const, roomId: requiredRoomId(row.room_id) };
+        : row.scope_kind === "agent"
+          ? { kind: "agent" as const, agentId: requiredAgentId(row.agent_id) }
+          : { kind: "room" as const, roomId: requiredRoomId(row.room_id) };
       const paths = entries.rows.map((entry) => entry.path);
       // Hold the resource rows while the physical rename runs. A newer batch
       // either waits for this recovery or is already visible here and is
@@ -3165,6 +3410,7 @@ export class WorkspaceCompletionService {
     const row = result.rows[0];
     if (!row) throw new WorkspaceServerError("workspace_completion_resource_not_found", 404);
     const resource = resourceFromRow(row);
+    assertResourceReadable(resource);
     const pointer = resource.currentConfirmedVersion ?? resource.currentProvisionalVersion;
     if (!pointer) throw new WorkspaceServerError("workspace_completion_resource_version_not_ready", 503);
     const version = await this.selectVersion(sql, workspaceId, resourceId, pointer, requireCurrent);
@@ -3321,6 +3567,64 @@ export class WorkspaceCompletionService {
     }
   }
 
+  /** Agent-scoped resources are never allowed to float by ID alone.  The
+   * target Agent must be a live Agent owned by this Workspace, and writes are
+   * additionally guarded by the normal Workspace-admin policy below. */
+  private async assertAgentScope(
+    sql: WorkspaceSql,
+    workspaceId: string,
+    scope: WorkspaceCompletionScope,
+    requireManagement: boolean
+  ): Promise<void> {
+    if (scope.kind !== "agent") return;
+    const agent = await sql.query<{ id: string; status: string }>(
+      "SELECT id, status FROM workspace_agents WHERE workspace_id = $1 AND id = $2",
+      [workspaceId, scope.agentId]
+    );
+    const row = agent.rows[0];
+    if (!row) throw new WorkspaceServerError("workspace_completion_agent_not_found", 404);
+    if (row.status !== "active") throw new WorkspaceServerError("workspace_completion_agent_not_active", 409);
+    if (requireManagement) {
+      const permission = await sql.query<{ allowed: boolean }>(
+        "SELECT samurai_can_workspace($1, 'admin') AS allowed",
+        [workspaceId]
+      );
+      if (permission.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_completion_agent_management_denied", 403);
+    }
+  }
+
+  /** Re-checks the Share destination under the import transaction. The
+   * admission check in Share Core happens before fetch/stage and is not
+   * sufficient after a long-running import. */
+  private async assertImportedDestination(
+    sql: WorkspaceSql,
+    context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId" | "caller">,
+    scope: WorkspaceCompletionScope
+  ): Promise<void> {
+    if (scope.kind === "room") {
+      const room = await sql.query<{ id: string }>(
+        // The runtime role is intentionally denied UPDATE on the hierarchy
+        // tables.  A row-locking clause would therefore require a privilege
+        // this read-only destination check must not have; the FK and RLS
+        // checks in the same transaction provide the required consistency.
+        "SELECT id FROM rooms WHERE workspace_id = $1 AND id = $2",
+        [context.workspaceId, scope.roomId]
+      );
+      if (!room.rows[0]) throw new WorkspaceServerError("workspace_completion_import_room_not_found", 404);
+      const permission = await sql.query<{ allowed: boolean }>(
+        "SELECT (samurai_workspace_is_writable($1) AND samurai_can_room($1, $2, 'edit')) AS allowed",
+        [context.workspaceId, scope.roomId]
+      );
+      if (permission.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_completion_policy_denied", 403);
+      return;
+    }
+    const permission = await sql.query<{ allowed: boolean }>(
+      "SELECT (samurai_workspace_is_writable($1) AND samurai_can_workspace($1, 'admin')) AS allowed",
+      [context.workspaceId]
+    );
+    if (permission.rows[0]?.allowed !== true) throw new WorkspaceServerError("workspace_completion_agent_management_denied", 403);
+  }
+
   private async resolveEpisodeForActivity(sql: WorkspaceSql, context: WorkspaceRequestContext, input: WorkspaceCompletionActivityInput, activityId: string): Promise<WorkspaceCompletionEpisode> {
     if (input.episodeId) {
       const episode = await this.selectEpisode(sql, context.workspaceId, input.episodeId);
@@ -3454,7 +3758,9 @@ export class WorkspaceCompletionService {
        WHERE use_event.workspace_id = $1 AND use_event.episode_id = $2
          AND use_event.event IN ('actually_used', 'outcome')
          AND resource.lifecycle_state <> 'archived'
-         AND (resource.scope_kind = 'workspace' OR resource.room_id = $3)
+         AND ((resource.scope_kind = 'workspace' AND resource.resource_kind <> 'knowledge')
+           OR (resource.scope_kind = 'room' AND resource.room_id = $3)
+           OR resource.scope_kind = 'agent')
        ORDER BY use_event.resource_id, use_event.resource_version, use_event.created_at DESC, use_event.id DESC`,
       [workspaceId, episode.id, episode.roomId]
     );
@@ -3810,8 +4116,9 @@ export class WorkspaceCompletionService {
 interface ResourceRow {
   workspace_id: string;
   id: string;
-  scope_kind: "workspace" | "room";
+  scope_kind: "workspace" | "room" | "agent";
   room_id: string | null;
+  agent_id: string | null;
   resource_kind: WorkspaceCompletionResourceKind;
   knowledge_kind: WorkspaceCompletionKnowledgeKind | null;
   title: string;
@@ -4102,7 +4409,11 @@ function resourceFromRow(row: ResourceRow): WorkspaceCompletionResource {
   return {
     workspaceId: row.workspace_id,
     id: row.id,
-    scope: row.scope_kind === "room" ? { kind: "room", roomId: requiredRoomId(row.room_id) } : { kind: "workspace" },
+    scope: row.scope_kind === "room"
+      ? { kind: "room", roomId: requiredRoomId(row.room_id) }
+      : row.scope_kind === "agent"
+        ? { kind: "agent", agentId: requiredAgentId(row.agent_id) }
+        : { kind: "workspace" },
     kind: row.resource_kind,
     ...(row.knowledge_kind ? { knowledgeKind: row.knowledge_kind } : {}),
     title: row.title,
@@ -4502,6 +4813,15 @@ function validateResourceInput(input: WorkspaceCompletionResourceInput, source: 
     throw new WorkspaceServerError("workspace_completion_knowledge_kind_required", 422);
   }
   if (input.kind === "skill" && input.knowledgeKind !== undefined) throw new WorkspaceServerError("workspace_completion_skill_knowledge_kind_forbidden", 422);
+  if (input.scope.kind === "workspace" && input.kind === "knowledge") {
+    throw new WorkspaceServerError("workspace_memory_removed", 409);
+  }
+  if (input.scope.kind === "agent" && input.kind !== "knowledge" && input.kind !== "skill") {
+    throw new WorkspaceServerError("workspace_completion_agent_resource_kind_invalid", 422);
+  }
+  if (input.scope.kind === "agent" && input.aiManaged === true) {
+    throw new WorkspaceServerError("workspace_completion_agent_ai_managed_forbidden", 422);
+  }
   const supportFiles = normalizeSkillSupportFiles(input.kind, input.supportFiles);
   if (input.kind === "skill" && source !== "import") validateSkillPackageMetadata(input.metadata);
   if (input.kind !== "skill" && supportFiles.length > 0) throw new WorkspaceServerError("workspace_completion_skill_support_non_skill", 422);
@@ -4563,6 +4883,7 @@ function validateSkillPackageMetadata(metadata: WorkspaceRecordPayload): void {
 
 function validatePolicyInput(input: WorkspaceCompletionPolicyInput): void {
   assertScope(input.scope);
+  if (input.scope.kind === "agent") throw new WorkspaceServerError("workspace_completion_policy_agent_scope_forbidden", 422);
   if (input.id) assertCompletionId(input.id, "workspace_completion_policy_id_invalid");
   assertSafeText(input.title, "workspace_completion_policy_title_invalid");
   assertSafeText(input.content, "workspace_completion_policy_content_invalid");
@@ -4668,7 +4989,7 @@ function attestationFailureReasons(value: unknown): Array<{ code: string; messag
 }
 
 function sameScope(left: WorkspaceCompletionScope, right: WorkspaceCompletionScope): boolean {
-  return left.kind === right.kind && left.roomId === right.roomId;
+  return left.kind === right.kind && left.roomId === right.roomId && left.agentId === right.agentId;
 }
 
 function activityAttestationHash(activity: WorkspaceCompletionActivity): string {
@@ -4710,14 +5031,67 @@ function trustedHumanPolicyApproval(context: WorkspaceRequestContext): TrustedHu
   };
 }
 
+function isWorkspaceKnowledge(resource: Pick<WorkspaceCompletionResource, "scope" | "kind">): boolean {
+  return resource.scope.kind === "workspace" && resource.kind === "knowledge";
+}
+
+function assertResourceReadable(resource: WorkspaceCompletionResource): void {
+  if (isWorkspaceKnowledge(resource)) throw new WorkspaceServerError("workspace_memory_removed", 409);
+}
+
+function assertWorkspaceKnowledgeScope(scope: WorkspaceCompletionScope, kind: WorkspaceCompletionResourceKind): void {
+  if (scope.kind === "workspace" && kind === "knowledge") {
+    throw new WorkspaceServerError("workspace_memory_removed", 409);
+  }
+}
+
+function assertWorkspaceKnowledgeQuery(scopeKind: WorkspaceCompletionScopeKind | undefined, kind: WorkspaceCompletionResourceKind | undefined): void {
+  if (scopeKind === "workspace" && kind === "knowledge") {
+    throw new WorkspaceServerError("workspace_memory_removed", 409);
+  }
+}
+
+function assertResourceListTarget(input: { roomId?: string; agentId?: string; scopeKind?: WorkspaceCompletionScopeKind }): void {
+  if (input.scopeKind && !["workspace", "room", "agent"].includes(input.scopeKind)) {
+    throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+  }
+  if (input.roomId && input.agentId) throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+  if (input.scopeKind === "agent" && !input.agentId) throw new WorkspaceServerError("workspace_agent_id_required", 422);
+  if (input.scopeKind === "room" && !input.roomId) throw new WorkspaceServerError("room_id_required", 422);
+  if (input.scopeKind === "workspace" && (input.roomId || input.agentId)) throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+  if (input.agentId && input.scopeKind && input.scopeKind !== "agent") throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+  if (input.roomId && input.scopeKind && input.scopeKind !== "room") throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+}
+
+function resourceListScopeKind(input: { roomId?: string; agentId?: string; scopeKind?: WorkspaceCompletionScopeKind }): WorkspaceCompletionScopeKind {
+  return input.scopeKind ?? (input.agentId ? "agent" : input.roomId ? "room" : "workspace");
+}
+
+function assertSearchTarget(input: { roomId?: string; agentId?: string }): void {
+  if (Boolean(input.roomId) === Boolean(input.agentId)) throw new WorkspaceServerError("workspace_completion_search_target_invalid", 422);
+  if (input.roomId) assertOpaqueId(input.roomId, "room_id_invalid");
+  if (input.agentId) assertOpaqueId(input.agentId, "workspace_agent_id_invalid");
+}
+
 function isProvisionalImport(input: WorkspaceCompletionResourceInput, source: WorkspaceCompletionCreationSource): boolean {
   return source === "import" && input.metadata.migration_provisional === true;
 }
 
 function assertScope(scope: WorkspaceCompletionScope): void {
-  if (scope.kind !== "workspace" && scope.kind !== "room") throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
-  if ((scope.kind === "room") !== Boolean(scope.roomId)) throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
-  if (scope.roomId) assertOpaqueId(scope.roomId, "room_id_invalid");
+  if (!scope || (scope.kind !== "workspace" && scope.kind !== "room" && scope.kind !== "agent")) {
+    throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+  }
+  if (scope.kind === "workspace") {
+    if (scope.roomId !== undefined || scope.agentId !== undefined) throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+    return;
+  }
+  if (scope.kind === "room") {
+    if (!scope.roomId || scope.agentId !== undefined) throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+    assertOpaqueId(scope.roomId, "room_id_invalid");
+    return;
+  }
+  if (!scope.agentId || scope.roomId !== undefined) throw new WorkspaceServerError("workspace_completion_scope_invalid", 422);
+  assertOpaqueId(scope.agentId, "workspace_agent_id_invalid");
 }
 
 function scopeRoom(scope: WorkspaceCompletionScope): string | undefined {
@@ -4947,6 +5321,11 @@ function sessionRefFrom(value: unknown): WorkspaceCompletionActivity["sessionRef
 }
 
 function requiredRoomId(value: string | null): string {
+  if (!value) throw new WorkspaceServerError("workspace_completion_database_value_invalid", 500);
+  return value;
+}
+
+function requiredAgentId(value: string | null): string {
   if (!value) throw new WorkspaceServerError("workspace_completion_database_value_invalid", 500);
   return value;
 }

@@ -66,7 +66,7 @@ function completionEvidence(resourceRefs: Record<string, unknown>[] = [], runSta
   };
 }
 
-function reservation() {
+function reservation(withPersonalPreferences = false) {
   return {
     work_id: "work_one",
     assignee_id: "assignee_one",
@@ -78,7 +78,16 @@ function reservation() {
     version: 3,
     agent_configuration_version: 4,
     reservation_id: "reservation_one",
-    lease_owner: "worker_one"
+    lease_owner: "worker_one",
+    ...(withPersonalPreferences ? {
+      personal_preferences_snapshot: {
+        schema_version: 1,
+        revision: 7,
+        display_name: "Takuma",
+        output_locale: "ja",
+        instructions: "Use the saved style."
+      }
+    } : {})
   };
 }
 
@@ -147,7 +156,7 @@ describe("PostgresRoomWorkWorker", () => {
   it("claims a Room assignment, creates the internal Session, and settles the same generation", async () => {
     const settle = vi.fn(async () => undefined);
     const claim = vi.fn()
-      .mockResolvedValueOnce(reservation())
+      .mockResolvedValueOnce(reservation(true))
       .mockResolvedValueOnce(undefined);
     const store = { claimRoomWorkReservation: claim, settleRoomWorkAssignment: settle, ...completionEvidence() } as unknown as WorkspaceServerStore;
     const runtime = runtimeFake();
@@ -181,7 +190,18 @@ describe("PostgresRoomWorkWorker", () => {
         correlationId: expect.stringMatching(/^room_work_run_[a-f0-9]{48}$/),
         idempotencyKey: expect.stringMatching(/^room_work_run_[a-f0-9]{48}$/)
       }),
-      input: { content: "Do the work", agent_id: "agent_one", attachments: [] },
+      input: {
+        content: "Do the work",
+        agent_id: "agent_one",
+        attachments: [],
+        personal_preferences: {
+          schema_version: 1,
+          revision: 7,
+          display_name: "Takuma",
+          output_locale: "ja",
+          instructions: "Use the saved style."
+        }
+      },
       executionBinding: {
         workId: "work_one",
         assigneeId: "assignee_one",
@@ -236,7 +256,7 @@ describe("PostgresRoomWorkWorker", () => {
     const runtime = { getBackendRun, runDomainCommand } as unknown as PostgresRuntimeCommandService;
     const store = {
       claimRoomWorkReservation: vi.fn().mockResolvedValueOnce({
-        ...reservation(),
+        ...reservation(true),
         current_run_id: "run_recovered"
       }),
       settleRoomWorkAssignment: settle,

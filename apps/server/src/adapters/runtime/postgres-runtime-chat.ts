@@ -45,8 +45,8 @@ import {
   WorkspaceChangeRecordSchema,
   type SupportedLocale
 } from "@samurai-agent/core-schemas";
-import type { AgentBackend, AgentBackendRegistry, BackendExecutionContext, BackendOutputEvent, BackendRunInput, BackendTerminalEvidence, MemoryCandidateLike, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
-import { BackendEventBridge, type RunChatTurnResult } from "@samurai-agent/runtime";
+import type { AgentBackend, AgentBackendRegistry, BackendExecutionContext, BackendExecutionResource, BackendExecutionContextAssembly, BackendOutputEvent, BackendPersonalPreferencesSnapshot, BackendRunInput, BackendTerminalEvidence, MemoryCandidateLike, TemporaryContextAttachment } from "@samurai-agent/agent-backends";
+import { BackendEventBridge, assembleRuntimeExecutionContext, isRuntimeContextResourceRef, isRuntimeContextSourceScope, type RunChatTurnResult, type RuntimeExecutionContextAssembly, type RuntimeExecutionResourceCandidate } from "@samurai-agent/runtime";
 import {
   PostgresWorkspaceDatabase,
   WorkspaceServerError,
@@ -64,6 +64,10 @@ export interface PostgresRuntimeChatOptions {
   defaultBackendId?: string;
   /** Room-scoped Knowledge query. The Runtime never reads Knowledge files directly. */
   knowledgeMemory?: PostgresRuntimeKnowledgePort;
+  /** Completion-backed Room/Agent context selector. The selector owns the
+   * existing confirmed-version/ranking rules; Runtime only applies its final
+   * scope and total-budget checks. */
+  executionContext?: PostgresRuntimeExecutionContextPort;
   /** Emits only after the Runtime event has been persisted. The caller owns
    * Room re-authorization before a client sees the notification. */
   onEvent?: (event: BackendEventRecord, roomId: string) => Promise<void>;
@@ -159,6 +163,8 @@ export type PostgresRuntimeRunControlResult = BackendRunRecord | RunChatTurnResu
 export interface PostgresRuntimeKnowledgePage {
   memory: MemoryFrontmatter & { file_path: string };
   content: string;
+  scope?: { kind: "workspace" | "room" | "agent"; roomId?: string; agentId?: string };
+  metadata?: Record<string, JsonValue>;
 }
 
 export interface PostgresRuntimeKnowledgePort {
@@ -173,6 +179,17 @@ export interface PostgresRuntimeKnowledgePort {
     query: string,
     limit?: number
   ): Promise<Array<PostgresRuntimeKnowledgePage & { rank: number }>>;
+}
+
+export interface PostgresRuntimeExecutionContextPort {
+  select(
+    context: { workspaceId: string; accountId: string },
+    input: { roomId: string; agentId: string; query: string; limit?: number }
+  ): Promise<{
+    roomKnowledge?: RuntimeExecutionResourceCandidate[];
+    agentKnowledge?: RuntimeExecutionResourceCandidate[];
+    agentSkills?: RuntimeExecutionResourceCandidate[];
+  }>;
 }
 
 export interface PostgresRuntimeSearchResult {
@@ -201,6 +218,8 @@ export interface PostgresRuntimeChatTurnInput {
   inputLocale?: SupportedLocale;
   outputLocale?: SupportedLocale;
   metadata?: Record<string, JsonValue>;
+  /** Server-verified Account settings. Generic metadata is never trusted for this. */
+  verifiedPersonalPreferences?: BackendPersonalPreferencesSnapshot;
   attachments?: Array<z.infer<typeof ResourceRefSchema>>;
   temporaryContext?: TemporaryContextAttachment[];
   idempotencyKey: string;
@@ -610,6 +629,7 @@ export class PostgresRuntimeChat {
   private readonly coreWorkspaceRoot?: string;
   private readonly defaultBackendId: string;
   private readonly knowledgeMemory?: PostgresRuntimeKnowledgePort;
+  private readonly executionContext?: PostgresRuntimeExecutionContextPort;
   private readonly onEvent?: PostgresRuntimeChatOptions["onEvent"];
   private readonly onCompletionActivity?: PostgresRuntimeChatOptions["onCompletionActivity"];
   private readonly principal?: import("@samurai-agent/core-schemas").Principal;
@@ -629,6 +649,7 @@ export class PostgresRuntimeChat {
     this.coreWorkspaceRoot = options.coreWorkspaceRoot;
     this.defaultBackendId = options.defaultBackendId?.trim() || "samurai-native";
     this.knowledgeMemory = options.knowledgeMemory;
+    this.executionContext = options.executionContext;
     this.onEvent = options.onEvent;
     this.onCompletionActivity = options.onCompletionActivity;
     this.principal = options.principal ? PrincipalSchema.parse(options.principal) : undefined;
@@ -910,11 +931,18 @@ export class PostgresRuntimeChat {
     const admission = await this.admissionForRun(resumed);
     const backendSessionId = resumed.backend_session_id;
     if (!backendSessionId) throw new WorkspaceServerError("runtime_resume_backend_session_missing", 409);
-    const streamInput: Record<string, JsonValue> = { ...safeInput, backend_session_id: backendSessionId };
     const resumedAdmission = { ...admission, run: resumed };
+    const controlInput = this.backendRunInputForControl(resumedAdmission);
+    const streamInput: Record<string, JsonValue> = {
+      ...safeInput,
+      backend_session_id: backendSessionId,
+      ...(controlInput.execution_context_assembly ? { execution_context_assembly: controlInput.execution_context_assembly as unknown as JsonValue } : {}),
+      ...(controlInput.context_resources ? { context_resources: controlInput.context_resources as unknown as JsonValue } : {}),
+      ...(controlInput.personal_preferences ? { personal_preferences: controlInput.personal_preferences as unknown as JsonValue } : {})
+    };
     const settled = await this.executeBackendStream({
       admission: resumedAdmission,
-      runInput: this.backendRunInputForControl(resumedAdmission),
+      runInput: controlInput,
       stream: backend.resumeRun(resumed.id, streamInput),
       unknownOnError: true
     });
@@ -1054,6 +1082,8 @@ export class PostgresRuntimeChat {
     const persistedAgent = persistedBinding ? runtimeAgentFromBinding(persistedBinding) : undefined;
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, run.room_id!);
+      if (run.agent_id) await this.assertAgentCanExecute(sql, run.room_id!, run.agent_id);
+      await this.assertPersistedRoomWorkBinding(sql, run);
       // `withContext` supplies one PoolClient.  Keep these reads sequential so
       // the admission path never queues concurrent queries on that client.
       // Apart from avoiding pg's client-queue deprecation, this preserves the
@@ -1114,7 +1144,15 @@ export class PostgresRuntimeChat {
     });
     const backend = this.backendRegistry.get(admission.run.backend_id);
     const continuationState = runtimeContinuationFromRunMetadata(admission.run.metadata);
-    const executionContext = binding && backend ? runtimeExecutionContext(binding, backend, continuationState) : undefined;
+    const persistedExecutionContext = runtimeExecutionContextFromRunMetadata(admission.run.metadata, {
+      roomId,
+      ...(admission.run.agent_id ? { agentId: admission.run.agent_id } : {})
+    });
+    const personalPreferences = runtimePersonalPreferencesFromRunMetadata(admission.run.metadata);
+    const executionContext = binding && backend ? runtimeExecutionContext(binding, backend, continuationState, {
+      assembly: persistedExecutionContext,
+      personalPreferences
+    }) : undefined;
     const envelope = admission.userMessage.envelope ?? MessageEnvelopeSchema.parse({
       id: createId("envelope"),
       source: channelForSource(admission.run.source),
@@ -1156,7 +1194,12 @@ export class PostgresRuntimeChat {
       user_input: admission.userMessage.content,
       input_locale: admission.userMessage.input_locale,
       output_locale: admission.userMessage.output_locale,
-      active_memory: [],
+      active_memory: executionContextMemoryCandidates(persistedExecutionContext),
+      ...(persistedExecutionContext ? {
+        context_resources: persistedExecutionContext.resources,
+        execution_context_assembly: persistedExecutionContext
+      } : {}),
+      ...(personalPreferences ? { personal_preferences: personalPreferences } : {}),
       available_tools: this.availableProviderTools(binding),
       recent_messages: [],
       // The persisted Run binding is authoritative for control/reconnect
@@ -1439,8 +1482,10 @@ export class PostgresRuntimeChat {
     const sessionId = requireId(input.sessionId, "session_id_required");
     const session = await this.getSession(sessionId);
     if (!session?.room_id) throw new WorkspaceServerError("runtime_session_not_found_or_room_missing", 404);
-    const knowledge = await this.relevantKnowledge(session.room_id, content);
     const agent = await this.resolveAgent(session.room_id, input.agentId);
+    const personalPreferences = await this.personalPreferencesForTurn(input, session);
+    const executionContextAssembly = await this.resolveExecutionContext(session.room_id, agent.id, content);
+    const knowledge = executionContextMemoryCandidates(executionContextAssembly);
     const requestedBackendId = input.backendId?.trim();
     if (requestedBackendId && requestedBackendId !== agent.backendId) {
       throw new WorkspaceServerError("runtime_backend_agent_mismatch", 409);
@@ -1481,7 +1526,10 @@ export class PostgresRuntimeChat {
     }
     const resumeBackendSessionId = roomWorkContinuation?.backendSessionId ?? legacyResumeBackendSessionId;
     const continuationState = roomWorkContinuation?.state;
-    const executionContext = runtimeExecutionContext(executionBinding, backend, continuationState);
+    const executionContext = runtimeExecutionContext(executionBinding, backend, continuationState, {
+      assembly: executionContextAssembly,
+      personalPreferences
+    });
     // Room Work attachments are server-issued immutable file references. Read
     // the DB row and physical bytes before admission so an invalid request
     // cannot create a durable Message/Run/Activity/Reservation. The admit
@@ -1495,7 +1543,7 @@ export class PostgresRuntimeChat {
       ? roomWorkPreflight?.map((item) => item.ref) ?? (input.attachments ?? [])
       : (input.attachments ?? []);
     const inputLocale = input.inputLocale ?? session.ui_locale;
-    const outputLocale = input.outputLocale ?? session.output_locale;
+    const outputLocale = input.outputLocale ?? personalPreferences?.output_locale ?? session.output_locale;
     const userMetadata = runtimeMetadataForBackend(input.metadata ?? {});
     const envelope = MessageEnvelopeSchema.parse({
       id: createId("envelope"),
@@ -1528,6 +1576,8 @@ export class PostgresRuntimeChat {
       metadata: userMetadata,
       attachments,
       temporary_context: (input.temporaryContext ?? []).map(temporaryContextHash),
+      personal_preferences: personalPreferences ?? null,
+      execution_context_refs: executionContextAssembly.resource_refs,
       retry_of_run_id: input.retryOfRunId ?? null,
       attempt_no: input.attemptNo ?? 1,
       resume_backend_session_id: resumeBackendSessionId ?? null
@@ -1546,6 +1596,8 @@ export class PostgresRuntimeChat {
       metadata: userMetadata,
       attachments,
       executionBinding,
+      ...(personalPreferences ? { personalPreferences } : {}),
+      executionContextAssembly,
       ...(continuationState ? { continuationState } : {})
     });
     if (admission.replay) {
@@ -1614,7 +1666,10 @@ export class PostgresRuntimeChat {
         user_input: content,
         input_locale: inputLocale,
         output_locale: outputLocale,
-        active_memory: knowledge.map((page) => memoryCandidate(page)),
+        active_memory: knowledge,
+        context_resources: executionContextAssembly.resources,
+        execution_context_assembly: executionContextAssembly,
+        ...(personalPreferences ? { personal_preferences: personalPreferences } : {}),
         recent_messages: recentMessages,
         ...((input.temporaryContext?.length || materializedAttachments.length) ? {
           temporary_context: [...(input.temporaryContext ?? []), ...materializedAttachments.map((item) => item.context)]
@@ -1626,7 +1681,12 @@ export class PostgresRuntimeChat {
         context_intent: "light_chat",
         available_tools: this.availableProviderTools(executionBinding),
         ...(providerSessionId ? { backend_session_id: providerSessionId } : {}),
-        ...(continuation ? { execution_context: runtimeExecutionContext(executionBinding, backend, continuation) } : executionContext ? { execution_context: executionContext } : {}),
+        ...(continuation ? {
+          execution_context: runtimeExecutionContext(executionBinding, backend, continuation, {
+            assembly: executionContextAssembly,
+            personalPreferences
+          })
+        } : executionContext ? { execution_context: executionContext } : {}),
         ...(input.signal ? { abort_signal: input.signal } : {})
       });
       let inputForBackend = buildInputForBackend(continuationState, resumeBackendSessionId);
@@ -1992,6 +2052,8 @@ export class PostgresRuntimeChat {
     metadata?: Record<string, JsonValue>;
     attachments?: readonly ResourceRef[];
     executionBinding?: RuntimeExecutionBinding;
+    personalPreferences?: BackendPersonalPreferencesSnapshot;
+    executionContextAssembly?: RuntimeExecutionContextAssembly;
     continuationState?: RuntimeContinuationState;
   }): Promise<RuntimeAdmission> {
     const now = nowIso();
@@ -2034,6 +2096,8 @@ export class PostgresRuntimeChat {
         ...userMetadata,
         ...(input.retryOfRunId ? { retry_of_run_id: input.retryOfRunId } : {}),
         ...(input.executionBinding ? { runtime_binding: runtimeBindingMetadata(input.executionBinding) } : {}),
+        ...(input.personalPreferences ? { personal_preferences_snapshot: input.personalPreferences } : {}),
+        ...(input.executionContextAssembly ? { runtime_execution_context: input.executionContextAssembly } : {}),
         ...(input.continuationState ? { runtime_continuation: input.continuationState } : {})
       }
     });
@@ -2102,6 +2166,7 @@ export class PostgresRuntimeChat {
     };
     return this.database.withContext(this.context(), async (sql) => {
       await this.assertRoomCanExecute(sql, input.session.room_id!);
+      if (input.agent) await this.assertAgentCanExecute(sql, input.session.room_id!, input.agent.id);
       // Idempotent replays must be resolved before the Room Work admission
       // guard. A stop can legitimately close the assignment after the
       // original Run was admitted; replaying that durable Run must not be
@@ -3243,6 +3308,71 @@ export class PostgresRuntimeChat {
     if (result.rows[0]?.allowed !== true) throw new WorkspaceServerError("runtime_room_execute_forbidden", 403);
   }
 
+  /** Re-check the Agent membership at every control/retry admission. */
+  private async assertAgentCanExecute(sql: WorkspaceSql, roomId: string, agentId: string): Promise<void> {
+    const result = await sql.query<{ allowed: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1
+         FROM workspace_agents agent
+         JOIN workspace_agent_room_permissions permission
+           ON permission.workspace_id = agent.workspace_id AND permission.agent_id = agent.id
+         WHERE agent.workspace_id = $1 AND permission.room_id = $2 AND permission.agent_id = $3
+           AND permission.can_execute = TRUE AND agent.status = 'active' AND agent.enabled = TRUE
+       ) AS allowed`,
+      [this.workspaceId, roomId, agentId]
+    );
+    if (result.rows[0]?.allowed !== true) throw new WorkspaceServerError("runtime_agent_not_authorized_for_room", 403);
+  }
+
+  /**
+   * Runtime controls must not continue a Room Work after its persisted Work
+   * or assignment has been stopped/reassigned.  This is a read-only check;
+   * the admission function remains the atomic writer-side fence.
+   */
+  private async assertPersistedRoomWorkBinding(sql: WorkspaceSql, run: BackendRunRecord): Promise<void> {
+    if (!run.room_id || !run.agent_id) return;
+    const binding = runtimeBindingFromRunMetadata(run.metadata, {
+      workspaceId: this.workspaceId,
+      roomId: run.room_id,
+      sessionId: run.session_id ?? "",
+      agentId: run.agent_id,
+      backendId: run.backend_id
+    });
+    if (!binding?.workId || !binding.assigneeId) return;
+    const result = await sql.query<{
+      room_id: string;
+      stop_state: string;
+      control_generation: number | string;
+      assignment_status: string;
+      assignment_agent_id: string;
+      assignment_agent_version: number | string;
+      current_run_id: string | null;
+    }>(
+      `SELECT work.room_id, work.stop_state, work.control_generation,
+              assignment.status AS assignment_status,
+              assignment.agent_id AS assignment_agent_id,
+              assignment.agent_version AS assignment_agent_version,
+              assignment.current_run_id
+         FROM workspace_human_works work
+         JOIN workspace_human_work_assignments assignment
+           ON assignment.workspace_id = work.workspace_id AND assignment.work_id = work.id
+        WHERE work.workspace_id = $1 AND work.id = $2 AND assignment.id = $3
+          AND assignment.room_id = $4`,
+      [this.workspaceId, binding.workId, binding.assigneeId, run.room_id]
+    );
+    const row = result.rows[0];
+    if (!row
+      || row.room_id !== run.room_id
+      || row.stop_state !== "none"
+      || Number(row.control_generation) !== binding.generation
+      || row.assignment_status !== "running"
+      || row.assignment_agent_id !== binding.agentId
+      || Number(row.assignment_agent_version) !== binding.agentConfigurationVersion
+      || row.current_run_id !== run.id) {
+      throw new WorkspaceServerError("room_work_execution_authorization_revoked", 403);
+    }
+  }
+
   private async relevantKnowledge(roomId: string, query: string): Promise<Array<PostgresRuntimeKnowledgePage & { rank?: number }>> {
     if (!this.knowledgeMemory) return [];
     const matches = await this.knowledgeMemory.search(this.context(), roomId, query, 8);
@@ -3251,6 +3381,45 @@ export class PostgresRuntimeChat {
     // Room-scoped context. The bounded list keeps ordinary chat from loading an
     // unbounded Workspace history or another Room's files.
     return (await this.knowledgeMemory.list(this.context(), roomId, false)).slice(0, 8);
+  }
+
+  /**
+   * The Completion selector is the source of truth for rank/version/state.
+   * Runtime still assembles one shared budget and checks the returned scope so
+   * an Agent resource can never turn into Room membership or authority.
+   */
+  private async resolveExecutionContext(roomId: string, agentId: string, query: string): Promise<RuntimeExecutionContextAssembly> {
+    const selected = this.executionContext
+      ? await this.executionContext.select(this.context(), { roomId, agentId, query, limit: 32 })
+      : {
+          roomKnowledge: (await this.relevantKnowledge(roomId, query))
+            .map((page) => executionCandidateFromKnowledgePage(page, roomId))
+            .filter((candidate): candidate is RuntimeExecutionResourceCandidate => Boolean(candidate))
+        };
+    return assembleRuntimeExecutionContext({
+      roomId,
+      agentId,
+      query,
+      roomKnowledge: selected.roomKnowledge,
+      agentKnowledge: selected.agentKnowledge,
+      agentSkills: selected.agentSkills
+    });
+  }
+
+  private async personalPreferencesForTurn(
+    input: PostgresRuntimeChatTurnInput,
+    session: SessionRecord
+  ): Promise<BackendPersonalPreferencesSnapshot | undefined> {
+    if (input.retryOfRunId) {
+      const original = await this.getBackendRun(input.retryOfRunId);
+      if (!original || original.session_id !== session.id || original.room_id !== session.room_id) {
+        throw new WorkspaceServerError("runtime_retry_snapshot_missing", 409);
+      }
+      return runtimePersonalPreferencesFromRunMetadata(original.metadata);
+    }
+    return input.verifiedPersonalPreferences
+      ? validatePersonalPreferencesSnapshot(input.verifiedPersonalPreferences)
+      : undefined;
   }
 
   private async listMessages(sessionId: string): Promise<MessageRecord[]> {
@@ -3558,6 +3727,7 @@ export class PostgresRuntimeCommandService {
           ...(commandInput.backend_id ? { backendId: commandInput.backend_id } : {}),
           ...(commandInput.input_locale ? { inputLocale: commandInput.input_locale } : {}),
           ...(commandInput.output_locale ? { outputLocale: commandInput.output_locale } : {}),
+          ...(commandInput.personal_preferences ? { verifiedPersonalPreferences: commandInput.personal_preferences } : {}),
           attachments: commandInput.attachments,
           temporaryContext: commandInput.temporary_context,
           metadata: commandInput.metadata,
@@ -4230,7 +4400,11 @@ function runtimeBackendSessionKey(binding: RuntimeExecutionBinding): string {
 function runtimeExecutionContext(
   binding: RuntimeExecutionBinding,
   backend: Pick<AgentBackend, "kind">,
-  continuationState?: RuntimeContinuationState
+  continuationState?: RuntimeContinuationState,
+  extras: {
+    assembly?: RuntimeExecutionContextAssembly | BackendExecutionContextAssembly;
+    personalPreferences?: BackendPersonalPreferencesSnapshot;
+  } = {}
 ): RuntimeBackendExecutionContext | undefined {
   // BackendRunAssociation deliberately requires a concrete work and
   // assignee.  Legacy Session callers do not have that association, so they
@@ -4257,6 +4431,12 @@ function runtimeExecutionContext(
     },
     credential_boundary: isNative ? "provider_api" : "external_cli",
     continuity: isNative ? "samurai_context" : "external_session",
+    ...(extras.assembly ? {
+      resources: extras.assembly.resources as BackendExecutionResource[],
+      resource_refs: extras.assembly.resource_refs,
+      context_assembly: extras.assembly as BackendExecutionContextAssembly
+    } : {}),
+    ...(extras.personalPreferences ? { personal_preferences: extras.personalPreferences } : {}),
     ...(continuationState ? { continuity_state: continuationState } : {})
   };
 }
@@ -4301,7 +4481,15 @@ function runtimeMetadataForBackend(metadata: Record<string, JsonValue>): Record<
   // `runtime_binding` is persisted for reconciliation, but it is a typed
   // host association rather than provider/user metadata.  Keep it out of the
   // generic Backend payload; controls receive it through execution_context.
-  const { runtime_binding: _runtimeBinding, runtime_continuation: _runtimeContinuation, ...safeMetadata } = metadata;
+  const {
+    runtime_binding: _runtimeBinding,
+    runtime_continuation: _runtimeContinuation,
+    runtime_execution_context: _runtimeExecutionContext,
+    personal_preferences_snapshot: _personalPreferencesSnapshot,
+    personal_preferences: _personalPreferences,
+    verified_personal_preferences: _verifiedPersonalPreferences,
+    ...safeMetadata
+  } = metadata;
   return safeMetadata;
 }
 
@@ -4611,6 +4799,161 @@ function requireId(value: string | undefined, code: string): string {
 
 function summarize(value: string, maxLength = 160): string {
   return value.trim().replace(/\s+/g, " ").slice(0, maxLength) || "Chat turn";
+}
+
+function executionCandidateFromKnowledgePage(
+  page: PostgresRuntimeKnowledgePage & { rank?: number },
+  roomId: string
+): RuntimeExecutionResourceCandidate | undefined {
+  const scope = page.scope;
+  if (scope?.kind === "workspace") return undefined;
+  const sourceScope = scope?.kind === "agent"
+    ? scope.agentId ? { kind: "agent" as const, agent_id: scope.agentId } : undefined
+    : { kind: "room" as const, room_id: scope?.roomId ?? roomId };
+  if (!sourceScope) return undefined;
+  const memory = page.memory;
+  const evidenceState = memory.state === "provisional"
+    ? "provisional" as const
+    : memory.evidence_state === "conflict"
+      ? "contradicted" as const
+      : "confirmed" as const;
+  return {
+    id: memory.id,
+    kind: "knowledge",
+    title: memory.topic,
+    version: memory.version ?? "1",
+    contentHash: memory.content_hash || stableHash(page.content),
+    sourceScope,
+    evidenceState,
+    lifecycleState: memory.state === "archived" ? "archived" : "active",
+    finalized: evidenceState === "confirmed",
+    rank: page.rank,
+    selectionReason: page.rank === undefined ? "room_knowledge_room_list" : `room_knowledge_search_rank:${page.rank}`,
+    uri: memory.file_path,
+    content: page.content
+  };
+}
+
+function executionContextMemoryCandidates(
+  assembly: RuntimeExecutionContextAssembly | BackendExecutionContextAssembly | undefined
+): MemoryCandidateLike[] {
+  if (!assembly) return [];
+  return assembly.resources
+    .filter((resource) => resource.kind === "knowledge" && resource.source_scope.kind === "room")
+    .map((resource) => ({
+      id: resource.id,
+      topic: resource.title,
+      content: resource.content ?? "",
+      state: "active" as const,
+      priority: "primary" as const,
+      selection_reason: resource.selection_reason
+    }));
+}
+
+function validatePersonalPreferencesSnapshot(input: BackendPersonalPreferencesSnapshot): BackendPersonalPreferencesSnapshot {
+  if (!input || input.schema_version !== 1 || !Number.isSafeInteger(input.revision) || input.revision < 0) {
+    throw new WorkspaceServerError("runtime_personal_preferences_snapshot_invalid", 400);
+  }
+  if (input.display_name !== undefined && (typeof input.display_name !== "string" || input.display_name.trim().length > 500)) {
+    throw new WorkspaceServerError("runtime_personal_preferences_snapshot_invalid", 400);
+  }
+  if (input.instructions !== undefined && (typeof input.instructions !== "string" || input.instructions.length > 20_000)) {
+    throw new WorkspaceServerError("runtime_personal_preferences_snapshot_invalid", 400);
+  }
+  if (input.output_locale !== undefined && input.output_locale !== null && !SupportedLocaleSchema.safeParse(input.output_locale).success) {
+    throw new WorkspaceServerError("runtime_personal_preferences_snapshot_invalid", 400);
+  }
+  return {
+    schema_version: 1,
+    revision: input.revision,
+    ...(input.display_name?.trim() ? { display_name: input.display_name.trim() } : {}),
+    ...(input.instructions ? { instructions: input.instructions } : {}),
+    ...(input.output_locale !== undefined ? { output_locale: input.output_locale } : {})
+  };
+}
+
+function runtimePersonalPreferencesFromRunMetadata(metadata: Record<string, JsonValue>): BackendPersonalPreferencesSnapshot | undefined {
+  const value = metadata.personal_preferences_snapshot;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try {
+    return validatePersonalPreferencesSnapshot(value as unknown as BackendPersonalPreferencesSnapshot);
+  } catch {
+    return undefined;
+  }
+}
+
+function runtimeExecutionContextFromRunMetadata(
+  metadata: Record<string, JsonValue>,
+  expected?: { roomId?: string; agentId?: string }
+): BackendExecutionContextAssembly | undefined {
+  const value = metadata.runtime_execution_context;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as unknown as BackendExecutionContextAssembly;
+  if (candidate.version !== 1 || typeof candidate.room_id !== "string" || typeof candidate.agent_id !== "string"
+    || !Array.isArray(candidate.resources) || !Array.isArray(candidate.resource_refs) || !Array.isArray(candidate.sources)) {
+    return undefined;
+  }
+  if ((expected?.roomId && candidate.room_id !== expected.roomId)
+    || (expected?.agentId && candidate.agent_id !== expected.agentId)) return undefined;
+  if (candidate.resources.some((resource) => !isPersistedExecutionResource(resource, candidate))
+    || candidate.resource_refs.some((ref) => !isPersistedExecutionRef(ref, candidate))
+    || candidate.sources.some((source) => !isPersistedExecutionSource(source, candidate))) return undefined;
+  return candidate;
+}
+
+function isPersistedExecutionRef(
+  value: unknown,
+  candidate: Pick<BackendExecutionContextAssembly, "room_id" | "agent_id">
+): boolean {
+  if (!isRuntimeContextResourceRef(value)) return false;
+  return executionScopeMatches(value.source_scope, candidate);
+}
+
+function isPersistedExecutionResource(
+  value: unknown,
+  candidate: Pick<BackendExecutionContextAssembly, "room_id" | "agent_id">
+): value is BackendExecutionResource {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const resource = value as Partial<BackendExecutionResource>;
+  if ((resource.kind !== "knowledge" && resource.kind !== "skill")
+    || typeof resource.id !== "string" || !resource.id.trim()
+    || typeof resource.title !== "string" || !resource.title.trim()
+    || typeof resource.version !== "string" || !resource.version.trim()
+    || typeof resource.content_hash !== "string" || !resource.content_hash.trim()
+    || typeof resource.selection_reason !== "string"
+    || (resource.disclosure_level !== "catalog" && resource.disclosure_level !== "body" && resource.disclosure_level !== "support")
+    || !isRuntimeContextSourceScope(resource.source_scope)
+    || !executionScopeMatches(resource.source_scope, candidate)
+    || !isRuntimeContextResourceRef(resource.ref)) return false;
+  return resource.ref.kind === resource.kind
+    && resource.ref.id === resource.id
+    && resource.ref.version === resource.version
+    && resource.ref.content_hash === resource.content_hash
+    && executionScopeMatches(resource.ref.source_scope, candidate)
+    && (resource.content === undefined || typeof resource.content === "string")
+    && (!resource.support_files || (Array.isArray(resource.support_files)
+      && resource.support_files.every((file) => Boolean(file) && typeof file.path === "string" && typeof file.content === "string")));
+}
+
+function isPersistedExecutionSource(
+  value: unknown,
+  candidate: Pick<BackendExecutionContextAssembly, "room_id" | "agent_id">
+): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const source = value as Partial<BackendExecutionContextAssembly["sources"][number]>;
+  if ((source.kind !== "room_knowledge" && source.kind !== "agent_knowledge" && source.kind !== "agent_skills")
+    || !isRuntimeContextSourceScope(source.source_scope)
+    || !executionScopeMatches(source.source_scope, candidate)
+    || !Array.isArray(source.refs)) return false;
+  const expectedKind = source.kind === "agent_skills" ? "skill" : "knowledge";
+  return source.refs.every((ref) => isPersistedExecutionRef(ref, candidate) && ref.kind === expectedKind);
+}
+
+function executionScopeMatches(
+  scope: { kind: "room"; room_id: string } | { kind: "agent"; agent_id: string },
+  candidate: Pick<BackendExecutionContextAssembly, "room_id" | "agent_id">
+): boolean {
+  return scope.kind === "room" ? scope.room_id === candidate.room_id : scope.agent_id === candidate.agent_id;
 }
 
 function memoryCandidate(page: PostgresRuntimeKnowledgePage & { rank?: number }): MemoryCandidateLike {

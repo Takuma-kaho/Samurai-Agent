@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { NativeRoom } from "../native-app/types";
 import type { CSSProperties, ReactElement } from "react";
 
@@ -10,6 +11,10 @@ export interface RoomNavigatorProps {
   error?: string | null;
   onSelect: (room: NativeRoom) => void;
   onCreate?: () => void;
+  /** Controlled expanded Room IDs. When omitted, the navigator starts fully expanded. */
+  expandedRoomIds?: ReadonlySet<string>;
+  /** Notify the parent so expanded state can be persisted by the owning screen. */
+  onToggleExpanded?: (room: NativeRoom) => void;
 }
 
 function roomDepth(room: NativeRoom, byId: Map<string, NativeRoom>): number {
@@ -72,8 +77,11 @@ export function RoomNavigator({
   archived = false,
   error,
   onSelect,
-  onCreate
+  onCreate,
+  expandedRoomIds,
+  onToggleExpanded
 }: RoomNavigatorProps) {
+  const [locallyCollapsedRoomIds, setLocallyCollapsedRoomIds] = useState<Set<string>>(() => new Set());
   const normalRooms = rooms.filter((room) => room.kind !== "agent_dm");
   const agentDmRooms = rooms.filter((room) => room.kind === "agent_dm");
   const byId = new Map(normalRooms.map((room) => [room.id, room]));
@@ -89,6 +97,22 @@ export function RoomNavigator({
   }
   for (const children of childrenById.values()) children.sort(roomOrder);
 
+  const isRoomExpanded = (room: NativeRoom): boolean => expandedRoomIds
+    ? expandedRoomIds.has(room.id)
+    : !locallyCollapsedRoomIds.has(room.id);
+
+  const toggleRoomExpanded = (room: NativeRoom): void => {
+    if (expandedRoomIds === undefined) {
+      setLocallyCollapsedRoomIds((current) => {
+        const next = new Set(current);
+        if (next.has(room.id)) next.delete(room.id);
+        else next.add(room.id);
+        return next;
+      });
+    }
+    onToggleExpanded?.(room);
+  };
+
   const renderRoomButton = (room: NativeRoom, hasChildren: boolean): ReactElement => {
     const active = room.id === selectedRoomId;
     // Viewing a Room and starting Agent work are separate capabilities.
@@ -98,30 +122,64 @@ export function RoomNavigator({
     const isAgentDm = room.kind === "agent_dm";
     const permissionLabel = room.canView === false ? "閲覧不可" : room.canExecute === false ? "読み取り専用" : undefined;
     const ariaLabel = `${room.name}${isAgentDm ? "（Agent DM・非公開）" : ""}${permissionLabel ? `・${permissionLabel}` : ""}`;
-    return <button
+    const roomButton = <button
       className={`native-room-item native-room-item-${isAgentDm ? "dm" : "normal"}${hasChildren ? " native-room-item-parent" : ""}${active ? " is-selected" : ""}${roomDisabled ? " is-muted" : ""}`}
       type="button"
       onClick={() => onSelect(room)}
       disabled={roomDisabled}
       aria-current={active ? "page" : undefined}
       aria-label={ariaLabel}
-      aria-expanded={hasChildren ? true : undefined}
       title={permissionLabel}
-      style={{ "--native-room-depth": isAgentDm ? 0 : roomDepth(room, byId) } as CSSProperties}
+      style={{
+        "--native-room-depth": isAgentDm ? 0 : roomDepth(room, byId),
+        ...(hasChildren ? { flex: "1 1 auto", minWidth: 0, width: "auto" } : {})
+      } as CSSProperties}
     >
       <span className={isAgentDm ? "native-room-dm-mark" : "native-room-mark"} aria-hidden="true">{isAgentDm ? "◉" : "#"}</span>
       <span className="native-room-name">{room.name}</span>
-      {hasChildren ? <span className="native-room-children-mark" aria-hidden="true">⌄</span> : null}
     </button>;
+
+    if (!hasChildren) return roomButton;
+
+    const expanded = isRoomExpanded(room);
+    const toggleLabel = `${room.name}を${expanded ? "折りたたむ" : "展開する"}`;
+    return <div className="native-room-item-row" style={{ display: "flex", minWidth: 0 }}>
+      <button
+        className="native-icon-button native-room-toggle"
+        type="button"
+        onClick={() => toggleRoomExpanded(room)}
+        disabled={roomDisabled}
+        aria-label={toggleLabel}
+        aria-expanded={expanded}
+        title={toggleLabel}
+        style={{ flex: "0 0 27px", minWidth: "27px", height: "auto", padding: 0 }}
+      >
+        <span aria-hidden="true">{expanded ? "⌄" : "›"}</span>
+      </button>
+      {roomButton}
+    </div>;
   };
 
   const renderRoomTree = (room: NativeRoom, rendered: Set<string>): ReactElement | null => {
     if (rendered.has(room.id)) return null;
     rendered.add(room.id);
     const children = childrenById.get(room.id) ?? [];
-    const childElements = children
-      .map((child) => renderRoomTree(child, rendered))
-      .filter((child): child is ReactElement => child !== null);
+    const expanded = children.length === 0 || isRoomExpanded(room);
+    if (!expanded) {
+      const markHiddenDescendants = (parentId: string): void => {
+        for (const child of childrenById.get(parentId) ?? []) {
+          if (rendered.has(child.id)) continue;
+          rendered.add(child.id);
+          markHiddenDescendants(child.id);
+        }
+      };
+      markHiddenDescendants(room.id);
+    }
+    const childElements = expanded
+      ? children
+        .map((child) => renderRoomTree(child, rendered))
+        .filter((child): child is ReactElement => child !== null)
+      : [];
     return (
       <li className={children.length ? "native-room-group" : undefined} key={room.id}>
         {renderRoomButton(room, children.length > 0)}

@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, createNativeDraftNavigationControllerRegistry, CreateDialog, nativeAgentDirectoryScopeKey, nativeAgentProfileForScope, nativeRoomResultResourceTarget, nativeRoomToolTarget, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey } from "./NativeApp";
+import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, createNativeDraftNavigationControllerRegistry, CreateDialog, nativeAgentDirectoryScopeKey, nativeAgentProfileForScope, nativeRoomResultResourceTarget, nativeRoomToolTarget, nativeWorkspaceContextTarget, nativeWorkspaceNotificationPageForDisplay, nativeWorkspaceSwitcherEntries, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey } from "./NativeApp";
 import { createNativeDraftNavigationController } from "./use-native-draft-navigation";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 
@@ -25,6 +25,46 @@ describe("Native draft navigation controller registry", () => {
     expect(registry.getCurrent()).toBe(first);
     underlyingDetach();
     expect(registry.getCurrent()).toBeUndefined();
+  });
+});
+
+describe("Native Workspace context entry points", () => {
+  it("strips Room state from the shared context target", () => {
+    expect(nativeWorkspaceContextTarget({ connectionId: "connection_a", workspaceId: "workspace_a", roomId: "room_a", selectionGeneration: 4 }))
+      .toEqual({ connectionId: "connection_a", workspaceId: "workspace_a", selectionGeneration: 4 });
+    expect(nativeWorkspaceContextTarget(undefined)).toBeUndefined();
+  });
+
+  it("lists only authorized target-addressable Workspaces without merging same IDs", () => {
+    const entries = nativeWorkspaceSwitcherEntries([
+      { id: "workspace_a", name: "調査", state: "active", access: "granted", target: { connectionId: "connection_a", workspaceId: "workspace_a" } },
+      { id: "workspace_a", name: "調査の複製", state: "active", access: "granted", target: { connectionId: "connection_b", workspaceId: "workspace_a" } },
+      { id: "workspace_denied", name: "閲覧不可", state: "read_only", access: "none", target: { connectionId: "connection_a", workspaceId: "workspace_denied" } },
+      { id: "legacy", name: "接続先不明", state: "active", access: "granted" }
+    ]);
+
+    expect(entries.map((entry) => entry.key)).toEqual([
+      "connection_a\nworkspace_a",
+      "connection_b\nworkspace_a"
+    ]);
+  });
+
+  it("keeps an unknown notification kind visible instead of collapsing it into an empty state", () => {
+    const page = nativeWorkspaceNotificationPageForDisplay({
+      items: [{
+        id: "notification_unknown",
+        kind: "new_server_event",
+        createdAt: "2026-09-17T00:00:00.000Z",
+        readAt: null,
+        title: "未認識のイベント",
+        summary: "内容を確認してください。",
+        target: null,
+        actionState: "not_required"
+      }],
+      nextCursor: null
+    });
+
+    expect(page.items[0]?.summary).toContain("new_server_event");
   });
 });
 

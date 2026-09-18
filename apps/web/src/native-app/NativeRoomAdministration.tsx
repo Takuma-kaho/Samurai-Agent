@@ -1,5 +1,5 @@
 import { useId } from "react";
-import type { FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useNativeRoomAdministration, WORKSPACE_ROOT_VALUE, type NativeRoomAdministrationDraftState, type NativeRoomAdministrationRole, type UseNativeRoomAdministrationOptions } from "./use-native-room-administration";
 import type { NativeRoom } from "./types";
 import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
@@ -11,7 +11,24 @@ export interface NativeRoomAdministrationProps extends UseNativeRoomAdministrati
   /** Parent navigation guard receives this panel's draft and saving state. */
   onDraftStateChange?: (state: NativeRoomAdministrationDraftState) => void;
   onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
+  initialTab?: NativeRoomAdministrationTab;
+  onTabChange?: (tab: NativeRoomAdministrationTab) => void;
+  agentPanel?: ReactNode;
+  knowledgePanel?: ReactNode;
+  learningPanel?: ReactNode;
+  sharingPanel?: ReactNode;
 }
+
+export type NativeRoomAdministrationTab = "basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing";
+
+const administrationTabs: ReadonlyArray<{ id: NativeRoomAdministrationTab; label: string }> = [
+  { id: "basic", label: "基本" },
+  { id: "participants", label: "参加者" },
+  { id: "agent", label: "Agent" },
+  { id: "knowledge", label: "Knowledge" },
+  { id: "learning", label: "学習" },
+  { id: "sharing", label: "共有" }
+];
 
 const roleLabels: Record<NativeRoomAdministrationRole, string> = {
   owner: "Owner",
@@ -66,6 +83,10 @@ function submit(event: FormEvent<HTMLFormElement>, action: () => void): void {
 export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
   const admin = useNativeRoomAdministration(props);
   const id = useId().replace(/:/g, "");
+  const [activeTab, setActiveTab] = useState<NativeRoomAdministrationTab>(props.initialTab ?? "basic");
+  useEffect(() => {
+    setActiveTab(props.initialTab ?? "basic");
+  }, [props.initialTab]);
   const currentRoom = admin.activeRoom;
   const normalRoom = Boolean(currentRoom && !admin.currentRoomIsDm);
   const flattenedRooms = flattenRooms(props.rooms);
@@ -88,6 +109,10 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
   };
   const selectRoom = (room: NativeRoom) => {
     if (props.onSelectRoom) draftNavigation.requestNavigation(() => props.onSelectRoom?.(room));
+  };
+  const selectTab = (tab: NativeRoomAdministrationTab): void => {
+    setActiveTab(tab);
+    props.onTabChange?.(tab);
   };
 
   return (
@@ -128,6 +153,10 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
         .native-room-administration__error { border-color: var(--native-danger, #ee8981); color: var(--native-danger, #ee8981); }
         .native-room-administration__warning { border-color: var(--native-accent, #f1a65c); color: var(--native-accent, #f1a65c); }
         .native-room-administration fieldset { border: 0; margin: 0; padding: 0; }
+        .native-room-administration__tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+        .native-room-administration__tab { background: rgba(255, 255, 255, .035); border: 1px solid var(--native-line, rgba(204, 218, 209, .14)); border-radius: 8px; color: var(--native-muted, #a4afa7); cursor: pointer; font-size: 11px; font-weight: 750; padding: 8px 11px; }
+        .native-room-administration__tab[aria-selected="true"] { background: rgba(241, 166, 92, .14); border-color: rgba(241, 166, 92, .5); color: var(--native-accent, #f1a65c); }
+        .native-room-administration__panel { min-height: 140px; }
         @media (max-width: 580px) { .native-room-administration { padding: 15px; } .native-room-administration__header { padding: 16px; } .native-room-administration__member-row { align-items: flex-start; flex-direction: column; gap: 3px; } }
       `}</style>
 
@@ -146,6 +175,20 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
         {props.onClose ? <button className="native-room-administration__close" type="button" onClick={requestClose} aria-label="Room管理を閉じる">×</button> : null}
       </header>
       <NativeDraftNavigationPrompt controller={draftNavigation} />
+      <nav className="native-room-administration__tabs" aria-label="Room管理タブ" role="tablist">
+        {administrationTabs.map((tab) => (
+          <button
+            type="button"
+            role="tab"
+            className="native-room-administration__tab"
+            id={`${id}-tab-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`${id}-panel-${tab.id}`}
+            key={tab.id}
+            onClick={() => selectTab(tab.id)}
+          >{tab.label}</button>
+        ))}
+      </nav>
 
       {admin.actionError ? <p className="native-room-administration__error" role="alert">Server: {admin.actionError}</p> : null}
 
@@ -160,6 +203,7 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
         </div>
       ) : (
         <>
+          <div id={`${id}-panel-basic`} className="native-room-administration__panel" role="tabpanel" aria-labelledby={`${id}-tab-basic`} hidden={activeTab !== "basic"}>
           <div className="native-room-administration__card">
             <h2 id={`${id}-rooms-title`}>Room</h2>
             <p className="native-room-administration__muted">親子Roomや既存Chatへ自動で混ぜず、このRoomを明示して操作します。</p>
@@ -241,8 +285,9 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
               )}
             </section>
           </div>
+          </div>
 
-          <section className="native-room-administration__card" aria-labelledby={`${id}-members-title`}>
+          <section id={`${id}-panel-participants`} className="native-room-administration__panel native-room-administration__card" role="tabpanel" aria-labelledby={`${id}-tab-participants`} hidden={activeTab !== "participants"}>
             <h2 id={`${id}-members-title`}>現在の人間membership</h2>
             <p className="native-room-administration__muted">参加・解除・role変更はServerの権限と最後のOwner保護に従います。</p>
             {admin.membersLoading ? <p role="status" aria-live="polite">読み込み中…</p> : null}
@@ -291,6 +336,18 @@ export function NativeRoomAdministration(props: NativeRoomAdministrationProps) {
             ) : (
               <p className="native-room-administration__muted">このRoomのmembershipを変更する管理権限がありません。</p>
             )}
+          </section>
+          <section id={`${id}-panel-agent`} className="native-room-administration__panel native-room-administration__card" role="tabpanel" aria-labelledby={`${id}-tab-agent`} hidden={activeTab !== "agent"}>
+            {props.agentPanel ?? <p className="native-room-administration__muted">このRoomのAgent設定は確認できません。</p>}
+          </section>
+          <section id={`${id}-panel-knowledge`} className="native-room-administration__panel native-room-administration__card" role="tabpanel" aria-labelledby={`${id}-tab-knowledge`} hidden={activeTab !== "knowledge"}>
+            {props.knowledgePanel ?? <p className="native-room-administration__muted">Room Knowledgeを確認できません。</p>}
+          </section>
+          <section id={`${id}-panel-learning`} className="native-room-administration__panel native-room-administration__card" role="tabpanel" aria-labelledby={`${id}-tab-learning`} hidden={activeTab !== "learning"}>
+            {props.learningPanel ?? <p className="native-room-administration__muted">Room学習設定を確認できません。</p>}
+          </section>
+          <section id={`${id}-panel-sharing`} className="native-room-administration__panel native-room-administration__card" role="tabpanel" aria-labelledby={`${id}-tab-sharing`} hidden={activeTab !== "sharing"}>
+            {props.sharingPanel ?? <p className="native-room-administration__muted">共有可能なRoom Knowledgeがありません。</p>}
           </section>
         </>
       )}

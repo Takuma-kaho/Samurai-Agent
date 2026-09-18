@@ -27,7 +27,13 @@ const workspaceResource = {
   ...resource,
   id: "resource_workspace",
   scope: { kind: "workspace" as const },
-  title: "Workspace fact"
+  // Workspace Knowledge was retired by the Native context contract. Keep the
+  // legacy management-boundary fixture as a Workspace Skill so the test still
+  // verifies that Room lists include retained Workspace resources without
+  // reintroducing the removed memory surface.
+  kind: "skill" as const,
+  knowledgeKind: undefined,
+  title: "Workspace skill"
 };
 
 const version = {
@@ -392,6 +398,24 @@ describe("Domain API v1 management boundary", () => {
         { workspaceId: "workspace_1", accountId: "account_1" },
         "room_1"
       );
+
+      // A fresh Workspace has no persisted settings row. The Core's default
+      // marker is internal-only and must still satisfy the public contract.
+      mounted.learning.getSettingsLayers.mockResolvedValueOnce({
+        effective: {
+          ...learningSettings,
+          id: "workspace",
+          scope: { kind: "workspace" },
+          version: 0,
+          updatedBy: "",
+          updatedAt: "1970-01-01T00:00:00.000Z",
+          enabledInheritsWorkspace: true
+        }
+      });
+      const defaultLearningResponse = await request(baseUrl, "GET", "/api/v1/workspaces/workspace_1/learning/settings?room_id=room_1");
+      expect(defaultLearningResponse.status).toBe(200);
+      expect(defaultLearningResponse.body).toMatchObject({ settings: { updatedBy: "system", version: 0, scope: { kind: "workspace" } } });
+      expect(defaultLearningResponse.body.settings).not.toHaveProperty("enabledInheritsWorkspace");
 
       const learningPatch = await request(baseUrl, "PATCH", "/api/v1/workspaces/workspace_1/learning/settings", { scope_kind: "room", room_id: "room_1", enabled: false, expected_version: 1 }, "learning_patch");
       expect(learningPatch.status).toBe(201);

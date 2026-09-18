@@ -58,7 +58,11 @@ export class WorkspaceCompletionMigrationService {
 
   async migrateLegacy(context: WorkspaceRequestContext, input: { dryRun?: boolean } = {}): Promise<WorkspaceCompletionLegacyMigrationResult> {
     await this.assertOwner(context);
-    if (input.dryRun) return emptyMigrationResult(previewFromSnapshot(await this.readLegacySnapshot(context)));
+    // Read and reject retired input before starting the SECURITY DEFINER Run.
+    // A rejected legacy Memory must not put the Workspace into read-only mode.
+    const preflightSnapshot = await this.readLegacySnapshot(context);
+    assertLegacyWorkspaceMemoryRemoved(preflightSnapshot);
+    if (input.dryRun) return emptyMigrationResult(previewFromSnapshot(preflightSnapshot));
     this.assertAuthenticatedHuman(context);
     // The SECURITY DEFINER start function creates the Run and changes the
     // Workspace to read-only in one transaction.  Nothing is snapshotted
@@ -112,6 +116,10 @@ export class WorkspaceCompletionMigrationService {
       for (const resource of snapshot.resources) {
         const history = versionsFor(snapshot, resource.id);
         if (hasSecretResource(snapshot, resource)) continue;
+        // Workspace-scoped Knowledge is retired.  It must not be re-created
+        // through the legacy backfill (Room Knowledge, Skills, and Policies
+        // remain eligible for their normal migration paths).
+        if (isWorkspaceKnowledge(resource)) continue;
         if (resource.resource_kind === "workspace_rule") {
           const result = await this.migrateWorkspaceRule(runContext, resource, history, migratedLegacyJobIds);
           migratedPolicies += result.policies;
@@ -265,6 +273,7 @@ export class WorkspaceCompletionMigrationService {
   }
 
   private async migrateResource(context: WorkspaceRequestContext, resource: LegacyResourceRow, history: readonly LegacyVersionRow[]): Promise<{ resources: number; versions: number }> {
+    if (isWorkspaceKnowledge(resource)) return { resources: 0, versions: 0 };
     const targetId = targetResourceId(context.workspaceId, resource.id);
     const sourceVersions = history.length > 0 ? history : [currentAsVersion(resource)];
     const existing = await this.completion.getResource({ workspaceId: context.workspaceId, accountId: context.accountId }, targetId).catch((error) => {
@@ -663,7 +672,32 @@ export class WorkspaceCompletionMigrationService {
         "SELECT samurai_rollback_completion_legacy_migration($1, $2) AS rollback",
         [context.workspaceId, integrityHash]
       );
-      return payload(result.rows[0]?.rollback);
+      const value = payload(result.rows[0]?.rollback);
+      // Keep rollback file cleanup restartable.  The legacy rollback function
+      // has already removed the Completion rows in this transaction, so only
+      // paths returned as unreferenced by that function may enter the queue.
+      // Physical deletion remains a best-effort fast path below; if the
+      // process stops before it runs, the maintenance worker converges it.
+      const records = Array.isArray(value.orphaned_files) ? value.orphaned_files : [];
+      for (const entry of records) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+        const file = entry as Record<string, unknown>;
+        if (typeof file.path !== "string" || !/^[a-f0-9]{64}$/.test(String(file.sha256))) continue;
+        const sourceBatchId = typeof file.batch_id === "string" ? file.batch_id : null;
+        const size = typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0;
+        const cleanupId = `completion_cleanup_${createHash("sha256")
+          .update(`${context.workspaceId}:${sourceBatchId ?? ""}:${file.path}:${file.sha256}`)
+          .digest("hex")
+          .slice(0, 32)}`;
+        await sql.query(
+          `INSERT INTO workspace_completion_file_cleanup_queue
+             (workspace_id, id, source_batch_id, path, sha256, size, reason)
+           VALUES ($1, $2, $3, $4, $5, $6, 'completion_orphaned_batch')
+           ON CONFLICT (workspace_id, path, sha256) DO NOTHING`,
+          [context.workspaceId, cleanupId, sourceBatchId, file.path, file.sha256, size]
+        );
+      }
+      return value;
     });
     const records = Array.isArray(rollback.value.orphaned_files) ? rollback.value.orphaned_files : [];
     let removedFiles = 0;
@@ -844,6 +878,7 @@ interface LegacyAttemptRow {
 }
 
 function previewFromSnapshot(snapshot: LegacySnapshot): WorkspaceCompletionLegacyMigrationPreview {
+  assertLegacyWorkspaceMemoryRemoved(snapshot);
   const byKind: Record<LegacyResourceKind, number> = { knowledge: 0, memory: 0, skill: 0, workspace_rule: 0 };
   const blockedSecretResources: string[] = [];
   for (const resource of snapshot.resources) {
@@ -906,6 +941,7 @@ function expectedMigrationTargets(snapshot: LegacySnapshot, workspaceId: string)
     const history = versionsFor(snapshot, resource.id);
     const sourceVersions = history.length > 0 ? history : [currentAsVersion(resource)];
     if (hasSecretResource(snapshot, resource)) continue;
+    if (isWorkspaceKnowledge(resource)) continue;
     const targetId = targetResourceId(workspaceId, resource.id);
     if (resource.resource_kind !== "workspace_rule") {
       targets.resourceIds.push(targetId);
@@ -1043,7 +1079,42 @@ function isMigratableResource(snapshot: LegacySnapshot, resource: LegacyResource
   // workspace_rule is represented only by a re-approval request.  It has no
   // target Resource/Version to which old Evidence, Links, or Uses could be
   // safely attached.
-  return resource.resource_kind !== "workspace_rule";
+  return resource.resource_kind !== "workspace_rule" && !isWorkspaceKnowledge(resource);
+}
+
+function isWorkspaceKnowledge(resource: LegacyResourceRow): boolean {
+  return resource.scope_kind === "workspace" && resource.resource_kind === "knowledge";
+}
+
+type LegacyMemoryCheckSnapshot = {
+  resources: ReadonlyArray<Pick<LegacyResourceRow, "id" | "scope_kind" | "resource_kind" | "payload">>;
+  versions: ReadonlyArray<Pick<LegacyVersionRow, "resource_id" | "payload">>;
+};
+
+/** Old Workspace Memory is retired input, not a migration source. Keep this
+ * check independent from the Completion writer so preview, apply, and any
+ * future restore adapter fail before creating a run or a target resource. */
+export function assertLegacyWorkspaceMemoryRemoved(snapshot: LegacyMemoryCheckSnapshot): void {
+  for (const resource of snapshot.resources) {
+    if (resource.scope_kind !== "workspace") continue;
+    const kind = String(resource.resource_kind).toLowerCase();
+    const versions = snapshot.versions.filter((version) => version.resource_id === resource.id);
+    if (kind === "memory" || kind === "workspace_memory"
+      || legacyWorkspaceMemoryMarker(resource.payload)
+      || versions.some((version) => legacyWorkspaceMemoryMarker(version.payload))) {
+      throw new WorkspaceServerError("workspace_memory_removed", 409, { resource_id: resource.id });
+    }
+  }
+}
+
+function legacyWorkspaceMemoryMarker(value: unknown): boolean {
+  const body = payload(value);
+  const legacy = payload(body.legacy_source);
+  const values = [body.resource_kind, body.resource_type, body.legacy_resource_kind, legacy.resource_kind, legacy.resource_type]
+    .filter((candidate): candidate is string => typeof candidate === "string")
+    .map((candidate) => candidate.toLowerCase());
+  return body.memory === true || body.workspace_memory === true
+    || values.includes("memory") || values.includes("workspace_memory");
 }
 
 function targetVersionForLegacy(snapshot: LegacySnapshot, resource: LegacyResourceRow, sourceVersion: number): number | undefined {

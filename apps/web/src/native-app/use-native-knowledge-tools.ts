@@ -57,6 +57,35 @@ export interface NativeKnowledgeToolsDraft {
 }
 
 /**
+ * The share dialog receives only the public selection metadata.  It must not
+ * receive a resource body, support file path, or any other Completion detail.
+ */
+export interface NativeRoomKnowledgeShareResource {
+  id: string;
+  version: number;
+  kind: "knowledge";
+  title: string;
+}
+
+export interface NativeRoomKnowledgeShareSelection {
+  source: {
+    kind: "room_knowledge";
+    id: string;
+    label: string;
+  };
+  resources: readonly NativeRoomKnowledgeShareResource[];
+}
+
+export type NativeKnowledgeResourcesErrorKind = "permission" | "retrieval";
+
+export type NativeKnowledgeShareAvailability =
+  | "loading"
+  | "ready"
+  | "no_resources"
+  | "permission_denied"
+  | "retrieval_failed";
+
+/**
  * Returns whether the resource draft still represents the exact values which
  * were submitted by a mutation. The dirty flag is intentionally excluded:
  * React can keep that flag true while the submitted values are unchanged, and
@@ -126,7 +155,10 @@ export function nativeKnowledgeResourceForOpen(
   resourceId: string,
   resourceOverride?: WorkspaceCompletionResourceView
 ): WorkspaceCompletionResourceView | undefined {
-  return resourceOverride ?? resources.find((resource) => resource.id === resourceId);
+  const resource = resourceOverride ?? resources.find((candidate) => candidate.id === resourceId);
+  if (!resource) return undefined;
+  if (resource.kind === "knowledge" && (resource.scope.kind !== "room" || resource.evidenceState !== "confirmed")) return undefined;
+  return resource;
 }
 
 /** Search hits are openable only when the client has an exact navigation ref. */
@@ -184,10 +216,13 @@ export interface NativeKnowledgeToolsState {
   readOnly: boolean;
 
   roomResources: WorkspaceCompletionResourceView[];
-  workspaceResources: WorkspaceCompletionResourceView[];
+  roomKnowledgeShareResources: NativeRoomKnowledgeShareResource[];
   skills: WorkspaceCompletionResourceView[];
   resourcesLoading: boolean;
+  resourcesLoaded: boolean;
   resourcesError: string | null;
+  resourcesErrorKind: NativeKnowledgeResourcesErrorKind | null;
+  shareAvailability: NativeKnowledgeShareAvailability;
   reloadResources: () => Promise<void>;
   selectedResourceId?: string;
   selectedResource?: NativeKnowledgeResourceDetail;
@@ -272,8 +307,108 @@ export function resourceMatchesNativeKnowledgeToolsTarget(
   target: NativeKnowledgeToolsTarget
 ): boolean {
   if (resource.workspaceId !== target.workspaceId) return false;
+  // Workspace-scoped Knowledge was removed from the product surface. Keep
+  // Workspace-scoped Skill compatibility, but never let an old Knowledge
+  // response enter Room management or work references.
+  if (resource.kind === "knowledge" && resource.scope.kind !== "room") return false;
   if (resource.scope.kind === "workspace") return true;
   return resource.scope.kind === "room" && resource.scope.roomId === target.roomId;
+}
+
+/** Room management/search only exposes a confirmed Knowledge projection. */
+export function isNativeRoomKnowledgeResource(
+  resource: WorkspaceCompletionResourceView,
+  target: NativeKnowledgeToolsTarget
+): boolean {
+  return resource.kind === "knowledge"
+    && resource.scope.kind === "room"
+    && resource.scope.roomId === target.roomId
+    && resource.evidenceState === "confirmed"
+    && resourceMatchesNativeKnowledgeToolsTarget(resource, target);
+}
+
+/**
+ * Share is stricter than Room Knowledge browsing.  Archived, provisional,
+ * AI-managed, Skill, Workspace, Agent, and other-Room resources are never
+ * offered to the parent share surface.
+ */
+export function isNativeRoomKnowledgeShareableResource(
+  resource: WorkspaceCompletionResourceView,
+  target: NativeKnowledgeToolsTarget
+): boolean {
+  return isNativeRoomKnowledgeResource(resource, target)
+    && resource.lifecycleState === "active"
+    && resource.aiManaged === false;
+}
+
+export function nativeRoomKnowledgeShareResources(
+  resources: readonly WorkspaceCompletionResourceView[],
+  target: NativeKnowledgeToolsTarget
+): NativeRoomKnowledgeShareResource[] {
+  const unique = new Map<string, NativeRoomKnowledgeShareResource>();
+  for (const resource of resources) {
+    if (!isNativeRoomKnowledgeShareableResource(resource, target)) continue;
+    if (unique.has(resource.id)) continue;
+    unique.set(resource.id, {
+      id: resource.id,
+      version: resource.version,
+      kind: "knowledge",
+      title: resource.title
+    });
+  }
+  return [...unique.values()];
+}
+
+export function nativeRoomKnowledgeShareSelection(
+  target: NativeKnowledgeToolsTarget,
+  roomLabel: string | undefined,
+  resources: readonly NativeRoomKnowledgeShareResource[]
+): NativeRoomKnowledgeShareSelection {
+  return {
+    source: {
+      kind: "room_knowledge",
+      id: target.roomId,
+      label: roomLabel?.trim() || "選択中のRoom"
+    },
+    resources: resources.map((resource) => ({ ...resource }))
+  };
+}
+
+export function nativeKnowledgeResourcesErrorKind(error: unknown): NativeKnowledgeResourcesErrorKind {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const normalized = raw.toLowerCase();
+  return /forbidden|permission|unauthorized|not[_-]?allowed|access|membership/.test(normalized)
+    ? "permission"
+    : "retrieval";
+}
+
+export function nativeKnowledgeShareAvailability(input: {
+  target?: NativeKnowledgeToolsTarget;
+  resourcesLoading: boolean;
+  resourcesLoaded: boolean;
+  resourcesError: string | null;
+  resourcesErrorKind: NativeKnowledgeResourcesErrorKind | null;
+  resources: readonly NativeRoomKnowledgeShareResource[];
+}): NativeKnowledgeShareAvailability {
+  if (input.resourcesErrorKind === "permission") return "permission_denied";
+  if (input.resourcesError) return "retrieval_failed";
+  if (!input.target || input.resourcesLoading || !input.resourcesLoaded) return "loading";
+  return input.resources.length > 0 ? "ready" : "no_resources";
+}
+
+export function nativeKnowledgeShareAvailabilityMessage(status: NativeKnowledgeShareAvailability): string {
+  switch (status) {
+    case "loading":
+      return "共有できるRoom Knowledgeを確認しています…";
+    case "no_resources":
+      return "共有できる確認済み・有効・手動管理のRoom Knowledgeはありません。";
+    case "permission_denied":
+      return "このRoomのKnowledgeを共有する権限がありません。";
+    case "retrieval_failed":
+      return "共有候補のKnowledgeを取得できませんでした。接続とServerの状態を確認してください。";
+    case "ready":
+      return "";
+  }
 }
 
 export function isNativeKnowledgeResourceKind(value: WorkspaceCompletionResourceView["kind"]): value is NativeKnowledgeResourceKind {
@@ -351,6 +486,11 @@ function resourceScopeInput(resource: WorkspaceCompletionResourceView, target: N
   return resource.scope.kind === "room"
     ? { scopeKind: "room", roomId: target.roomId }
     : { scopeKind: "workspace" };
+}
+
+function nativeKnowledgeResourceScopeKind(resource: WorkspaceCompletionResourceView): NativeKnowledgeResourceScope | undefined {
+  if (resource.scope.kind === "room" || resource.scope.kind === "workspace") return resource.scope.kind;
+  return undefined;
 }
 
 function isSupportedLocale(value: string): value is SupportedLocale {
@@ -462,10 +602,11 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
 
   const [tab, setTab] = useState<NativeKnowledgeToolsTab>(options.initialTab ?? "knowledge");
   const [roomResources, setRoomResources] = useState<WorkspaceCompletionResourceView[]>([]);
-  const [workspaceResources, setWorkspaceResources] = useState<WorkspaceCompletionResourceView[]>([]);
   const [skills, setSkills] = useState<WorkspaceCompletionResourceView[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [resourcesLoaded, setResourcesLoaded] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [resourcesErrorKind, setResourcesErrorKind] = useState<NativeKnowledgeResourcesErrorKind | null>(null);
   const [selectedResourceId, setSelectedResourceId] = useState<string>();
   const [selectedResource, setSelectedResource] = useState<NativeKnowledgeResourceDetail>();
   const [resourceLoading, setResourceLoading] = useState(false);
@@ -509,8 +650,12 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
   selectedResourceIdRef.current = selectedResourceId;
 
   const allResources = useMemo(
-    () => [...roomResources, ...workspaceResources, ...skills],
-    [roomResources, workspaceResources, skills]
+    () => [...roomResources, ...skills],
+    [roomResources, skills]
+  );
+  const roomKnowledgeShareResources = useMemo(
+    () => requestedTarget ? nativeRoomKnowledgeShareResources(roomResources, requestedTarget) : [],
+    [roomResources, targetKey]
   );
 
   const isCurrent = useCallback((capturedTargetKey: string): boolean => {
@@ -549,18 +694,23 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     const generation = ++resourceGeneration.current;
     if (!capturedTarget) {
       setRoomResources([]);
-      setWorkspaceResources([]);
       setSkills([]);
+      setResourcesLoaded(false);
       setResourcesError(null);
+      setResourcesErrorKind(null);
       return;
     }
     const bridge = getBridge();
     if (!bridge?.listWorkspaceCompletionResources) {
+      setResourcesLoaded(false);
+      setResourcesErrorKind("retrieval");
       setResourcesError("Knowledgeの既存bridgeが利用できないため、読み取り専用で表示できません。");
       return;
     }
     setResourcesLoading(true);
+    setResourcesLoaded(false);
     setResourcesError(null);
+    setResourcesErrorKind(null);
     try {
       const listResources = (input: { scopeKind: "room" | "workspace"; kind: "knowledge" | "skill" }) => collectCompletionResourcePages(
         (cursor) => withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.listWorkspaceCompletionResources!({
@@ -571,28 +721,22 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
           target: capturedTarget
         }))
       );
-      const [roomKnowledge, workspaceKnowledge, roomSkills, workspaceSkills] = await Promise.all([
+      const [roomKnowledge, roomSkills, workspaceSkills] = await Promise.all([
         listResources({ scopeKind: "room", kind: "knowledge" }),
-        listResources({ scopeKind: "workspace", kind: "knowledge" }),
         listResources({ scopeKind: "room", kind: "skill" }),
         listResources({ scopeKind: "workspace", kind: "skill" })
       ]);
       if (generation !== resourceGeneration.current || !isCurrent(capturedTargetKey)) return;
-      const room = roomKnowledge.filter((resource) => resource.kind === "knowledge"
-        && resource.scope.kind === "room"
-        && resource.scope.roomId === capturedTarget.roomId
-        && resource.workspaceId === capturedTarget.workspaceId);
-      const workspace = workspaceKnowledge.filter((resource) => resource.kind === "knowledge"
-        && resource.scope.kind === "workspace"
-        && resource.workspaceId === capturedTarget.workspaceId);
+      const room = roomKnowledge.filter((resource) => isNativeRoomKnowledgeResource(resource, capturedTarget));
       const listedSkills = [...roomSkills, ...workspaceSkills]
         .filter((resource) => resource.kind === "skill" && resourceMatchesNativeKnowledgeToolsTarget(resource, capturedTarget));
       const uniqueSkills = [...new Map(listedSkills.map((resource) => [resource.id, resource])).values()];
       setRoomResources(room);
-      setWorkspaceResources(workspace);
       setSkills(uniqueSkills);
+      setResourcesLoaded(true);
     } catch (error) {
       if (generation === resourceGeneration.current && isCurrent(capturedTargetKey)) {
+        setResourcesErrorKind(nativeKnowledgeResourcesErrorKind(error));
         setResourcesError(nativeKnowledgeToolsErrorMessage(error));
       }
     } finally {
@@ -647,11 +791,13 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       );
       if (!resourceMatchesNativeKnowledgeToolsTarget(resolved.resource, capturedTarget)) throw new Error("workspace_resource_response_scope_invalid");
       if (!isNativeKnowledgeResourceKind(resolved.resource.kind)) throw new Error("workspace_resource_kind_invalid");
+      const scopeKind = nativeKnowledgeResourceScopeKind(resolved.resource);
+      if (!scopeKind) throw new Error("workspace_resource_scope_invalid");
       setSelectedResource(resolved);
       setDraft({
         resourceId,
         kind: resolved.resource.kind,
-        scopeKind: resolved.resource.scope.kind,
+        scopeKind,
         ...(resolved.resource.scope.kind === "room" ? { roomId: capturedTarget.roomId } : {}),
         title: resolved.resource.title,
         content: resolved.content,
@@ -788,6 +934,10 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       setResourceError("タイトル、本文、作成理由を入力してください。下書きは保持されています。");
       return false;
     }
+    if (currentDraft.kind === "knowledge" && currentDraft.scopeKind !== "room") {
+      setResourceError("Knowledgeは現在のRoomにだけ保存できます。");
+      return false;
+    }
     if (currentDraft.scopeKind === "room" && currentDraft.roomId !== capturedTarget.roomId) {
       setResourceError("作成対象のRoomが切り替わりました。下書きを確認してください。");
       return false;
@@ -813,7 +963,7 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
         scopeKind: currentDraft.scopeKind,
         ...(currentDraft.scopeKind === "room" ? { roomId: capturedTarget.roomId } : {}),
         kind: currentDraft.kind,
-        knowledgeKind: currentDraft.knowledgeKind,
+        ...(currentDraft.kind === "knowledge" ? { knowledgeKind: currentDraft.knowledgeKind } : {}),
         title: currentDraft.title.trim(),
         content: currentDraft.content,
         reason: currentDraft.reason.trim(),
@@ -926,10 +1076,15 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       }));
       const savedResource = validateResourceMutationResponse(response, current.resource.id, capturedTarget);
       if (!isCurrent(capturedTargetKey) || generation !== detailGeneration.current) return false;
+      const scopeKind = nativeKnowledgeResourceScopeKind(current.resource);
+      if (!scopeKind) {
+        setResourceError("この資源の保存先を確認できないため、状態を変更できません。");
+        return false;
+      }
       const submittedDraft = draft ?? {
         resourceId: current.resource.id,
         kind: "knowledge" as const,
-        scopeKind: current.resource.scope.kind,
+        scopeKind,
         ...(current.resource.scope.kind === "room" ? { roomId: capturedTarget.roomId } : {}),
         title: current.resource.title,
         content: current.content,
@@ -981,10 +1136,15 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       }));
       const savedResource = validateResourceMutationResponse(response, current.resource.id, capturedTarget);
       if (!isCurrent(capturedTargetKey) || generation !== detailGeneration.current) return false;
+      const scopeKind = nativeKnowledgeResourceScopeKind(current.resource);
+      if (!scopeKind) {
+        setResourceError("この資源の保存先を確認できないため、状態を変更できません。");
+        return false;
+      }
       const submittedDraft = draft ?? {
         resourceId: current.resource.id,
         kind: current.resource.kind === "skill" ? "skill" as const : "knowledge" as const,
-        scopeKind: current.resource.scope.kind,
+        scopeKind,
         ...(current.resource.scope.kind === "room" ? { roomId: capturedTarget.roomId } : {}),
         title: current.resource.title,
         content: current.content,
@@ -1040,13 +1200,13 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       if (generation !== searchGeneration.current || !isCurrent(capturedTargetKey)) return;
       const records: NativeRoomSearchResult[] = [];
       for (const result of knowledgeResponse) {
-        if (!resourceMatchesNativeKnowledgeToolsTarget(result, capturedTarget) || result.kind !== "knowledge") continue;
+        if (!isNativeRoomKnowledgeResource(result, capturedTarget)) continue;
         records.push({
           key: `knowledge:${result.id}`,
           kind: "knowledge",
           id: result.id,
           title: result.title,
-          summary: `${result.scope.kind === "room" ? "このRoom" : "Workspace共通"} · ${result.creationSource}`,
+          summary: `このRoom · ${result.creationSource}`,
           resource: result,
           ...(result.rank === undefined ? {} : { rank: result.rank })
         });
@@ -1099,13 +1259,14 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       setSettings(nextSettings);
       setSettingsDraft((current) => {
         if (current && (settingsLanguageDirty || settingsLearningDirty)) return current;
-        const scope = learningSnapshot.room ? "room" : "workspace";
-        const scoped = learningSnapshot.room ?? learningSnapshot.workspace ?? learningSnapshot.effective;
+        // Learning belongs to the current Room. Workspace settings are shown
+        // as the inheritance source and are never edited from this panel.
+        const scoped = learningSnapshot.room ?? learningSnapshot.effective;
         return {
           uiLocale: isSupportedLocale(workspace.ui_locale) ? workspace.ui_locale : "ja",
           outputLocale: isSupportedLocale(workspace.output_locale) ? workspace.output_locale : "ja",
           learningEnabled: workspace.learning_enabled,
-          learningScope: scope,
+          learningScope: "room",
           scopedLearningEnabled: scoped.enabled
         };
       });
@@ -1165,23 +1326,11 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     setSettingsBusy("learning");
     setSettingsError(null);
     try {
-      if (currentDraft.learningEnabled !== currentSettings.workspace.learning_enabled && !bridge.patchWorkspaceSettings) {
-        throw new Error("workspace_settings_patch_unavailable");
-      }
-      if (bridge.patchWorkspaceSettings && currentDraft.learningEnabled !== currentSettings.workspace.learning_enabled) {
-        await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.patchWorkspaceSettings!({
-          patch: { learning_enabled: currentDraft.learningEnabled },
-          operationId: createIdempotencyKey(),
-          target: capturedTarget
-        }));
-      }
-      const scopeKind = currentDraft.learningScope;
-      const currentScope = scopeKind === "room"
-        ? currentSettings.learning.room
-        : currentSettings.learning.workspace;
+      const scopeKind = "room" as const;
+      const currentScope = currentSettings.learning.room;
       const result = await withNativeKnowledgeToolsTarget(bridge, capturedTarget, () => bridge.updateWorkspaceLearningSettings!({
         scopeKind,
-        ...(scopeKind === "room" ? { roomId: capturedTarget.roomId } : {}),
+        roomId: capturedTarget.roomId,
         enabled: currentDraft.scopedLearningEnabled,
         expectedVersion: currentScope?.version ?? 0,
         operationId: createIdempotencyKey(),
@@ -1192,7 +1341,6 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
       if (scopeKind === "room" && (resultSettings.scope.kind !== "room" || resultSettings.scope.roomId !== capturedTarget.roomId)) {
         throw new Error("workspace_learning_room_scope_invalid");
       }
-      if (scopeKind === "workspace" && resultSettings.scope.kind !== "workspace") throw new Error("workspace_learning_workspace_scope_invalid");
       if (!isCurrent(capturedTargetKey)) return false;
       setSettingsLearningDirty(false);
       await reloadSettings();
@@ -1317,6 +1465,10 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     setSettingsLearningDirty(false);
     setAutomationJobs([]);
     setAutomationRuns([]);
+    setRoomResources([]);
+    setSkills([]);
+    setResourcesLoaded(false);
+    setResourcesErrorKind(null);
     setResourcesError(null);
     setAutomationError(null);
     setResourcesLoading(false);
@@ -1366,6 +1518,14 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
   const automationCanManage = Boolean(getBridge()?.setWorkspaceAutomationManagement);
   const hasUnsavedChanges = Boolean(draft?.dirty || createDraft?.dirty || settingsLanguageDirty || settingsLearningDirty);
   const saving = createBusy || resourceBusy === "save" || settingsBusy !== null;
+  const shareAvailability = nativeKnowledgeShareAvailability({
+    target: requestedTarget,
+    resourcesLoading,
+    resourcesLoaded,
+    resourcesError,
+    resourcesErrorKind,
+    resources: roomKnowledgeShareResources
+  });
 
   return {
     target: requestedTarget,
@@ -1375,10 +1535,13 @@ export function useNativeKnowledgeTools(options: UseNativeKnowledgeToolsOptions 
     bridgeAvailable,
     readOnly,
     roomResources,
-    workspaceResources,
+    roomKnowledgeShareResources,
     skills,
     resourcesLoading,
+    resourcesLoaded,
     resourcesError,
+    resourcesErrorKind,
+    shareAvailability,
     reloadResources,
     selectedResourceId,
     selectedResource,

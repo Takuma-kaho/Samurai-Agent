@@ -6,6 +6,7 @@ import { WorkspaceServerError } from "./errors";
 import {
   assertSkillSupportRelativePath,
   completionResourcePath,
+  completionSkillSupportPath,
   isWorkspaceCompletionOwnedPath,
   parseWorkspaceCompletionDocument,
   renderWorkspaceCompletionDocument,
@@ -34,6 +35,12 @@ describe("Workspace completion files", () => {
 
   it("rejects a path outside the Workspace", () => {
     expect(() => completionResourcePath({ id: "policy_a", kind: "policy", scope: { kind: "room", roomId: "../room" } })).toThrow(WorkspaceServerError);
+    try {
+      completionResourcePath({ id: "knowledge_a", kind: "knowledge", scope: { kind: "workspace" } });
+      throw new Error("expected Workspace Knowledge to be rejected");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "workspace_memory_removed", status: 409 });
+    }
   });
 
   it("keeps generic Workspace files out of Completion-owned roots", () => {
@@ -69,6 +76,27 @@ describe("Workspace completion files", () => {
     expect(batch.scope).toEqual({ kind: "workspace" });
     await files.finalize(batch);
     await expect(files.read("workspace_a", "profile/PROFILE.md", batch.entries[0]!.sha256)).resolves.toEqual(Buffer.from("workspace profile", "utf8"));
+  });
+
+  it("generates Agent-owned resource and Skill support paths", () => {
+    const scope = { kind: "agent" as const, agentId: "agent_a" };
+    expect(completionResourcePath({ id: "knowledge_a", kind: "knowledge", scope })).toBe("agents/agent_a/knowledge/knowledge_a.md");
+    expect(completionResourcePath({ id: "skill_a", kind: "skill", scope })).toBe("agents/agent_a/skills/skill_a/SKILL.md");
+    expect(completionSkillSupportPath({ id: "skill_a", scope, relativePath: "references/guide.md" })).toBe("agents/agent_a/skills/skill_a/references/guide.md");
+    expect(isWorkspaceCompletionOwnedPath("agents/agent_a/knowledge/knowledge_a.md")).toBe(true);
+  });
+
+  it("stages Agent files only with an exclusive Agent scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-completion-"));
+    roots.push(root);
+    const files = new WorkspaceCompletionFileService(root);
+    const batch = await files.stage("workspace_a", { kind: "agent", agentId: "agent_a" }, [{
+      path: "agents/agent_a/knowledge/knowledge_a.md", content: Buffer.from("agent knowledge", "utf8")
+    }]);
+    expect(batch.scope).toEqual({ kind: "agent", agentId: "agent_a" });
+    await expect(files.stage("workspace_a", { kind: "agent", agentId: "agent_a", roomId: "room_a" }, [{
+      path: "agents/agent_a/knowledge/other.md", content: Buffer.from("body", "utf8")
+    }])).rejects.toMatchObject({ code: "workspace_completion_file_batch_scope_invalid", status: 422 });
   });
 
   it("rejects an ambiguous Room scope before staging files", async () => {
@@ -122,5 +150,24 @@ describe("Workspace completion files", () => {
 
     await expect(restarted.read("workspace_a", "knowledge/first.md", batch.entries[0]!.sha256)).resolves.toEqual(Buffer.from("first", "utf8"));
     await expect(restarted.read("workspace_a", "knowledge/second.md", batch.entries[1]!.sha256)).resolves.toEqual(Buffer.from("second", "utf8"));
+  });
+
+  it("publishes an import batch exclusively without replacing another body", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-completion-"));
+    roots.push(root);
+    const files = new WorkspaceCompletionFileService(root);
+    const first = await files.stage("workspace_a", { kind: "room", roomId: "room_a" }, [{
+      path: "knowledge/knowledge_a.md", content: Buffer.from("first", "utf8")
+    }]);
+    await files.finalizeExclusive(first);
+
+    const second = await files.stage("workspace_a", { kind: "room", roomId: "room_a" }, [{
+      path: "knowledge/knowledge_a.md", content: Buffer.from("second", "utf8")
+    }]);
+    await expect(files.finalizeExclusive(second)).rejects.toMatchObject({
+      code: "workspace_completion_file_path_conflict",
+      status: 409
+    });
+    await expect(files.read("workspace_a", "knowledge/knowledge_a.md", first.entries[0]!.sha256)).resolves.toEqual(Buffer.from("first", "utf8"));
   });
 });

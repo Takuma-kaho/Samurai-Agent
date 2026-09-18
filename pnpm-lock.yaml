@@ -136,6 +136,9 @@ importers:
       express:
         specifier: ^5.2.1
         version: 5.2.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
       socket.io:
         specifier: ^4.8.3
         version: 4.8.3
@@ -146,6 +149,9 @@ importers:
       '@samurai-agent/agent-backends':
         specifier: workspace:*
         version: link:../../packages/agent-backends
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
 
   apps/web:
     dependencies:

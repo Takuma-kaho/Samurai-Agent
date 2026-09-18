@@ -60,6 +60,7 @@ import type {
   NativeSelectionCandidate
 } from "./types";
 import { nativeWorkspaceTargetIdentityKey, nativeWorkspaceTargetKey, nativeWorkspaceTargetMatches } from "./types";
+import { useNativeAgentResources } from "./use-native-agent-resources";
 
 const legacyOrganizationId = "__legacy_connection__";
 
@@ -2151,6 +2152,13 @@ export function useNativeApp() {
   selectedWorkspaceTargetRef.current = selectedWorkspaceTarget && selectedRoomId
     ? { ...selectedWorkspaceTarget, roomId: selectedRoomId }
     : selectedWorkspaceTarget;
+  const agentResourceModel = useNativeAgentResources({
+    bridge,
+    target: selectedWorkspaceTarget,
+    // Workspace roles are only a capability hint.  The Server remains the
+    // authority; the hook falls back to read-only on a denied mutation.
+    canManage: selectedWorkspace?.role === "owner" || selectedWorkspace?.role === "admin"
+  });
   const chatContextTargetKey = selectedWorkspaceTargetKey
     ?? (selectedWorkspaceTarget ? nativeWorkspaceTargetKey(selectedWorkspaceTarget) : undefined);
   const chatContextTargetIdentityKey = selectedWorkspaceTargetRef.current
@@ -2706,9 +2714,14 @@ export function useNativeApp() {
       const candidate = readNativeSelectionCandidate(authorizedConnection, target);
       const selected = listed.find((room) => room.id === candidate?.roomId) ?? listed[0];
       setRooms(listed);
+      setSelectedRoomId(selected?.id);
+      // Publish the initial Room before starting Workspace-scoped side
+      // loads.  The Browser bridge snapshots the active Room to discard
+      // stale responses; starting the Agent list while it is still unset
+      // races the Room-opening effect and surfaces a false error banner.
+      setActiveWorkspaceRoomId(selected?.id);
       void loadWorkspaceAgents(activationId, target);
       void loadWorkspaceAgentBackends(activationId, target);
-      setSelectedRoomId(selected?.id);
       if (selected) void loadRoomAgentMembers(selected.id, activationId, target);
       writeNativeSelectionCandidate({
         connectionId: target.connectionId,
@@ -4399,6 +4412,18 @@ export function useNativeApp() {
     agentBackends,
     agentBackendLoading,
     agentBackendError,
+    agentResources: agentResourceModel.resources,
+    agentResourceAgentId: agentResourceModel.agentId,
+    agentResourceSelectedId: agentResourceModel.selectedResourceId,
+    agentResourceLoading: agentResourceModel.loading,
+    agentResourceError: agentResourceModel.error,
+    agentResourceCanManage: agentResourceModel.canManage,
+    selectAgentResources: agentResourceModel.selectAgent,
+    selectAgentResource: agentResourceModel.selectResource,
+    loadAgentResource: agentResourceModel.loadResource,
+    createAgentResource: agentResourceModel.createResource,
+    updateAgentResource: agentResourceModel.updateResource,
+    archiveAgentResource: agentResourceModel.archiveResource,
     roomAgentMembers,
     roomAgentMembersLoading,
     roomAgentMembersError,

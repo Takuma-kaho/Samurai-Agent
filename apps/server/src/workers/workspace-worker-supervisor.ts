@@ -84,6 +84,14 @@ export interface WorkspaceSkillOptimizationWorkerPort {
   close?(): Promise<void>;
 }
 
+/** Durable Share import lane. The injected adapter owns claim, current target
+ * authorization, fetch/manifest verification, staging, commit, and settlement;
+ * the supervisor only gives it a bounded tick and shutdown signal. */
+export interface WorkspaceShareImportWorkerPort {
+  runTick(context: WorkspaceRequestContext, input: { workerId: string; maxRuns: number; signal: AbortSignal }): Promise<unknown>;
+  close?(): Promise<void>;
+}
+
 export type WorkspaceWorkerSupervisorState = "starting" | "running" | "retrying" | "disabled" | "stopping" | "stopped";
 
 export interface WorkspaceWorkerSupervisorStatus {
@@ -129,6 +137,7 @@ export interface WorkspaceWorkerSupervisorOptions {
   clientEventQueue?: WorkspaceClientEventQueuePort;
   gatewayMaintenance?: WorkspaceGatewayMaintenancePort;
   skillOptimizationWorker?: WorkspaceSkillOptimizationWorkerPort;
+  shareImportWorker?: WorkspaceShareImportWorkerPort;
   onError?(error: unknown): void;
 }
 
@@ -286,6 +295,7 @@ export class WorkspaceWorkerSupervisor {
     closePort(this.options.clientEventQueue);
     closePort(this.options.gatewayMaintenance);
     closePort(this.options.skillOptimizationWorker);
+    closePort(this.options.shareImportWorker);
     const results = await Promise.allSettled([starting, activeTick, activeStopTick, ...closePromises]);
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
     this.permanentlyStopped = true;
@@ -373,6 +383,13 @@ export class WorkspaceWorkerSupervisor {
         }
         if (this.options.roomWorkWorker) {
           await this.options.roomWorkWorker.runTick(context, {
+            workerId: this.options.workerId,
+            maxRuns: this.options.maxRuns,
+            signal: this.controller.signal
+          });
+        }
+        if (this.options.shareImportWorker) {
+          await this.options.shareImportWorker.runTick(context, {
             workerId: this.options.workerId,
             maxRuns: this.options.maxRuns,
             signal: this.controller.signal

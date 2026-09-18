@@ -32,6 +32,44 @@ describe("chat idempotency keys", () => {
     await expect(api.startChat("本文", "ja", "ja", "turn-new-1")).rejects.toMatchObject({ status: 503 });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("passes personal preferences only as an optional chat-start snapshot", async () => {
+    const sendWorkspaceChatMessage = vi.fn(async (_input: unknown) => ({ result: {} as never }));
+    vi.stubGlobal("window", { samuraiDesktop: { sendWorkspaceChatMessage } });
+    const personalPreferences = {
+      schema_version: 1 as const,
+      revision: 4,
+      display_name: "登録名",
+      output_locale: "ja" as const,
+      instructions: "簡潔に"
+    };
+
+    await api.submitChatSurfaceOperation({
+      idempotencyKey: "turn-prefs",
+      sessionId: "session-1",
+      content: "本文",
+      outputLocale: "ja",
+      personalPreferences
+    });
+
+    expect(sendWorkspaceChatMessage).toHaveBeenCalledWith(expect.objectContaining({ personalPreferences }));
+    expect(sendWorkspaceChatMessage.mock.calls[0]?.[0]).not.toHaveProperty("metadata.personal_preferences");
+  });
+});
+
+describe("external Share link bridge", () => {
+  it("uses only the fixed view/import methods and preserves the operation id", async () => {
+    const viewWorkspaceShareLink = vi.fn(async (input: unknown) => ({ sourceUrl: (input as { sourceUrl: string }).sourceUrl }));
+    const importWorkspaceShareLink = vi.fn(async (input: unknown) => ({ importId: (input as { operationId: string }).operationId }));
+    vi.stubGlobal("window", { samuraiDesktop: { viewWorkspaceShareLink, importWorkspaceShareLink } });
+
+    const sourceUrl = `https://source.example/s/${"a".repeat(43)}`;
+    await api.viewWorkspaceShareLink({ sourceUrl });
+    await api.importWorkspaceShareLink({ sourceUrl, operationId: "share_link_import_1" });
+
+    expect(viewWorkspaceShareLink).toHaveBeenCalledWith({ sourceUrl });
+    expect(importWorkspaceShareLink).toHaveBeenCalledWith({ sourceUrl, operationId: "share_link_import_1" });
+  });
 });
 
 describe("Room work bridge", () => {
@@ -231,6 +269,43 @@ describe("Room work bridge", () => {
 
     expect(setWorkspaceRoomDefaultAgent).toHaveBeenCalledWith(expect.objectContaining({ roomId: "room_1", operationId: "default_1", target }));
     expect(openWorkspaceAgentDm).toHaveBeenCalledWith({ agentId: "agent_1", operationId: "dm_1", target });
+  });
+});
+
+describe("Share bridge contract", () => {
+  it("injects only fixed Share methods and binds a generated operation id", async () => {
+    const createWorkspaceShareDraft = vi.fn(async (_input: { operationId?: string }) => ({}));
+    const updateWorkspaceShareDraft = vi.fn(async (_input: { operationId?: string }) => ({}));
+    const discardWorkspaceShareDraft = vi.fn(async (_input: { operationId?: string }) => ({}));
+    vi.stubGlobal("window", { samuraiDesktop: { createWorkspaceShareDraft, updateWorkspaceShareDraft, discardWorkspaceShareDraft } });
+
+    await api.createWorkspaceShareDraft({
+      baseShareId: "share_public_1"
+    });
+
+    const operationId = createWorkspaceShareDraft.mock.calls[0]?.[0]?.operationId;
+    expect(typeof operationId).toBe("string");
+    expect(operationId).toBeTruthy();
+    await api.updateWorkspaceShareDraft({
+      draftId: "draft_1",
+      expectedVersion: 1,
+      manifest: { formatVersion: 1, kind: "room_knowledge", title: "Share", entries: [{ entryId: "entry_1", kind: "knowledge", title: "Knowledge", content: "Body", knowledgeKind: "fact", files: [] }] },
+      visibility: "restricted",
+      recipientAccountIds: ["account_1"]
+    });
+    await api.discardWorkspaceShareDraft({ draftId: "draft_1", expectedVersion: 1 });
+    expect(updateWorkspaceShareDraft.mock.calls[0]?.[0]?.operationId).toBeTruthy();
+    expect(discardWorkspaceShareDraft.mock.calls[0]?.[0]?.operationId).toBeTruthy();
+    expect(browserBridgeSource).toContain("createWorkspaceShareDraft");
+    expect(browserBridgeSource).toContain("viewWorkspaceShareDraft");
+    expect(browserBridgeSource).toContain("updateWorkspaceShareDraft");
+    expect(browserBridgeSource).toContain("discardWorkspaceShareDraft");
+    expect(browserBridgeSource).toContain("listWorkspaceShares");
+    expect(browserBridgeSource).toContain("publishWorkspaceShare");
+    expect(browserBridgeSource).toContain("revokeWorkspaceShare");
+    expect(browserBridgeSource).toContain("importWorkspaceShare");
+    expect(browserBridgeSource).toContain("getWorkspaceShareImportStatus");
+    expect(apiSource).toContain("no generic signed request is exposed");
   });
 });
 

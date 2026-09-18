@@ -48,6 +48,14 @@ import {
   PublicLearningSettingsSchema,
   PublicLearningSettingsLayersSchema,
   PublicLearningSettingsPatchInputSchema,
+  PublicAccountInvitationNotificationReadResultSchema,
+  PublicAccountInvitationNotificationsPageSchema,
+  PublicAccountWorkspaceNotificationSummariesSchema,
+  PublicNotificationMarkReadResultSchema,
+  PublicNotificationPageSchema,
+  PublicNotificationSummarySchema,
+  PublicTargetSchema,
+  PublicWorkspaceSearchPageSchema,
   PublicRuntimeSettingsSchema,
   PublicEventEnvelopeSchema,
   PublicWorkspaceDirectorySchema,
@@ -72,7 +80,9 @@ import {
   type RunControlAction,
   type DomainApiResponse,
   type EventReplayPage,
-  type PublicEventEnvelope
+  type PublicEventEnvelope,
+  type PersonalPreferencesSnapshot,
+  type PublicRequestContext
 } from "@samurai-agent/domain-api";
 import {
   operationDefinitions,
@@ -269,6 +279,42 @@ const organizationQueryIds = new Set<string>([
   "organization.workspace.list", "workspace.organization.move.preflight", "workspace.organization.move.status"
 ]);
 
+/** Account-authenticated context/notification operations intentionally stay
+ * outside the Organization operation sets.  In particular, an Organization
+ * path must never make these operations appear Organization-scoped. */
+const accountCommandIds = new Set<string>(["account.invitation_notification_read"]);
+const accountQueryIds = new Set<string>([
+  "account.workspace_notification_summaries",
+  "account.invitation_notifications"
+]);
+
+/** Share operations are Workspace-scoped management contracts.  Keep the
+ * dispatch list explicit so an Account/Organization route can never reach
+ * the share Core by merely matching a `share.*` prefix. */
+const workspaceShareCommandIds = new Set<string>([
+  "share.draft.create",
+  "share.draft.update",
+  "share.draft.discard",
+  "share.publish",
+  "share.revoke",
+  "share.import"
+]);
+const workspaceShareQueryIds = new Set<string>([
+  "share.draft.view",
+  "share.list",
+  "share.view",
+  "share.import.status"
+]);
+
+/** Preferences are an authenticated execution snapshot, never a general
+ * query/management context.  Keep this allowlist explicit so a caller cannot
+ * smuggle Account settings into search, notifications, sharing, or controls. */
+const personalPreferencesCommandIds = new Set<string>([
+  "chat.turn.run",
+  "room.work.create",
+  "room.work.reply"
+]);
+
 type CompletionManagementService = Pick<WorkspaceCompletionService, "getResourceRefForRoom"> & Partial<Pick<WorkspaceCompletionService,
   "listResourcesPage" | "searchKnowledgePage" | "getResource" | "getResourceBody" | "listResourceVersions" | "listEvidence" | "getSkillDocument">>;
 
@@ -277,6 +323,121 @@ type RuntimeAutomationService = Pick<PostgresRuntimeAutomation, "createJob" | "l
 type LearningManagementService = Pick<WorkspaceLearningService, "getSettingsLayers" | "updateSettings">;
 type LearningRunnerService = {
   schedule(context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">, input?: { roomId?: string }): void;
+};
+
+/**
+ * Context/Notification Core is kept as a structural seam here so the HTTP
+ * adapter does not become the owner of either SQL authorization boundary.
+ * The concrete services live in packages/workspace-server and are injected by
+ * the host without making this adapter depend on their storage.
+ */
+type WorkspaceContextQueryManagementService = {
+  search(
+    context: { accountId: string; workspaceId: string },
+    input: {
+      q: unknown;
+      types?: unknown;
+      room_id?: unknown;
+      roomId?: unknown;
+      limit?: unknown;
+      cursor?: unknown;
+    }
+  ): Promise<{
+    items: readonly WorkspaceContextSearchItemProjection[];
+    next_cursor: string | null;
+  }>;
+};
+
+type WorkspaceContextSearchItemProjection = {
+  type: string;
+  id: string;
+  room_id: string;
+  title: string;
+  snippet: string;
+  updated_at: string;
+  target: unknown;
+};
+
+type WorkspaceNotificationPageInput = {
+  unreadOnly?: boolean;
+  limit?: number;
+  cursor?: string;
+};
+
+type WorkspaceNotificationViewProjection = {
+  id: string;
+  kind: string;
+  createdAt: string;
+  readAt: string | null;
+  title: string;
+  summary: string;
+  target: unknown;
+  actionState: string;
+};
+
+type WorkspaceNotificationPageProjection = {
+  items: readonly WorkspaceNotificationViewProjection[];
+  nextCursor: string | null;
+};
+
+type WorkspaceNotificationReadProjection = {
+  updatedIds: readonly string[];
+  alreadyReadIds: readonly string[];
+  readAt: string;
+};
+
+type WorkspaceNotificationManagementService = {
+  listNotifications(
+    context: { accountId: string; workspaceId: string },
+    input?: WorkspaceNotificationPageInput
+  ): Promise<WorkspaceNotificationPageProjection>;
+  notificationSummary(context: { accountId: string; workspaceId: string }): Promise<{
+    unreadCount: number;
+    asOf: string;
+  }>;
+  markNotificationsRead(
+    context: { accountId: string; workspaceId: string },
+    notificationIds: readonly string[]
+  ): Promise<WorkspaceNotificationReadProjection>;
+  listWorkspaceNotificationSummaries(
+    context: { accountId: string },
+    workspaceIds: readonly string[]
+  ): Promise<readonly {
+    workspaceId: string;
+    unreadCount: number;
+    asOf: string;
+  }[]>;
+  listInvitationNotifications(
+    context: { accountId: string },
+    input?: WorkspaceNotificationPageInput
+  ): Promise<WorkspaceNotificationPageProjection>;
+  markInvitationNotificationsRead(
+    context: { accountId: string },
+    notificationIds: readonly string[]
+  ): Promise<WorkspaceNotificationReadProjection>;
+};
+
+/** Structural seam for the Workspace Share Core.  The concrete
+ * `WorkspaceShareService` lives in packages/workspace-server and owns SQL,
+ * file, authorization, and replay checks.  The adapter intentionally does
+ * not duplicate those decisions or reshape its safe public projections. */
+type WorkspaceShareManagementService = {
+  createDraft(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  updateDraft(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  viewDraft(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  discardDraft(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  publish(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  list(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  view(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  revoke(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  import(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+  importStatus(context: WorkspaceShareServiceContext, input: unknown): Promise<unknown>;
+};
+
+type WorkspaceShareServiceContext = {
+  workspaceId: string;
+  accountId: string;
+  operationId?: string;
 };
 
 export type V1Dependencies = {
@@ -305,6 +466,13 @@ export type V1Dependencies = {
   learningRunner?: LearningRunnerService;
   automation?: RuntimeAutomationService;
   interactionWorkflow?: WorkspaceInteractionRequestWorkflowService;
+  /** Context/Notification Core services are optional only for host
+   * composition; their public operations fail closed when absent. */
+  contextQuery?: WorkspaceContextQueryManagementService;
+  notifications?: WorkspaceNotificationManagementService;
+  /** Share Core is optional only for host composition; every share contract
+   * fails closed when the signed Workspace service is unavailable. */
+  share?: WorkspaceShareManagementService;
   backendRegistry: {
     statuses(): readonly AgentBackendStatusProjection[];
   };
@@ -629,12 +797,20 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
       ? { ...parsedInput, workspace_id: parsedInput.workspace_id ?? pathParam(req, "workspaceId") }
       : parsedInput;
     const operation = operationContext(req);
+    if (workspaceShareCommandIds.has(operationId)) {
+      assertWorkspaceSharePathBinding(pathParam(req, "workspaceId"), operation.workspaceId);
+    }
+    const personalPreferences = resolveExecutionPersonalPreferences(operationId, request.context, input);
     const context = trustedContext(operation, request.context, operationId);
-    const result = await executeCommand({ operationId, input, requestContext: request.context, context, req, operation, dependencies: executionDependencies });
+    const result = await executeCommand({ operationId, input, requestContext: request.context, personalPreferences, context, req, operation, dependencies: executionDependencies });
     const response = apiResponse(req, publicOperationResult(operationId, result.value, operation.accountId), result.replayed);
-    const status = operationId === "generated_surface.action.run" && isGeneratedSurfaceAsyncResult(result.value)
-      ? result.replayed ? 200 : 202
-      : result.replayed ? 200 : 201;
+    const status = result.replayed
+      ? 200
+      : operationId === "share.import" && recordValue(result.value).status === "staging"
+        ? 202
+        : operationId === "generated_surface.action.run" && isGeneratedSurfaceAsyncResult(result.value)
+          ? 202
+          : 201;
     res.status(status).json(response);
   }));
 
@@ -651,6 +827,10 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     const input = definition
       ? parseOperationInput(definition, request.input, queryId)
       : parsePublicOperationInput(queryId, request.input);
+    if (workspaceShareQueryIds.has(queryId)) {
+      assertWorkspaceSharePathBinding(pathParam(req, "workspaceId"), workspaceContext(req).workspaceId);
+    }
+    resolveExecutionPersonalPreferences(queryId, request.context, input);
     const context = trustedContext(workspaceContext(req), request.context, undefined, requestId(req));
     const result = await executeQuery(queryId, input, request.context, context, executionDependencies);
     res.json(apiResponse(req, publicOperationResult(queryId, result), false));
@@ -716,6 +896,7 @@ export function mountDomainApiV1(dependencies: V1Dependencies): void {
     const action = RunControlActionSchema.safeParse(pathParam(req, "action"));
     if (!action.success) throw new WorkspaceServerError("run_control_action_invalid", 400);
     const input = parseRunControlRequest(req.body, action.data);
+    resolveExecutionPersonalPreferences("run.control", input.context, input.input);
     const operation = operationContext(req);
     const runId = pathParam(req, "runId");
     const execution = await runControlService.execute({
@@ -788,7 +969,9 @@ function mountWorkspaceManagementRoutes(dependencies: V1Dependencies): void {
   const completionView = async (req: Request, res: Response, resourceId: string): Promise<void> => {
     const input = parsePublicOperationInput("completion.resource.view", {
       resource_id: resourceId,
+      ...(optionalQuery(req, "scope_kind") ? { scope_kind: optionalQuery(req, "scope_kind") } : {}),
       ...(optionalQuery(req, "room_id") ? { room_id: optionalQuery(req, "room_id") } : {}),
+      ...(optionalQuery(req, "agent_id") ? { agent_id: optionalQuery(req, "agent_id") } : {}),
       ...(optionalQuery(req, "kind") ? { kind: optionalQuery(req, "kind") } : {}),
       ...(managementQueryNumber(req, "versions_limit") === undefined ? {} : { versions_limit: managementQueryNumber(req, "versions_limit") }),
       ...(managementQueryNumber(req, "evidence_limit") === undefined ? {} : { evidence_limit: managementQueryNumber(req, "evidence_limit") })
@@ -798,7 +981,9 @@ function mountWorkspaceManagementRoutes(dependencies: V1Dependencies): void {
   const completionBody = async (req: Request, res: Response, resourceId: string): Promise<void> => {
     const input = parsePublicOperationInput("completion.resource.body", {
       resource_id: resourceId,
+      ...(optionalQuery(req, "scope_kind") ? { scope_kind: optionalQuery(req, "scope_kind") } : {}),
       ...(optionalQuery(req, "room_id") ? { room_id: optionalQuery(req, "room_id") } : {}),
+      ...(optionalQuery(req, "agent_id") ? { agent_id: optionalQuery(req, "agent_id") } : {}),
       ...(optionalQuery(req, "kind") ? { kind: optionalQuery(req, "kind") } : {}),
       ...(managementQueryNumber(req, "version") === undefined ? {} : { version: managementQueryNumber(req, "version") })
     });
@@ -822,7 +1007,9 @@ function mountWorkspaceManagementRoutes(dependencies: V1Dependencies): void {
     const input = parsePublicOperationInput("completion.resource.body", {
       resource_id: resourceId,
       kind: "skill",
+      ...(optionalQuery(req, "scope_kind") ? { scope_kind: optionalQuery(req, "scope_kind") } : {}),
       ...(optionalQuery(req, "room_id") ? { room_id: optionalQuery(req, "room_id") } : {}),
+      ...(optionalQuery(req, "agent_id") ? { agent_id: optionalQuery(req, "agent_id") } : {}),
       ...(managementQueryNumber(req, "version") === undefined ? {} : { version: managementQueryNumber(req, "version") })
     });
     res.json(await runQuery(req, "completion.resource.body", input));
@@ -951,7 +1138,7 @@ function mountWorkspaceManagementRoutes(dependencies: V1Dependencies): void {
 function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
   const { app, authenticateAccount, asyncRoute } = dependencies;
 
-  const catalog = (_req: Request, res: Response): void => {
+  const catalog = (_req: Request, res: Response, includeAccountOperations = false): void => {
     const contracts = operationDefinitions
       .filter((definition) => organizationCatalogOperationIds.has(definition.id) && v1OperationIds.has(definition.id) && definition.sources.includes("runtime_api"))
       .map((definition) => ({
@@ -968,11 +1155,26 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
         concurrency: definition.concurrency,
         sources: [...definition.sources]
       }));
-    res.json(DomainApiCatalogSchema.parse({ api_version: "1", contracts, events: eventCatalog, run_controls: runControlCatalog }));
+    const accountContracts = includeAccountOperations
+      ? publicManagementContractDefinitions
+        .filter((definition) => accountCommandIds.has(definition.id) || accountQueryIds.has(definition.id))
+        .map((definition) => ({
+          id: definition.id,
+          kind: definition.kind,
+          version: definition.version,
+          availability: definition.availability,
+          input_schema: schemaForPublicContract(definition.input, `${definition.id}.input`),
+          output_schema: schemaForPublicContract(definition.output, `${definition.id}.output`),
+          idempotency: definition.idempotency,
+          concurrency: definition.concurrency,
+          sources: [...definition.sources]
+        }))
+      : [];
+    res.json(DomainApiCatalogSchema.parse({ api_version: "1", contracts: [...contracts, ...accountContracts], events: eventCatalog, run_controls: runControlCatalog }));
   };
 
   app.get("/api/v1/domain/catalog", authenticateAccount, asyncRoute(async (req, res) => {
-    catalog(req, res);
+    catalog(req, res, true);
   }));
   app.get("/api/v1/organizations/:organizationId/domain/catalog", authenticateAccount, asyncRoute(async (req, res) => {
     catalog(req, res);
@@ -980,6 +1182,19 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
 
   const operationRoute = (withOrganizationIdPath = false) => asyncRoute(async (req, res) => {
     const operationId = pathParam(req, "operationId");
+    if (!withOrganizationIdPath && accountCommandIds.has(operationId)) {
+      const request = parseDomainRequest(req.body);
+      const input = parsePublicOperationInput(operationId, request.input);
+      resolveExecutionPersonalPreferences(operationId, request.context, input);
+      // Passing no organization selector keeps this Account-authenticated
+      // operation independent from Organization membership. The injected
+      // context builder still derives accountId from the trusted signature.
+      const operation = dependencies.organizationContext(req, undefined, { mutation: true });
+      const result = await executeAccountCommandOperation({ operationId, input, operation, dependencies });
+      const response = apiResponse(req, publicOperationResult(operationId, result.value, operation.accountId), result.replayed);
+      res.status(result.replayed ? 200 : 201).json(response);
+      return;
+    }
     if (!organizationRouteOperationIds.has(operationId) || !organizationCommandIds.has(operationId)) {
       throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
     }
@@ -989,6 +1204,7 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
     }
     const request = parseDomainRequest(req.body);
     const input = parseOperationInput(definition, request.input, operationId);
+    resolveExecutionPersonalPreferences(operationId, request.context, input);
     if (operationId === "workspace.bundle.restore" && !withOrganizationIdPath) assertStandaloneBundleOperationInput(input);
     const organizationIdFromPath = withOrganizationIdPath ? pathParam(req, "organizationId") : undefined;
     const inputOrganizationId = optionalStringField(input, "organization_id");
@@ -1017,6 +1233,17 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
 
   const queryRoute = (withOrganizationIdPath = false) => asyncRoute(async (req, res) => {
     const queryId = pathParam(req, "queryId");
+    if (!withOrganizationIdPath && accountQueryIds.has(queryId)) {
+      const request = parseDomainRequest(req.body);
+      const input = parsePublicOperationInput(queryId, request.input);
+      resolveExecutionPersonalPreferences(queryId, request.context, input);
+      // Account context is trusted authentication only; no Organization ID
+      // is resolved for these queries.
+      const operation = dependencies.organizationContext(req, undefined, { mutation: false });
+      const result = await executeAccountQueryOperation({ queryId, input, operation, dependencies });
+      res.json(apiResponse(req, publicOperationResult(queryId, result, operation.accountId), false));
+      return;
+    }
     if (!organizationRouteOperationIds.has(queryId) || !organizationQueryIds.has(queryId)) {
       throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
     }
@@ -1026,6 +1253,7 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
     }
     const request = parseDomainRequest(req.body);
     const input = parseOperationInput(definition, request.input, queryId);
+    resolveExecutionPersonalPreferences(queryId, request.context, input);
     const organizationIdFromPath = withOrganizationIdPath ? pathParam(req, "organizationId") : undefined;
     const inputOrganizationId = optionalStringField(input, "organization_id");
     if (organizationIdFromPath && inputOrganizationId && inputOrganizationId !== organizationIdFromPath) {
@@ -1039,6 +1267,64 @@ function mountOrganizationDomainRoutes(dependencies: V1Dependencies): void {
 
   app.post("/api/v1/domain/queries/:queryId", authenticateAccount, queryRoute());
   app.post("/api/v1/organizations/:organizationId/domain/queries/:queryId", authenticateAccount, queryRoute(true));
+}
+
+async function executeAccountCommandOperation(input: {
+  operationId: string;
+  input: Record<string, unknown>;
+  operation: OrganizationApiRequestContext;
+  dependencies: V1Dependencies;
+}): Promise<{ value: JsonValue; replayed: boolean }> {
+  const { operationId, input: value, operation, dependencies } = input;
+  if (!accountCommandIds.has(operationId)) {
+    throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+  }
+  if (operationId === "account.invitation_notification_read") {
+    const notifications = requireNotificationManagementService(dependencies, operationId);
+    const result = await notifications.markInvitationNotificationsRead(
+      { accountId: operation.accountId },
+      value.notification_ids as readonly string[]
+    );
+    return { value: publicNotificationReadResult(result, PublicAccountInvitationNotificationReadResultSchema), replayed: false };
+  }
+  throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
+}
+
+async function executeAccountQueryOperation(input: {
+  queryId: string;
+  input: Record<string, unknown>;
+  operation: OrganizationApiRequestContext;
+  dependencies: V1Dependencies;
+}): Promise<JsonValue> {
+  const { queryId, input: value, operation, dependencies } = input;
+  if (!accountQueryIds.has(queryId)) {
+    throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
+  }
+  const notifications = requireNotificationManagementService(dependencies, queryId);
+  if (queryId === "account.workspace_notification_summaries") {
+    const summaries = await notifications.listWorkspaceNotificationSummaries(
+      { accountId: operation.accountId },
+      value.workspace_ids as readonly string[]
+    );
+    return PublicAccountWorkspaceNotificationSummariesSchema.parse({
+      items: summaries.map((summary) => ({
+        workspace_id: summary.workspaceId,
+        unread_count: summary.unreadCount,
+        as_of: summary.asOf
+      }))
+    }) as JsonValue;
+  }
+  if (queryId === "account.invitation_notifications") {
+    const page = await notifications.listInvitationNotifications(
+      { accountId: operation.accountId },
+      {
+        limit: numberField(value, "limit"),
+        ...(value.cursor === undefined ? {} : { cursor: stringField(value, "cursor") })
+      }
+    );
+    return publicNotificationPage(page, PublicAccountInvitationNotificationsPageSchema);
+  }
+  throw new WorkspaceServerError("domain_query_not_available", 404, { query_id: queryId });
 }
 
 /** The REST and Domain API v1 routes share this command dispatch. */
@@ -1165,6 +1451,24 @@ function normalizeOrganizationCommandResult(raw: unknown, envelopeKey?: string):
   return { value: raw, replayed };
 }
 
+/**
+ * Share mutations use an explicit Core result envelope when replay metadata is
+ * available.  Keep the compatibility path for older injected services that
+ * return the public DTO directly, but reject a partial/extended envelope
+ * rather than allowing replay metadata or internal fields into the DTO.
+ */
+function unwrapWorkspaceShareMutationResult(raw: unknown): { value: unknown; replayed: boolean } {
+  const body = recordValue(raw);
+  const hasValue = Object.prototype.hasOwnProperty.call(body, "value");
+  const hasReplayed = Object.prototype.hasOwnProperty.call(body, "replayed");
+  if (!hasValue && !hasReplayed) return { value: raw, replayed: false };
+  if (!hasValue || !hasReplayed || typeof body.replayed !== "boolean"
+    || Object.keys(body).some((key) => key !== "value" && key !== "replayed")) {
+    throw new WorkspaceServerError("workspace_share_result_invalid", 500);
+  }
+  return { value: body.value, replayed: body.replayed };
+}
+
 async function executePublicManagementCommand(input: {
   operationId: string;
   input: Record<string, unknown>;
@@ -1173,14 +1477,50 @@ async function executePublicManagementCommand(input: {
   dependencies: V1Dependencies;
 }): Promise<{ value: JsonValue; replayed: boolean }> {
   const { operationId, input: value, requestContext, context: operation, dependencies } = input;
+  if (workspaceShareCommandIds.has(operationId)) {
+    const shares = requireWorkspaceShareManagementService(dependencies, operationId);
+    const shareContext = workspaceShareContext(operation, true);
+    assertWorkspaceShareInputBinding(operationId, value, shareContext);
+    const result = operationId === "share.draft.create"
+      ? await shares.createDraft(shareContext, value)
+      : operationId === "share.draft.update"
+        ? await shares.updateDraft(shareContext, value)
+        : operationId === "share.draft.discard"
+          ? await shares.discardDraft(shareContext, value)
+          : operationId === "share.publish"
+            ? await shares.publish(shareContext, value)
+            : operationId === "share.revoke"
+              ? await shares.revoke(shareContext, value)
+              : await shares.import(shareContext, value);
+    // The Share Core already returns the allowlisted public projection.  It
+    // may additionally return the strict `{ value, replayed }` mutation
+    // envelope. Keep replay metadata at the API envelope and out of the
+    // registered public DTO before `publicOperationResult` validates it.
+    const unwrapped = unwrapWorkspaceShareMutationResult(result);
+    return { value: unwrapped.value as JsonValue, replayed: unwrapped.replayed };
+  }
+  if (operationId === "notification.mark_read") {
+    const notifications = requireNotificationManagementService(dependencies, operationId);
+    const result = await notifications.markNotificationsRead(
+      { workspaceId: operation.workspaceId, accountId: operation.accountId },
+      value.notification_ids as readonly string[]
+    );
+    return {
+      value: publicNotificationReadResult(result, PublicNotificationMarkReadResultSchema),
+      replayed: false
+    };
+  }
   if (operationId.startsWith("completion.resource.")) {
     const completion = requireCompletionManagementService(dependencies);
-    if (operationId !== "completion.resource.create" && requestContext.room_id) {
+    if (requestContext.room_id && value.agent_id) throw new WorkspaceServerError("completion_scope_targets_exclusive", 400);
+    if (operationId !== "completion.resource.create") {
       const current = await completion.getResource!(
         { workspaceId: operation.workspaceId, accountId: operation.accountId },
         stringField(value, "resource_id")
       );
-      assertCompletionTarget(publicCompletionResource(current.resource), requestContext);
+      const currentResource = publicCompletionResource(current.resource);
+      assertCompletionTarget(currentResource, requestContext);
+      assertCompletionTarget(currentResource, value);
     }
     let saved: { resource: unknown; replayed: boolean };
     let eventType: string;
@@ -1219,6 +1559,7 @@ async function executePublicManagementCommand(input: {
     }
     const resource = publicCompletionResource(saved.resource);
     assertCompletionTarget(resource, requestContext);
+    assertCompletionTarget(resource, value);
     if (!saved.replayed) {
       const resourceBody = resource as unknown as Record<string, unknown>;
       const roomId = completionResourceRoomId(resourceBody);
@@ -1332,18 +1673,69 @@ async function executePublicManagementQuery(input: {
 }): Promise<JsonValue> {
   const { queryId, input: value, requestContext, context, dependencies } = input;
   const serviceContext = { workspaceId: context.workspaceId, accountId: context.actorId };
+  if (workspaceShareQueryIds.has(queryId)) {
+    const shares = requireWorkspaceShareManagementService(dependencies, queryId);
+    const shareContext = workspaceShareContext(context);
+    assertWorkspaceShareInputBinding(queryId, value, shareContext);
+    const result = queryId === "share.draft.view"
+      ? await shares.viewDraft(shareContext, value)
+      : queryId === "share.list"
+        ? await shares.list(shareContext, value)
+        : queryId === "share.view"
+          ? await shares.view(shareContext, value)
+          : await shares.importStatus(shareContext, value);
+    // Preserve the Core's safe management/public projection. The registered
+    // output schema is applied once by `publicOperationResult` at the route.
+    return result as JsonValue;
+  }
+  if (queryId === "workspace.search") {
+    const contextQuery = requireContextQueryManagementService(dependencies, queryId);
+    const page = await contextQuery.search(serviceContext, {
+      q: value.q,
+      types: value.types,
+      ...(value.room_id === undefined ? {} : { room_id: value.room_id }),
+      ...(value.limit === undefined ? {} : { limit: value.limit }),
+      ...(value.cursor === undefined ? {} : { cursor: value.cursor })
+    });
+    return PublicWorkspaceSearchPageSchema.parse(page) as JsonValue;
+  }
+  if (queryId === "notification.list") {
+    const notifications = requireNotificationManagementService(dependencies, queryId);
+    const page = await notifications.listNotifications(serviceContext, {
+      unreadOnly: value.unread_only === true,
+      limit: numberField(value, "limit"),
+      ...(value.cursor === undefined ? {} : { cursor: stringField(value, "cursor") })
+    });
+    return publicNotificationPage(page, PublicNotificationPageSchema);
+  }
+  if (queryId === "notification.summary") {
+    const notifications = requireNotificationManagementService(dependencies, queryId);
+    const summary = await notifications.notificationSummary(serviceContext);
+    return PublicNotificationSummarySchema.parse({
+      unread_count: summary.unreadCount,
+      as_of: summary.asOf
+    }) as JsonValue;
+  }
   if (queryId === "completion.resource.list") {
     const completion = requireCompletionManagementService(dependencies);
+    const requestedScopeKind = optionalStringField(value, "scope_kind")
+      ?? (value.agent_id ? "agent" : value.room_id ? "room" : undefined);
     const listInput = {
       ...(value.room_id ? { roomId: stringField(value, "room_id") } : {}),
+      ...(value.agent_id ? { agentId: stringField(value, "agent_id") } : {}),
+      ...(requestedScopeKind ? { scopeKind: requestedScopeKind as "workspace" | "room" | "agent" } : {}),
       ...(value.kind ? { kind: stringField(value, "kind") as never } : {}),
       ...(value.include_archived ? { includeArchived: true } : {}),
       ...(value.limit ? { limit: numberField(value, "limit") } : {}),
       ...(value.cursor ? { cursor: stringField(value, "cursor") } : {})
     };
     let page;
-    const requestedScopeKind = optionalStringField(value, "scope_kind");
-    if (!requestedScopeKind) {
+    // Skill and Policy lists are already complete at the SQL target boundary:
+    // both may include retained Workspace-owned definitions, and the fixed
+    // kind filter means there is no Room Knowledge page to reconstruct by
+    // scanning. Keep the cursor-walk only for the mixed Knowledge view.
+    if (!requestedScopeKind || requestedScopeKind === "agent" || requestedScopeKind === "workspace"
+      || value.kind === "skill" || value.kind === "policy") {
       page = await completion.listResourcesPage!(serviceContext, listInput);
     } else {
       // The Completion SQL facade can constrain an authorized Room target,
@@ -1352,7 +1744,7 @@ async function executePublicManagementQuery(input: {
       // public page. Filtering only the first SQL page would hide a Room
       // resource whenever unrelated Workspace rows filled that page.
       const limit = numberField(value, "limit");
-      const targetRoomId = requestedScopeKind === "room" ? stringField(value, "room_id") : undefined;
+      const targetRoomId = stringField(value, "room_id");
       const items: Array<Awaited<ReturnType<NonNullable<CompletionManagementService["listResourcesPage"]>>>["items"][number]> = [];
       let cursor = value.cursor ? stringField(value, "cursor") : undefined;
       let nextCursor: string | undefined;
@@ -1361,14 +1753,13 @@ async function executePublicManagementQuery(input: {
       for (let attempt = 0; attempt < 10_001 && items.length < limit; attempt += 1) {
         const scanned = await completion.listResourcesPage!(serviceContext, {
           ...listInput,
+          scopeKind: "room",
           limit: 1,
           ...(cursor ? { cursor } : {})
         });
         for (const item of scanned.items) {
-          const inScope = requestedScopeKind === "workspace"
-            ? item.scope.kind === "workspace"
-            : item.scope.kind === "workspace"
-              || (item.scope.kind === "room" && item.scope.roomId === targetRoomId);
+          const inScope = item.scope.kind === "workspace"
+            || (item.scope.kind === "room" && item.scope.roomId === targetRoomId);
           if (inScope) items.push(item);
         }
         if (items.length >= limit) {
@@ -1466,13 +1857,14 @@ async function executePublicManagementQuery(input: {
 async function executeCommand(input: {
   operationId: string;
   input: Record<string, unknown>;
-  requestContext: { room_id?: string; session_id?: string };
+  requestContext: Pick<PublicRequestContext, "room_id" | "session_id">;
+  personalPreferences?: PersonalPreferencesSnapshot;
   context: TrustedDomainContext;
   req: Request;
   operation: WorkspaceRequestContext;
   dependencies: V1Dependencies;
 }): Promise<{ value: JsonValue; replayed: boolean }> {
-  const { operationId, input: value, requestContext, context, req, operation, dependencies } = input;
+  const { operationId, input: value, requestContext, personalPreferences, context, req, operation, dependencies } = input;
   const { commands, artifacts, generatedSurfaces, store, realtimeGate, runtimeFor } = dependencies;
   const { workspaceId, accountId } = operation;
   if (publicManagementCommandIds.has(operationId)) {
@@ -1483,6 +1875,7 @@ async function executeCommand(input: {
       operationId,
       input: value,
       requestContext,
+      personalPreferences,
       operation,
       dependencies
     });
@@ -1581,6 +1974,7 @@ async function executeCommand(input: {
       roomId,
       instruction: stringField(value, "content"),
       attachments: arrayValue(value, "attachments"),
+      ...(personalPreferences === undefined ? {} : { personalPreferences }),
       ...(value.agent_id === undefined ? {} : { agentId: stringField(value, "agent_id") })
     });
     const unwrapped = unwrapStoreResult(raw);
@@ -1764,11 +2158,12 @@ export function roomWorkInstructionForPublicInput(
 async function executeRoomWorkCommand(input: {
   operationId: string;
   input: Record<string, unknown>;
-  requestContext: { room_id?: string; session_id?: string };
+  requestContext: Pick<PublicRequestContext, "room_id" | "session_id">;
+  personalPreferences?: PersonalPreferencesSnapshot;
   operation: WorkspaceRequestContext;
   dependencies: V1Dependencies;
 }): Promise<{ value: JsonValue; replayed: boolean }> {
-  const { operationId, input: value, requestContext, operation, dependencies } = input;
+  const { operationId, input: value, requestContext, personalPreferences, operation, dependencies } = input;
   if (requestContext.session_id) {
     // Room work is the public continuity boundary. A caller must not select a
     // legacy Runtime Session and thereby bypass the work aggregate.
@@ -1793,6 +2188,7 @@ async function executeRoomWorkCommand(input: {
         ...(instruction === undefined ? {} : { instruction }),
         attachments: arrayValue(value, "attachments"),
         resourceRefs,
+        ...(personalPreferences === undefined ? {} : { personalPreferences }),
         ...(value.agent_id === undefined ? {} : { agentId: stringField(value, "agent_id") })
       });
       break;
@@ -1804,6 +2200,7 @@ async function executeRoomWorkCommand(input: {
         ...(instruction === undefined ? {} : { instruction }),
         attachments: arrayValue(value, "attachments"),
         resourceRefs,
+        ...(personalPreferences === undefined ? {} : { personalPreferences }),
         ...(numberFieldOptional(value, "expected_version") === undefined ? {} : { expectedVersion: numberFieldOptional(value, "expected_version") }),
         ...(numberFieldOptional(value, "expected_generation") === undefined ? {} : { expectedGeneration: numberFieldOptional(value, "expected_generation") })
       });
@@ -2737,6 +3134,7 @@ function managementRequestContext(value: Record<string, unknown>): { room_id?: s
 function completionListQuery(req: Request): Record<string, unknown> {
   const scopeKind = optionalQuery(req, "scope_kind");
   const roomId = optionalQuery(req, "room_id");
+  const agentId = optionalQuery(req, "agent_id");
   const kind = optionalQuery(req, "kind");
   const includeArchived = optionalBooleanQuery(req, "include_archived");
   const limit = managementQueryNumber(req, "limit");
@@ -2744,6 +3142,7 @@ function completionListQuery(req: Request): Record<string, unknown> {
   return {
     ...(scopeKind ? { scope_kind: scopeKind } : {}),
     ...(roomId ? { room_id: roomId } : {}),
+    ...(agentId ? { agent_id: agentId } : {}),
     ...(kind ? { kind } : {}),
     ...(includeArchived === undefined ? {} : { include_archived: includeArchived }),
     ...(limit === undefined ? {} : { limit }),
@@ -2792,19 +3191,175 @@ function requireRuntimeAutomationService(dependencies: V1Dependencies): RuntimeA
   return dependencies.automation;
 }
 
+function requireContextQueryManagementService(
+  dependencies: V1Dependencies,
+  operationId: string
+): WorkspaceContextQueryManagementService {
+  if (!dependencies.contextQuery || typeof dependencies.contextQuery.search !== "function") {
+    throw new WorkspaceServerError("domain_operation_not_available", 503, { operation_id: operationId });
+  }
+  return dependencies.contextQuery;
+}
+
+function requireWorkspaceShareManagementService(
+  dependencies: V1Dependencies,
+  operationId: string
+): WorkspaceShareManagementService {
+  const share = dependencies.share;
+  if (!share
+    || typeof share.createDraft !== "function"
+    || typeof share.updateDraft !== "function"
+    || typeof share.viewDraft !== "function"
+    || typeof share.discardDraft !== "function"
+    || typeof share.publish !== "function"
+    || typeof share.list !== "function"
+    || typeof share.view !== "function"
+    || typeof share.revoke !== "function"
+    || typeof share.import !== "function"
+    || typeof share.importStatus !== "function") {
+    throw new WorkspaceServerError("domain_operation_not_available", 503, { operation_id: operationId });
+  }
+  return share;
+}
+
+function workspaceShareContext(
+  context: { workspaceId?: unknown; accountId?: unknown; actorId?: unknown; operationId?: unknown; idempotencyKey?: unknown },
+  requireOperation = false
+): WorkspaceShareServiceContext {
+  const workspaceId = typeof context.workspaceId === "string" ? context.workspaceId.trim() : "";
+  const accountId = typeof context.accountId === "string"
+    ? context.accountId.trim()
+    : typeof context.actorId === "string" ? context.actorId.trim() : "";
+  const operationId = typeof context.operationId === "string"
+    ? context.operationId.trim()
+    : typeof context.idempotencyKey === "string" ? context.idempotencyKey.trim() : "";
+  if (!workspaceId || !accountId) throw new WorkspaceServerError("workspace_authentication_required", 401);
+  if (requireOperation && !operationId) throw new WorkspaceServerError("workspace_operation_id_required", 400);
+  return { workspaceId, accountId, ...(operationId ? { operationId } : {}) };
+}
+
+function assertWorkspaceSharePathBinding(pathWorkspaceId: string, signedWorkspaceId: string): void {
+  if (!signedWorkspaceId || pathWorkspaceId !== signedWorkspaceId) throw new WorkspaceServerError("workspace_id_mismatch", 400);
+}
+
+/** The Share Core repeats this binding inside its transaction.  Checking the
+ * signed target at the adapter boundary prevents an injected/legacy service
+ * from accepting a delegation for another Workspace. */
+function assertWorkspaceShareInputBinding(
+  operationId: string,
+  input: Record<string, unknown>,
+  context: WorkspaceShareServiceContext
+): void {
+  if (operationId !== "share.import") return;
+  const delegation = recordValue(input.delegation);
+  const payload = recordValue(delegation.payload);
+  if (payload.target_workspace_id !== context.workspaceId) {
+    throw new WorkspaceServerError("workspace_id_mismatch", 400);
+  }
+  if (payload.recipient_account_id !== context.accountId
+    || payload.operation_id !== context.operationId) {
+    throw new WorkspaceServerError("workspace_share_delegation_mismatch", 403);
+  }
+}
+
+function requireNotificationManagementService(
+  dependencies: V1Dependencies,
+  operationId: string
+): WorkspaceNotificationManagementService {
+  if (!dependencies.notifications
+    || typeof dependencies.notifications.listNotifications !== "function"
+    || typeof dependencies.notifications.notificationSummary !== "function"
+    || typeof dependencies.notifications.markNotificationsRead !== "function"
+    || typeof dependencies.notifications.listWorkspaceNotificationSummaries !== "function"
+    || typeof dependencies.notifications.listInvitationNotifications !== "function"
+    || typeof dependencies.notifications.markInvitationNotificationsRead !== "function") {
+    throw new WorkspaceServerError("domain_operation_not_available", 503, { operation_id: operationId });
+  }
+  return dependencies.notifications;
+}
+
+function publicNotificationPage(
+  page: WorkspaceNotificationPageProjection,
+  schema: typeof PublicNotificationPageSchema | typeof PublicAccountInvitationNotificationsPageSchema
+): JsonValue {
+  return schema.parse({
+    items: page.items.map(publicNotification),
+    next_cursor: page.nextCursor
+  }) as JsonValue;
+}
+
+function publicNotification(value: WorkspaceNotificationViewProjection): Record<string, unknown> {
+  return {
+    id: value.id,
+    kind: value.kind,
+    created_at: value.createdAt,
+    read_at: value.readAt,
+    title: value.title,
+    summary: value.summary,
+    target: publicNotificationTarget(value.target),
+    action_state: value.actionState
+  };
+}
+
+/** Only the documented target projection crosses the public boundary. */
+function publicNotificationTarget(value: unknown): JsonValue | null {
+  const body = recordValue(value);
+  const kind = valueString(body, "kind");
+  const roomId = valueString(body, "room_id", "roomId");
+  let candidate: Record<string, unknown> | undefined;
+  if (kind === "room" && roomId) {
+    candidate = { kind, room_id: roomId };
+  } else if (kind === "work" && roomId) {
+    const workId = valueString(body, "work_id", "workId");
+    const messageId = valueString(body, "message_id", "messageId");
+    if (workId) candidate = { kind, room_id: roomId, work_id: workId, ...(messageId ? { message_id: messageId } : {}) };
+  } else if (kind === "knowledge" && roomId) {
+    const resourceId = valueString(body, "resource_id", "resourceId");
+    if (resourceId) candidate = { kind, room_id: roomId, resource_id: resourceId };
+  } else if (kind === "interaction_request" && roomId) {
+    const requestId = valueString(body, "request_id", "requestId");
+    if (requestId) candidate = { kind, room_id: roomId, request_id: requestId };
+  } else if (kind === "invitation") {
+    const invitationId = valueString(body, "invitation_id", "invitationId");
+    if (invitationId) candidate = { kind, invitation_id: invitationId };
+  }
+  if (!candidate) return null;
+  const parsed = PublicTargetSchema.safeParse(candidate);
+  return parsed.success ? parsed.data as JsonValue : null;
+}
+
+function publicNotificationReadResult(
+  value: WorkspaceNotificationReadProjection,
+  schema: typeof PublicNotificationMarkReadResultSchema | typeof PublicAccountInvitationNotificationReadResultSchema
+): JsonValue {
+  return schema.parse({
+    updated_ids: [...value.updatedIds],
+    already_read_ids: [...value.alreadyReadIds],
+    read_at: value.readAt
+  }) as JsonValue;
+}
+
 function completionResourceInputFromPublic(value: Record<string, unknown>): WorkspaceCompletionResourceInput {
   const kind = stringField(value, "kind");
   if (kind !== "knowledge" && kind !== "skill") throw new WorkspaceServerError("workspace_completion_resource_kind_invalid", 400);
   const scopeKind = stringField(value, "scope_kind");
-  if (scopeKind !== "workspace" && scopeKind !== "room") throw new WorkspaceServerError("workspace_completion_scope_invalid", 400);
+  if (scopeKind !== "workspace" && scopeKind !== "room" && scopeKind !== "agent") throw new WorkspaceServerError("workspace_completion_scope_invalid", 400);
   const roomId = optionalStringField(value, "room_id");
+  const agentId = optionalStringField(value, "agent_id");
+  if (roomId && agentId) throw new WorkspaceServerError("completion_scope_targets_exclusive", 400);
   if (scopeKind === "room" && !roomId) throw new WorkspaceServerError("room_id_required", 400);
+  if (scopeKind === "room" && agentId) throw new WorkspaceServerError("room_scope_agent_forbidden", 400);
+  if (scopeKind === "agent" && !agentId) throw new WorkspaceServerError("agent_id_required", 400);
+  if (scopeKind === "agent" && roomId) throw new WorkspaceServerError("agent_scope_room_forbidden", 400);
   if (scopeKind === "workspace" && roomId) throw new WorkspaceServerError("workspace_scope_room_forbidden", 400);
+  if (scopeKind === "workspace" && agentId) throw new WorkspaceServerError("workspace_scope_agent_forbidden", 400);
+  if (scopeKind === "workspace" && kind === "knowledge") throw new WorkspaceServerError("workspace_memory_removed", 409);
   const knowledgeKind = optionalStringField(value, "knowledge_kind");
   if (kind === "knowledge" && (!knowledgeKind || !["fact", "decision", "explanation", "experience_rule"].includes(knowledgeKind))) {
     throw new WorkspaceServerError("workspace_completion_knowledge_kind_invalid", 400);
   }
   if (kind === "skill" && knowledgeKind) throw new WorkspaceServerError("skill_knowledge_kind_forbidden", 400);
+  if (scopeKind === "agent" && value.ai_managed === true) throw new WorkspaceServerError("agent_scope_ai_managed_forbidden", 422);
   const supportFiles = Array.isArray(value.support_files)
     ? value.support_files.map((entry) => {
       const file = recordValue(entry);
@@ -2813,7 +3368,7 @@ function completionResourceInputFromPublic(value: Record<string, unknown>): Work
     : undefined;
   return {
     ...(optionalStringField(value, "resource_id") ? { id: optionalStringField(value, "resource_id") } : {}),
-    scope: scopeKind === "room" ? { kind: "room", roomId: roomId! } : { kind: "workspace" },
+    scope: scopeKind === "room" ? { kind: "room", roomId: roomId! } : scopeKind === "agent" ? { kind: "agent", agentId: agentId! } : { kind: "workspace" },
     kind,
     ...(kind === "knowledge" ? { knowledgeKind: knowledgeKind as "fact" | "decision" | "explanation" | "experience_rule" } : {}),
     title: stringField(value, "title"),
@@ -2892,8 +3447,20 @@ function publicRuntimeSettings(value: unknown): JsonValue {
 
 function publicLearningSettings(value: unknown): JsonValue {
   const body = recordValue(value);
-  const { secretRef: _secretRef, ...safe } = body;
-  return PublicLearningSettingsSchema.parse(safe) as JsonValue;
+  const {
+    secretRef: _secretRef,
+    // This is an internal inheritance resolver flag. The public contract
+    // exposes the resolved settings, not the layer-resolution mechanism.
+    enabledInheritsWorkspace: _enabledInheritsWorkspace,
+    ...safe
+  } = body;
+  // A new Workspace has no persisted settings row yet. The Core represents
+  // that inherited default with an empty updatedBy value, while the public
+  // contract requires a non-empty opaque identifier. Keep the marker explicit
+  // at this projection boundary; it is not an Account or an authorization
+  // selector and is never written back to PostgreSQL.
+  const updatedBy = body.updatedBy === "" ? "system" : body.updatedBy;
+  return PublicLearningSettingsSchema.parse({ ...safe, updatedBy }) as JsonValue;
 }
 
 function publicLearningSettingsLayers(value: WorkspaceLearningSettingsLayers | unknown): JsonValue {
@@ -2906,6 +3473,17 @@ function publicLearningSettingsLayers(value: WorkspaceLearningSettingsLayers | u
 }
 
 function publicCompletionResource(value: unknown): JsonValue {
+  const body = recordValue(value);
+  const scope = recordValue(body.scope);
+  if (scope.kind === "workspace" && body.kind === "knowledge") {
+    throw new WorkspaceServerError("workspace_memory_removed", 409);
+  }
+  if (scope.kind === "agent" && body.kind !== "knowledge" && body.kind !== "skill") {
+    throw new WorkspaceServerError("workspace_completion_agent_resource_kind_invalid", 422);
+  }
+  if (scope.kind === "agent" && body.aiManaged === true) {
+    throw new WorkspaceServerError("workspace_completion_agent_ai_managed_forbidden", 422);
+  }
   return PublicCompletionResourceSchema.parse(value) as JsonValue;
 }
 
@@ -2926,16 +3504,34 @@ function completionResourceRoomId(value: Record<string, unknown>): string | unde
 
 function assertCompletionTarget(resource: JsonValue, input: Record<string, unknown>): void {
   const roomId = optionalStringField(input, "room_id");
-  if (!roomId) return;
   const body = recordValue(resource);
   const scope = recordValue(body.scope);
-  if (scope.kind === "room" && scope.roomId !== roomId) throw new WorkspaceServerError("completion_target_room_mismatch", 403);
+  const agentId = optionalStringField(input, "agent_id");
+  const scopeKind = optionalStringField(input, "scope_kind");
+  if (roomId && agentId) throw new WorkspaceServerError("completion_scope_targets_exclusive", 400);
+  if (scope.kind === "workspace" && body.kind === "knowledge") {
+    throw new WorkspaceServerError("workspace_memory_removed", 409);
+  }
+  if (roomId && scope.kind === "agent") throw new WorkspaceServerError("completion_scope_targets_exclusive", 400);
+  if (scopeKind === "workspace" && scope.kind !== "workspace") throw new WorkspaceServerError("completion_target_scope_mismatch", 403);
+  if (scopeKind === "room" && scope.kind !== "room") throw new WorkspaceServerError("completion_target_scope_mismatch", 403);
+  if (scopeKind === "agent" && scope.kind !== "agent") throw new WorkspaceServerError("completion_target_scope_mismatch", 403);
+  if (scopeKind === "agent" && !agentId) throw new WorkspaceServerError("agent_id_required", 400);
+  if (scopeKind === "room" && !roomId) throw new WorkspaceServerError("room_id_required", 400);
+  if (roomId && scope.kind === "room" && scope.roomId !== roomId) throw new WorkspaceServerError("completion_target_room_mismatch", 403);
+  if (agentId && (scope.kind !== "agent" || scope.agentId !== agentId)) throw new WorkspaceServerError("completion_target_agent_mismatch", 403);
 }
 
 function completionScopeFilter(resources: JsonValue[], input: Record<string, unknown>): JsonValue[] {
-  const scopeKind = optionalStringField(input, "scope_kind");
+  const scopeKind = optionalStringField(input, "scope_kind")
+    ?? (input.agent_id ? "agent" : input.room_id ? "room" : undefined);
   const roomId = optionalStringField(input, "room_id");
+  const agentId = optionalStringField(input, "agent_id");
   if (scopeKind === "workspace") return resources.filter((entry) => recordValue(recordValue(entry).scope).kind === "workspace");
+  if (scopeKind === "agent") return resources.filter((entry) => {
+    const scope = recordValue(recordValue(entry).scope);
+    return scope.kind === "agent" && (!agentId || scope.agentId === agentId);
+  });
   if (scopeKind === "room" && roomId) return resources.filter((entry) => {
     const scope = recordValue(recordValue(entry).scope);
     return scope.kind === "workspace" || scope.roomId === roomId;
@@ -3005,7 +3601,7 @@ function numberValueRequired(value: Record<string, unknown>, name: string): numb
   return parsed;
 }
 
-function parseDomainRequest(value: unknown): { context: { room_id?: string; session_id?: string }; input: JsonValue } {
+function parseDomainRequest(value: unknown): { context: PublicRequestContext; input: JsonValue } {
   const parsed = DomainApiRequestSchema.safeParse(value);
   if (!parsed.success) throw new WorkspaceServerError("domain_api_request_invalid", 400, { issue: safeIssue(parsed.error.issues[0]) });
   return parsed.data;
@@ -3038,9 +3634,39 @@ function parsePublicOperationInput(operationId: string, value: JsonValue): Recor
   if (!definition) throw new WorkspaceServerError("domain_operation_not_available", 404, { operation_id: operationId });
   const parsed = definition.input.safeParse(value);
   if (!parsed.success || !parsed.data || typeof parsed.data !== "object" || Array.isArray(parsed.data)) {
+    const issueMessage = parsed.success ? undefined : parsed.error.issues[0]?.message;
+    if (issueMessage === "workspace_memory_removed") throw new WorkspaceServerError("workspace_memory_removed", 409, { operation_id: operationId });
+    if (issueMessage === "agent_scope_ai_managed_forbidden") throw new WorkspaceServerError("workspace_completion_agent_ai_managed_forbidden", 422, { operation_id: operationId });
+    if (issueMessage === "agent_scope_resource_kind_invalid") throw new WorkspaceServerError("workspace_completion_agent_resource_kind_invalid", 422, { operation_id: operationId });
     throw new WorkspaceServerError("domain_api_input_invalid", 400, { operation_id: operationId, issue: safeIssue(parsed.success ? undefined : parsed.error.issues[0]) });
   }
   return parsed.data as Record<string, unknown>;
+}
+
+/**
+ * Resolve the Account-owned preferences snapshot at the command boundary.
+ * Room Work uses the request context; the deprecated chat command may also
+ * carry the snapshot in its legacy operation input.  Both values must agree,
+ * and no query/other command may carry either form.
+ */
+export function resolveExecutionPersonalPreferences(
+  operationId: string,
+  requestContext: Pick<PublicRequestContext, "personal_preferences">,
+  input: Record<string, unknown>
+): PersonalPreferencesSnapshot | undefined {
+  const contextSnapshot = requestContext.personal_preferences;
+  const inputSnapshot = input.personal_preferences as PersonalPreferencesSnapshot | undefined;
+  if ((contextSnapshot !== undefined || inputSnapshot !== undefined) && !personalPreferencesCommandIds.has(operationId)) {
+    throw new WorkspaceServerError("personal_preferences_not_allowed", 400);
+  }
+  if (inputSnapshot !== undefined && operationId !== "chat.turn.run") {
+    throw new WorkspaceServerError("personal_preferences_input_forbidden", 400);
+  }
+  if (contextSnapshot !== undefined && inputSnapshot !== undefined
+    && JSON.stringify(contextSnapshot) !== JSON.stringify(inputSnapshot)) {
+    throw new WorkspaceServerError("personal_preferences_conflict", 409);
+  }
+  return inputSnapshot ?? contextSnapshot;
 }
 
 function trustedContext(

@@ -1533,6 +1533,64 @@ describe("agent backend registry", () => {
     expect(prompt).toContain("attachments/workspace-report.txt");
   });
 
+  it("passes only explicit Room/Agent context and verified preference snapshots to external prompts", () => {
+    const input: BackendRunInput = {
+      ...backendInput("run_execution_context_prompt"),
+      context_intent: "light_chat",
+      personal_preferences: {
+        schema_version: 1,
+        revision: 7,
+        display_name: "Owner",
+        instructions: "Use concise Japanese.",
+        output_locale: "ja"
+      },
+      context_resources: [{
+        kind: "knowledge",
+        id: "room-knowledge",
+        title: "Room runbook",
+        version: "3",
+        content_hash: "a".repeat(64),
+        source_scope: { kind: "room", room_id: "room-1" },
+        selection_reason: "completion_selected:room_knowledge",
+        disclosure_level: "body",
+        content: "Room body",
+        ref: {
+          kind: "knowledge",
+          id: "room-knowledge",
+          uri: "knowledge/room-knowledge/v3.md",
+          version: "3",
+          content_hash: "a".repeat(64),
+          source_scope: { kind: "room", room_id: "room-1" }
+        }
+      }, {
+        kind: "skill",
+        id: "agent-skill",
+        title: "Agent skill",
+        version: "2",
+        content_hash: "b".repeat(64),
+        source_scope: { kind: "agent", agent_id: "agent-1" },
+        selection_reason: "completion_selected:agent_skills",
+        disclosure_level: "catalog",
+        content: "must stay undisclosed",
+        ref: {
+          kind: "skill",
+          id: "agent-skill",
+          uri: "skills/agent-skill/v2/SKILL.md",
+          version: "2",
+          content_hash: "b".repeat(64),
+          source_scope: { kind: "agent", agent_id: "agent-1" }
+        }
+      }]
+    };
+    const prompt = buildExternalBackendPrompt(input);
+    expect(prompt).toContain("Room body");
+    expect(prompt).toContain("source_scope: room:room-1");
+    expect(prompt).toContain("source_scope: agent:agent-1");
+    expect(prompt).toContain("Use concise Japanese.");
+    expect(prompt).not.toContain("must stay undisclosed");
+    expect(prompt).not.toContain("Workspace Knowledge");
+  });
+
   it("injects run-scoped Samurai Artifact MCP config into Codex and Claude Code CLI args", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "samurai-backend-mcp-"));
     roots.push(root);

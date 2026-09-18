@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { WorkspaceServerError } from "./errors";
 import {
+  assertAutomaticLearningResourceScope,
   assertSafeLearningPayload,
+  assertWorkspaceMemoryAllowed,
   classifyLearningActivity,
   rankKnowledgeForCurrentRoom,
+  resolveWorkspaceLearningSettings,
   validateWorkspaceKnowledgeReviewResult,
   type WorkspaceKnowledgeReviewSnapshot
 } from "./workspace-learning-policy";
-import type { WorkspaceLearningResource } from "./types";
+import type { WorkspaceLearningResource, WorkspaceLearningSettings } from "./types";
 
 const now = "2026-08-15T00:00:00.000Z";
 
@@ -33,18 +36,52 @@ describe("Workspace learning policy", () => {
     })).toMatchObject({ eligible: false });
   });
 
-  it("ranks only matching Knowledge in the fixed three-layer order", () => {
+  it("ranks only matching Room Knowledge and Workspace policy", () => {
     const results = rankKnowledgeForCurrentRoom({
       query: "deploy",
       workspaceRules: [resource("rule", "Always deploy", "Rule", { kind: "workspace" }, true)],
       roomKnowledge: [resource("room", "Deploy to staging", "Room", { kind: "room", roomId: "room_current" })],
-      workspaceKnowledge: [
-        resource("workspace", "Deploy overview", "Common", { kind: "workspace" }),
-        resource("unrelated", "Expense policy", "No match", { kind: "workspace" })
-      ],
+      workspaceKnowledge: [],
       limit: 10
     });
-    expect(results.map((item) => item.id)).toEqual(["rule", "room", "workspace"]);
+    expect(results.map((item) => item.id)).toEqual(["rule", "room"]);
+  });
+
+  it("rejects removed Workspace Knowledge/Memory and fixes automatic output to one Room", () => {
+    expect(() => assertWorkspaceMemoryAllowed({ kind: "workspace" }, "knowledge")).toThrow("workspace_memory_removed");
+    expect(() => assertWorkspaceMemoryAllowed({ kind: "workspace" }, "memory")).toThrow("workspace_memory_removed");
+    expect(() => rankKnowledgeForCurrentRoom({
+      query: "deploy", workspaceRules: [], roomKnowledge: [],
+      workspaceKnowledge: [resource("removed", "Removed", "old", { kind: "workspace" })], limit: 10
+    })).toThrow("workspace_memory_removed");
+    expect(() => assertAutomaticLearningResourceScope({ kind: "workspace" }, "room_current"))
+      .toThrow("workspace_learning_auto_resource_scope_invalid");
+    expect(() => assertAutomaticLearningResourceScope({ kind: "room", roomId: "other_room" }, "room_current"))
+      .toThrow("workspace_learning_auto_resource_scope_invalid");
+  });
+
+  it("inherits only enabled while keeping Room model, budget, and usage", () => {
+    const workspace = settings({ kind: "workspace" }, true, "workspace-model", 10, 100, 3, 30);
+    const room = settings({ kind: "room", roomId: "room_current" }, false, "room-model", 20, 200, 7, 70, true);
+    const inherited = resolveWorkspaceLearningSettings({ workspace, room });
+    expect(inherited.effective).toMatchObject({
+      enabled: true,
+      enabledInheritsWorkspace: true,
+      model: "room-model",
+      currencyLimit: 20,
+      tokenLimit: 200,
+      currencyUsed: 7,
+      tokensUsed: 70
+    });
+
+    const overridden = resolveWorkspaceLearningSettings({
+      workspace,
+      room: settings({ kind: "room", roomId: "room_current" }, false, "room-model", 20, 200, 7, 70, false)
+    });
+    expect(overridden.effective.enabled).toBe(false);
+    expect(overridden.effective.enabledInheritsWorkspace).toBe(false);
+    expect(overridden.effective.currencyUsed).toBe(7);
+    expect(overridden.effective.tokensUsed).toBe(70);
   });
 
   it("keeps a fixed item intact while accepting a separately recorded conflict candidate", () => {
@@ -148,4 +185,33 @@ function resource(
     createdBy: "account_owner", updatedBy: "account_owner",
     createdAt: now, updatedAt: now
   };
+}
+
+function settings(
+  scope: WorkspaceLearningSettings["scope"],
+  enabled: boolean,
+  model: string,
+  currencyLimit: number,
+  tokenLimit: number,
+  currencyUsed: number,
+  tokensUsed: number,
+  enabledInheritsWorkspace = false
+): WorkspaceLearningSettings {
+  return {
+    workspaceId: "workspace_one",
+    id: scope.kind === "room" ? `room:${scope.roomId}` : "workspace",
+    scope,
+    enabled,
+    model,
+    currencyLimit,
+    tokenLimit,
+    currencyUsed,
+    tokensUsed,
+    currencyReserved: 1,
+    tokensReserved: 10,
+    version: 1,
+    updatedBy: "account_owner",
+    updatedAt: now,
+    ...(enabledInheritsWorkspace ? { enabledInheritsWorkspace } : {})
+  } as WorkspaceLearningSettings;
 }

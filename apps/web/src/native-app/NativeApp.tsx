@@ -1,23 +1,46 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import RoomNavigator from "../components/RoomNavigator";
 import ChatSurface from "../components/ChatSurface";
-import RoomWorkSurface, { roomWorkCanReceiveReply, roomWorkControlAllowed } from "./RoomWorkSurface";
+import RoomWorkSurface, { roomWorkCanReceiveReply, roomWorkControlAllowed, type NativeRoomPanelState } from "./RoomWorkSurface";
 import { NativeInteractionRequests } from "./NativeInteractionRequests";
 import NativeKnowledgeTools from "./NativeKnowledgeTools";
+import NativeAgentResources, { type NativeAgentResource, type NativeAgentResourceArchiveInput, type NativeAgentResourceDetail, type NativeAgentResourceSelection, type NativeAgentResourceUpdateInput, type NativeAgentResourceWriteInput } from "./NativeAgentResources";
 import NativeRoomAdministration from "./NativeRoomAdministration";
 import NativeArtifactWorkspace, { nativeArtifactWorkspaceInitialResourceFromUnknown } from "./NativeArtifactWorkspace";
 import NativeCollectionPanel from "./NativeCollectionPanel";
 import NativeProfileMenu from "./NativeProfileMenu";
+import NativeAccountSettings from "./NativeAccountSettings";
+import WorkspaceContextSearch from "./WorkspaceContextSearch";
+import WorkspaceNotificationCenter from "./WorkspaceNotificationCenter";
+import WorkspaceShareDialog from "./WorkspaceShareDialog";
+import WorkspaceShareImport from "./WorkspaceShareImport";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 import OrganizationManagement from "../components/OrganizationManagement";
 import EvidenceInspector from "../components/EvidenceInspector";
 import ConnectionRequired from "../components/ConnectionRequired";
 import WorkspaceConnectionSettings from "../components/WorkspaceConnectionSettings";
+import type {
+  AccountInvitationNotificationListInput,
+  AccountWorkspaceNotificationSummaries,
+  AccountWorkspaceNotificationSummariesInput,
+  DesktopWorkspaceTarget,
+  WorkspaceContextSearchInput,
+  WorkspaceContextSearchPage,
+  WorkspaceNotificationListInput,
+  WorkspaceNotificationMarkReadResult,
+  WorkspaceNotificationPage,
+  WorkspaceNotificationSummary
+} from "../lib/api";
 import { createIdempotencyKey } from "../lib/api";
+import { loadNativeAccountPreferences, saveNativeAccountPreferences } from "../lib/native-account-preferences";
 import { readNativeThemePreference, writeNativeThemePreference, type NativeTheme } from "../lib/native-app-theme-preferences";
 import { nativeRoomAgentIsAvailable, nativeRoomCreateErrorIsExplicitServerFailure, useNativeApp } from "./use-native-app";
 import { type NativeDraftNavigationController, type NativeDraftNavigationTarget } from "./use-native-draft-navigation";
-import type { NativeRoomSearchResult } from "./use-native-knowledge-tools";
+import { nativeKnowledgeResourcesErrorKind, nativeRoomKnowledgeShareResources, nativeRoomKnowledgeShareSelection, type NativeRoomKnowledgeShareSelection, type NativeKnowledgeShareAvailability, type NativeRoomSearchResult } from "./use-native-knowledge-tools";
+import { useNativeShareState } from "./use-native-share-state";
+import { useNativeRoomExpansion } from "./use-native-room-expansion";
+import { useNativeRoomParticipants } from "./use-native-room-participants";
+import { nativeWorkspaceTargetKey } from "./types";
 import type { NativeAgent, NativeAgentBackend, NativeArtifactWorkspaceInitialResource, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspace, NativeWorkspaceTarget } from "./types";
 
 export interface NativeCreateDialogValue {
@@ -38,6 +61,19 @@ export type NativeRoomToolTarget = NativeWorkspaceTarget & { roomId: string };
 
 type NativeDraftNavigationControllerRegistration = {
   controller: NativeDraftNavigationController;
+};
+
+type NativeWorkspaceUnreadState =
+  | { status: "zero" }
+  | { status: "count"; count: number }
+  | { status: "unknown" }
+  | { status: "failed" };
+
+type NativeAccountSettingsReturnContext = {
+  targetKey?: string;
+  roomId?: string;
+  roomPanelState: NativeRoomPanelState;
+  roomSettingsTab: "basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing";
 };
 
 export interface NativeDraftNavigationControllerRegistry {
@@ -380,9 +416,21 @@ export function AgentDirectoryPanel({
   agentBackends,
   agentLoading,
   agentError,
+  agentResources,
+  agentResourceSelectedId,
+  agentResourceLoading,
+  agentResourceError,
+  agentResourceCanManage,
   onClose,
   onViewAgent,
-  onOpenAgentDm
+  onOpenAgentDm,
+  onSelectAgentResources,
+  onSelectAgentResource,
+  onLoadAgentResource,
+  onCreateAgentResource,
+  onUpdateAgentResource,
+  onArchiveAgentResource,
+  onOpenAgentShare
 }: {
   workspaceName?: string;
   workspaceTargetKey?: string;
@@ -393,6 +441,11 @@ export function AgentDirectoryPanel({
   agentBackends: NativeAgentBackend[];
   agentLoading?: boolean;
   agentError?: string | null;
+  agentResources?: readonly NativeAgentResource[];
+  agentResourceSelectedId?: string;
+  agentResourceLoading?: boolean;
+  agentResourceError?: string | null;
+  agentResourceCanManage?: boolean;
   roomAgentMembers?: NativeRoomAgentMember[];
   roomAgentMembersLoading?: boolean;
   roomAgentMembersError?: string | null;
@@ -405,6 +458,13 @@ export function AgentDirectoryPanel({
   onRemoveRoomAgent?: (agentId: string) => Promise<NativeRoomAgentMember>;
   onSetDefaultAgent?: (agentId: string) => Promise<void> | void;
   onOpenAgentDm?: (agentId: string) => Promise<void> | void;
+  onSelectAgentResources?: (agentId?: string) => void;
+  onSelectAgentResource?: (selection: NativeAgentResourceSelection) => void;
+  onLoadAgentResource?: (selection: NativeAgentResourceSelection) => Promise<NativeAgentResourceDetail>;
+  onCreateAgentResource?: (input: NativeAgentResourceWriteInput) => Promise<NativeAgentResource>;
+  onUpdateAgentResource?: (input: NativeAgentResourceUpdateInput) => Promise<NativeAgentResource>;
+  onArchiveAgentResource?: (input: NativeAgentResourceArchiveInput) => Promise<NativeAgentResource>;
+  onOpenAgentShare?: (selection: NativeAgentResourceSelection & { kind: "knowledge" | "skill" }) => void | Promise<void>;
   onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
 }) {
   const backendLabels = useMemo(() => new Map(agentBackends.map((backend) => [backend.id, backend.label])), [agentBackends]);
@@ -433,7 +493,8 @@ export function AgentDirectoryPanel({
     setProfileErrorScopeKey(undefined);
     setProfileLoadingId(undefined);
     setProfileLoadingScopeKey(undefined);
-  }, [directoryScopeKey]);
+    onSelectAgentResources?.(undefined);
+  }, [directoryScopeKey, onSelectAgentResources]);
 
   const loadAgentProfile = async (agent: NativeAgent): Promise<void> => {
     const requestGeneration = profileRequestGenerationRef.current + 1;
@@ -445,6 +506,7 @@ export function AgentDirectoryPanel({
     setProfileErrorScopeKey(undefined);
     setProfileLoadingId(agent.id);
     setProfileLoadingScopeKey(requestScopeKey);
+    onSelectAgentResources?.(agent.id);
     const isCurrentRequest = (): boolean => profileRequestGenerationRef.current === requestGeneration
       && currentProfileScopeRef.current === requestScopeKey;
     try {
@@ -536,10 +598,76 @@ export function AgentDirectoryPanel({
           </dl>
           {visibleProfile.description ? <p className="native-agent-profile-description">{visibleProfile.description}</p> : null}
           {visibleProfile.instructions ? <p className="native-agent-profile-instructions">{visibleProfile.instructions}</p> : null}
+          <NativeAgentResources
+            agentId={visibleProfile.id}
+            agentLabel={visibleProfile.displayName}
+            resources={agentResources ?? []}
+            selectedResourceId={agentResourceSelectedId}
+            canManage={agentResourceCanManage}
+            loading={agentResourceLoading}
+            error={agentResourceError}
+            onSelectResource={onSelectAgentResource}
+            onLoadResource={onLoadAgentResource}
+            onCreateResource={onCreateAgentResource}
+            onUpdateResource={onUpdateAgentResource}
+            onArchiveResource={onArchiveAgentResource}
+            onOpenShare={onOpenAgentShare}
+          />
         </section> : null}
       </div>
     </section>
   );
+}
+
+/** Search and notification requests are scoped to the selected Workspace only. */
+export function nativeWorkspaceContextTarget(target: NativeWorkspaceTarget | undefined): DesktopWorkspaceTarget | undefined {
+  if (!target?.connectionId || !target.workspaceId) return undefined;
+  return {
+    connectionId: target.connectionId,
+    workspaceId: target.workspaceId,
+    ...(target.selectionGeneration === undefined ? {} : { selectionGeneration: target.selectionGeneration })
+  };
+}
+
+/** Keep the sidebar switcher limited to authorized, target-addressable rows. */
+export function nativeWorkspaceSwitcherEntries(workspaces: readonly NativeWorkspace[]): Array<{ key: string; workspace: NativeWorkspace }> {
+  const entries: Array<{ key: string; workspace: NativeWorkspace }> = [];
+  const seen = new Set<string>();
+  for (const workspace of workspaces) {
+    if (workspace.access !== "granted") continue;
+    const target = workspace.target
+      ?? (workspace.connectionId ? { connectionId: workspace.connectionId, workspaceId: workspace.id } : undefined);
+    if (!target) continue;
+    const key = nativeWorkspaceTargetKey(target);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ key, workspace });
+  }
+  return entries;
+}
+
+const nativeKnownWorkspaceNotificationKinds = new Set([
+  "work_completed",
+  "work_failed",
+  "approval_required",
+  "input_required",
+  "workspace_invitation",
+  "organization_invitation"
+]);
+
+/** Keep an unrecognized notification kind visible in the safe text projection. */
+export function nativeWorkspaceNotificationPageForDisplay(page: WorkspaceNotificationPage): WorkspaceNotificationPage {
+  return {
+    ...page,
+    items: page.items.map((notification) => {
+      if (nativeKnownWorkspaceNotificationKinds.has(notification.kind)) return notification;
+      const kind = notification.kind.trim() || "unknown";
+      return {
+        ...notification,
+        summary: `未認識の通知種別: ${kind}。${notification.summary}`
+      };
+    })
+  };
 }
 
 export function NativeApp() {
@@ -555,9 +683,24 @@ export function NativeApp() {
   const [managementScope, setManagementScope] = useState<"organization" | "workspace">("organization");
   const [connectionSettingsOpen, setConnectionSettingsOpen] = useState(false);
   const [agentDirectoryOpen, setAgentDirectoryOpen] = useState(false);
- const [roomToolOpen, setRoomToolOpen] = useState<NativeRoomTool>();
- const [artifactWorkspaceInitialResource, setArtifactWorkspaceInitialResource] = useState<NativeArtifactWorkspaceInitialResource>();
- const [workResourceDrafts, setWorkResourceDrafts] = useState<Record<string, NativeRoomWorkResourceRefInput[]>>({});
+  const [roomToolOpen, setRoomToolOpen] = useState<NativeRoomTool>();
+  const [roomPanelState, setRoomPanelState] = useState<NativeRoomPanelState>("closed");
+  const [roomSettingsTab, setRoomSettingsTab] = useState<"basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing">("basic");
+  const [artifactWorkspaceInitialResource, setArtifactWorkspaceInitialResource] = useState<NativeArtifactWorkspaceInitialResource>();
+  const [workResourceDrafts, setWorkResourceDrafts] = useState<Record<string, NativeRoomWorkResourceRefInput[]>>({});
+  const [contextSurface, setContextSurface] = useState<"search" | "notifications">();
+  const [workspacePopoverOpen, setWorkspacePopoverOpen] = useState(false);
+  const [workspaceUnreadStates, setWorkspaceUnreadStates] = useState<Record<string, NativeWorkspaceUnreadState>>({});
+  const [accountSettingsRestoreError, setAccountSettingsRestoreError] = useState<string | null>(null);
+  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
+  const contextSearchTriggerRef = useRef<HTMLButtonElement>(null);
+  const contextNotificationTriggerRef = useRef<HTMLButtonElement>(null);
+  const contextReturnTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const contextWasMobileSidebarOpenRef = useRef(false);
+  const accountSettingsWasMobileSidebarOpenRef = useRef(false);
+  const accountSettingsReturnContextRef = useRef<NativeAccountSettingsReturnContext | undefined>(undefined);
+  const accountSettingsPendingRestoreRef = useRef<NativeAccountSettingsReturnContext | undefined>(undefined);
+  const accountSettingsRestoreSelectionRequestedRef = useRef(false);
   const draftNavigationControllerRegistryRef = useRef<NativeDraftNavigationControllerRegistry | undefined>(undefined);
   if (!draftNavigationControllerRegistryRef.current) {
     draftNavigationControllerRegistryRef.current = createNativeDraftNavigationControllerRegistry();
@@ -574,6 +717,262 @@ export function NativeApp() {
   const closeMobileSidebar = useCallback((): void => {
     setMobileSidebarOpen(false);
   }, []);
+
+  const currentContextTarget = useMemo(
+    () => nativeWorkspaceContextTarget(model.selectedWorkspaceTarget),
+    [model.selectedWorkspaceTarget?.connectionId, model.selectedWorkspaceTarget?.workspaceId]
+  );
+  const roomExpansion = useNativeRoomExpansion(model.selectedWorkspaceTargetKey);
+  const roomParticipantsBridge = useMemo(() => {
+    const listWorkspaceRoomMembers = model.bridge?.listWorkspaceRoomMembers;
+    if (!listWorkspaceRoomMembers) return undefined;
+    return {
+      listWorkspaceRoomMembers: (roomId: string, target?: DesktopWorkspaceTarget) => listWorkspaceRoomMembers(roomId, target)
+    };
+  }, [model.bridge]);
+  const roomParticipants = useNativeRoomParticipants({
+    room: model.selectedRoom,
+    target: currentContextTarget,
+    agents: model.agents,
+    roomAgentMembers: model.roomAgentMembers,
+    bridge: roomParticipantsBridge
+  });
+  const [roomKnowledgeShareAvailability, setRoomKnowledgeShareAvailability] = useState<NativeKnowledgeShareAvailability>("loading");
+  const [roomKnowledgeShareSelection, setRoomKnowledgeShareSelection] = useState<NativeRoomKnowledgeShareSelection>();
+  useEffect(() => {
+    const target = roomToolTarget;
+    const method = model.bridge?.listWorkspaceCompletionResources;
+    if (!target || !method) {
+      setRoomKnowledgeShareAvailability("no_resources");
+      setRoomKnowledgeShareSelection(undefined);
+      return;
+    }
+    let active = true;
+    setRoomKnowledgeShareAvailability("loading");
+    setRoomKnowledgeShareSelection(undefined);
+    void method({ scopeKind: "room", roomId: target.roomId, kind: "knowledge", includeArchived: true, target })
+      .then((response) => {
+        if (!active) return;
+        const resources = nativeRoomKnowledgeShareResources(response.resources, target);
+        setRoomKnowledgeShareAvailability(resources.length > 0 ? "ready" : "no_resources");
+        setRoomKnowledgeShareSelection(resources.length > 0 ? nativeRoomKnowledgeShareSelection(target, model.selectedRoom?.name, resources) : undefined);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setRoomKnowledgeShareAvailability(nativeKnowledgeResourcesErrorKind(error) === "permission" ? "permission_denied" : "retrieval_failed");
+        setRoomKnowledgeShareSelection(undefined);
+      });
+    return () => { active = false; };
+  }, [model.bridge, model.selectedRoom?.name, roomToolTarget?.connectionId, roomToolTarget?.selectionGeneration, roomToolTarget?.roomId, roomToolTarget?.workspaceId]);
+  const roomParentIds = useMemo(() => {
+    const roomIds = new Set(model.rooms.map((room) => room.id));
+    return new Set(model.rooms.filter((room) => model.rooms.some((child) => child.parentRoomId === room.id && roomIds.has(child.id))).map((room) => room.id));
+  }, [model.rooms]);
+  const toggleRoomExpanded = useCallback((room: NativeRoom): void => {
+    roomExpansion.toggleExpanded(room.id, roomParentIds);
+  }, [roomExpansion, roomParentIds]);
+  const workspaceSwitcherEntries = useMemo(
+    () => nativeWorkspaceSwitcherEntries(model.workspaces),
+    [model.workspaces]
+  );
+  const accountPreferencesStore = useMemo(() => ({
+    load: loadNativeAccountPreferences,
+    save: saveNativeAccountPreferences
+  }), []);
+  const accountConnectionId = model.connection?.id ?? model.connectionState.activeConnectionId;
+  const accountWorkspaceEntries = useMemo(() => model.workspaces
+    .filter((workspace) => {
+      if (workspace.access !== "granted") return false;
+      const connectionId = workspace.target?.connectionId ?? workspace.connectionId;
+      return !accountConnectionId || !connectionId || connectionId === accountConnectionId;
+    })
+    .map((workspace) => ({
+      id: workspace.target?.workspaceId ?? workspace.id,
+      label: workspace.name
+    }))
+    .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.id === entry.id) === index),
+  [accountConnectionId, model.workspaces]);
+  const accountWorkspaceIds = useMemo(
+    () => accountWorkspaceEntries.map((entry) => entry.id),
+    [accountWorkspaceEntries]
+  );
+  const accountWorkspaceLabels = useMemo(
+    () => Object.fromEntries(accountWorkspaceEntries.map((entry) => [entry.id, entry.label])),
+    [accountWorkspaceEntries]
+  );
+  useEffect(() => {
+    if (!workspacePopoverOpen) return;
+    const method = model.bridge?.getAccountWorkspaceNotificationSummaries;
+    if (!method || accountWorkspaceIds.length === 0) {
+      setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => [id, { status: "unknown" as const }])));
+      return;
+    }
+    let active = true;
+    setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => [id, { status: "unknown" as const }])));
+    void method({ workspaceIds: accountWorkspaceIds })
+      .then((response) => {
+        if (!active) return;
+        const byWorkspace = new Map(response.items.map((item) => [item.workspaceId, item.unreadCount]));
+        setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => {
+          const count = byWorkspace.get(id);
+          return [id, count === undefined ? { status: "unknown" as const } : count > 0 ? { status: "count" as const, count } : { status: "zero" as const }];
+        })));
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => [id, { status: "failed" as const }])));
+      });
+    return () => { active = false; };
+  }, [accountWorkspaceIds, model.bridge, workspacePopoverOpen]);
+
+  const searchWorkspaceContext = useCallback(async (input: WorkspaceContextSearchInput): Promise<WorkspaceContextSearchPage> => {
+    const method = model.bridge?.searchWorkspaceContext;
+    if (!method || !currentContextTarget) throw new Error("workspace_context_search_unavailable");
+    return method({ ...input, target: currentContextTarget });
+  }, [currentContextTarget, model.bridge]);
+  const listWorkspaceNotifications = useCallback(async (input?: WorkspaceNotificationListInput): Promise<WorkspaceNotificationPage> => {
+    const method = model.bridge?.listWorkspaceNotifications;
+    if (!method) throw new Error("workspace_notification_list_unavailable");
+    return nativeWorkspaceNotificationPageForDisplay(await method({ ...(input ?? {}), ...(currentContextTarget ? { target: currentContextTarget } : {}) }));
+  }, [currentContextTarget, model.bridge]);
+  const getWorkspaceNotificationSummary = useCallback(async (input?: { target?: DesktopWorkspaceTarget }): Promise<WorkspaceNotificationSummary> => {
+    const method = model.bridge?.getWorkspaceNotificationSummary;
+    if (!method) throw new Error("workspace_notification_summary_unavailable");
+    return method(currentContextTarget ? { target: currentContextTarget } : input);
+  }, [currentContextTarget, model.bridge]);
+  const markWorkspaceNotificationsRead = useCallback(async (input: {
+    notificationIds: string[];
+    operationId: string;
+    target?: DesktopWorkspaceTarget;
+  }): Promise<WorkspaceNotificationMarkReadResult> => {
+    const method = model.bridge?.markWorkspaceNotificationsRead;
+    if (!method) throw new Error("workspace_notification_read_unavailable");
+    return method({ ...input, ...(currentContextTarget ? { target: currentContextTarget } : {}) });
+  }, [currentContextTarget, model.bridge]);
+  const getAccountWorkspaceNotificationSummaries = useCallback(async (input: AccountWorkspaceNotificationSummariesInput): Promise<AccountWorkspaceNotificationSummaries> => {
+    const method = model.bridge?.getAccountWorkspaceNotificationSummaries;
+    if (!method) throw new Error("account_workspace_notification_summary_unavailable");
+    return method({ ...input, workspaceIds: accountWorkspaceIds, ...(currentContextTarget ? { target: currentContextTarget } : {}) });
+  }, [accountWorkspaceIds, currentContextTarget, model.bridge]);
+  const listAccountInvitationNotifications = useCallback(async (input?: AccountInvitationNotificationListInput): Promise<WorkspaceNotificationPage> => {
+    const method = model.bridge?.listAccountInvitationNotifications;
+    if (!method) throw new Error("account_invitation_notification_list_unavailable");
+    return nativeWorkspaceNotificationPageForDisplay(await method({ ...(input ?? {}), ...(currentContextTarget ? { target: currentContextTarget } : {}) }));
+  }, [currentContextTarget, model.bridge]);
+  const markAccountInvitationNotificationsRead = useCallback(async (input: {
+    notificationIds: string[];
+    operationId: string;
+    target?: DesktopWorkspaceTarget;
+  }): Promise<WorkspaceNotificationMarkReadResult> => {
+    const method = model.bridge?.markAccountInvitationNotificationsRead;
+    if (!method) throw new Error("account_invitation_notification_read_unavailable");
+    return method({ ...input, ...(currentContextTarget ? { target: currentContextTarget } : {}) });
+  }, [currentContextTarget, model.bridge]);
+
+  const openContextSurface = useCallback((surface: "search" | "notifications"): void => {
+    contextReturnTriggerRef.current = surface === "search"
+      ? contextSearchTriggerRef.current
+      : contextNotificationTriggerRef.current;
+    contextWasMobileSidebarOpenRef.current = mobileSidebarOpen;
+    setProfileMenuOpen(false);
+    setMobileSidebarOpen(false);
+    setContextSurface(surface);
+  }, [mobileSidebarOpen]);
+  const closeContextSurface = useCallback((restoreFocus = true): void => {
+    const restoreMobileSidebar = contextWasMobileSidebarOpenRef.current;
+    setContextSurface(undefined);
+    if (restoreMobileSidebar) setMobileSidebarOpen(true);
+    if (!restoreFocus) return;
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => contextReturnTriggerRef.current?.focus(), 0);
+    } else {
+      contextReturnTriggerRef.current?.focus();
+    }
+  }, []);
+
+  const openAccountSettings = useCallback((): void => {
+    if (!model.connection?.accountId) return;
+    accountSettingsReturnContextRef.current = {
+      targetKey: model.selectedWorkspaceTargetKey,
+      roomId: model.selectedRoomId,
+      roomPanelState,
+      roomSettingsTab
+    };
+    setAccountSettingsRestoreError(null);
+    accountSettingsWasMobileSidebarOpenRef.current = mobileSidebarOpen;
+    setProfileMenuOpen(false);
+    setMobileSidebarOpen(false);
+    setAccountSettingsOpen(true);
+  }, [mobileSidebarOpen, model.connection?.accountId, model.selectedRoomId, model.selectedWorkspaceTargetKey, roomPanelState, roomSettingsTab]);
+  const closeAccountSettings = useCallback((): void => {
+    const restoreMobileSidebar = accountSettingsWasMobileSidebarOpenRef.current;
+    const returnContext = accountSettingsReturnContextRef.current;
+    accountSettingsReturnContextRef.current = undefined;
+    if (returnContext) accountSettingsPendingRestoreRef.current = returnContext;
+    setAccountSettingsOpen(false);
+    if (restoreMobileSidebar) setMobileSidebarOpen(true);
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => document.querySelector<HTMLButtonElement>("[data-native-profile-trigger='true']")?.focus(), 0);
+    }
+  }, []);
+
+  useEffect(() => {
+    const pending = accountSettingsPendingRestoreRef.current;
+    if (!pending || accountSettingsOpen) return;
+    if (pending.targetKey && model.selectedWorkspaceTargetKey !== pending.targetKey) {
+      const entry = workspaceSwitcherEntries.find((candidate) => candidate.key === pending.targetKey);
+      if (!entry) {
+        accountSettingsPendingRestoreRef.current = undefined;
+        accountSettingsRestoreSelectionRequestedRef.current = false;
+        setRoomPanelState("closed");
+        setAccountSettingsRestoreError("設定を開く前のWorkspaceは、現在の権限では利用できません。安全のためRoomパネルを閉じました。");
+        return;
+      }
+      if (!accountSettingsRestoreSelectionRequestedRef.current) {
+        accountSettingsRestoreSelectionRequestedRef.current = true;
+        model.selectWorkspace(entry.workspace);
+      }
+      return;
+    }
+    accountSettingsRestoreSelectionRequestedRef.current = false;
+    if (pending.roomId && (model.roomLoading || !model.selectedWorkspaceTargetKey)) return;
+    if (pending.roomId) {
+      const room = model.rooms.find((candidate) => candidate.id === pending.roomId && candidate.workspaceId === model.selectedWorkspaceTarget?.workspaceId);
+      if (!room) {
+        accountSettingsPendingRestoreRef.current = undefined;
+        accountSettingsRestoreSelectionRequestedRef.current = false;
+        setRoomPanelState("closed");
+        setAccountSettingsRestoreError("設定を開く前のRoomは、現在の権限では利用できません。安全のためRoomパネルを閉じました。");
+        return;
+      }
+      if (model.selectedRoomId !== room.id) {
+        void model.openRoom(room);
+        return;
+      }
+    }
+    accountSettingsPendingRestoreRef.current = undefined;
+    setAccountSettingsRestoreError(null);
+    setRoomSettingsTab(pending.roomSettingsTab);
+    setRoomPanelState(pending.roomPanelState);
+  }, [accountSettingsOpen, model.openRoom, model.roomLoading, model.rooms, model.selectedRoomId, model.selectedWorkspaceTarget, model.selectedWorkspaceTargetKey, model.selectWorkspace, workspaceSwitcherEntries]);
+
+  const copyAccountId = useCallback(async (accountId: string): Promise<void> => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) throw new Error("account_id_copy_unavailable");
+    await navigator.clipboard.writeText(accountId);
+  }, []);
+
+  const connectionReflections = useMemo(() => model.connectionState.connections.map((connection) => {
+    if (connection.id === model.connection?.id && model.connectionLoading) {
+      return { connectionId: connection.id, state: "pending" as const };
+    }
+    if (connection.id === model.connection?.id && model.connectionError) {
+      return { connectionId: connection.id, state: "failed" as const, error: model.connectionError };
+    }
+    // There is no renderer-side write for the Server display name. Keep the
+    // status explicitly unverified rather than claiming that a local save was
+    // reflected remotely.
+    return { connectionId: connection.id, state: "unknown" as const };
+  }), [model.connection?.id, model.connectionError, model.connectionLoading, model.connectionState.connections]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.matchMedia) return;
@@ -604,12 +1003,32 @@ export function NativeApp() {
     return true;
   }, []);
 
-  const selectWorkspaceFromProfile = useCallback((workspace: NativeWorkspace): void => {
+  const shareState = useNativeShareState({
+    bridge: model.bridge,
+    target: model.selectedWorkspaceTarget,
+    selectedRoom: model.selectedRoom,
+    selectedWorkspace: model.selectedWorkspace,
+    workspaces: model.workspaces,
+    rooms: model.rooms,
+    agents: model.agents,
+    agentResources: model.agentResources,
+    selectedAgentId: model.agentResourceAgentId,
+    members: model.members,
+    accountId: model.connection?.accountId,
+    authenticated: Boolean(model.connection?.accountId),
+    requestNavigation: requestNativeNavigation,
+    refreshConnections: model.refreshConnections
+  });
+
+  const selectWorkspaceFromSidebar = useCallback((targetKey: string): void => {
+    const entry = workspaceSwitcherEntries.find((candidate) => candidate.key === targetKey);
+    if (!entry) return;
     requestNativeNavigation(() => {
-      model.selectWorkspace(workspace);
+      model.selectWorkspace(entry.workspace);
+      setWorkspacePopoverOpen(false);
       closeMobileSidebar();
     });
-  }, [closeMobileSidebar, model.selectWorkspace, requestNativeNavigation]);
+  }, [closeMobileSidebar, model.selectWorkspace, requestNativeNavigation, workspaceSwitcherEntries]);
 
   useEffect(() => {
     const preventDraftLoss = (event: BeforeUnloadEvent): void => {
@@ -627,6 +1046,8 @@ export function NativeApp() {
  // does not discard an in-progress instruction or comment.
  useEffect(() => {
    setRoomToolOpen(undefined);
+   setRoomPanelState("closed");
+   setRoomSettingsTab("basic");
    setArtifactWorkspaceInitialResource(undefined);
  }, [model.selectedRoomId, model.selectedWorkspaceTargetKey]);
 
@@ -752,16 +1173,41 @@ export function NativeApp() {
   const openRoomTool = (tool: NativeRoomTool): void => {
     requestNativeNavigation(() => {
       setArtifactWorkspaceInitialResource(undefined);
-      setRoomToolOpen(tool);
+      if (tool === "artifacts") {
+        setRoomToolOpen(undefined);
+        setRoomPanelState("artifacts");
+      } else if (tool === "administration") {
+        setRoomToolOpen(undefined);
+        setRoomSettingsTab("basic");
+        setRoomPanelState("room_settings");
+      } else {
+        setRoomToolOpen(tool);
+      }
       closeMobileSidebar();
     });
   };
+  const openRoomSettings = useCallback((tab: "basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing" = "basic"): void => {
+    requestNativeNavigation(() => {
+      setRoomToolOpen(undefined);
+      setRoomSettingsTab(tab);
+      setRoomPanelState("room_settings");
+      closeMobileSidebar();
+    });
+  }, [closeMobileSidebar, requestNativeNavigation]);
+  const toggleRoomPanel = useCallback((): void => {
+    requestNativeNavigation(() => {
+      setRoomPanelState((current) => current === "closed" ? "artifacts" : "closed");
+      setRoomToolOpen(undefined);
+      setArtifactWorkspaceInitialResource(undefined);
+    });
+  }, [requestNativeNavigation]);
   const openResultResource = (resource: NativeArtifactWorkspaceInitialResource): void => {
     requestNativeNavigation(() => {
       const scoped = nativeRoomResultResourceTarget(model.selectedWorkspaceTarget, model.selectedRoom, resource);
       if (!scoped) return;
       setArtifactWorkspaceInitialResource(scoped);
-      setRoomToolOpen("artifacts");
+      setRoomToolOpen(undefined);
+      setRoomPanelState("artifacts");
     });
   };
   const openKnowledgeSearchResult = async (result: NativeRoomSearchResult): Promise<void> => {
@@ -776,7 +1222,8 @@ export function NativeApp() {
       });
       if (!scoped) throw new Error("search_result_target_unavailable");
       setArtifactWorkspaceInitialResource(scoped);
-      setRoomToolOpen("artifacts");
+      setRoomToolOpen(undefined);
+      setRoomPanelState("artifacts");
       return;
     }
     if ((result.kind === "session" || result.kind === "message") && result.work_id) {
@@ -836,15 +1283,42 @@ export function NativeApp() {
     });
   };
 
-  // The artifact surface is the only Room tool that stays alongside the
-  // conversation. Other Room tools continue to replace the main surface so
-  // the existing workbench navigation and draft lifecycle remain unchanged.
+  // Room panels stay alongside the conversation. The work surface remains
+  // mounted so its stream, editor and drafts survive panel navigation.
   const artifactPanelTarget = model.connection
     && !model.managementOpen
     && !agentDirectoryOpen
-    && roomToolOpen === "artifacts"
+    && roomPanelState !== "closed"
     ? roomToolTarget
     : undefined;
+  const roomSettingsPanelTarget = model.connection
+    && !model.managementOpen
+    && !agentDirectoryOpen
+    && roomPanelState !== "closed"
+    ? roomToolTarget
+    : undefined;
+
+  const openRoomFromContext = useCallback((roomId: string): void => {
+    const normalizedRoomId = roomId.trim();
+    if (!normalizedRoomId || !currentContextTarget) return;
+    const room = model.rooms.find((candidate) => candidate.id === normalizedRoomId
+      && candidate.workspaceId === currentContextTarget.workspaceId);
+    // Search and notification projections never become a second authority for
+    // navigation. Only a Room already present in the current signed list may
+    // be opened from this surface.
+    if (!room) return;
+    requestNativeNavigation(() => {
+      closeContextSurface(false);
+      closeMobileSidebar();
+      return model.openRoom(room);
+    });
+  }, [closeContextSurface, closeMobileSidebar, currentContextTarget, model.openRoom, model.rooms, requestNativeNavigation]);
+  const searchApiAvailable = Boolean(model.bridge?.searchWorkspaceContext && currentContextTarget);
+  const notificationApiAvailable = Boolean(
+    model.bridge?.listWorkspaceNotifications
+      || model.bridge?.listAccountInvitationNotifications
+      || model.bridge?.getAccountWorkspaceNotificationSummaries
+  );
 
   const main = !model.connection
     ? model.connectionLoading
@@ -899,6 +1373,11 @@ export function NativeApp() {
           agentBackends={model.agentBackends}
           agentLoading={model.agentLoading}
           agentError={model.agentError}
+          agentResources={model.agentResources}
+          agentResourceSelectedId={model.agentResourceSelectedId}
+          agentResourceLoading={model.agentResourceLoading}
+          agentResourceError={model.agentResourceError}
+          agentResourceCanManage={model.agentResourceCanManage}
           roomAgentMembers={model.roomAgentMembers}
           roomAgentMembersLoading={model.roomAgentMembersLoading}
           roomAgentMembersError={model.roomAgentMembersError}
@@ -912,6 +1391,16 @@ export function NativeApp() {
           onRemoveRoomAgent={model.removeRoomAgent}
           onSetDefaultAgent={model.setRoomDefaultAgent}
           onOpenAgentDm={model.openAgentDm}
+          onSelectAgentResources={model.selectAgentResources}
+          onSelectAgentResource={model.selectAgentResource}
+          onLoadAgentResource={model.loadAgentResource}
+          onCreateAgentResource={model.createAgentResource}
+          onUpdateAgentResource={model.updateAgentResource}
+          onArchiveAgentResource={model.archiveAgentResource}
+          onOpenAgentShare={(selection) => {
+            if (selection.kind !== "knowledge" && selection.kind !== "skill") return;
+            void shareState.openAgentShare(selection);
+          }}
         />
       : roomToolOpen === "knowledge" && roomToolTarget
         ? <NativeKnowledgeTools
@@ -922,6 +1411,7 @@ export function NativeApp() {
           onDraftNavigationControllerChange={onDraftNavigationControllerChange}
           onOpenSearchResult={openKnowledgeSearchResult}
           onUseResource={addWorkResourceRef}
+          onOpenShare={shareState.openRoomShare}
           bridge={model.bridge}
         />
       : roomToolOpen === "interactions" && roomToolTarget
@@ -932,19 +1422,6 @@ export function NativeApp() {
           onClose={() => setRoomToolOpen(undefined)}
           onDraftNavigationControllerChange={onDraftNavigationControllerChange}
         />
-      : roomToolOpen === "administration" && model.selectedWorkspace && model.selectedRoom && model.selectedWorkspaceTarget
-        ? <NativeRoomAdministration
-          rooms={model.rooms}
-          target={model.selectedWorkspaceTarget}
-          workspaceVersion={model.selectedWorkspace.version}
-          currentRoom={model.selectedRoom}
-          workspaceRole={model.selectedWorkspace.role}
-          bridge={model.bridge}
-         onSelectRoom={model.openRoom}
-         onRefresh={model.refreshWorkspaceContent}
-          onClose={() => setRoomToolOpen(undefined)}
-          onDraftNavigationControllerChange={onDraftNavigationControllerChange}
-       />
       : roomToolOpen === "collections" && roomToolTarget
         ? <NativeCollectionPanel
           target={roomToolTarget}
@@ -1004,6 +1481,16 @@ export function NativeApp() {
                 onSetDefaultAgent={model.setRoomDefaultAgent}
                 onOpenAgentDm={model.openAgentDm}
                 onOpenAgentSettings={() => requestNativeNavigation(() => setAgentDirectoryOpen(true))}
+                participants={roomParticipants.participants}
+                participantsLoading={roomParticipants.loading}
+                participantsError={roomParticipants.error}
+                roomPanelState={roomPanelState}
+                onToggleRoomPanel={toggleRoomPanel}
+                onOpenRoomArtifacts={() => openRoomTool("artifacts")}
+                onOpenRoomSettings={() => openRoomSettings("basic")}
+                onOpenRoomKnowledge={() => openRoomSettings("knowledge")}
+                onOpenRoomShare={roomKnowledgeShareSelection ? () => { void shareState.openRoomShare(roomKnowledgeShareSelection); } : undefined}
+                roomKnowledgeShareAvailable={roomKnowledgeShareAvailability === "ready"}
                 roomToolLinks={<NativeRoomToolLinks target={roomToolTarget} onOpen={openRoomTool} />}
                 onOpenResultResource={openResultResource}
                 onReconnect={model.reconnect}
@@ -1028,32 +1515,259 @@ export function NativeApp() {
   return (
     <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
       <div className="native-workspace-shell">
-        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}`} aria-hidden={mobileViewport && !mobileSidebarOpen ? true : undefined} inert={mobileViewport && !mobileSidebarOpen} aria-label="Samurai navigation">
+        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen} aria-label="Samurai navigation">
           <div className="native-brand"><span className="native-brand-mark" aria-hidden="true">S</span><div><strong>samurai</strong></div></div>
+          <div className="native-sidebar-context-tools" aria-label="Workspaceコンテキスト">
+            <span className="native-sidebar-workspace-label">Workspace</span>
+            <div className="native-workspace-picker">
+              <button
+                type="button"
+                className="native-sidebar-workspace-trigger"
+                aria-label="Workspaceを切り替え"
+                aria-expanded={workspacePopoverOpen}
+                aria-haspopup="dialog"
+                onClick={() => setWorkspacePopoverOpen((open) => !open)}
+                disabled={workspaceSwitcherEntries.length === 0 || model.workspaceLoading}
+              >
+                <span>{model.selectedWorkspace?.name ?? (workspaceSwitcherEntries.length ? "Workspaceを選択" : "Workspaceなし")}</span>
+                <span aria-hidden="true">⌄</span>
+              </button>
+              {workspacePopoverOpen ? (
+                <div className="native-workspace-popover" role="dialog" aria-label="Workspaceを選択">
+                  <div className="native-workspace-popover-heading"><strong>Workspace</strong><span>{model.connectionState.activeConnectionId ? "接続済みServer" : "接続未確認"}</span></div>
+                  <ul>
+                    {workspaceSwitcherEntries.map(({ key, workspace }) => {
+                      const unread = workspaceUnreadStates[workspace.target?.workspaceId ?? workspace.id];
+                      const unreadLabel = unread?.status === "count" ? `未読 ${unread.count}` : unread?.status === "zero" ? "未読 0" : unread?.status === "failed" ? "未読取得失敗" : "未読未確認";
+                      return <li key={key}>
+                        <button type="button" className="native-workspace-popover-row" aria-current={key === model.selectedWorkspaceTargetKey ? "true" : undefined} onClick={() => selectWorkspaceFromSidebar(key)}>
+                          <span className="native-workspace-popover-row-main"><strong>{workspace.name}</strong><small>{workspace.serverLabel ?? workspace.serverOrigin ?? "Server"}</small></span>
+                          <span className="native-workspace-popover-row-meta"><small>{workspace.availability === "offline" ? "オフライン" : workspace.availability === "reconnecting" ? "再接続中" : workspace.availability === "connected" ? "接続済み" : "接続未確認"}</small><small>{unreadLabel}</small></span>
+                        </button>
+                      </li>;
+                    })}
+                  </ul>
+                  <div className="native-workspace-popover-fixed"><span>固定入口</span><button type="button" onClick={() => { setWorkspacePopoverOpen(false); openContextSurface("search"); }} disabled={!searchApiAvailable}>検索</button><button type="button" onClick={() => { setWorkspacePopoverOpen(false); openContextSurface("notifications"); }} disabled={!notificationApiAvailable}>通知</button></div>
+                </div>
+              ) : null}
+            </div>
+            <div className="native-sidebar-quick-actions">
+              <button
+                ref={contextSearchTriggerRef}
+                type="button"
+                className="native-sidebar-quick-button"
+                aria-label="現在のWorkspaceを検索"
+                onClick={() => openContextSurface("search")}
+                disabled={!searchApiAvailable}
+                title={searchApiAvailable ? "現在のWorkspaceを検索" : "Workspace検索は利用できません"}
+              ><span aria-hidden="true">⌕</span><span>検索</span></button>
+              <button
+                ref={contextNotificationTriggerRef}
+                type="button"
+                className="native-sidebar-quick-button"
+                aria-label="Workspace通知を開く"
+                onClick={() => openContextSurface("notifications")}
+                disabled={!notificationApiAvailable}
+                title={notificationApiAvailable ? "Workspace通知を開く" : "通知は利用できません"}
+              ><span aria-hidden="true">◌</span><span>通知</span></button>
+            </div>
+          </div>
           {model.selectedWorkspace ? <button type="button" className="native-sidebar-agent-link" onClick={() => { requestNativeNavigation(() => { setAgentDirectoryOpen(true); closeMobileSidebar(); }); }} disabled={model.agentLoading}>✦<span>Agent</span></button> : null}
-          <RoomNavigator rooms={model.rooms} selectedRoomId={model.selectedRoomId} loading={model.roomLoading} disabled={!model.connection || !model.selectedWorkspace} archived={model.selectedWorkspace?.state !== "active"} error={model.roomError} onSelect={(roomId) => { requestNativeNavigation(() => { model.openRoom(roomId); closeMobileSidebar(); }); }} onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room", "existing-only") : undefined} />
+          <RoomNavigator
+            rooms={model.rooms}
+            selectedRoomId={model.selectedRoomId}
+            loading={model.roomLoading}
+            disabled={!model.connection || !model.selectedWorkspace}
+            archived={model.selectedWorkspace?.state !== "active"}
+            error={model.roomError}
+            expandedRoomIds={roomExpansion.expandedRoomIds ?? roomParentIds}
+            onToggleExpanded={toggleRoomExpanded}
+            onSelect={(room) => { requestNativeNavigation(() => { void model.openRoom(room); closeMobileSidebar(); }); }}
+            onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room", "existing-only") : undefined}
+          />
           <NativeProfileMenu
             accountLabel={accountLabel}
             open={profileMenuOpen}
-            theme={theme}
-            workspaces={model.workspaces}
-            selectedWorkspaceTargetKey={model.selectedWorkspaceTargetKey}
             onToggle={() => setProfileMenuOpen((open) => !open)}
             onClose={() => setProfileMenuOpen(false)}
-            onThemeChange={changeTheme}
-            onSelectWorkspace={selectWorkspaceFromProfile}
+            onOpenSettings={model.connection?.accountId ? openAccountSettings : undefined}
           />
         </aside>
         <section className="native-main-window" aria-label="現在のRoom">
-          <main className="native-main">{main}</main>
-          {artifactPanelTarget ? <aside className="native-artifact-panel" aria-label="成果物">
+          <main className="native-main">
+            {main}
+            {shareState.dialog ? <div className="native-main-share-overlay" role="presentation">
+              <div className="native-main-share-dialog" onMouseDown={(event) => event.stopPropagation()}>
+                {shareState.dialog.loading ? <p className="native-inline-note" role="status">共有情報を確認しています…</p> : null}
+                {shareState.dialog.error ? <p className="native-inline-error" role="alert">{shareState.dialog.error}</p> : null}
+                <WorkspaceShareDialog
+                  source={shareState.dialog.source}
+                  resources={shareState.dialog.resources}
+                  recipientOptions={shareState.dialog.recipientOptions}
+                  draft={shareState.dialog.draft}
+                  publishedShares={shareState.dialog.publishedShares}
+                  initialStage={shareState.dialog.initialStage}
+                  onCreateDraft={shareState.onCreateDraft}
+                  onUpdateDraft={shareState.onUpdateDraft}
+                  onDiscardDraft={shareState.onDiscardDraft}
+                  onPublishDraft={shareState.onPublishDraft}
+                  onRevokeShare={shareState.onRevokeShare}
+                  onClose={shareState.closeDialog}
+                  onPublished={shareState.onPublished}
+                />
+              </div>
+            </div> : null}
+            {shareState.import ? <div className="native-main-share-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) shareState.closeImport(); }}>
+              <div className="native-main-share-dialog" onMouseDown={(event) => event.stopPropagation()}>
+                {shareState.import.loading ? <section className="native-share-loading" role="dialog" aria-modal="true" aria-labelledby="native-share-loading-title"><h2 id="native-share-loading-title">共有内容を確認しています</h2><p role="status">共有元から表示用の固定コピーを取得しています…</p></section> : null}
+                {shareState.import.error ? <section className="native-share-error" role="dialog" aria-modal="true" aria-labelledby="native-share-error-title"><h2 id="native-share-error-title">共有内容を表示できません</h2><p role="alert">{shareState.import.error}</p><button type="button" className="native-button" onClick={shareState.closeImport}>閉じる</button></section> : null}
+                {shareState.import.view ? <WorkspaceShareImport
+                  view={shareState.import.view}
+                  source={shareState.import.source}
+                  authenticated={shareState.importAuthenticated}
+                  authenticating={shareState.importAuthenticating}
+                  workspaces={shareState.importWorkspaces}
+                  rooms={shareState.importRooms}
+                  initialStatus={shareState.import.status}
+                  onAuthenticate={shareState.onAuthenticateImport}
+                  onStartImport={shareState.onStartImport}
+                  onGetStatus={shareState.onGetImportStatus}
+                  onClose={shareState.closeImport}
+                /> : null}
+              </div>
+            </div> : null}
+            {!shareState.import && shareState.importRouteError ? <div className="native-main-share-overlay" role="presentation">
+              <section className="native-share-error" role="dialog" aria-modal="true" aria-labelledby="native-share-route-error-title">
+                <h2 id="native-share-route-error-title">共有リンクを開けません</h2>
+                <p role="alert">{shareState.importRouteError}</p>
+                <button type="button" className="native-button" onClick={shareState.closeImport}>閉じる</button>
+              </section>
+            </div> : null}
+            {contextSurface === "search" && searchApiAvailable ? <div className="native-main-context-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeContextSurface(); }}>
+              <div className="native-main-context-dialog" onMouseDown={(event) => event.stopPropagation()}>
+                <WorkspaceContextSearch
+                  search={searchWorkspaceContext}
+                  target={currentContextTarget}
+                  workspaceName={model.selectedWorkspace?.name}
+                  open
+                  onClose={closeContextSurface}
+                  onOpenRoom={openRoomFromContext}
+                />
+              </div>
+            </div> : null}
+            {contextSurface === "notifications" && notificationApiAvailable ? <div className="native-main-context-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeContextSurface(); }}>
+              <div className="native-main-context-dialog" onMouseDown={(event) => event.stopPropagation()}>
+                <WorkspaceNotificationCenter
+                  target={currentContextTarget}
+                  workspaceName={model.selectedWorkspace?.name}
+                  workspaceIds={accountWorkspaceIds}
+                  workspaceLabels={accountWorkspaceLabels}
+                  open
+                  onClose={closeContextSurface}
+                  onOpenRoom={openRoomFromContext}
+                  listWorkspaceNotifications={model.bridge?.listWorkspaceNotifications ? listWorkspaceNotifications : undefined}
+                  getWorkspaceNotificationSummary={model.bridge?.getWorkspaceNotificationSummary ? getWorkspaceNotificationSummary : undefined}
+                  markWorkspaceNotificationsRead={model.bridge?.markWorkspaceNotificationsRead ? markWorkspaceNotificationsRead : undefined}
+                  getAccountWorkspaceNotificationSummaries={model.bridge?.getAccountWorkspaceNotificationSummaries ? getAccountWorkspaceNotificationSummaries : undefined}
+                  listAccountInvitationNotifications={model.bridge?.listAccountInvitationNotifications ? listAccountInvitationNotifications : undefined}
+                  markAccountInvitationNotificationsRead={model.bridge?.markAccountInvitationNotificationsRead ? markAccountInvitationNotificationsRead : undefined}
+                />
+              </div>
+            </div> : null}
+          </main>
+          {accountSettingsRestoreError ? <div className="native-main-context-restore-error" role="alert">{accountSettingsRestoreError}</div> : null}
+          {accountSettingsOpen && model.connection?.accountId ? <div className="native-main-surface-overlay native-account-settings-overlay">
+            <NativeAccountSettings
+              accountId={model.connection.accountId}
+              registeredDisplayName={accountLabel}
+              preferencesStore={accountPreferencesStore}
+              theme={theme}
+              onThemeChange={changeTheme}
+              connections={model.connectionState.connections}
+              connectionReflections={connectionReflections}
+              connectionsLoading={model.connectionLoading}
+              connectionsError={model.connectionError}
+              onRetryConnection={() => model.refreshConnections()}
+              onManageConnection={() => {
+                setAccountSettingsOpen(false);
+                setConnectionSettingsOpen(true);
+              }}
+              onCopyAccountId={copyAccountId}
+              onBack={closeAccountSettings}
+            />
+          </div> : null}
+          {roomSettingsPanelTarget && model.selectedWorkspace && model.selectedRoom ? <aside className="native-room-panel" aria-label="Room設定" hidden={roomPanelState !== "room_settings"}>
+            <NativeRoomAdministration
+              rooms={model.rooms}
+              target={roomSettingsPanelTarget}
+              workspaceVersion={model.selectedWorkspace.version}
+              currentRoom={model.selectedRoom}
+              workspaceRole={model.selectedWorkspace.role}
+              bridge={model.bridge}
+              initialTab={roomSettingsTab}
+              onTabChange={setRoomSettingsTab}
+              onSelectRoom={model.openRoom}
+              onRefresh={model.refreshWorkspaceContent}
+              onClose={() => setRoomPanelState("closed")}
+              onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+              agentPanel={(
+                <div>
+                  <h2>Room Agent</h2>
+                  <p className="native-room-administration__muted">このRoomで認可済みのAgentだけを表示します。既定Agentは自動変更しません。</p>
+                  {model.roomAgentMembersLoading ? <p role="status">Agent membershipを確認しています…</p> : null}
+                  {model.roomAgentMembersError ? <p className="native-room-administration__error" role="alert">{model.roomAgentMembersError}</p> : null}
+                  {!model.roomAgentMembersLoading && !model.roomAgentMembersError && model.roomAgentMembers.filter((member) => !member.removed).length === 0 ? <p className="native-room-administration__muted">認可済みAgentはありません。</p> : null}
+                  <ul className="native-room-administration__member-list" aria-label="RoomのAgent membership">
+                    {model.roomAgentMembers.filter((member) => !member.removed).map((member) => {
+                      const agent = model.agents.find((candidate) => candidate.id === member.agentId);
+                      return <li className="native-room-administration__member-row" key={member.id}><span>{agent?.displayName ?? "Agent"}</span><span>{member.canExecute ? "実行可" : "実行不可"}</span></li>;
+                    })}
+                  </ul>
+                  <button type="button" className="native-room-administration__secondary" onClick={() => { setRoomPanelState("closed"); requestNativeNavigation(() => setAgentDirectoryOpen(true)); }}>Agent詳細を開く</button>
+                </div>
+              )}
+              knowledgePanel={roomToolTarget ? (
+                <NativeKnowledgeTools
+                  target={roomToolTarget}
+                  workspaceName={model.selectedWorkspace.name}
+                  roomName={model.selectedRoom.name}
+                  initialTab="knowledge"
+                  onClose={() => setRoomPanelState("closed")}
+                  onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+                  onOpenSearchResult={openKnowledgeSearchResult}
+                  onUseResource={addWorkResourceRef}
+                  onOpenShare={shareState.openRoomShare}
+                  bridge={model.bridge}
+                />
+              ) : undefined}
+              learningPanel={roomToolTarget ? (
+                <NativeKnowledgeTools
+                  target={roomToolTarget}
+                  workspaceName={model.selectedWorkspace.name}
+                  roomName={model.selectedRoom.name}
+                  initialTab="settings"
+                  onClose={() => setRoomPanelState("closed")}
+                  onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+                  bridge={model.bridge}
+                />
+              ) : undefined}
+              sharingPanel={(
+                <div>
+                  <h2>Room Knowledge共有</h2>
+                  <p className="native-room-administration__muted">共有可能なRoom Knowledgeが確認できた場合だけ、Knowledge画面から共有を開始できます。Workspace Knowledgeや未確定資源は対象外です。</p>
+                  <button type="button" className="native-room-administration__secondary" onClick={() => setRoomSettingsTab("knowledge")}>Knowledgeを確認</button>
+                </div>
+              )}
+            />
+          </aside> : null}
+          {artifactPanelTarget ? <aside className="native-artifact-panel" aria-label="成果物" hidden={roomPanelState !== "artifacts"}>
             <NativeArtifactWorkspace
               target={artifactPanelTarget}
               initialResource={artifactWorkspaceInitialResource}
               canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
               canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
               bridge={model.bridge}
-              onClose={() => { setArtifactWorkspaceInitialResource(undefined); setRoomToolOpen(undefined); }}
+              onClose={() => { setArtifactWorkspaceInitialResource(undefined); setRoomPanelState("closed"); }}
               onDraftNavigationControllerChange={onDraftNavigationControllerChange}
               onRequestAgentRevision={async (target) => {
                 const sourceWork = target.sourceWorkId ? model.works.find((work) => work.id === target.sourceWorkId) : undefined;
@@ -1061,7 +1775,7 @@ export function NativeApp() {
                   ? sourceWork.id
                   : undefined;
                 model.appendWorkDraft(artifactRevisionRequestDraft(target), replyWorkId);
-                setRoomToolOpen(undefined);
+                setRoomPanelState("closed");
               }}
             />
           </aside> : null}

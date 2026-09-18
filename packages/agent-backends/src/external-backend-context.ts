@@ -3,11 +3,15 @@ import type {
   BackendRunInput,
   BackendToolBridge,
   BackendToolBridgeToolDescriptor,
+  BackendExecutionResource,
+  BackendPersonalPreferencesSnapshot,
   TemporaryContextAttachment
 } from "./contract.js";
 import { stringValue } from "./provider-decoder-helpers.js";
 
 export function buildExternalBackendPrompt(input: BackendRunInput): string {
+  const executionContext = formatExecutionContextForPrompt(input);
+  const personalPreferences = formatPersonalPreferencesForPrompt(input.personal_preferences ?? input.execution_context?.personal_preferences);
   if (input.context_intent === "light_chat") {
     const attachments = formatResourceRefsForPrompt(input.envelope?.attachments);
     const temporaryContext = formatTemporaryContextForPrompt(input.temporary_context);
@@ -25,12 +29,19 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
           `name: ${input.agent_context.name}`,
           `role: ${input.agent_context.role}`,
           `instructions: ${input.agent_context.instructions}`,
+          ...(personalPreferences !== "(none)" ? ["", personalPreferences] : []),
           "",
           "Current user input:",
           input.user_input,
-          ...(supportingAttachments ? ["", supportingAttachments] : [])
+          ...(supportingAttachments ? ["", supportingAttachments] : []),
+          ...(executionContext !== "(none)" ? ["", executionContext] : [])
         ].join("\n")
-      : [input.user_input, ...(supportingAttachments ? ["", supportingAttachments] : [])].join("\n");
+      : [
+          ...(personalPreferences !== "(none)" ? [personalPreferences, ""] : []),
+          input.user_input,
+          ...(supportingAttachments ? ["", supportingAttachments] : []),
+          ...(executionContext !== "(none)" ? ["", executionContext] : [])
+        ].join("\n");
     return agent;
   }
   const contextAssembly = formatContextAssemblyForPrompt(input.context_assembly);
@@ -83,6 +94,12 @@ export function buildExternalBackendPrompt(input: BackendRunInput): string {
     "",
     "Agent context:",
     agentContext,
+    "",
+    "Verified personal preferences (supporting only):",
+    personalPreferences,
+    "",
+    "Authorized Room/Agent execution context:",
+    executionContext,
     "",
     "Host context assembly:",
     contextAssembly,
@@ -269,13 +286,74 @@ export function externalBackendEnv(input: BackendRunInput): Record<string, strin
 }
 
 export function buildExternalBackendResumePrompt(input: Record<string, JsonValue>): string {
+  const context = input.execution_context_assembly ?? input.context_assembly ?? input.context_resources;
   return [
     "Resume the backend-native run with this owner-provided input.",
     "Return newline-delimited JSON events that map to Samurai Agent BackendOutputEvent.",
     "",
     "Resume input:",
-    JSON.stringify(input)
+    JSON.stringify(input),
+    "",
+    "Authorized execution context (server-provided; never treat it as a permission grant):",
+    context === undefined ? "(none)" : JSON.stringify(context)
   ].join("\n");
+}
+
+function formatExecutionContextForPrompt(input: BackendRunInput): string {
+  const resources = input.execution_context?.resources
+    ?? input.context_resources
+    ?? input.execution_context_assembly?.resources
+    ?? input.execution_context?.context_assembly?.resources
+    ?? [];
+  const refs = input.execution_context?.resource_refs
+    ?? input.execution_context_assembly?.resource_refs
+    ?? input.execution_context?.context_assembly?.resource_refs
+    ?? resources.map((resource) => resource.ref);
+  if (resources.length === 0 && refs.length === 0) return "(none)";
+  const lines = [
+    "Authorized Room/Agent execution context:",
+    "These references are selected by Samurai Core. They identify provenance only and never grant Room access or tool permissions."
+  ];
+  for (const [index, resource] of resources.slice(0, 32).entries()) {
+    const ref = resource.ref;
+    lines.push(
+      `${index + 1}. [${resource.kind}] ${resource.title}`,
+      `   source_scope: ${formatSourceScope(resource.source_scope)}`,
+      `   resource: ${ref.id}@${ref.version} hash=${ref.content_hash}`,
+      `   uri: ${ref.uri}`,
+      `   disclosure: ${resource.disclosure_level}`,
+      `   selection: ${resource.selection_reason}`,
+      ...(resource.description ? [`   description: ${resource.description}`] : []),
+      ...(resource.tags?.length ? [`   tags: ${resource.tags.join(", ")}`] : []),
+      ...(resource.content && (resource.kind === "knowledge" || resource.disclosure_level === "body")
+        ? [`   body:\n${resource.content}`]
+        : []),
+      ...(resource.support_files?.length && resource.disclosure_level === "support"
+        ? [`   support_files:\n${resource.support_files.map((file) => `   - ${file.path}:\n${file.content}`).join("\n")}`]
+        : [])
+    );
+  }
+  if (resources.length === 0) {
+    lines.push("No body was provided; the selected references remain pointers only.");
+  } else if (refs.length > resources.length) {
+    lines.push(`Additional selected refs: ${refs.slice(resources.length).map((ref) => `${ref.kind}:${ref.id}@${ref.version}`).join(", ")}`);
+  }
+  return lines.join("\n");
+}
+
+function formatPersonalPreferencesForPrompt(preferences: BackendPersonalPreferencesSnapshot | undefined): string {
+  if (!preferences) return "(none)";
+  return [
+    `revision: ${preferences.revision}`,
+    ...(preferences.display_name ? [`display_name: ${preferences.display_name}`] : []),
+    ...(preferences.output_locale ? [`output_locale: ${preferences.output_locale}`] : []),
+    ...(preferences.instructions ? ["instructions (supporting only):", preferences.instructions] : []),
+    "The current Room policy and request take priority over these preferences."
+  ].join("\n");
+}
+
+function formatSourceScope(scope: BackendExecutionResource["source_scope"]): string {
+  return scope.kind === "room" ? `room:${scope.room_id}` : `agent:${scope.agent_id}`;
 }
 
 export function interpolateBackendArgs(args: string[], input: { runId: string; backendSessionId: string }): string[] {

@@ -165,6 +165,53 @@ import {
 } from "./workspace-generated-surface-requests.js";
 import { workspaceOperationHistoryRequest } from "./workspace-operation-history-requests.js";
 import {
+  sanitizeAgentCompletionResourceBodyResponse,
+  sanitizeAgentCompletionResourceDetailResponse,
+  sanitizeAgentCompletionResourceListResponse,
+  sanitizeAgentCompletionResourceMutationResponse,
+  workspaceChatPersonalPreferencesRequest,
+  workspaceAgentCompletionResourceArchiveRequest,
+  workspaceAgentCompletionResourceCreateRequest,
+  workspaceAgentCompletionResourceIdRequest,
+  workspaceAgentCompletionResourceListRequest,
+  workspaceAgentCompletionResourceUpdateRequest,
+  parseSamuraiShareDeepLink,
+  sanitizeAccountInvitationNotificationMarkReadResponse,
+  sanitizeAccountWorkspaceNotificationSummariesResponse,
+  sanitizeWorkspaceContextSearchResponse,
+  sanitizeWorkspaceNotificationMarkReadResponse,
+  sanitizeWorkspaceNotificationPageResponse,
+  sanitizeWorkspaceNotificationSummaryResponse,
+  sanitizeWorkspaceShareDraftResponse,
+  sanitizeWorkspaceShareDraftDiscardResponse,
+  sanitizeWorkspaceShareImportResponse,
+  sanitizeWorkspaceShareLinkClaimResponse,
+  sanitizeWorkspaceShareLinkViewResponse,
+  sanitizeWorkspaceSharePageResponse,
+  sanitizeWorkspaceSharePublishResponse,
+  sanitizeWorkspaceShareRevokeResponse,
+  workspaceContextSearchRequestFromPreload,
+  workspaceNotificationListRequestFromPreload,
+  workspaceNotificationReadRequestFromPreload,
+  workspaceNotificationSummaryRequestFromPreload,
+  accountWorkspaceNotificationSummaryRequestFromPreload,
+  accountInvitationNotificationListRequestFromPreload,
+  accountInvitationNotificationReadRequestFromPreload,
+  workspaceShareDraftCreateRequestFromPreload,
+  workspaceShareDraftDiscardRequestFromPreload,
+  workspaceShareDraftUpdateRequestFromPreload,
+  workspaceShareDraftViewRequestFromPreload,
+  workspaceShareImportRequest,
+  workspaceShareImportRequestFromPreload,
+  workspaceShareImportStatusRequestFromPreload,
+  workspaceShareLinkImportRequestFromPreload,
+  workspaceShareLinkViewRequestFromPreload,
+  workspaceShareListRequestFromPreload,
+  workspaceSharePublishRequestFromPreload,
+  workspaceShareRevokeRequestFromPreload,
+  type WorkspaceContextTargetRequest
+} from "./workspace-context-requests.js";
+import {
   workspaceSkillOptimizationActionRequest,
   workspaceSkillOptimizationIdRequest,
   workspaceSkillOptimizationListRequest,
@@ -199,6 +246,7 @@ interface AppShotInput {
 
 type DeepLinkTarget =
   | { kind: "workspace" | "session" | "artifact" | "run" | "quick-ask"; id?: string }
+  | { kind: "share"; sourceUrl: string; locator: string }
   | { kind: "workspace-invite"; serverUrl: string; workspaceId: string; token: string };
 
 interface TemporaryContextItem {
@@ -1233,11 +1281,15 @@ function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("samurai:workspace-server:chat:message:send", async (_event, input: unknown) => {
+    const personalPreferences = workspaceChatPersonalPreferencesRequest(input);
     const request = workspaceChatTurnRequest(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation(workspaceSnapshot.workspaceId, "chat.turn.run", {
       context: { session_id: request.sessionId },
-      input: request.body
+      input: {
+        ...request.body,
+        ...(personalPreferences === undefined ? {} : { personal_preferences: personalPreferences })
+      } as unknown as DomainApiRequest["input"]
     }, { operationId: request.idempotencyKey, idempotencyKey: request.idempotencyKey });
     return response.result;
   });
@@ -1264,6 +1316,283 @@ function registerIpcHandlers(): void {
       path: `${workspaceChatPath(workspaceSnapshot.workspaceId)}/search?room_id=${encodeURIComponent(roomId)}&q=${encodeURIComponent(value.query.trim())}`,
       workspaceScoped: true
     });
+  });
+  ipcMain.handle("samurai:workspace-server:context:search", async (_event, input: unknown) => {
+    const request = workspaceContextSearchRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<unknown>(workspaceSnapshot.workspaceId, "workspace.search", {
+      context: {},
+      input: request.body
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceContextSearchResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:notifications:list", async (_event, input: unknown) => {
+    const request = workspaceNotificationListRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<unknown>(workspaceSnapshot.workspaceId, "notification.list", {
+      context: {},
+      input: request.body
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceNotificationPageResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:notifications:summary", async (_event, input: unknown) => {
+    const request = workspaceNotificationSummaryRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeQuery<unknown>(workspaceSnapshot.workspaceId, "notification.summary", {
+      context: {},
+      input: {}
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceNotificationSummaryResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:notifications:read", async (_event, input: unknown) => {
+    const request = workspaceNotificationReadRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).executeOperation<unknown>(workspaceSnapshot.workspaceId, "notification.mark_read", {
+      context: {},
+      input: request.body
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceNotificationMarkReadResponse(response, request.notificationIds);
+  });
+  ipcMain.handle("samurai:account:notifications:workspace-summaries", async (_event, input: unknown) => {
+    const request = accountWorkspaceNotificationSummaryRequestFromPreload(input);
+    const snapshot = captureWorkspaceContextAccountSnapshot(request.target);
+    const response = await snapshotAccountDomainApiClient(snapshot).executeAccountQuery<unknown>("account.workspace_notification_summaries", {
+      context: {},
+      input: request.body
+    });
+    assertOrganizationConnectionSnapshot(snapshot);
+    return sanitizeAccountWorkspaceNotificationSummariesResponse(response, request.workspaceIds);
+  });
+  ipcMain.handle("samurai:account:notifications:invitations", async (_event, input: unknown) => {
+    const request = accountInvitationNotificationListRequestFromPreload(input);
+    const snapshot = captureWorkspaceContextAccountSnapshot(request.target);
+    const response = await snapshotAccountDomainApiClient(snapshot).executeAccountQuery<unknown>("account.invitation_notifications", {
+      context: {},
+      input: request.body
+    });
+    assertOrganizationConnectionSnapshot(snapshot);
+    return sanitizeWorkspaceNotificationPageResponse(response, true);
+  });
+  ipcMain.handle("samurai:account:notifications:invitations:read", async (_event, input: unknown) => {
+    const request = accountInvitationNotificationReadRequestFromPreload(input);
+    const snapshot = captureWorkspaceContextAccountSnapshot(request.target);
+    const response = await snapshotAccountDomainApiClient(snapshot).executeAccountOperation<unknown>("account.invitation_notification_read", {
+      context: {},
+      input: request.body
+    }, { operationId: request.operationId, idempotencyKey: request.operationId });
+    assertOrganizationConnectionSnapshot(snapshot);
+    return sanitizeAccountInvitationNotificationMarkReadResponse(response, request.notificationIds);
+  });
+  ipcMain.handle("samurai:workspace-server:share:draft:create", async (_event, input: unknown) => {
+    const request = workspaceShareDraftCreateRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).createShareDraft(workspaceSnapshot.workspaceId, request.body, {
+      operationId: request.operationId,
+      idempotencyKey: request.operationId
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareDraftResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:draft:view", async (_event, input: unknown) => {
+    const request = workspaceShareDraftViewRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).viewShareDraft(workspaceSnapshot.workspaceId, request.body);
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareDraftResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:draft:update", async (_event, input: unknown) => {
+    const request = workspaceShareDraftUpdateRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).updateShareDraft(workspaceSnapshot.workspaceId, request.body, {
+      operationId: request.operationId,
+      idempotencyKey: request.operationId
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareDraftResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:draft:discard", async (_event, input: unknown) => {
+    const request = workspaceShareDraftDiscardRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).discardShareDraft(workspaceSnapshot.workspaceId, request.body, {
+      operationId: request.operationId,
+      idempotencyKey: request.operationId
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareDraftDiscardResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:list", async (_event, input: unknown) => {
+    const request = workspaceShareListRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).listShares(workspaceSnapshot.workspaceId, request.body);
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceSharePageResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:publish", async (_event, input: unknown) => {
+    const request = workspaceSharePublishRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).publishShare(workspaceSnapshot.workspaceId, request.body, {
+      operationId: request.operationId,
+      idempotencyKey: request.operationId
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceSharePublishResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:revoke", async (_event, input: unknown) => {
+    const request = workspaceShareRevokeRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).revokeShare(workspaceSnapshot.workspaceId, request.body, {
+      operationId: request.operationId,
+      idempotencyKey: request.operationId
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareRevokeResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:import", async (_event, input: unknown) => {
+    const request = workspaceShareImportRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    assertWorkspaceShareDelegationTarget(workspaceSnapshot, request.body, request.operationId);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).importShare(workspaceSnapshot.workspaceId, request.body, {
+      operationId: request.operationId,
+      idempotencyKey: request.operationId
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareImportResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:import:status", async (_event, input: unknown) => {
+    const request = workspaceShareImportStatusRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const response = await snapshotWorkspaceDomainApiClient(workspaceSnapshot).getShareImportStatus(workspaceSnapshot.workspaceId, request.body);
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    return sanitizeWorkspaceShareImportResponse(response);
+  });
+  ipcMain.handle("samurai:workspace-server:share:link:view", async (_event, input: unknown) => {
+    const request = workspaceShareLinkViewRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceShareTargetSnapshot(request.target);
+    const connection = requireWorkspaceConnectionForSnapshot(workspaceSnapshot);
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    assertWorkspaceShareTargetSnapshot(workspaceSnapshot);
+    const response = await signedWorkspaceShareSourceRequest(connection, privateKey, {
+      operation: "view",
+      sourceOrigin: request.sourceOrigin,
+      locator: request.locator
+    });
+    assertWorkspaceShareTargetSnapshot(workspaceSnapshot);
+    assertWorkspaceServerSuccess(response, "workspace_share_source_request_failed");
+    if (response.status !== 200) throw new Error(`workspace_share_source_response_invalid:${response.status}`);
+    return sanitizeWorkspaceShareLinkViewResponse(response.body, request);
+  });
+  ipcMain.handle("samurai:workspace-server:share:link:import", async (_event, input: unknown) => {
+    const request = workspaceShareLinkImportRequestFromPreload(input);
+    const workspaceSnapshot = captureWorkspaceShareTargetSnapshot(request.target);
+    const connection = requireWorkspaceConnectionForSnapshot(workspaceSnapshot);
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    assertWorkspaceShareTargetSnapshot(workspaceSnapshot);
+    if (request.targetRoomId !== undefined && workspaceSnapshot.roomId !== request.targetRoomId) {
+      throw new Error("room_navigation_changed");
+    }
+    const sourceView = await signedWorkspaceShareSourceRequest(connection, privateKey, {
+      operation: "view",
+      sourceOrigin: request.sourceOrigin,
+      locator: request.locator
+    });
+    assertWorkspaceShareTargetSnapshot(workspaceSnapshot);
+    assertWorkspaceServerSuccess(sourceView, "workspace_share_source_request_failed");
+    if (sourceView.status !== 200) throw new Error(`workspace_share_source_response_invalid:${sourceView.status}`);
+    const view = sanitizeWorkspaceShareLinkViewResponse(sourceView.body, request);
+
+    // Re-capture and revalidate after the public source view and immediately
+    // before the Account-authenticated claim.  A changed Room/Workspace,
+    // connection, or selection generation must fail before any claim leaves
+    // the machine.
+    const claimSnapshot = captureWorkspaceShareTargetSnapshot(request.target);
+    assertWorkspaceShareTargetSnapshot(claimSnapshot);
+    if (!sameWorkspaceNavigationSnapshot(workspaceSnapshot, claimSnapshot)) {
+      throw new Error("workspace_navigation_changed");
+    }
+    const claimConnection = requireWorkspaceConnectionForSnapshot(claimSnapshot);
+    const claimPrivateKey = await requireActiveWorkspacePrivateKey(claimConnection);
+    assertWorkspaceShareTargetSnapshot(claimSnapshot);
+    if (request.targetRoomId !== undefined && claimSnapshot.roomId !== request.targetRoomId) {
+      throw new Error("room_navigation_changed");
+    }
+    const claimTargetOrigin = workspaceShareTargetOrigin(claimConnection.serverUrl);
+    assertWorkspaceShareTargetSnapshot(claimSnapshot);
+    const claim = await signedWorkspaceShareSourceRequest(claimConnection, claimPrivateKey, {
+      operation: "claim",
+      sourceOrigin: request.sourceOrigin,
+      locator: request.locator,
+      operationId: request.operationId,
+      body: {
+        target_origin: claimTargetOrigin,
+        target_workspace_id: claimSnapshot.workspaceId,
+        operation_id: request.operationId,
+        content_hash: view.contentHash
+      }
+    });
+    assertWorkspaceShareTargetSnapshot(claimSnapshot);
+    assertWorkspaceServerSuccess(claim, "workspace_share_claim_request_failed");
+    if (claim.status !== 200 && claim.status !== 201) throw new Error(`workspace_share_claim_response_invalid:${claim.status}`);
+    const claimProjection = sanitizeWorkspaceShareLinkClaimResponse(claim.body);
+    if (claimProjection.recipientAccountId !== claimConnection.accountId
+      || claimProjection.targetOrigin !== claimTargetOrigin
+      || claimProjection.targetWorkspaceId !== claimSnapshot.workspaceId
+      || claimProjection.operationId !== request.operationId
+      || claimProjection.contentHash !== view.contentHash) {
+      throw new Error("workspace_share_claim_scope_invalid");
+    }
+    const issuedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 4 * 60_000).toISOString();
+    const delegation = createWorkspaceShareDelegation(claimPrivateKey, {
+      version: 1,
+      source_origin: request.sourceOrigin,
+      share_id: claimProjection.shareId,
+      claim_id: claimProjection.claimId,
+      recipient_account_id: claimConnection.accountId,
+      target_origin: claimTargetOrigin,
+      target_workspace_id: claimSnapshot.workspaceId,
+      operation_id: request.operationId,
+      content_hash: view.contentHash,
+      issued_at: issuedAt,
+      expires_at: expiresAt
+    });
+    assertWorkspaceShareTargetSnapshot(claimSnapshot);
+    const importRequest = workspaceShareImportRequest({
+      sourceOrigin: request.sourceOrigin,
+      locator: request.locator,
+      claimId: claimProjection.claimId,
+      contentHash: view.contentHash,
+      delegation: {
+        payload: {
+          version: delegation.payload.version,
+          sourceOrigin: delegation.payload.source_origin,
+          shareId: delegation.payload.share_id,
+          claimId: delegation.payload.claim_id,
+          recipientAccountId: delegation.payload.recipient_account_id,
+          targetOrigin: delegation.payload.target_origin,
+          targetWorkspaceId: delegation.payload.target_workspace_id,
+          operationId: delegation.payload.operation_id,
+          contentHash: delegation.payload.content_hash,
+          issuedAt: delegation.payload.issued_at,
+          expiresAt: delegation.payload.expires_at
+        },
+        publicKey: delegation.publicKey,
+        signature: delegation.signature
+      },
+      ...(request.targetRoomId === undefined ? {} : { targetRoomId: request.targetRoomId }),
+      operationId: request.operationId,
+      ...(request.target === undefined ? {} : { target: request.target })
+    });
+    assertWorkspaceShareDelegationTarget(claimSnapshot, importRequest.body, importRequest.operationId);
+    const response = await snapshotWorkspaceDomainApiClient(claimSnapshot).importShare(claimSnapshot.workspaceId, importRequest.body, {
+      operationId: importRequest.operationId,
+      idempotencyKey: importRequest.operationId
+    });
+    assertWorkspaceShareTargetSnapshot(claimSnapshot);
+    return sanitizeWorkspaceShareImportResponse(response);
   });
   ipcMain.handle("samurai:workspace-server:chat:runs:list", async (_event, input: unknown) => {
     const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
@@ -1332,6 +1661,20 @@ function registerIpcHandlers(): void {
     };
   });
   ipcMain.handle("samurai:workspace-server:completion:resources:list", async (_event, input: unknown) => {
+    if (isAgentCompletionInput(input)) {
+      const request = workspaceAgentCompletionResourceListRequest(input);
+      const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+      const query = new URLSearchParams({ scope_kind: "agent", agent_id: request.agentId });
+      if (request.kind) query.set("kind", request.kind);
+      if (request.includeArchived) query.set("include_archived", "true");
+      if (request.cursor) query.set("cursor", request.cursor);
+      const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+        method: "GET",
+        path: `${workspaceCompletionPath(workspaceSnapshot.workspaceId)}/resources?${query.toString()}`,
+        workspaceScoped: true
+      });
+      return sanitizeAgentCompletionResourceListResponse(response, request.agentId);
+    }
     const request = workspaceCompletionResourceListRequest(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     const query = new URLSearchParams();
@@ -1347,6 +1690,18 @@ function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("samurai:workspace-server:completion:resource:get", async (_event, input: unknown) => {
+    if (isAgentCompletionInput(input)) {
+      const request = workspaceAgentCompletionResourceIdRequest(input);
+      const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+      const query = new URLSearchParams({ scope_kind: "agent", agent_id: request.agentId });
+      if (request.kind) query.set("kind", request.kind);
+      const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+        method: "GET",
+        path: `${workspaceCompletionPath(workspaceSnapshot.workspaceId)}/resources/${encodeURIComponent(request.resourceId)}?${query.toString()}`,
+        workspaceScoped: true
+      });
+      return sanitizeAgentCompletionResourceDetailResponse(response, request.agentId);
+    }
     const request = workspaceCompletionResourceIdRequest(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     return snapshotWorkspaceServerRequest(workspaceSnapshot, {
@@ -1356,6 +1711,19 @@ function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("samurai:workspace-server:completion:resource:body", async (_event, input: unknown) => {
+    if (isAgentCompletionInput(input)) {
+      const request = workspaceAgentCompletionResourceIdRequest(input);
+      const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+      const query = new URLSearchParams({ scope_kind: "agent", agent_id: request.agentId });
+      if (request.kind) query.set("kind", request.kind);
+      if (request.version !== undefined) query.set("version", String(request.version));
+      const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+        method: "GET",
+        path: `${workspaceCompletionPath(workspaceSnapshot.workspaceId)}/resources/${encodeURIComponent(request.resourceId)}/body?${query.toString()}`,
+        workspaceScoped: true
+      });
+      return sanitizeAgentCompletionResourceBodyResponse(response, request.agentId);
+    }
     const request = workspaceCompletionResourceIdRequest(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     return snapshotWorkspaceServerRequest(workspaceSnapshot, {
@@ -1365,6 +1733,19 @@ function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("samurai:workspace-server:completion:resource:create", async (_event, input: unknown) => {
+    if (isAgentCompletionInput(input)) {
+      const request = workspaceAgentCompletionResourceCreateRequest(input);
+      const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+      const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+        method: "POST",
+        path: `${workspaceCompletionPath(workspaceSnapshot.workspaceId)}/resources`,
+        workspaceScoped: true,
+        operationId: request.operationId,
+        idempotencyKey: request.operationId,
+        body: request.body
+      });
+      return sanitizeAgentCompletionResourceMutationResponse(response, request.agentId);
+    }
     const request = workspaceCompletionResourceCreateRequest(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     return snapshotWorkspaceServerRequest(workspaceSnapshot, {
@@ -1376,6 +1757,19 @@ function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("samurai:workspace-server:completion:resource:update", async (_event, input: unknown) => {
+    if (isAgentCompletionInput(input)) {
+      const request = workspaceAgentCompletionResourceUpdateRequest(input);
+      const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+      const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+        method: "PATCH",
+        path: `${workspaceCompletionPath(workspaceSnapshot.workspaceId)}/resources/${encodeURIComponent(request.resourceId)}`,
+        workspaceScoped: true,
+        operationId: request.operationId,
+        idempotencyKey: request.operationId,
+        body: request.body
+      });
+      return sanitizeAgentCompletionResourceMutationResponse(response, request.agentId);
+    }
     const request = workspaceCompletionResourceUpdateRequest(input);
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     return snapshotWorkspaceServerRequest(workspaceSnapshot, {
@@ -1398,6 +1792,19 @@ function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("samurai:workspace-server:completion:resource:archive", async (_event, input: unknown) => {
+    if (isAgentCompletionInput(input)) {
+      const request = workspaceAgentCompletionResourceArchiveRequest(input);
+      const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+      const response = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+        method: "POST",
+        path: `${workspaceCompletionPath(workspaceSnapshot.workspaceId)}/resources/${encodeURIComponent(request.resourceId)}/archive`,
+        workspaceScoped: true,
+        operationId: request.operationId,
+        idempotencyKey: request.operationId,
+        body: request.body
+      });
+      return sanitizeAgentCompletionResourceMutationResponse(response, request.agentId);
+    }
     const request = workspaceCompletionResourceStateRequest(input, "archive");
     const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
     return snapshotWorkspaceServerRequest(workspaceSnapshot, {
@@ -3854,6 +4261,41 @@ type WorkspaceServerResponse = {
   headers: DesktopArtifactRawContent["headers"];
 };
 
+type WorkspaceShareSourceRequest =
+  | { operation: "view"; sourceOrigin: string; locator: string }
+  | {
+    operation: "claim";
+    sourceOrigin: string;
+    locator: string;
+    operationId: string;
+    body: {
+      target_origin: string;
+      target_workspace_id: string;
+      operation_id: string;
+      content_hash: string;
+    };
+  };
+
+type WorkspaceShareDelegationPayload = {
+  version: 1;
+  source_origin: string;
+  share_id: string;
+  claim_id: string;
+  recipient_account_id: string;
+  target_origin: string;
+  target_workspace_id: string;
+  operation_id: string;
+  content_hash: string;
+  issued_at: string;
+  expires_at: string;
+};
+
+type WorkspaceShareDelegation = {
+  payload: WorkspaceShareDelegationPayload;
+  publicKey: string;
+  signature: string;
+};
+
 type WorkspaceRealtimeNotice = {
   type: "event" | "access_changed" | "access_revoked" | "room_access_changed" | "room_access_revoked";
   workspaceId: string;
@@ -3875,6 +4317,15 @@ function requireWorkspaceIdentityStore(): WorkspaceIdentityStore {
 function requireActiveWorkspaceConnection(): WorkspaceConnection {
   const connection = activeWorkspaceConnection(workspaceConnectionRegistry);
   if (!connection) throw new Error("workspace_connection_not_selected");
+  return connection;
+}
+
+function requireWorkspaceConnectionForSnapshot(snapshot: ActiveWorkspaceSnapshot): WorkspaceConnection {
+  const connection = workspaceConnectionRegistry.connections.find((candidate) => candidate.id === snapshot.connectionId);
+  if (!connection) throw new Error("workspace_connection_not_selected");
+  if (connection.id !== activeWorkspaceConnection(workspaceConnectionRegistry)?.id) throw new Error("workspace_navigation_changed");
+  const activeWorkspaceId = workspaceIdForConnection(connection);
+  if (activeWorkspaceId !== snapshot.workspaceId) throw new Error("workspace_navigation_changed");
   return connection;
 }
 
@@ -3926,11 +4377,66 @@ function captureWorkspaceTargetSnapshot(target?: { connectionId: string; workspa
   return target?.roomId === undefined ? { ...snapshot, roomId: undefined } : snapshot;
 }
 
+/**
+ * External Share is a Room-sensitive fixed client.  Unlike the legacy
+ * Workspace-wide requests above, it keeps the currently selected Room (or
+ * the explicit absence of one) in the snapshot so a renderer cannot supply a
+ * synthetic targetRoomId.  The complete navigation generation is retained
+ * even when the caller omitted an optional target.
+ */
+function captureWorkspaceShareTargetSnapshot(target?: { connectionId: string; workspaceId: string; roomId?: string; selectionGeneration?: number }): ActiveWorkspaceSnapshot {
+  const snapshot = captureActiveWorkspaceSnapshot();
+  if (target && (target.connectionId !== snapshot.connectionId || target.workspaceId !== snapshot.workspaceId)) {
+    throw new Error("workspace_navigation_changed");
+  }
+  if (target?.selectionGeneration !== undefined && target.selectionGeneration !== snapshot.selectionGeneration) {
+    throw new Error("workspace_navigation_changed");
+  }
+  if (target?.roomId !== undefined && target.roomId !== snapshot.roomId) {
+    throw new Error("room_navigation_changed");
+  }
+  return snapshot;
+}
+
+function assertWorkspaceShareTargetSnapshot(snapshot: ActiveWorkspaceSnapshot): void {
+  assertActiveWorkspaceSnapshot(snapshot);
+  const current = captureActiveWorkspaceSnapshot();
+  if (!sameWorkspaceNavigationSnapshot(snapshot, current)) {
+    throw new Error("workspace_navigation_changed");
+  }
+}
+
+function sameWorkspaceNavigationSnapshot(left: ActiveWorkspaceSnapshot, right: ActiveWorkspaceSnapshot): boolean {
+  return left.connectionId === right.connectionId
+    && left.workspaceId === right.workspaceId
+    && left.workspaceTargetGeneration === right.workspaceTargetGeneration
+    && left.selectionGeneration === right.selectionGeneration
+    && left.roomId === right.roomId;
+}
+
 /** Organization requests are account-scoped, so a connection-only snapshot
  * is the correct boundary even when no Workspace is currently selected. */
 function captureOrganizationConnectionSnapshot(target?: { connectionId: string; workspaceId: string }): OrganizationConnectionSnapshot {
   const connection = requireActiveWorkspaceConnection();
   if (target && target.connectionId !== connection.id) throw new Error("workspace_navigation_changed");
+  return { connectionId: connection.id };
+}
+
+/** Account notification queries use the active signed connection only.  A
+ * supplied target is still checked against the current Workspace snapshot so
+ * a stale renderer cannot silently switch the Account request to another
+ * Server or Workspace.  The Workspace is not sent in the Account URL/header.
+ */
+function captureWorkspaceContextAccountSnapshot(target?: WorkspaceContextTargetRequest): OrganizationConnectionSnapshot {
+  const connection = requireActiveWorkspaceConnection();
+  if (target && target.connectionId !== connection.id) throw new Error("workspace_navigation_changed");
+  const activeWorkspaceId = workspaceIdForConnection(connection);
+  if (target && (!activeWorkspaceId || target.workspaceId !== activeWorkspaceId)) {
+    throw new Error("workspace_navigation_changed");
+  }
+  if (target?.selectionGeneration !== undefined && target.selectionGeneration !== workspaceSelectionGeneration) {
+    throw new Error("workspace_navigation_changed");
+  }
   return { connectionId: connection.id };
 }
 
@@ -4016,6 +4522,60 @@ function assertActiveWorkspaceSnapshot(snapshot: ActiveWorkspaceSnapshot): void 
     ...(activeRoomId ? { roomId: activeRoomId } : {})
   })) {
     throw new Error("workspace_navigation_changed");
+  }
+}
+
+/**
+ * Share imports carry a signed delegation created for one destination.  The
+ * renderer may provide the public delegation, but it cannot select a
+ * different Account, Workspace, origin, or operation after the request has
+ * been received.  Signature verification remains a Server responsibility;
+ * this check binds the request to the currently selected Desktop target.
+ */
+function assertWorkspaceShareDelegationTarget(
+  snapshot: ActiveWorkspaceSnapshot,
+  input: {
+    source_origin: string;
+    claim_id: string;
+    content_hash: string;
+    delegation: {
+      payload: {
+        source_origin: string;
+        claim_id: string;
+        recipient_account_id: string;
+        target_origin: string;
+        target_workspace_id: string;
+        operation_id: string;
+        content_hash: string;
+      };
+    };
+    target_room_id?: string;
+  },
+  operationId: string
+): void {
+  assertActiveWorkspaceSnapshot(snapshot);
+  const connection = requireActiveWorkspaceConnection();
+  const workspaceId = workspaceIdForConnection(connection);
+  if (connection.id !== snapshot.connectionId || workspaceId !== snapshot.workspaceId) {
+    throw new Error("workspace_navigation_changed");
+  }
+  let targetOrigin: string;
+  try {
+    const parsed = new URL(connection.serverUrl);
+    targetOrigin = `${parsed.origin}/`;
+  } catch {
+    throw new Error("workspace_share_target_origin_invalid");
+  }
+  const delegation = input.delegation.payload;
+  if (delegation.source_origin !== input.source_origin
+    || delegation.claim_id !== input.claim_id
+    || delegation.content_hash !== input.content_hash
+    || delegation.operation_id !== operationId
+    || delegation.target_workspace_id !== snapshot.workspaceId
+    || delegation.target_origin !== targetOrigin
+    || delegation.recipient_account_id !== connection.accountId
+    || (snapshot.roomId !== undefined && input.target_room_id !== undefined && input.target_room_id !== snapshot.roomId)) {
+    throw new Error("workspace_share_delegation_target_invalid");
   }
 }
 
@@ -4686,6 +5246,187 @@ async function signedWorkspaceServerRequest(
     try { responseBody = JSON.parse(text); } catch { responseBody = { error: "workspace_server_response_invalid" }; }
   }
   return { status: response.status, body: responseBody, headers };
+}
+
+/**
+ * The external Share source is deliberately a separate finite transport. It
+ * accepts only the two fixed public/claim paths and sends the normal Account
+ * signature plus the public key needed by the source's identity resolver.
+ */
+async function signedWorkspaceShareSourceRequest(
+  connection: WorkspaceConnection,
+  privateKey: string,
+  input: WorkspaceShareSourceRequest
+): Promise<WorkspaceServerResponse> {
+  const sourceOrigin = normalizeWorkspaceShareSourceOrigin(input.sourceOrigin);
+  const locator = normalizeWorkspaceShareLocatorForSource(input.locator);
+  const method = input.operation === "view" ? "GET" : "POST";
+  const path = input.operation === "view"
+    ? `/api/v1/shares/${locator}`
+    : `/api/v1/shares/${locator}/claims`;
+  const operationId = input.operation === "claim" ? normalizeWorkspaceShareOpaqueId(input.operationId, "workspace_share_operation_id_invalid") : undefined;
+  const body = input.operation === "view" ? {} : normalizeWorkspaceShareClaimBody(input.body, operationId!);
+  const requestId = `share_request_${randomUUID()}`;
+  const timestamp = String(Date.now());
+  const signaturePayload = createWorkspaceAccountSignaturePayload({
+    method,
+    path,
+    ...(operationId ? { operationId, idempotencyKey: operationId } : {}),
+    requestId,
+    timestamp,
+    body
+  });
+  const signature = sign(null, Buffer.from(signaturePayload), createPrivateKey(privateKey)).toString("base64url");
+  const url = new URL(path, sourceOrigin);
+  const response = await fetch(url, {
+    method,
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      "content-type": "application/json",
+      "x-samurai-account-id": connection.accountId,
+      "x-samurai-public-key": publicKeyHeaderFromPrivateKey(privateKey),
+      "x-samurai-request-id": requestId,
+      "x-samurai-timestamp": timestamp,
+      "x-samurai-signature": signature,
+      ...(operationId ? { "x-samurai-operation-id": operationId, "idempotency-key": operationId } : {})
+    },
+    ...(method === "GET" ? {} : { body: JSON.stringify(body) })
+  });
+  const headers: DesktopArtifactRawContent["headers"] = {
+    contentType: response.headers.get("content-type") ?? undefined,
+    contentLength: response.headers.get("content-length") ?? undefined,
+    contentEncoding: response.headers.get("x-content-encoding") ?? undefined
+  };
+  const text = await response.text();
+  let responseBody: unknown = undefined;
+  if (text) {
+    try {
+      responseBody = JSON.parse(text);
+    } catch {
+      responseBody = undefined;
+    }
+  }
+  return { status: response.status, body: responseBody, headers };
+}
+
+function createWorkspaceShareDelegation(
+  privateKey: string,
+  payload: WorkspaceShareDelegationPayload
+): WorkspaceShareDelegation {
+  validateWorkspaceShareDelegationPayload(payload);
+  const canonicalPayload = canonicalWorkspaceShareJson(payload);
+  const signature = sign(
+    null,
+    Buffer.from(`samurai-share-import-v1\n${canonicalPayload}`),
+    createPrivateKey(privateKey)
+  ).toString("base64url");
+  return {
+    payload,
+    publicKey: publicKeyHeaderFromPrivateKey(privateKey),
+    signature
+  };
+}
+
+function publicKeyHeaderFromPrivateKey(privateKey: string): string {
+  try {
+    const der = createPublicKey(createPrivateKey(privateKey)).export({ format: "der", type: "spki" });
+    return `base64:${Buffer.from(der).toString("base64")}`;
+  } catch {
+    throw new Error("workspace_identity_private_key_invalid");
+  }
+}
+
+function normalizeWorkspaceShareSourceOrigin(value: unknown): string {
+  if (typeof value !== "string" || value.length > 2_048) throw new Error("workspace_share_source_origin_invalid");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("workspace_share_source_origin_invalid");
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error("workspace_share_source_origin_invalid");
+  }
+  return new URL("/", parsed.origin).toString();
+}
+
+function normalizeWorkspaceShareLocatorForSource(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) throw new Error("workspace_share_locator_invalid");
+  return value;
+}
+
+function normalizeWorkspaceShareOpaqueId(value: unknown, errorCode: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(value)) throw new Error(errorCode);
+  return value;
+}
+
+function normalizeWorkspaceShareClaimBody(
+  value: unknown,
+  operationId: string
+): { target_origin: string; target_workspace_id: string; operation_id: string; content_hash: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("workspace_share_claim_input_invalid");
+  const record = value as Record<string, unknown>;
+  const allowed = ["target_origin", "target_workspace_id", "operation_id", "content_hash"];
+  if (Object.keys(record).some((key) => !allowed.includes(key)) || record.operation_id !== operationId) {
+    throw new Error("workspace_share_claim_input_invalid");
+  }
+  const targetOrigin = normalizeWorkspaceShareSourceOrigin(record.target_origin);
+  const targetWorkspaceId = normalizeWorkspaceShareOpaqueId(record.target_workspace_id, "workspace_share_target_workspace_invalid");
+  if (typeof record.content_hash !== "string" || !/^[a-f0-9]{64}$/.test(record.content_hash)) {
+    throw new Error("workspace_share_content_hash_invalid");
+  }
+  return {
+    target_origin: targetOrigin,
+    target_workspace_id: targetWorkspaceId,
+    operation_id: operationId,
+    content_hash: record.content_hash
+  };
+}
+
+function workspaceShareTargetOrigin(serverUrl: string): string {
+  return normalizeWorkspaceShareSourceOrigin(new URL("/", new URL(serverUrl).origin).toString());
+}
+
+function validateWorkspaceShareDelegationPayload(payload: WorkspaceShareDelegationPayload): void {
+  const allowed = [
+    "version", "source_origin", "share_id", "claim_id", "recipient_account_id", "target_origin",
+    "target_workspace_id", "operation_id", "content_hash", "issued_at", "expires_at"
+  ];
+  if (!payload || payload.version !== 1 || Object.keys(payload).some((key) => !allowed.includes(key))) {
+    throw new Error("workspace_share_delegation_invalid");
+  }
+  normalizeWorkspaceShareSourceOrigin(payload.source_origin);
+  normalizeWorkspaceShareSourceOrigin(payload.target_origin);
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "version" || key === "source_origin" || key === "target_origin" || key === "content_hash") continue;
+    if (typeof value !== "string" || !value || value.length > 512) throw new Error("workspace_share_delegation_invalid");
+  }
+  normalizeWorkspaceShareOpaqueId(payload.share_id, "workspace_share_delegation_invalid");
+  normalizeWorkspaceShareOpaqueId(payload.claim_id, "workspace_share_delegation_invalid");
+  normalizeWorkspaceShareOpaqueId(payload.recipient_account_id, "workspace_share_delegation_invalid");
+  normalizeWorkspaceShareOpaqueId(payload.target_workspace_id, "workspace_share_delegation_invalid");
+  normalizeWorkspaceShareOpaqueId(payload.operation_id, "workspace_share_delegation_invalid");
+  if (!/^[a-f0-9]{64}$/.test(payload.content_hash)) throw new Error("workspace_share_delegation_invalid");
+  const issuedAt = Date.parse(payload.issued_at);
+  const expiresAt = Date.parse(payload.expires_at);
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt || expiresAt - issuedAt > 5 * 60_000 || expiresAt <= Date.now()) {
+    throw new Error("workspace_share_delegation_expired");
+  }
+}
+
+function canonicalWorkspaceShareJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("workspace_share_delegation_invalid");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalWorkspaceShareJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalWorkspaceShareJson(record[key])}`).join(",")}}`;
+  }
+  throw new Error("workspace_share_delegation_invalid");
 }
 
 async function readBoundedWorkspaceArtifactBytes(response: Response): Promise<number[]> {
@@ -5447,6 +6188,29 @@ function snapshotWorkspaceDomainApiClient(snapshot: ActiveWorkspaceSnapshot): Do
   });
 }
 
+/** Account-scoped Domain API client.  It keeps the signed connection fixed,
+ * but deliberately omits Workspace routing and headers. */
+function snapshotAccountDomainApiClient(snapshot: OrganizationConnectionSnapshot): DomainApiClient {
+  return new DomainApiClient(async <T>(request: DomainApiTransportRequest): Promise<T> => {
+    assertOrganizationConnectionSnapshot(snapshot);
+    const connection = workspaceConnectionRegistry.connections.find((candidate) => candidate.id === snapshot.connectionId);
+    if (!connection) throw new Error("workspace_connection_not_selected");
+    const privateKey = await requireActiveWorkspacePrivateKey(connection);
+    assertOrganizationConnectionSnapshot(snapshot);
+    const result = await signedWorkspaceServerRequest(connection, privateKey, {
+      method: request.method,
+      path: request.path,
+      workspaceScoped: false,
+      ...(request.operationId ? { operationId: request.operationId } : {}),
+      ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
+      ...(request.body === undefined ? {} : { body: request.body })
+    });
+    assertOrganizationConnectionSnapshot(snapshot);
+    assertWorkspaceServerSuccess(result, "account_domain_request_failed");
+    return result.body as T;
+  });
+}
+
 function toDesktopWorkspaceRoom(room: PublicRoomRecord): {
   id: string;
   workspaceId: string;
@@ -5745,6 +6509,12 @@ function activeWorkspaceLearningPath(): string {
 
 function workspaceCompletionPath(workspaceId: string): string {
   return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/completion`;
+}
+
+function isAgentCompletionInput(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const value = input as Record<string, unknown>;
+  return value.scopeKind === "agent" || value.agentId !== undefined;
 }
 
 function workspaceLegacyCompletionPath(workspaceId: string): string {
@@ -6313,7 +7083,7 @@ async function routeDeepLinkToRenderer(url: string): Promise<void> {
   if (!target) {
     await mainWindow.loadURL(dataUrl(statusPageHtml({
       title: "Deep Linkを開けません",
-      message: "このリンク形式には対応していません。workspace、session、artifact、run、quick-ask のリンクだけ開けます。",
+      message: "このリンク形式には対応していません。workspace、session、artifact、run、quick-ask、share の安全なリンクだけ開けます。",
       detail: url,
       config
     })));
@@ -6342,7 +7112,9 @@ async function routeDeepLinkToRenderer(url: string): Promise<void> {
     })));
     return;
   }
-  const hash = target.id ? `#/${target.kind}/${encodeURIComponent(target.id)}` : `#/${target.kind}`;
+  const hash = target.kind === "share"
+    ? `#/share?source=${encodeURIComponent(target.sourceUrl)}`
+    : target.id ? `#/${target.kind}/${encodeURIComponent(target.id)}` : `#/${target.kind}`;
   if (config.mode === "packaged" && latestHealth.ok && existsSync(config.packagedWebEntryPath)) {
     await mainWindow.loadURL(`${pathToFileURL(config.packagedWebEntryPath).toString()}${hash}`);
     return;
@@ -6365,6 +7137,9 @@ function parseDeepLink(url: string): DeepLinkTarget | undefined {
     }
     if (kind === "quick-ask") {
       return { kind: "quick-ask" };
+    }
+    if (kind === "share") {
+      return parseSamuraiShareDeepLink(url);
     }
     if (kind === "workspace-invite") {
       const serverUrl = normalizeInvitationServerUrl(parsed.searchParams.get("server"));
@@ -6489,7 +7264,7 @@ function normalizeInvitationServerUrl(value: string | null): string | undefined 
 async function checkDeepLinkTargetAvailability(
   target: DeepLinkTarget
 ): Promise<{ ok: true } | { ok: false; detail?: string }> {
-  if (target.kind === "workspace" || target.kind === "quick-ask") {
+  if (target.kind === "workspace" || target.kind === "quick-ask" || target.kind === "share") {
     return { ok: true };
   }
   if (target.kind === "workspace-invite") {
