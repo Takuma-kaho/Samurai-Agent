@@ -30,8 +30,6 @@
 - 参加者の重ね表示: [Microsoft Fluent 2 Avatar group](https://fluent2.microsoft.design/components/web/react/core/avatargroup/usage)
 - 小さな操作メニュー: [Google Material Web Menus](https://github.com/material-components/material-web/blob/main/docs/components/menu.md)
 
-今後のプロダクト作成時にも、上のスキル集から適した参考を選べるようにする。codexを主な参考にしつつ、他の指針は必要な部品に限って使う。スキル集全体のグローバル導入は今回行わない。
-
 ## 進める順番
 
 1. 現在使えるRoom操作と、追加実装が必要な操作を分ける。
