@@ -249,25 +249,25 @@ export default function WorkspaceShareImport({
 }
 
 const workspaceShareImportStyles = `
-.workspace-share-import { --share-import-ink: var(--native-copy, #edf2eb); --share-import-muted: var(--native-muted, #a4afa7); --share-import-line: var(--native-line, rgba(204,218,209,.14)); --share-import-accent: var(--native-accent, #f1a65c); --share-import-danger: var(--native-danger, #ee8981); box-sizing: border-box; color: var(--share-import-ink); display: grid; gap: 14px; max-height: min(920px, calc(100vh - 32px)); overflow: auto; padding: clamp(18px, 3vw, 32px); width: min(820px, calc(100vw - 32px)); }
+.workspace-share-import { --share-import-ink: var(--native-copy, #eeeeee); --share-import-muted: var(--native-muted, #b2b2b2); --share-import-line: var(--native-line, rgba(255,255,255,.09)); --share-import-accent: var(--native-accent, #d6d6d6); --share-import-danger: var(--native-danger, #ee8981); box-sizing: border-box; color: var(--share-import-ink); display: grid; gap: 12px; max-height: min(920px, calc(100vh - 32px)); overflow: auto; padding: 20px 24px; width: min(820px, calc(100vw - 32px)); }
 .workspace-share-import *, .workspace-share-import *::before, .workspace-share-import *::after { box-sizing: border-box; }
 .workspace-share-import__header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; }
-.workspace-share-import__header h2 { font-family: Georgia, "Times New Roman", serif; font-size: clamp(24px, 3vw, 34px); letter-spacing: -.035em; line-height: 1.05; margin: 5px 0 0; }
+.workspace-share-import__header h2 { font-family: inherit; font-size: 18px; font-weight: 600; letter-spacing: .01em; line-height: 1.3; margin: 5px 0 0; }
 .workspace-share-import__header p, .workspace-share-import__note { color: var(--share-import-muted); font-size: 12px; line-height: 1.55; margin: 9px 0 0; }
-.workspace-share-import__eyebrow { color: var(--share-import-accent); display: block; font-size: 10px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
-.workspace-share-import__close { background: transparent; border: 1px solid var(--share-import-line); border-radius: 9px; color: var(--share-import-muted); cursor: pointer; font-size: 21px; height: 36px; width: 36px; }
-.workspace-share-import__auth, .workspace-share-import__destination, .workspace-share-import__result { background: linear-gradient(145deg, rgba(28,37,32,.92), rgba(16,22,19,.96)); border: 1px solid var(--share-import-line); border-radius: 14px; padding: 15px; }
-.workspace-share-import__auth { border-color: rgba(241,166,92,.35); }
+.workspace-share-import__eyebrow { color: var(--share-import-muted); display: block; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.workspace-share-import__close { background: transparent; border: 1px solid var(--share-import-line); border-radius: 8px; color: var(--share-import-muted); cursor: pointer; font-size: 16px; height: 32px; width: 32px; }
+.workspace-share-import__auth, .workspace-share-import__destination, .workspace-share-import__result { background: var(--native-surface-soft, #1c1c1c); border: 1px solid var(--share-import-line); border-radius: 10px; padding: 14px; }
+.workspace-share-import__auth { border-color: rgba(var(--native-accent-rgb, 214, 214, 214), .28); }
 .workspace-share-import__auth p { color: var(--share-import-muted); font-size: 12px; line-height: 1.5; }
 .workspace-share-import__destination { display: grid; gap: 13px; }
 .workspace-share-import__destination fieldset { border: 0; display: grid; gap: 11px; margin: 0; padding: 0; }
-.workspace-share-import__destination legend { color: var(--share-import-accent); font-size: 12px; font-weight: 800; margin-bottom: 2px; }
+.workspace-share-import__destination legend { color: var(--share-import-accent); font-size: 13px; font-weight: 600; margin-bottom: 2px; }
 .workspace-share-import__destination label { color: var(--share-import-muted); display: grid; font-size: 11px; font-weight: 700; gap: 6px; }
 .workspace-share-import__destination select { background: rgba(0,0,0,.2); border: 1px solid rgba(204,218,209,.25); border-radius: 8px; color: inherit; font: inherit; padding: 9px 10px; width: 100%; }
 .workspace-share-import__destination select:focus-visible, .workspace-share-import button:focus-visible, .workspace-share-import input:focus-visible { outline: 2px solid var(--share-import-accent); outline-offset: 2px; }
 .workspace-share-import__confirm { align-items: center; color: var(--share-import-ink); display: flex !important; font-size: 12px !important; font-weight: 600 !important; gap: 8px; }
-.workspace-share-import__primary, .workspace-share-import__secondary { border-radius: 8px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 750; min-height: 35px; padding: 8px 12px; }
-.workspace-share-import__primary { background: var(--share-import-accent); border: 1px solid var(--share-import-accent); color: #2b190b; }
+.workspace-share-import__primary, .workspace-share-import__secondary { border-radius: 7px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 600; min-height: 32px; padding: 7px 10px; }
+.workspace-share-import__primary { background: var(--share-import-accent); border: 1px solid var(--share-import-accent); color: var(--native-accent-ink, #171717); }
 .workspace-share-import__secondary { background: rgba(255,255,255,.04); border: 1px solid rgba(204,218,209,.25); color: inherit; justify-self: start; }
 .workspace-share-import button:disabled { cursor: not-allowed; opacity: .52; }
 .workspace-share-import__status { min-height: 24px; }

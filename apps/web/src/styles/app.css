@@ -18,7 +18,7 @@
   --edge-shade: rgba(255, 255, 255, 0.09);
   --edge-glow: rgba(255, 255, 255, 0.09);
   --canvas-glow: rgba(255, 255, 255, 0.045);
-  --surface-lift: linear-gradient(180deg, rgba(27, 27, 27, 0.62), rgba(3, 3, 3, 0.12) 34%, transparent 100%);
+  --surface-lift: none;
   --surface-inset: rgba(255, 255, 255, 0.035);
   --feed-card: #262626;
   --feed-card-hover: #2b2b2b;
@@ -34,7 +34,7 @@
   --radius-ui: 8px;
   --radius-card: 8px;
   --radius-pill: 999px;
-  font-family: "Open Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Open Sans", "SF Pro Text", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 /* React Native App surface shared by the sole web UI runtime. */
@@ -252,7 +252,7 @@
   border-radius: 7px;
   color: var(--native-muted);
   display: inline-flex;
-  font-size: 17px;
+  font-size: 16px;
   height: 32px;
   justify-content: center;
   min-width: 32px;
@@ -583,11 +583,11 @@
 .native-management-header h1,
 .native-main-empty h1,
 .native-connection-gate h1 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(22px, 2.5vw, 34px);
-  font-weight: 400;
-  letter-spacing: -0.035em;
-  line-height: 1.05;
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
   margin: 7px 0 0;
 }
 
@@ -1000,10 +1000,10 @@ input:disabled {
 .native-dialog .native-card-heading h2,
 .native-management h2,
 .native-evidence-inspector h2 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 21px;
-  font-weight: 400;
-  letter-spacing: -0.02em;
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   margin: 6px 0 0;
 }
 
@@ -1113,7 +1113,7 @@ input:disabled {
 }
 
 .native-management-card h2 {
-  font-size: 22px;
+  font-size: 18px;
 }
 
 .native-form-grid {
@@ -1557,7 +1557,7 @@ input:disabled {
 .native-evidence-icon {
   color: var(--native-muted);
   flex: 0 0 auto;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1;
 }
 
@@ -2078,6 +2078,43 @@ input:disabled {
   }
 }
 
+/* Room Work uses one composer surface. Do not let the shared textarea rules add a second frame. */
+.native-app-shell .native-work-surface .native-composer,
+.native-app-shell .native-work-surface .native-composer:focus-within {
+  border: 0;
+  box-shadow: none;
+  outline: 0;
+}
+
+.native-app-shell .native-work-surface .native-room-work-composer-input {
+  background: transparent;
+  border: 0 !important;
+  border-radius: 0;
+  box-shadow: none !important;
+  box-sizing: border-box;
+  color: var(--native-copy);
+  display: block;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.5;
+  max-height: 216px;
+  min-height: 0;
+  outline: 0 !important;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  padding: 0 2px;
+  resize: none;
+  width: 100%;
+}
+
+.native-app-shell .native-work-surface .native-room-work-composer-input:focus,
+.native-app-shell .native-work-surface .native-room-work-composer-input:focus-visible {
+  border: 0 !important;
+  box-shadow: none !important;
+  outline: 0 !important;
+}
+
 /* The Room work renderer keeps a small, scoped style block for its data
  * states.  Give its ordinary transcript the same visual geometry as the
  * prototype without changing those state transitions. */
@@ -2264,10 +2301,11 @@ input:disabled {
 
 .native-artifact-workspace h1,
 .native-interaction-requests h1 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(27px, 4vw, 42px);
-  letter-spacing: -0.04em;
-  line-height: 1;
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
   margin: 5px 0 8px;
 }
 
@@ -2287,7 +2325,7 @@ input:disabled {
 .native-interaction-request-card {
   background: var(--native-panel-soft);
   border: 1px solid var(--native-line);
-  border-radius: 13px;
+  border-radius: 10px;
   min-width: 0;
 }
 
@@ -2501,9 +2539,7 @@ body,
 }
 
 body {
-  background:
-    radial-gradient(ellipse 720px 220px at 50% -120px, var(--canvas-glow), transparent 72%),
-    linear-gradient(180deg, var(--stage-soft) 0%, var(--bg) 28%, var(--bg) 100%);
+  background: var(--bg);
   color: var(--ink);
   margin: 0;
 }
@@ -2613,25 +2649,28 @@ button {
  * create any prototype-only controls or data.
  */
 .native-app-shell {
-  --native-frame: #383838;
-  --native-surface: #181818;
-  --native-surface-raised: #232323;
-  --native-surface-soft: #202020;
-  --native-sidebar-text: #dedede;
-  --native-sidebar-muted: #b8b8b8;
-  --native-sidebar-selected: rgba(255, 255, 255, .11);
+  --native-frame: #282828;
+  --native-surface: #171717;
+  --native-surface-raised: #222222;
+  --native-surface-soft: #1c1c1c;
+  --native-sidebar-text: #d8d8d8;
+  --native-sidebar-muted: #9c9c9c;
+  --native-sidebar-selected: rgba(255, 255, 255, .08);
   --native-bg: var(--native-surface);
   --native-panel: var(--native-frame);
   --native-panel-soft: var(--native-surface-raised);
-  --native-copy: #ededed;
-  --native-muted: #b5b5b5;
-  --native-dim: #898989;
+  --native-copy: #eeeeee;
+  --native-muted: #b2b2b2;
+  --native-dim: #858585;
   --native-accent: #d6d6d6;
   --native-accent-rgb: 214, 214, 214;
-  --native-accent-soft: rgba(214, 214, 214, .12);
-  --native-accent-ink: #202020;
-  --native-line: rgba(255, 255, 255, .1);
-  --native-line-strong: rgba(255, 255, 255, .2);
+  --native-accent-soft: rgba(214, 214, 214, .1);
+  --native-accent-ink: #171717;
+  --native-line: rgba(255, 255, 255, .09);
+  --native-line-strong: rgba(255, 255, 255, .18);
+  font-family: "Open Sans", "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
   background: var(--native-frame);
   color: var(--native-copy);
   display: block;
@@ -2661,7 +2700,7 @@ button {
   border: 0;
   color: var(--native-sidebar-text);
   gap: 0;
-  padding: 10px 15px 2px;
+  padding: 10px 14px 2px;
 }
 
 .native-sidebar::after { display: none; }
@@ -2699,11 +2738,11 @@ button {
   color: var(--native-sidebar-text);
   display: flex;
   font: inherit;
-  font-size: 14px;
-  gap: 11px;
+  font-size: 13px;
+  gap: 8px;
   margin: 0 0 8px;
-  min-height: 42px;
-  padding: 8px 12px;
+  min-height: 36px;
+  padding: 6px 10px;
   text-align: left;
   width: 100%;
 }
@@ -2734,7 +2773,7 @@ button {
 
 .native-section-eyebrow {
   color: var(--native-sidebar-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   letter-spacing: .04em;
   text-transform: none;
@@ -2745,9 +2784,9 @@ button {
   border: 0;
   border-radius: 6px;
   color: var(--native-sidebar-muted);
-  font-size: 19px;
-  height: 24px;
-  min-width: 24px;
+  font-size: 16px;
+  height: 32px;
+  min-width: 32px;
 }
 
 .native-icon-button-small:hover:not(:disabled),
@@ -2764,11 +2803,11 @@ button {
   border: 0;
   border-radius: 7px;
   color: var(--native-sidebar-text);
-  font-size: 14px;
-  min-height: 42px;
-  padding-bottom: 8px;
+  font-size: 13px;
+  min-height: 36px;
+  padding-bottom: 6px;
   padding-right: 12px;
-  padding-top: 8px;
+  padding-top: 6px;
 }
 
 .native-room-item:hover:not(:disabled),
@@ -2784,20 +2823,20 @@ button {
 .native-room-dm-mark {
   color: var(--native-sidebar-muted);
   flex: 0 0 auto;
-  font-size: 19px;
+  font-size: 16px;
   font-weight: 400;
   line-height: 1;
   text-align: center;
-  width: 18px;
+  width: 16px;
 }
 
 .native-room-dm-mark {
   background: rgba(255, 255, 255, .1);
   border-radius: 9px;
   font-size: 10px;
-  height: 22px;
-  line-height: 22px;
-  width: 22px;
+  height: 20px;
+  line-height: 20px;
+  width: 20px;
 }
 
 .native-room-item.is-selected .native-room-mark,
@@ -2814,7 +2853,7 @@ button {
 
 .native-room-section-heading {
   color: var(--native-sidebar-muted);
-  font-size: 12px;
+  font-size: 11px;
   letter-spacing: .04em;
   margin: 0 5px 7px;
 }
@@ -2837,7 +2876,7 @@ button {
 .native-empty-copy,
 .native-loading-line {
   color: var(--native-sidebar-muted);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.65;
   margin: 6px 5px;
 }
@@ -2849,9 +2888,9 @@ button {
   border-top: 1px solid rgba(255, 255, 255, .15);
   border-radius: 0;
   color: var(--native-sidebar-text);
-  gap: 11px;
-  min-height: 72px;
-  padding: 15px 7px 6px;
+  gap: 8px;
+  min-height: 48px;
+  padding: 9px 7px 7px;
 }
 
 .native-profile-trigger:hover,
@@ -2864,16 +2903,16 @@ button {
 
 .native-profile-avatar {
   background: #555;
-  border-radius: 13px;
+  border-radius: 9px;
   color: #f5f5f5;
-  font-size: 13px;
-  height: 38px;
-  width: 38px;
+  font-size: 12px;
+  height: 28px;
+  width: 28px;
 }
 
 .native-profile-copy { gap: 1px; }
-.native-profile-copy strong { color: var(--native-sidebar-text); font-size: 14px; font-weight: 600; }
-.native-profile-copy small { color: var(--native-sidebar-muted); font-size: 12px; }
+.native-profile-copy strong { color: var(--native-sidebar-text); font-size: 13px; font-weight: 600; }
+.native-profile-copy small { color: var(--native-sidebar-muted); font-size: 11px; }
 .native-profile-workspace-name { align-items: center; display: inline-flex; gap: 5px; }
 .native-profile-workspace-icon { font-size: 11px; }
 .native-profile-chevron { color: var(--native-sidebar-muted); }
@@ -2881,8 +2920,8 @@ button {
 .native-profile-menu {
   background: var(--native-surface-raised);
   border: 1px solid var(--native-line-strong);
-  border-radius: 12px;
-  box-shadow: 0 18px 42px rgba(0, 0, 0, .34);
+  border-radius: 10px;
+  box-shadow: none;
 }
 
 .native-profile-menu-account {
@@ -2898,9 +2937,9 @@ button {
 
 .native-main-window {
   background: var(--native-surface);
-  border: 1px solid rgba(255, 255, 255, .08);
-  border-radius: 18px;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .08);
+  border: 0;
+  border-radius: 14px;
+  box-shadow: none;
   display: flex;
   min-height: 0;
   min-width: 0;
@@ -2945,15 +2984,15 @@ button {
 .native-chat-header,
 .native-management-header {
   border-bottom: 1px solid var(--native-line);
-  min-height: 78px;
-  padding: 0 30px;
+  min-height: 64px;
+  padding: 0 24px;
 }
 
 .native-chat-header h1,
 .native-management-header h1,
 .native-main-empty h1,
 .native-connection-gate h1 {
-  font-family: "Avenir Next", "Hiragino Sans", sans-serif;
+  font-family: inherit;
   font-size: 17px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -3035,18 +3074,18 @@ button {
   gap: 0;
   margin: 0 auto;
   max-width: 800px;
-  padding: 25px 32px 30px;
+  padding: 22px 24px 26px;
   width: 100%;
 }
 
 .native-message {
   animation: none;
-  margin: 0 0 25px;
+  margin: 0 0 20px;
   max-width: 100%;
 }
 
-.native-message-content { font-size: 15px; line-height: 1.85; }
-.native-message-meta { font-size: 13px; letter-spacing: 0; margin-bottom: 5px; text-transform: none; }
+.native-message-content { font-size: 14px; line-height: 1.7; }
+.native-message-meta { font-size: 12px; letter-spacing: 0; margin-bottom: 4px; text-transform: none; }
 .native-message-state { color: var(--native-dim); font-size: 10px; }
 .native-message-user { background: transparent; border: 0; border-radius: 0; padding: 0; }
 .native-message-user .native-message-content { background: var(--native-surface-raised); border-radius: 16px 16px 4px 16px; padding: 10px 14px; }
@@ -3056,21 +3095,21 @@ button {
 .native-composer-wrap {
   border: 0;
   margin: 0 auto;
-  max-width: 864px;
-  padding: 12px 32px 19px;
+  max-width: 820px;
+  padding: 10px 24px 16px;
   width: 100%;
 }
 
 .native-composer {
   background: var(--native-surface-raised);
   border: 1px solid rgba(120, 130, 126, .52);
-  border-radius: 14px;
+  border-radius: 10px;
   box-shadow: none;
   padding: 10px 12px 8px;
 }
 
 .native-composer:focus-within { border-color: var(--native-accent); box-shadow: none; }
-.native-composer textarea { background: transparent; color: var(--native-copy); font-size: 14px; min-height: 58px; padding: 5px 6px; }
+.native-composer textarea { background: transparent; color: var(--native-copy); font-size: 14px; min-height: 54px; padding: 5px 6px; }
 .native-composer-footer { color: var(--native-dim); font-size: 10px; padding-top: 7px; }
 .native-send-button { border-radius: 10px; min-height: 33px; padding: 0; width: 33px; }
 
@@ -3088,7 +3127,7 @@ button {
   display: flex;
   gap: 10px;
   justify-content: space-between;
-  min-height: 78px;
+  min-height: 64px;
   padding: 0 20px;
 }
 
@@ -3132,7 +3171,6 @@ button {
   --native-line-strong: rgba(30, 30, 30, .22);
 }
 
-.native-app-shell[data-native-theme="light"] .native-main-window { border-color: rgba(0, 0, 0, .04); }
 .native-app-shell[data-native-theme="light"] .native-profile-trigger { border-top-color: rgba(20, 20, 20, .14); }
 .native-app-shell[data-native-theme="light"] .native-profile-trigger:hover,
 .native-app-shell[data-native-theme="light"] .native-profile-trigger:focus-visible,

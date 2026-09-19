@@ -63,12 +63,6 @@ type NativeDraftNavigationControllerRegistration = {
   controller: NativeDraftNavigationController;
 };
 
-type NativeWorkspaceUnreadState =
-  | { status: "zero" }
-  | { status: "count"; count: number }
-  | { status: "unknown" }
-  | { status: "failed" };
-
 type NativeAccountSettingsReturnContext = {
   targetKey?: string;
   roomId?: string;
@@ -686,16 +680,19 @@ export function NativeApp() {
   const [roomToolOpen, setRoomToolOpen] = useState<NativeRoomTool>();
   const [roomPanelState, setRoomPanelState] = useState<NativeRoomPanelState>("closed");
   const [roomSettingsTab, setRoomSettingsTab] = useState<"basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing">("basic");
+  const [roomAdministrationTarget, setRoomAdministrationTarget] = useState<NativeRoom>();
+  const [roomAdministrationView, setRoomAdministrationView] = useState<"menu" | "participants" | "create" | "move" | "rename">("menu");
+  const [knowledgeToolsInitialTab, setKnowledgeToolsInitialTab] = useState<"knowledge" | "search" | "settings" | "automation">("knowledge");
   const [artifactWorkspaceInitialResource, setArtifactWorkspaceInitialResource] = useState<NativeArtifactWorkspaceInitialResource>();
   const [workResourceDrafts, setWorkResourceDrafts] = useState<Record<string, NativeRoomWorkResourceRefInput[]>>({});
   const [contextSurface, setContextSurface] = useState<"search" | "notifications">();
+  const [sidebarSearchQuery, setSidebarSearchQuery] = useState("");
   const [workspacePopoverOpen, setWorkspacePopoverOpen] = useState(false);
-  const [workspaceUnreadStates, setWorkspaceUnreadStates] = useState<Record<string, NativeWorkspaceUnreadState>>({});
   const [accountSettingsRestoreError, setAccountSettingsRestoreError] = useState<string | null>(null);
   const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
-  const contextSearchTriggerRef = useRef<HTMLButtonElement>(null);
+  const contextSearchTriggerRef = useRef<HTMLInputElement>(null);
   const contextNotificationTriggerRef = useRef<HTMLButtonElement>(null);
-  const contextReturnTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const contextReturnTriggerRef = useRef<HTMLElement | null>(null);
   const contextWasMobileSidebarOpenRef = useRef(false);
   const accountSettingsWasMobileSidebarOpenRef = useRef(false);
   const accountSettingsReturnContextRef = useRef<NativeAccountSettingsReturnContext | undefined>(undefined);
@@ -722,6 +719,35 @@ export function NativeApp() {
     () => nativeWorkspaceContextTarget(model.selectedWorkspaceTarget),
     [model.selectedWorkspaceTarget?.connectionId, model.selectedWorkspaceTarget?.workspaceId]
   );
+  const [accountPreferencesDisplayName, setAccountPreferencesDisplayName] = useState<string>();
+  useEffect(() => {
+    const accountId = model.connection?.accountId;
+    if (!accountId) {
+      setAccountPreferencesDisplayName(undefined);
+      return undefined;
+    }
+    let active = true;
+    void loadNativeAccountPreferences(accountId, "本人")
+      .then((preferences) => {
+        if (active) setAccountPreferencesDisplayName(preferences.display_name.trim() || undefined);
+      })
+      .catch(() => {
+        if (active) setAccountPreferencesDisplayName(undefined);
+      });
+    return () => { active = false; };
+  }, [model.connection?.accountId]);
+  const roomAccountDisplayNames = useMemo(() => {
+    const displayNames: Record<string, string> = {};
+    for (const member of model.members) {
+      const displayName = member.displayName?.trim();
+      if (displayName) displayNames[member.accountId] = displayName;
+    }
+    const accountId = model.connection?.accountId;
+    if (accountId && accountPreferencesDisplayName && !displayNames[accountId]) {
+      displayNames[accountId] = accountPreferencesDisplayName;
+    }
+    return displayNames;
+  }, [accountPreferencesDisplayName, model.connection?.accountId, model.members]);
   const roomExpansion = useNativeRoomExpansion(model.selectedWorkspaceTargetKey);
   const roomParticipantsBridge = useMemo(() => {
     const listWorkspaceRoomMembers = model.bridge?.listWorkspaceRoomMembers;
@@ -735,7 +761,8 @@ export function NativeApp() {
     target: currentContextTarget,
     agents: model.agents,
     roomAgentMembers: model.roomAgentMembers,
-    bridge: roomParticipantsBridge
+    bridge: roomParticipantsBridge,
+    accountDisplayNames: roomAccountDisplayNames
   });
   const [roomKnowledgeShareAvailability, setRoomKnowledgeShareAvailability] = useState<NativeKnowledgeShareAvailability>("loading");
   const [roomKnowledgeShareSelection, setRoomKnowledgeShareSelection] = useState<NativeRoomKnowledgeShareSelection>();
@@ -800,31 +827,6 @@ export function NativeApp() {
     () => Object.fromEntries(accountWorkspaceEntries.map((entry) => [entry.id, entry.label])),
     [accountWorkspaceEntries]
   );
-  useEffect(() => {
-    if (!workspacePopoverOpen) return;
-    const method = model.bridge?.getAccountWorkspaceNotificationSummaries;
-    if (!method || accountWorkspaceIds.length === 0) {
-      setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => [id, { status: "unknown" as const }])));
-      return;
-    }
-    let active = true;
-    setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => [id, { status: "unknown" as const }])));
-    void method({ workspaceIds: accountWorkspaceIds })
-      .then((response) => {
-        if (!active) return;
-        const byWorkspace = new Map(response.items.map((item) => [item.workspaceId, item.unreadCount]));
-        setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => {
-          const count = byWorkspace.get(id);
-          return [id, count === undefined ? { status: "unknown" as const } : count > 0 ? { status: "count" as const, count } : { status: "zero" as const }];
-        })));
-      })
-      .catch(() => {
-        if (!active) return;
-        setWorkspaceUnreadStates(Object.fromEntries(accountWorkspaceIds.map((id) => [id, { status: "failed" as const }])));
-      });
-    return () => { active = false; };
-  }, [accountWorkspaceIds, model.bridge, workspacePopoverOpen]);
-
   const searchWorkspaceContext = useCallback(async (input: WorkspaceContextSearchInput): Promise<WorkspaceContextSearchPage> => {
     const method = model.bridge?.searchWorkspaceContext;
     if (!method || !currentContextTarget) throw new Error("workspace_context_search_unavailable");
@@ -1048,8 +1050,16 @@ export function NativeApp() {
    setRoomToolOpen(undefined);
    setRoomPanelState("closed");
    setRoomSettingsTab("basic");
+   setRoomAdministrationTarget(undefined);
+   setRoomAdministrationView("menu");
    setArtifactWorkspaceInitialResource(undefined);
  }, [model.selectedRoomId, model.selectedWorkspaceTargetKey]);
+
+ // Search terms belong to the selected Workspace. Clear the shared sidebar
+ // input when navigation changes its authorized search scope.
+ useEffect(() => {
+   setSidebarSearchQuery("");
+ }, [model.selectedWorkspaceTargetKey]);
 
   const startCreate = (kind: "organization" | "workspace" | "room", nextRoomCreateMode: NativeRoomCreateMode = "full") => {
     requestNativeNavigation(() => {
@@ -1170,6 +1180,26 @@ export function NativeApp() {
     : model.workspaceTransferSupported
       ? undefined
       : "このDesktopは移転の事前確認・実行bridgeに対応していません。移転元を変更せず保持してください。";
+  const openRoomAdministrationFor = useCallback((room: NativeRoom, view: "menu" | "participants" | "create" | "move" | "rename" = "menu"): void => {
+    requestNativeNavigation(() => {
+      setRoomAdministrationTarget({ ...room });
+      setRoomAdministrationView(view);
+      setRoomToolOpen(undefined);
+      setArtifactWorkspaceInitialResource(undefined);
+      setRoomSettingsTab("basic");
+      setRoomPanelState("room_settings");
+      closeMobileSidebar();
+    });
+  }, [closeMobileSidebar, requestNativeNavigation]);
+  const openKnowledgeSurface = useCallback((initialTab: "knowledge" | "search" | "settings" | "automation" = "knowledge"): void => {
+    requestNativeNavigation(() => {
+      setKnowledgeToolsInitialTab(initialTab);
+      setRoomAdministrationTarget(undefined);
+      setRoomPanelState("closed");
+      setRoomToolOpen("knowledge");
+      closeMobileSidebar();
+    });
+  }, [closeMobileSidebar, requestNativeNavigation]);
   const openRoomTool = (tool: NativeRoomTool): void => {
     requestNativeNavigation(() => {
       setArtifactWorkspaceInitialResource(undefined);
@@ -1177,9 +1207,7 @@ export function NativeApp() {
         setRoomToolOpen(undefined);
         setRoomPanelState("artifacts");
       } else if (tool === "administration") {
-        setRoomToolOpen(undefined);
-        setRoomSettingsTab("basic");
-        setRoomPanelState("room_settings");
+        if (model.selectedRoom) openRoomAdministrationFor(model.selectedRoom, "menu");
       } else {
         setRoomToolOpen(tool);
       }
@@ -1187,13 +1215,21 @@ export function NativeApp() {
     });
   };
   const openRoomSettings = useCallback((tab: "basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing" = "basic"): void => {
-    requestNativeNavigation(() => {
-      setRoomToolOpen(undefined);
-      setRoomSettingsTab(tab);
-      setRoomPanelState("room_settings");
-      closeMobileSidebar();
-    });
-  }, [closeMobileSidebar, requestNativeNavigation]);
+    if (!model.selectedRoom) return;
+    if (tab === "knowledge") {
+      openKnowledgeSurface("knowledge");
+      return;
+    }
+    if (tab === "learning") {
+      openKnowledgeSurface("settings");
+      return;
+    }
+    if (tab === "sharing") {
+      if (roomKnowledgeShareSelection) void shareState.openRoomShare(roomKnowledgeShareSelection);
+      return;
+    }
+    openRoomAdministrationFor(model.selectedRoom, tab === "participants" || tab === "agent" ? "participants" : "menu");
+  }, [model.selectedRoom, openKnowledgeSurface, openRoomAdministrationFor, roomKnowledgeShareSelection, shareState]);
   const toggleRoomPanel = useCallback((): void => {
     requestNativeNavigation(() => {
       setRoomPanelState((current) => current === "closed" ? "artifacts" : "closed");
@@ -1285,6 +1321,8 @@ export function NativeApp() {
 
   // Room panels stay alongside the conversation. The work surface remains
   // mounted so its stream, editor and drafts survive panel navigation.
+  const roomAdministrationRoom = roomAdministrationTarget ?? model.selectedRoom;
+  const roomAdministrationToolTarget = nativeRoomToolTarget(model.selectedWorkspaceTarget, roomAdministrationRoom);
   const artifactPanelTarget = model.connection
     && !model.managementOpen
     && !agentDirectoryOpen
@@ -1295,7 +1333,7 @@ export function NativeApp() {
     && !model.managementOpen
     && !agentDirectoryOpen
     && roomPanelState !== "closed"
-    ? roomToolTarget
+    ? roomAdministrationToolTarget
     : undefined;
 
   const openRoomFromContext = useCallback((roomId: string): void => {
@@ -1407,6 +1445,7 @@ export function NativeApp() {
           target={roomToolTarget}
           workspaceName={model.selectedWorkspace?.name}
           roomName={model.selectedRoom?.name}
+          initialTab={knowledgeToolsInitialTab}
           onClose={() => setRoomToolOpen(undefined)}
           onDraftNavigationControllerChange={onDraftNavigationControllerChange}
           onOpenSearchResult={openKnowledgeSearchResult}
@@ -1484,6 +1523,8 @@ export function NativeApp() {
                 participants={roomParticipants.participants}
                 participantsLoading={roomParticipants.loading}
                 participantsError={roomParticipants.error}
+                onOpenRoomParticipants={() => { if (model.selectedRoom) openRoomAdministrationFor(model.selectedRoom, "participants"); }}
+                roomParticipantsOpen={roomPanelState === "room_settings" && roomAdministrationView === "participants"}
                 roomPanelState={roomPanelState}
                 onToggleRoomPanel={toggleRoomPanel}
                 onOpenRoomArtifacts={() => openRoomTool("artifacts")}
@@ -1515,10 +1556,8 @@ export function NativeApp() {
   return (
     <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
       <div className="native-workspace-shell">
-        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen} aria-label="Samurai navigation">
-          <div className="native-brand"><span className="native-brand-mark" aria-hidden="true">S</span><div><strong>samurai</strong></div></div>
+        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen || contextSurface !== undefined ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen || contextSurface !== undefined} aria-label="Workspace navigation">
           <div className="native-sidebar-context-tools" aria-label="Workspaceコンテキスト">
-            <span className="native-sidebar-workspace-label">Workspace</span>
             <div className="native-workspace-picker">
               <button
                 type="button"
@@ -1534,33 +1573,39 @@ export function NativeApp() {
               </button>
               {workspacePopoverOpen ? (
                 <div className="native-workspace-popover" role="dialog" aria-label="Workspaceを選択">
-                  <div className="native-workspace-popover-heading"><strong>Workspace</strong><span>{model.connectionState.activeConnectionId ? "接続済みServer" : "接続未確認"}</span></div>
                   <ul>
                     {workspaceSwitcherEntries.map(({ key, workspace }) => {
-                      const unread = workspaceUnreadStates[workspace.target?.workspaceId ?? workspace.id];
-                      const unreadLabel = unread?.status === "count" ? `未読 ${unread.count}` : unread?.status === "zero" ? "未読 0" : unread?.status === "failed" ? "未読取得失敗" : "未読未確認";
                       return <li key={key}>
                         <button type="button" className="native-workspace-popover-row" aria-current={key === model.selectedWorkspaceTargetKey ? "true" : undefined} onClick={() => selectWorkspaceFromSidebar(key)}>
-                          <span className="native-workspace-popover-row-main"><strong>{workspace.name}</strong><small>{workspace.serverLabel ?? workspace.serverOrigin ?? "Server"}</small></span>
-                          <span className="native-workspace-popover-row-meta"><small>{workspace.availability === "offline" ? "オフライン" : workspace.availability === "reconnecting" ? "再接続中" : workspace.availability === "connected" ? "接続済み" : "接続未確認"}</small><small>{unreadLabel}</small></span>
+                          <span className="native-workspace-popover-row-main"><strong>{workspace.name}</strong></span>
                         </button>
                       </li>;
                     })}
                   </ul>
-                  <div className="native-workspace-popover-fixed"><span>固定入口</span><button type="button" onClick={() => { setWorkspacePopoverOpen(false); openContextSurface("search"); }} disabled={!searchApiAvailable}>検索</button><button type="button" onClick={() => { setWorkspacePopoverOpen(false); openContextSurface("notifications"); }} disabled={!notificationApiAvailable}>通知</button></div>
                 </div>
               ) : null}
             </div>
-            <div className="native-sidebar-quick-actions">
-              <button
-                ref={contextSearchTriggerRef}
-                type="button"
-                className="native-sidebar-quick-button"
+            {contextSurface !== "search" ? <form className="native-sidebar-search" role="search" onSubmit={(event) => { event.preventDefault(); if (searchApiAvailable && sidebarSearchQuery.trim()) openContextSurface("search"); }}>
+              <label className="native-sidebar-search__label" htmlFor="native-sidebar-search-input">検索</label>
+              <input
+                ref={(element) => {
+                  contextSearchTriggerRef.current = element;
+                  if (element) contextReturnTriggerRef.current = element;
+                }}
+                id="native-sidebar-search-input"
+                className="native-sidebar-search__input"
+                type="search"
                 aria-label="現在のWorkspaceを検索"
-                onClick={() => openContextSurface("search")}
+                value={sidebarSearchQuery}
+                onChange={(event) => setSidebarSearchQuery(event.currentTarget.value)}
+                placeholder="検索"
+                autoComplete="off"
                 disabled={!searchApiAvailable}
                 title={searchApiAvailable ? "現在のWorkspaceを検索" : "Workspace検索は利用できません"}
-              ><span aria-hidden="true">⌕</span><span>検索</span></button>
+              />
+              <button type="submit" className="native-sidebar-search__submit" aria-label="検索結果を開く" disabled={!searchApiAvailable || !sidebarSearchQuery.trim()}>検索</button>
+            </form> : null}
+            <div className="native-sidebar-context-links">
               <button
                 ref={contextNotificationTriggerRef}
                 type="button"
@@ -1649,6 +1694,8 @@ export function NativeApp() {
                   search={searchWorkspaceContext}
                   target={currentContextTarget}
                   workspaceName={model.selectedWorkspace?.name}
+                  query={sidebarSearchQuery}
+                  onQueryChange={setSidebarSearchQuery}
                   open
                   onClose={closeContextSurface}
                   onOpenRoom={openRoomFromContext}
@@ -1696,19 +1743,28 @@ export function NativeApp() {
               onBack={closeAccountSettings}
             />
           </div> : null}
-          {roomSettingsPanelTarget && model.selectedWorkspace && model.selectedRoom ? <aside className="native-room-panel" aria-label="Room設定" hidden={roomPanelState !== "room_settings"}>
+          {roomSettingsPanelTarget && model.selectedWorkspace && roomAdministrationRoom ? <aside className="native-room-panel" aria-label="Roomメニュー" hidden={roomPanelState !== "room_settings"}>
             <NativeRoomAdministration
               rooms={model.rooms}
               target={roomSettingsPanelTarget}
               workspaceVersion={model.selectedWorkspace.version}
-              currentRoom={model.selectedRoom}
+              currentRoom={roomAdministrationRoom}
               workspaceRole={model.selectedWorkspace.role}
               bridge={model.bridge}
+              view={roomAdministrationView}
               initialTab={roomSettingsTab}
               onTabChange={setRoomSettingsTab}
-              onSelectRoom={model.openRoom}
+              onSelectRoom={roomAdministrationTarget ? undefined : model.openRoom}
               onRefresh={model.refreshWorkspaceContent}
-              onClose={() => setRoomPanelState("closed")}
+              participants={roomParticipants.participants}
+              participantsLoading={roomParticipants.loading}
+              participantsError={roomParticipants.error}
+              accountDisplayNames={roomAccountDisplayNames}
+              onClose={() => { setRoomPanelState("closed"); setRoomAdministrationTarget(undefined); setRoomAdministrationView("menu"); }}
+              onOpenShare={() => { if (roomKnowledgeShareSelection) void shareState.openRoomShare(roomKnowledgeShareSelection); }}
+              onOpenKnowledge={() => openKnowledgeSurface("knowledge")}
+              onOpenLearning={() => openKnowledgeSurface("settings")}
+              onOpenSharing={() => { if (roomKnowledgeShareSelection) void shareState.openRoomShare(roomKnowledgeShareSelection); }}
               onDraftNavigationControllerChange={onDraftNavigationControllerChange}
               agentPanel={(
                 <div>
@@ -1726,11 +1782,11 @@ export function NativeApp() {
                   <button type="button" className="native-room-administration__secondary" onClick={() => { setRoomPanelState("closed"); requestNativeNavigation(() => setAgentDirectoryOpen(true)); }}>Agent詳細を開く</button>
                 </div>
               )}
-              knowledgePanel={roomToolTarget ? (
+              knowledgePanel={roomAdministrationToolTarget ? (
                 <NativeKnowledgeTools
-                  target={roomToolTarget}
+                  target={roomAdministrationToolTarget}
                   workspaceName={model.selectedWorkspace.name}
-                  roomName={model.selectedRoom.name}
+                  roomName={roomAdministrationRoom.name}
                   initialTab="knowledge"
                   onClose={() => setRoomPanelState("closed")}
                   onDraftNavigationControllerChange={onDraftNavigationControllerChange}
@@ -1740,11 +1796,11 @@ export function NativeApp() {
                   bridge={model.bridge}
                 />
               ) : undefined}
-              learningPanel={roomToolTarget ? (
+              learningPanel={roomAdministrationToolTarget ? (
                 <NativeKnowledgeTools
-                  target={roomToolTarget}
+                  target={roomAdministrationToolTarget}
                   workspaceName={model.selectedWorkspace.name}
-                  roomName={model.selectedRoom.name}
+                  roomName={roomAdministrationRoom.name}
                   initialTab="settings"
                   onClose={() => setRoomPanelState("closed")}
                   onDraftNavigationControllerChange={onDraftNavigationControllerChange}

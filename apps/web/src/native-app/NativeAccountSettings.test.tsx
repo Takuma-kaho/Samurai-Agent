@@ -49,7 +49,7 @@ describe("NativeAccountSettings", () => {
       onBack: vi.fn()
     }));
 
-    expect(markup).toContain("本人設定");
+    expect(markup).toContain("設定");
     expect(markup).toContain("プロフィール");
     expect(markup).toContain("回答設定");
     expect(markup).toContain("外観");
@@ -162,7 +162,7 @@ describe("NativeAccountSettings helpers", () => {
       onThemeChange: vi.fn(),
       onBack: vi.fn()
     }));
-    expect(markup).toContain('aria-label="本人設定を閉じて元の画面へ戻る"');
+    expect(markup).toContain('aria-label="設定を閉じて元の画面へ戻る"');
     expect(source).toContain('role="alertdialog"');
     expect(source).toContain('aria-modal="true"');
     expect(source).toContain("保存せず");

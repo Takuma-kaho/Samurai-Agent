@@ -21,6 +21,8 @@ export interface UseNativeRoomParticipantsOptions {
   agents?: readonly NativeAgent[];
   roomAgentMembers?: readonly NativeRoomAgentMember[];
   bridge?: NativeRoomParticipantsBridge;
+  /** Names returned by an authorized account/member query. */
+  accountDisplayNames?: Readonly<Record<string, string | undefined>>;
 }
 
 function participantState(member: NativeRoomAgentMember, agent: NativeAgent | undefined): NativeRoomParticipant["state"] {
@@ -28,7 +30,17 @@ function participantState(member: NativeRoomAgentMember, agent: NativeAgent | un
   return agent && agent.enabled && agent.status !== "disabled" ? "available" : "unavailable";
 }
 
-export function useNativeRoomParticipants({ room, target, agents = [], roomAgentMembers = [], bridge }: UseNativeRoomParticipantsOptions) {
+export function nativeRoomParticipantDisplayName(
+  accountId: string,
+  index: number,
+  accountDisplayNames?: Readonly<Record<string, string | undefined>>
+): { label: string; reason?: string } {
+  const displayName = accountDisplayNames?.[accountId]?.trim();
+  if (displayName) return { label: displayName };
+  return { label: `参加者${index + 1}`, reason: "表示名未取得" };
+}
+
+export function useNativeRoomParticipants({ room, target, agents = [], roomAgentMembers = [], bridge, accountDisplayNames }: UseNativeRoomParticipantsOptions) {
   const [members, setMembers] = useState<DesktopWorkspaceRoomMembership[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,13 +78,17 @@ export function useNativeRoomParticipants({ room, target, agents = [], roomAgent
   }, [bridge, room?.kind, roomId, target, targetKey]);
 
   const participants = useMemo<NativeRoomParticipant[]>(() => {
-    const humans: NativeRoomParticipant[] = members.map((member) => ({
-      id: member.accountId,
-      kind: "account",
-      label: member.accountId,
-      role: member.role,
-      state: member.state
-    }));
+    const humans: NativeRoomParticipant[] = members.map((member, index) => {
+      const display = nativeRoomParticipantDisplayName(member.accountId, index, accountDisplayNames);
+      return {
+        id: member.accountId,
+        kind: "account",
+        label: display.label,
+        ...(display.reason ? { reason: display.reason } : {}),
+        role: member.role,
+        state: member.state
+      };
+    });
     const roomAgentIds = new Set(roomAgentMembers.filter((member) => member.roomId === roomId).map((member) => member.agentId));
     const agentsInRoom = agents.filter((agent) => roomAgentIds.has(agent.id));
     const agentRows: NativeRoomParticipant[] = roomAgentMembers
@@ -88,7 +104,7 @@ export function useNativeRoomParticipants({ room, target, agents = [], roomAgent
         };
       });
     return [...humans, ...agentRows];
-  }, [agents, members, roomAgentMembers, roomId]);
+  }, [accountDisplayNames, agents, members, roomAgentMembers, roomId]);
 
   return { participants, loading, error };
 }

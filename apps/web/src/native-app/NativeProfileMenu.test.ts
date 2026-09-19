@@ -13,8 +13,8 @@ describe("NativeProfileMenu", () => {
       onOpenSettings: vi.fn()
     }));
 
-    expect(markup).toContain("本人メニュー");
-    expect(markup).toContain("本人設定");
+    expect(markup).toContain("設定メニュー");
+    expect(markup).toContain("設定");
     expect(markup).toContain("プロフィール・回答設定・外観");
     expect(markup.match(/role="menuitem"/g)).toHaveLength(1);
     expect(markup).not.toContain("C · ダーク");
