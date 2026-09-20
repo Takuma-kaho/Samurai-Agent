@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type Dispatch, type Form
 import { createIdempotencyKey, getWorkspaceClientBridge, type WorkspaceAttachmentUploadResult } from "../lib/api";
 import { WorkspaceFileResourceRefSchema, type ResourceRef } from "@samurai-agent/core-schemas";
 import { nativeRoomAgentIsAvailable, nativeRoomWorkErrorIsExplicitServerFailure, type NativeRoomWorkMutationResult } from "./use-native-app";
+import { RoomDefaultAgentPicker, type RoomDefaultAgentOption } from "./RoomDefaultAgentPicker";
 import type {
   NativeAgent,
   NativeAgentBackend,
@@ -582,8 +583,8 @@ export function roomWorkShouldSubmitOnKeyDown(event: RoomWorkComposerKeyEvent): 
     && !event.isComposing;
 }
 
-export const roomWorkComposerMaxHeight = 216;
-export const roomWorkComposerMinHeight = 44;
+export const roomWorkComposerMaxHeight = 168;
+export const roomWorkComposerMinHeight = 40;
 
 export interface RoomWorkComposerResizeTarget {
   readonly scrollHeight: number;
@@ -639,14 +640,6 @@ function RoomParticipantsIcon(): ReactNode {
       <circle cx="7" cy="7" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
       <path d="M2.8 15c.3-2.5 1.8-3.8 4.2-3.8s3.9 1.3 4.2 3.8" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
       <path d="M12.4 5.1a2.3 2.3 0 0 1 0 4.2M13.2 11.4c1.8.3 2.9 1.5 3.2 3.6" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
-    </svg>
-  );
-}
-
-function RoomChevronIcon(): ReactNode {
-  return (
-    <svg className="native-work-composer-chevron" data-icon="chevron-down" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
-      <path d="m2.5 4.5 3.5 3 3.5-3" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.25" />
     </svg>
   );
 }
@@ -830,7 +823,7 @@ function renderSavedRoomWorkResourceRefs(refs: ResourceRef[]): ReactNode {
 }
 
 const roomWorkStyles = [
-  ".native-work-surface { container-type: inline-size; min-height: 0; }",
+  ".native-work-surface { --native-room-thread-max-width: 800px; --native-room-thread-gutter: 24px; container-type: inline-size; min-height: 0; }",
   ".native-work-surface .native-chat-header { align-items: center; gap: 12px; height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 24px) 0 24px; }",
   "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: var(--native-chat-header-right-inset, 24px); } }",
   ".native-work-surface .native-chat-header .native-section-eyebrow { display: none; }",
@@ -870,7 +863,7 @@ const roomWorkStyles = [
   ".native-work-thread-switcher button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-thread-switcher button:disabled { cursor: default; opacity: .6; }",
   ".native-work-thread-switcher-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-  ".native-work-conversation-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin: 14px auto 0; max-width: 800px; padding: 0 30px; width: 100%; }",
+  ".native-work-conversation-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin: 14px auto 0; max-width: var(--native-room-thread-max-width); padding: 0 var(--native-room-thread-gutter); width: 100%; }",
   ".native-work-conversation-header.is-compact { align-items: center; justify-content: flex-end; margin-top: 10px; min-height: 26px; }",
   ".native-work-conversation-heading { min-width: 0; }",
   ".native-work-conversation-heading h2 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; margin: 0; }",
@@ -1012,19 +1005,21 @@ const roomWorkStyles = [
   ".native-work-attachment-item { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; font-size: 10px; }",
   ".native-work-attachment-item::before { color: var(--native-accent); content: '↳'; }",
   ".native-work-attachment-action { color: var(--native-accent); font-size: 9px; }",
-  ".native-work-surface .native-composer-wrap { max-width: 920px; padding: 14px 24px 18px; }",
-  ".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0; border-radius: 28px; box-shadow: none; display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 14px 16px 12px; }",
+  ".native-work-surface .native-composer-wrap { box-sizing: border-box; max-width: var(--native-room-thread-max-width); padding: 14px var(--native-room-thread-gutter) 18px; }",
+  ".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0; border-radius: 22px; box-shadow: none; display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 14px 16px 12px; position: relative; }",
   ".native-work-surface .native-composer:focus-within { border: 0; box-shadow: none; outline: 0; }",
   `.native-work-surface .native-composer .native-room-work-composer-input { background: transparent; border: 0; box-sizing: border-box; color: var(--native-copy); flex: 0 0 auto; font-size: 15px; line-height: 1.5; max-height: ${roomWorkComposerMaxHeight}px; min-height: 0; overflow-x: hidden; overflow-y: hidden; padding: 0 2px; resize: none; width: 100%; }`,
   ".native-work-surface .native-composer .native-room-work-composer-input:focus-visible { outline: 0; }",
-  ".native-work-surface .native-composer-footer { align-items: center; display: flex; gap: 8px; min-height: 36px; padding: 0; }",
-  ".native-work-attachment-button { align-items: center; background: transparent; border: 0; border-radius: 50%; color: var(--native-copy); cursor: pointer; display: inline-flex; font: inherit; font-size: 10px; height: 34px; justify-content: center; min-width: 34px; padding: 0; transition: color 120ms ease; width: 34px; }",
-  ".native-work-attachment-button:hover:not(:disabled) { background: transparent; color: var(--native-copy); }",
+  ".native-work-surface .native-composer-footer { align-items: center; display: flex; gap: 8px; min-height: 32px; padding: 0; }",
+  ".native-work-attachment-button { align-items: center; background: transparent; border: 0; border-radius: 50%; color: var(--native-copy); cursor: pointer; display: inline-flex; font: inherit; font-size: 10px; height: 32px; justify-content: center; min-width: 32px; padding: 0; transition: background-color 120ms ease, color 120ms ease; width: 32px; }",
+  ".native-work-attachment-button:hover:not(:disabled) { background: var(--native-accent-soft); color: var(--native-copy); }",
   ".native-work-attachment-button:disabled { cursor: default; opacity: .55; }",
   ".native-composer-actions { align-items: center; display: inline-flex; flex: none; gap: 4px; }",
   ".native-work-surface .native-work-composer-add .native-work-composer-icon { height: 20px; width: 20px; }",
-  ".native-work-surface .native-send-button { align-items: center; background: var(--native-panel-soft); border: 0; border-radius: 50%; color: var(--native-copy); display: inline-flex; height: 36px; justify-content: center; margin-left: auto; min-height: 36px; padding: 0; transition: color 120ms ease; width: 36px; }",
-  ".native-work-surface .native-send-button:hover:not(:disabled) { background: var(--native-panel-soft); border: 0; color: var(--native-copy); }",
+  ".native-work-surface .native-send-button .native-work-composer-icon { height: 20px; width: 20px; }",
+  ".native-work-surface .native-send-button { align-items: center; background: var(--native-accent); border: 0; border-radius: 50%; color: var(--native-accent-ink); display: inline-flex; height: 32px; justify-content: center; margin-left: auto; min-height: 32px; padding: 0; transition: background-color 120ms ease, color 120ms ease; width: 32px; }",
+  ".native-work-surface .native-send-button:hover:not(:disabled) { background: var(--native-accent); border: 0; color: var(--native-accent-ink); filter: brightness(1.08); }",
+  ".native-work-surface .native-send-button:disabled { background: var(--native-panel-soft); color: var(--native-dim); }",
   ".native-work-reconnect { margin-left: auto; }",
   ".native-work-recovery { margin-left: 8px; }",
   ".native-work-header-action { align-items: center; background: transparent; border: 0; border-radius: 7px; color: var(--native-muted); cursor: pointer; display: inline-flex; font: inherit; font-size: 11px; gap: 6px; min-height: 32px; padding: 0 7px; }",
@@ -1038,14 +1033,17 @@ const roomWorkStyles = [
   ".native-work-participants-count { color: var(--native-copy); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 1ch; text-align: center; }",
   ".native-work-participant-status { color: var(--native-dim); font-size: 10px; white-space: nowrap; }",
   ".native-work-default-control { align-items: center; display: inline-flex; gap: 6px; }",
-  ".native-work-agent-row { align-items: center; color: var(--native-muted); display: flex; flex: 1 1 160px; flex-wrap: nowrap; gap: 7px; min-height: 36px; min-width: 0; padding: 0; }",
-  ".native-work-agent-row .native-work-default-avatar { background: var(--native-panel-soft); border-radius: 50%; flex: none; font-size: 10px; height: 24px; width: 24px; }",
+  ".native-work-agent-row { align-items: center; color: var(--native-muted); display: flex; flex: 1 1 160px; flex-wrap: nowrap; gap: 7px; min-height: 32px; min-width: 0; padding: 0; }",
+  ".native-work-agent-row .native-work-default-avatar { background: var(--native-panel-soft); border-radius: 50%; flex: none; font-size: 10px; height: 22px; width: 22px; }",
   ".native-work-agent-row .native-work-default-label { display: none; }",
   ".native-work-agent-row .native-work-default-value { font-size: 13px; }",
-  ".native-work-agent-select-wrap { align-items: center; display: inline-flex; gap: 3px; max-width: min(240px, 50vw); min-width: 0; }",
-  ".native-work-agent-select { appearance: none; background: transparent; border: 0; border-radius: 0; color: var(--native-copy); cursor: pointer; font: inherit; font-size: 13px; font-weight: 500; max-width: 100%; min-height: 36px; overflow: hidden; padding: 0; text-overflow: ellipsis; white-space: nowrap; }",
-  ".native-work-agent-select:focus-visible { outline: 0; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }",
-  ".native-work-agent-state { color: var(--native-accent); font-size: 12px; white-space: nowrap; }",
+  ".native-work-agent-picker { align-items: center; display: inline-flex; gap: 7px; min-width: 0; position: relative; }",
+  ".native-work-agent-trigger { align-items: center; background: transparent; border: 0; border-radius: 999px; color: var(--native-copy); cursor: pointer; display: inline-flex; flex: 0 1 auto; font: inherit; font-size: 13px; font-weight: 500; gap: 7px; min-height: 32px; min-width: 0; max-width: min(280px, 100%); padding: 3px 8px 3px 5px; text-align: left; transition: background-color 120ms ease, color 120ms ease; }",
+  ".native-work-agent-trigger:hover:not(:disabled), .native-work-agent-trigger[aria-expanded='true'] { background: var(--native-accent-soft); color: var(--native-copy); }",
+  ".native-work-agent-trigger:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-agent-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-agent-trigger:disabled { cursor: not-allowed; }",
+  ".native-work-agent-status { color: var(--native-accent); font-size: 12px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-composer-icon { display: block; height: 18px; width: 18px; }",
   ".native-work-composer-chevron { color: var(--native-dim); display: block; flex: none; height: 10px; pointer-events: none; width: 10px; }",
   ".native-work-header-popover { background: var(--native-panel, #18211c); border: 1px solid var(--native-line-strong); border-radius: 10px; box-shadow: 0 12px 28px var(--native-shadow, #0000003d); color: var(--native-copy); min-width: 245px; padding: 11px; position: absolute; right: 0; top: calc(100% + 8px); z-index: 20; }",
@@ -1059,10 +1057,19 @@ const roomWorkStyles = [
   ".native-work-room-menu button:hover { background: var(--native-hover, #ffffff12); }",
   ".native-work-default-button { align-items: center; background: transparent; border: 0; border-radius: 7px; color: inherit; cursor: pointer; display: inline-flex; gap: 7px; padding: 3px 5px; }",
   ".native-work-default-button:hover { background: var(--native-hover, #ffffff12); }",
+  ".native-work-agent-menu { background: var(--native-panel-soft); border: 1px solid var(--native-line-strong); border-radius: 12px; bottom: calc(100% + 8px); display: grid; gap: 2px; left: 0; max-height: min(280px, calc(100dvh - 32px)); max-width: min(280px, calc(100vw - 16px)); min-width: min(280px, calc(100vw - 16px)); overflow: auto; padding: 7px; position: absolute; width: min(280px, calc(100vw - 16px)); z-index: 40; }",
+  ".native-work-agent-option { align-items: center; background: transparent; border: 0; border-radius: 8px; color: var(--native-muted); cursor: pointer; display: flex; font: inherit; gap: 8px; min-height: 34px; min-width: 0; padding: 6px 8px; text-align: left; width: 100%; }",
+  ".native-work-agent-option:hover:not(:disabled), .native-work-agent-option.is-active:not(:disabled), .native-work-agent-option.is-selected { background: var(--native-accent-soft); color: var(--native-copy); }",
+  ".native-work-agent-option:focus-visible { outline: 2px solid var(--native-accent); outline-offset: -2px; }",
+  ".native-work-agent-option:disabled { color: var(--native-dim); cursor: not-allowed; opacity: .58; }",
+  ".native-work-agent-option-avatar { align-items: center; background: var(--native-panel); border-radius: 50%; display: inline-flex; flex: 0 0 auto; font-size: 10px; height: 22px; justify-content: center; width: 22px; }",
+  ".native-work-agent-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-agent-option-check { color: var(--native-accent); font-size: 13px; margin-left: auto; }",
   ".native-work-surface .native-banner { margin-inline: clamp(22px, 5vw, 72px); }",
   "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-thread-switcher { max-height: 112px; } .native-work-conversation-header { align-items: flex-start; flex-direction: column; } .native-work-conversation-actions { align-items: flex-start; flex-direction: row; } }",
   "@container (max-width: 560px) { .native-work-surface .native-chat-header { gap: 8px; } .native-work-header-meta { flex: 0 0 auto; } .native-work-participants-trigger { padding-inline: 4px; } .native-work-participants-icon { height: 16px; width: 16px; } }",
-  "@media (max-width: 560px) { .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list-content { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 14px 14px; } .native-work-surface .native-composer { border-radius: 24px; padding: 12px 14px 10px; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-select-wrap { max-width: min(190px, 46vw); } }"
+  "@container (max-width: 700px) { .native-work-message-list-content, .native-work-conversation-header { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding-inline: 18px; } }",
+  "@media (max-width: 560px) { .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 18px 14px; } .native-work-surface .native-composer { border-radius: 22px; padding: 12px 14px 10px; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-trigger { max-width: min(240px, 100%); } }"
 ].join("\n");
 
 export function RoomWorkSurface({
@@ -1544,35 +1551,37 @@ export function RoomWorkSurface({
         && roomCapability(room, "canExecute")
         && !writeBlocked
     );
+    const defaultAgentOptions: RoomDefaultAgentOption[] = agents.map((agent) => {
+      const selectable = agentIsAvailable(agent, agentBackends, roomAgentMembers);
+      return {
+        id: agent.id,
+        label: agent.displayName + (selectable ? "" : "（利用不可）"),
+        disabled: !selectable
+      };
+    });
     return (
       <div className="native-work-agent-row" aria-label="担当Agent">
-        <span className="native-work-default-avatar" aria-hidden="true">{actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}</span>
         <span className="native-work-default-label">担当Agent</span>
         {canChangeDefaultAgent ? (
-          <label className="native-work-agent-select-wrap">
-            <span className="native-visually-hidden">Roomの既定Agent</span>
-            <select
-              className="native-work-agent-select"
-              value={defaultAgentId ?? ""}
-              disabled={Boolean(busyAction?.startsWith("default-agent")) || agentLoading || agents.length === 0}
-              onChange={(event) => {
-                const agentId = event.currentTarget.value;
-                if (!agentId || !onSetDefaultAgent) return;
-                void runAction("default-agent:" + agentId, () => onSetDefaultAgent(agentId));
-              }}
-              aria-label="Roomの既定Agent"
-            >
-              <option value="" disabled>{agentLoading ? "Agentを確認中…" : defaultAgentId ? "Agentを選択" : "既定Agent未設定"}</option>
-              {agents.map((agent) => {
-                const selectable = agentIsAvailable(agent, agentBackends, roomAgentMembers);
-                return <option key={agent.id} value={agent.id} disabled={!selectable}>{agent.displayName + (selectable ? "" : "（利用不可）")}</option>;
-              })}
-            </select>
-            <RoomChevronIcon />
-            {defaultAgentId && !defaultAgentReady ? <span className="native-work-agent-state">{renderDefaultAgentState()}</span> : null}
-          </label>
+          <RoomDefaultAgentPicker
+            key={`${room?.id ?? "none"}:${defaultAgentId ?? "none"}`}
+            ariaLabel="Roomの既定Agent"
+            avatarLabel={actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}
+            disabled={Boolean(busyAction?.startsWith("default-agent")) || agentLoading}
+            label={defaultAgentId ? agentLabel(defaultAgentId, agents) : agentLoading ? "Agentを確認中…" : "既定Agent未設定"}
+            options={defaultAgentOptions}
+            status={defaultAgentId && !defaultAgentReady ? renderDefaultAgentState() : undefined}
+            value={defaultAgentId}
+            onSelect={(agentId) => {
+              if (!onSetDefaultAgent) return;
+              void runAction("default-agent:" + agentId, () => onSetDefaultAgent(agentId));
+            }}
+          />
         ) : (
-          <span className="native-work-default-value">{renderDefaultAgentState()}</span>
+          <>
+            <span className="native-work-default-avatar" aria-hidden="true">{actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}</span>
+            <span className="native-work-default-value">{renderDefaultAgentState()}</span>
+          </>
         )}
       </div>
     );

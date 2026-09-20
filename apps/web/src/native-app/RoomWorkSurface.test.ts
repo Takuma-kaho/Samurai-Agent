@@ -14,6 +14,7 @@ import {
   roomWorkMutationNeedsRetry,
   roomWorkStatusLabel
 } from "./RoomWorkSurface";
+import { roomDefaultAgentPickerNextIndex } from "./RoomDefaultAgentPicker";
 import type { RoomWorkSurfaceProps } from "./RoomWorkSurface";
 import type { NativeRoom, NativeRoomWork } from "./types";
 
@@ -512,9 +513,11 @@ describe("RoomWorkSurface", () => {
     expect(agentRowIndex).toBeGreaterThan(headerEnd);
     expect(html.slice(0, headerEnd)).not.toContain("Research Agent");
     expect(html).toContain('aria-label="Roomの既定Agent"');
-    expect(html).toContain("border-radius: 28px");
+    expect(html).toContain("border-radius: 22px");
     expect(html).toContain(".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0;");
     expect(html).toContain(".native-work-agent-row .native-work-default-label { display: none; }");
+    expect(html).toContain("class=\"native-work-agent-trigger\"");
+    expect(html).not.toContain("native-work-agent-select");
   });
 
   it("does not submit the composer while an IME is composing", () => {
@@ -533,7 +536,19 @@ describe("RoomWorkSurface", () => {
 
     Object.assign(input, { scrollHeight: 300 });
     resizeRoomWorkComposer(input);
-    expect(input.style).toEqual({ height: "216px", overflowY: "auto" });
+    expect(input.style).toEqual({ height: "168px", overflowY: "auto" });
+  });
+
+  it("moves the Agent picker through enabled options only", () => {
+    const options = [
+      { id: "research", label: "Research" },
+      { id: "disabled", label: "Disabled", disabled: true },
+      { id: "review", label: "Review" }
+    ];
+
+    expect(roomDefaultAgentPickerNextIndex(options, 0, 1)).toBe(2);
+    expect(roomDefaultAgentPickerNextIndex(options, 2, 1)).toBe(0);
+    expect(roomDefaultAgentPickerNextIndex(options, 0, -1)).toBe(2);
   });
 
   it("uses shared native theme tokens for work status and resource colors", () => {
@@ -578,9 +593,10 @@ describe("RoomWorkSurface", () => {
 
     expect(missingDefault).toContain("既定Agent未設定");
     expect(missingDefault).toContain('class="native-work-agent-row"');
-    expect(missingDefault).toContain('value="" disabled="" selected="">既定Agent未設定</option>');
+    expect(missingDefault).toContain("既定Agent未設定");
+    expect(missingDefault).toContain('class="native-work-agent-trigger"');
     expect(disabledDefault).toContain("無効または実行不可");
-    expect(disabledDefault).toContain('class="native-work-agent-state"');
+    expect(disabledDefault).toContain('class="native-work-agent-status"');
     expect(disabledDefault).not.toContain("別のAgentをRoomの既定に設定してください");
     expect(disabledDefault).toContain("disabled=\"\"");
   });
