@@ -21,3 +21,57 @@
 ## 検証状況
 
 静的検査、focused test、実Server保存、実Client状態保持、3テーマ・幅別の画面比較は実施後に追記する。過去の検証を今回の成功証拠に流用しない。
+
+## 2026-09-20 上部クローム実装の検証
+
+対象は作業ツリー（ベースcommit `8cceb41`）の変更。既存の角丸メイン画面とWorkspace/Roomのデータ経路を維持し、次を追加した。
+
+- Buzz型の上部クローム（サイドバー開閉、同一Workspace内の戻る／進む）を`NativeApp`へ接続。
+- 依存追加なしのインラインSVGでサイドバー、戻る、進むアイコンを実装。
+- macOS Electronではネイティブタイトルバーを隠し、traffic lightの位置を上部クロームに合わせる設定を追加。
+- 同一WorkspaceのRoom／Agent一覧だけを履歴対象にし、Draft navigation guardを経由させた。
+
+実行結果:
+
+- `pnpm lint` — passed（format 1019、lint 900、issues 0）。
+- `pnpm test` — passed（223 files passed、1 skipped、1715 tests passed、6 skipped）。
+- `pnpm --filter @samurai-agent/web typecheck` — passed。
+- `pnpm --filter @samurai-agent/desktop typecheck` — passed。
+- `pnpm --filter @samurai-agent/web build` — passed。
+- `pnpm --filter @samurai-agent/desktop build` — passed。
+- `pnpm desktop:verify` — passed。
+- `git diff --check` — passed。
+- Browser rendererの`http://127.0.0.1:5173/`をCUAで確認。上部クローム高さ40px、borderなし、メイン面の角丸14px、サイドバー閉じるとメイン領域が全幅になること、SVGボタンのアクセシブル名とdisabled状態を確認した。
+
+追加修正として、Buzzの`AppTopChrome`／`DrawerPanelIcon`とコード比較し、折りたたみSVGを24×22 viewBoxの外枠＋塗り矩形へ、矢印を24×24 viewBoxへ統一。矢印ボタン幅を24px、macOSナビ位置を左80px・下3px、両アイコンのCSS表示を16pxへ調整した。常駐Electron画面でも修正後の縮小されたアイコンを目視確認した。
+
+未検証:
+
+- Dockerがsandboxから`docker.sock`へ接続できず、検証用Self-host Serverを起動できなかったため、実Server保存、実データを使ったRoom／Agent履歴、常駐Electronの実ウィンドウ表示は未確認。
+- 3テーマ、390px Browser renderer、IME入力、実Agent実行は未確認。静的型検査・build・Browser rendererの確認をElectronや実Serverの成功証拠とは扱わない。
+
+## 2026-09-20 上部クロームのフルスクリーン配置修正
+
+Buzzの上部クロームは、macOSの通常ウィンドウ時だけ信号ボタンを避け、フルスクリーンではその余白と縦補正を外す。Samuraiはこの状態分岐を持たず、常に通常ウィンドウ用の左80px・下3pxを適用していた。
+
+- Electron Mainが`enter-full-screen`／`leave-full-screen`をrendererへ通知し、現在値を読む限定IPCを追加した。
+- preloadはフルスクリーン状態の取得・購読だけを公開し、Workspaceや認可の契約は変更していない。
+- `NativeTopChrome`は通常macOSだけ`is-mac-desktop`を付与する。通常時は左80px・下3px、フルスクリーン時は既定の左12px・縦補正なしになる。
+- BuzzのTauriにあるtraffic lightの`y`値はElectronと同じ座標契約ではないため、Electron側のネイティブ位置は変更しなかった。
+
+実行結果:
+
+- `pnpm exec vitest run apps/web/src/native-app/NativeApp.test.ts apps/desktop/src/preload.test.ts` — passed（2 files、41 tests）。
+- `pnpm --filter @samurai-agent/web run typecheck` — passed。
+- `pnpm --filter @samurai-agent/desktop run typecheck` — passed。
+- `pnpm --filter @samurai-agent/web run build` — passed（Viteの500KB超chunk警告のみ）。
+- `pnpm --filter @samurai-agent/desktop run build` — passed。
+- `pnpm lint` — passed（issues 0）。
+- `pnpm desktop:verify` — passed。
+- `git diff --check` — passed。
+- ローカル検証用Self-host ServerとElectronを再起動後、CUAで通常ウィンドウの信号ボタンを避ける配置、macOSフルスクリーンで左12px・縦補正なしへ切り替わること、通常表示へ戻ることを確認した。
+
+未検証:
+
+- SamuraiにはBuzzのCommunity Rail相当がないため、BuzzのRailあり（左32px）分岐は実装していない。
+- 3テーマ・狭幅・IME入力・実Agent実行はこの配置修正では再確認していない。

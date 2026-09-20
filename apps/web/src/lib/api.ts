@@ -1307,6 +1307,9 @@ declare global {
       workspaceServerUrl?: string;
       workspaceId?: string;
       accountId?: string;
+      /** Native fullscreen state for renderer-only chrome placement. */
+      getWindowFullscreen?: () => Promise<boolean>;
+      onWindowFullscreenChange?: (callback: (fullscreen: boolean) => void) => () => void;
       listWorkspaceConnections?: () => Promise<DesktopWorkspaceConnectionState>;
       /** Account-scoped, sanitized Workspace directory across connections. */
       listWorkspaceDirectory?: () => Promise<DesktopWorkspaceDirectoryResult>;

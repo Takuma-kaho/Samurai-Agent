@@ -55,6 +55,14 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   workspaceId,
   accountId,
   getStatus: () => ipcRenderer.invoke("samurai:get-status"),
+  getWindowFullscreen: () => ipcRenderer.invoke("samurai:window:fullscreen:get"),
+  onWindowFullscreenChange: (callback: (fullscreen: boolean) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, fullscreen: unknown) => {
+      callback(fullscreen === true);
+    };
+    ipcRenderer.on("samurai:window:fullscreen:changed", listener);
+    return () => ipcRenderer.removeListener("samurai:window:fullscreen:changed", listener);
+  },
   listWorkspaceConnections: () => ipcRenderer.invoke("samurai:workspace-connections:list"),
   listWorkspaceDirectory: () => ipcRenderer.invoke("samurai:workspace-directory:list"),
   createWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:workspace:create", sanitizeWorkspaceCreateInput(input)),

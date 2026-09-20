@@ -1,8 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import NativeTopChrome from "./NativeTopChrome";
 import { AgentDirectoryPanel, appendNativeRoomWorkResourceRef, artifactRevisionRequestDraft, createNativeDraftNavigationControllerRegistry, CreateDialog, nativeAgentDirectoryScopeKey, nativeAgentProfileForScope, nativeRoomResultResourceTarget, nativeRoomToolTarget, nativeWorkspaceContextTarget, nativeWorkspaceNotificationPageForDisplay, nativeWorkspaceSwitcherEntries, NativeRoomToolLinks, nativeRoomWorkResourceDraftKey } from "./NativeApp";
 import { createNativeDraftNavigationController } from "./use-native-draft-navigation";
+import { recordNativeWorkspaceNavigation, type NativeWorkspaceNavigationHistoryState } from "./use-native-workspace-navigation-history";
 import type { ArtifactRevisionTarget } from "./ArtifactSurfacePanel";
 
 describe("Native draft navigation controller registry", () => {
@@ -25,6 +27,63 @@ describe("Native draft navigation controller registry", () => {
     expect(registry.getCurrent()).toBe(first);
     underlyingDetach();
     expect(registry.getCurrent()).toBeUndefined();
+  });
+});
+
+describe("Native workspace navigation history", () => {
+  it("records same-Workspace destinations, truncates a forward branch, and resets on Workspace change", () => {
+    const roomA = { workspaceTargetKey: "connection_a\nworkspace_a", kind: "room" as const, roomId: "room_a" };
+    const agents = { workspaceTargetKey: "connection_a\nworkspace_a", kind: "agents" as const };
+    const roomB = { workspaceTargetKey: "connection_a\nworkspace_a", kind: "room" as const, roomId: "room_b" };
+    const roomOtherWorkspace = { workspaceTargetKey: "connection_b\nworkspace_b", kind: "room" as const, roomId: "room_c" };
+    let state: NativeWorkspaceNavigationHistoryState = { entries: [], index: -1 };
+
+    state = recordNativeWorkspaceNavigation(state, roomA);
+    state = recordNativeWorkspaceNavigation(state, agents);
+    state = { ...state, index: 0 };
+    state = recordNativeWorkspaceNavigation(state, roomB);
+    expect(state.entries).toEqual([roomA, roomB]);
+    expect(state.index).toBe(1);
+
+    state = recordNativeWorkspaceNavigation(state, roomOtherWorkspace);
+    expect(state).toEqual({ entries: [roomOtherWorkspace], index: 0 });
+  });
+});
+
+describe("Native top chrome", () => {
+  it("renders accessible inline SVG controls and disables unavailable history directions", () => {
+    const markup = renderToStaticMarkup(createElement(NativeTopChrome, {
+      sidebarOpen: true,
+      canGoBack: false,
+      canGoForward: true,
+      onToggleSidebar: vi.fn(),
+      onGoBack: vi.fn(),
+      onGoForward: vi.fn()
+    }));
+
+    expect(markup).toContain("アプリナビゲーション");
+    expect(markup).toContain("前の画面へ戻る");
+    expect(markup).toContain("次の画面へ進む");
+    expect(markup).toContain("disabled=\"\"");
+    expect(markup).toContain("native-top-chrome-history");
+    expect(markup).toContain("viewBox=\"0 0 24 24\"");
+    expect(markup).toContain("height=\"14\"");
+    expect(markup).toContain("<svg");
+  });
+
+  it("removes the macOS traffic-light clearance in native fullscreen", () => {
+    const markup = renderToStaticMarkup(createElement(NativeTopChrome, {
+      sidebarOpen: true,
+      macDesktop: true,
+      isFullscreen: true,
+      canGoBack: true,
+      canGoForward: true,
+      onToggleSidebar: vi.fn(),
+      onGoBack: vi.fn(),
+      onGoForward: vi.fn()
+    }));
+
+    expect(markup).not.toContain("is-mac-desktop");
   });
 });
 

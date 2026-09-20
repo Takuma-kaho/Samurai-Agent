@@ -10,6 +10,7 @@ import NativeArtifactWorkspace, { nativeArtifactWorkspaceInitialResourceFromUnkn
 import NativeCollectionPanel from "./NativeCollectionPanel";
 import NativeProfileMenu from "./NativeProfileMenu";
 import NativeAccountSettings from "./NativeAccountSettings";
+import NativeTopChrome from "./NativeTopChrome";
 import WorkspaceContextSearch from "./WorkspaceContextSearch";
 import WorkspaceNotificationCenter from "./WorkspaceNotificationCenter";
 import WorkspaceShareDialog from "./WorkspaceShareDialog";
@@ -40,6 +41,7 @@ import { nativeKnowledgeResourcesErrorKind, nativeRoomKnowledgeShareResources, n
 import { useNativeShareState } from "./use-native-share-state";
 import { useNativeRoomExpansion } from "./use-native-room-expansion";
 import { useNativeRoomParticipants } from "./use-native-room-participants";
+import { useNativeWorkspaceNavigationHistory, type NativeWorkspaceNavigationEntry } from "./use-native-workspace-navigation-history";
 import { nativeWorkspaceTargetKey } from "./types";
 import type { NativeAgent, NativeAgentBackend, NativeArtifactWorkspaceInitialResource, NativeChatMessage, NativeRoom, NativeRoomAgentMember, NativeRoomAgentPermission, NativeRoomNewAgentInput, NativeRoomWorkResourceRefInput, NativeWorkspace, NativeWorkspaceTarget } from "./types";
 
@@ -666,9 +668,12 @@ export function nativeWorkspaceNotificationPageForDisplay(page: WorkspaceNotific
 
 export function NativeApp() {
   const model = useNativeApp();
+  const macDesktop = typeof window !== "undefined" && Boolean(window.samuraiDesktop) && /Mac/.test(window.navigator.platform);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [theme, setTheme] = useState<NativeTheme>(() => readNativeThemePreference());
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [mobileViewport, setMobileViewport] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 700px)").matches === true);
   const [createKind, setCreateKind] = useState<"organization" | "workspace" | "room">();
   const [roomCreateMode, setRoomCreateMode] = useState<NativeRoomCreateMode>("full");
@@ -698,12 +703,36 @@ export function NativeApp() {
   const accountSettingsReturnContextRef = useRef<NativeAccountSettingsReturnContext | undefined>(undefined);
   const accountSettingsPendingRestoreRef = useRef<NativeAccountSettingsReturnContext | undefined>(undefined);
   const accountSettingsRestoreSelectionRequestedRef = useRef(false);
+  const workspaceNavigationRestoreRef = useRef<NativeWorkspaceNavigationEntry | undefined>(undefined);
   const draftNavigationControllerRegistryRef = useRef<NativeDraftNavigationControllerRegistry | undefined>(undefined);
   if (!draftNavigationControllerRegistryRef.current) {
     draftNavigationControllerRegistryRef.current = createNativeDraftNavigationControllerRegistry();
   }
 
   const roomToolTarget = nativeRoomToolTarget(model.selectedWorkspaceTarget, model.selectedRoom);
+  const workspaceNavigationHistory = useNativeWorkspaceNavigationHistory();
+
+  useEffect(() => {
+    if (!macDesktop || typeof window === "undefined") return;
+    const desktop = window.samuraiDesktop;
+    if (!desktop?.getWindowFullscreen) return;
+
+    let active = true;
+    void desktop.getWindowFullscreen()
+      .then((fullscreen) => {
+        if (active) setNativeFullscreen(fullscreen);
+      })
+      .catch(() => {
+        // Older preload builds do not expose this display-only capability.
+      });
+    const unsubscribe = desktop.onWindowFullscreenChange?.((fullscreen) => {
+      if (active) setNativeFullscreen(fullscreen);
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [macDesktop]);
 
   const changeTheme = useCallback((nextTheme: NativeTheme): void => {
     // Keep the UI responsive even when localStorage is disabled or full. The
@@ -1005,6 +1034,68 @@ export function NativeApp() {
     return true;
   }, []);
 
+  const primaryWorkspaceNavigationEntry = useMemo<NativeWorkspaceNavigationEntry | undefined>(() => {
+    const workspaceTargetKey = model.selectedWorkspaceTargetKey;
+    if (!workspaceTargetKey) return undefined;
+    if (agentDirectoryOpen) return { workspaceTargetKey, kind: "agents" };
+    if (!model.selectedRoomId) return undefined;
+    return { workspaceTargetKey, kind: "room", roomId: model.selectedRoomId };
+  }, [agentDirectoryOpen, model.selectedRoomId, model.selectedWorkspaceTargetKey]);
+
+  const restoreWorkspaceNavigation = useCallback((entry: NativeWorkspaceNavigationEntry): void => {
+    if (entry.workspaceTargetKey !== model.selectedWorkspaceTargetKey) return;
+    workspaceNavigationRestoreRef.current = entry;
+    if (entry.kind === "agents") {
+      setAgentDirectoryOpen(true);
+      return;
+    }
+    const room = model.rooms.find((candidate) => candidate.id === entry.roomId);
+    if (!room) {
+      workspaceNavigationRestoreRef.current = undefined;
+      return;
+    }
+    setAgentDirectoryOpen(false);
+    void model.openRoom(room);
+  }, [model.openRoom, model.rooms, model.selectedWorkspaceTargetKey]);
+
+  const goBackInWorkspace = useCallback((): void => {
+    const target = workspaceNavigationHistory.backTarget;
+    if (!target) return;
+    requestNativeNavigation(() => {
+      workspaceNavigationHistory.moveBack();
+      restoreWorkspaceNavigation(target);
+    });
+  }, [requestNativeNavigation, restoreWorkspaceNavigation, workspaceNavigationHistory.backTarget, workspaceNavigationHistory.moveBack]);
+
+  const goForwardInWorkspace = useCallback((): void => {
+    const target = workspaceNavigationHistory.forwardTarget;
+    if (!target) return;
+    requestNativeNavigation(() => {
+      workspaceNavigationHistory.moveForward();
+      restoreWorkspaceNavigation(target);
+    });
+  }, [requestNativeNavigation, restoreWorkspaceNavigation, workspaceNavigationHistory.forwardTarget, workspaceNavigationHistory.moveForward]);
+
+  useEffect(() => {
+    workspaceNavigationRestoreRef.current = undefined;
+    workspaceNavigationHistory.reset();
+  }, [model.selectedWorkspaceTargetKey, workspaceNavigationHistory.reset]);
+
+  useEffect(() => {
+    const entry = primaryWorkspaceNavigationEntry;
+    if (!entry) return;
+    const pending = workspaceNavigationRestoreRef.current;
+    if (pending) {
+      if (pending.workspaceTargetKey === entry.workspaceTargetKey
+        && pending.kind === entry.kind
+        && pending.roomId === entry.roomId) {
+        workspaceNavigationRestoreRef.current = undefined;
+      }
+      return;
+    }
+    workspaceNavigationHistory.record(entry);
+  }, [primaryWorkspaceNavigationEntry, workspaceNavigationHistory.record]);
+
   const shareState = useNativeShareState({
     bridge: model.bridge,
     target: model.selectedWorkspaceTarget,
@@ -1027,10 +1118,12 @@ export function NativeApp() {
     if (!entry) return;
     requestNativeNavigation(() => {
       model.selectWorkspace(entry.workspace);
+      setAgentDirectoryOpen(false);
+      workspaceNavigationHistory.reset();
       setWorkspacePopoverOpen(false);
       closeMobileSidebar();
     });
-  }, [closeMobileSidebar, model.selectWorkspace, requestNativeNavigation, workspaceSwitcherEntries]);
+  }, [closeMobileSidebar, model.selectWorkspace, requestNativeNavigation, workspaceNavigationHistory.reset, workspaceSwitcherEntries]);
 
   useEffect(() => {
     const preventDraftLoss = (event: BeforeUnloadEvent): void => {
@@ -1428,7 +1521,10 @@ export function NativeApp() {
           onSetRoomAgentPermission={model.setRoomAgentPermission}
           onRemoveRoomAgent={model.removeRoomAgent}
           onSetDefaultAgent={model.setRoomDefaultAgent}
-          onOpenAgentDm={model.openAgentDm}
+          onOpenAgentDm={async (agentId) => {
+            await model.openAgentDm(agentId);
+            setAgentDirectoryOpen(false);
+          }}
           onSelectAgentResources={model.selectAgentResources}
           onSelectAgentResource={model.selectAgentResource}
           onLoadAgentResource={model.loadAgentResource}
@@ -1518,7 +1614,10 @@ export function NativeApp() {
                 onReassignAssignee={model.reassignRoomWorkAssignee}
                 onDelegateAssignee={model.delegateRoomWorkAssignee}
                 onSetDefaultAgent={model.setRoomDefaultAgent}
-                onOpenAgentDm={model.openAgentDm}
+                onOpenAgentDm={async (agentId) => {
+                  await model.openAgentDm(agentId);
+                  setAgentDirectoryOpen(false);
+                }}
                 onOpenAgentSettings={() => requestNativeNavigation(() => setAgentDirectoryOpen(true))}
                 participants={roomParticipants.participants}
                 participantsLoading={roomParticipants.loading}
@@ -1555,8 +1654,24 @@ export function NativeApp() {
 
   return (
     <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
-      <div className="native-workspace-shell">
-        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen || contextSurface !== undefined ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || accountSettingsOpen || contextSurface !== undefined} aria-label="Workspace navigation">
+      <NativeTopChrome
+        sidebarOpen={mobileViewport ? mobileSidebarOpen : desktopSidebarOpen}
+        macDesktop={macDesktop}
+        isFullscreen={nativeFullscreen}
+        canGoBack={workspaceNavigationHistory.canGoBack}
+        canGoForward={workspaceNavigationHistory.canGoForward}
+        onToggleSidebar={() => {
+          if (mobileViewport) {
+            setMobileSidebarOpen((open) => !open);
+          } else {
+            setDesktopSidebarOpen((open) => !open);
+          }
+        }}
+        onGoBack={goBackInWorkspace}
+        onGoForward={goForwardInWorkspace}
+      />
+      <div className={`native-workspace-shell${!mobileViewport && !desktopSidebarOpen ? " is-sidebar-collapsed" : ""}`}>
+        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}${!mobileViewport && !desktopSidebarOpen ? " is-desktop-collapsed" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen) || accountSettingsOpen || contextSurface !== undefined ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen) || accountSettingsOpen || contextSurface !== undefined} aria-label="Workspace navigation">
           <div className="native-sidebar-context-tools" aria-label="Workspaceコンテキスト">
             <div className="native-workspace-picker">
               <button
@@ -1627,7 +1742,7 @@ export function NativeApp() {
             error={model.roomError}
             expandedRoomIds={roomExpansion.expandedRoomIds ?? roomParentIds}
             onToggleExpanded={toggleRoomExpanded}
-            onSelect={(room) => { requestNativeNavigation(() => { void model.openRoom(room); closeMobileSidebar(); }); }}
+            onSelect={(room) => { requestNativeNavigation(() => { setAgentDirectoryOpen(false); void model.openRoom(room); closeMobileSidebar(); }); }}
             onCreate={model.selectedWorkspace?.access === "granted" && model.selectedWorkspace.state === "active" ? () => startCreate("room", "existing-only") : undefined}
           />
           <NativeProfileMenu
@@ -1838,7 +1953,6 @@ export function NativeApp() {
         </section>
       </div>
       {mobileSidebarOpen ? <button type="button" className="native-mobile-nav-backdrop" aria-label="ナビゲーションを閉じる" onClick={closeMobileSidebar} /> : null}
-      <button type="button" className="native-mobile-nav-toggle" aria-label="ナビゲーションを開く" aria-expanded={mobileSidebarOpen} onClick={() => setMobileSidebarOpen((open) => !open)}>☰</button>
       {model.evidenceOpen ? <EvidenceInspector message={model.evidenceMessage} evidence={model.evidence} onClose={() => model.setEvidenceOpen(false)} /> : null}
       {createKind ? <CreateDialog
         kind={createKind}

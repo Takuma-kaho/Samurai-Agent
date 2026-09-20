@@ -400,6 +400,10 @@ async function createMainWindow(): Promise<void> {
     minHeight: 640,
     show: false,
     title: "Samurai Agent",
+    ...(process.platform === "darwin" ? {
+      titleBarStyle: "hidden" as const,
+      trafficLightPosition: { x: 16, y: 12 }
+    } : {}),
     webPreferences: {
       preload: preloadPath,
       additionalArguments: desktopArguments(config),
@@ -422,6 +426,15 @@ async function createMainWindow(): Promise<void> {
   });
   mainWindow.on("closed", () => {
     mainWindow = undefined;
+  });
+  // Native fullscreen hides macOS traffic lights. Keep the renderer's
+  // top-chrome clearance in sync so its navigation controls use the same
+  // compact placement as the reference UI in fullscreen.
+  mainWindow.on("enter-full-screen", () => {
+    mainWindow?.webContents.send("samurai:window:fullscreen:changed", true);
+  });
+  mainWindow.on("leave-full-screen", () => {
+    mainWindow?.webContents.send("samurai:window:fullscreen:changed", false);
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
@@ -606,6 +619,9 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:window:reload", async () => {
     await loadMainWindow();
+  });
+  ipcMain.handle("samurai:window:fullscreen:get", (event) => {
+    return BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false;
   });
   ipcMain.handle("samurai:workspace-connections:list", () => publicWorkspaceConnections());
   ipcMain.handle("samurai:workspace-connections:upsert", async (_event, input: unknown) => {
