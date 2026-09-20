@@ -80,9 +80,7 @@ export function NativeProfileMenu({
         <span className="native-profile-avatar" aria-hidden="true">{accountLabel.slice(0, 1) || "本"}</span>
         <span className="native-profile-copy">
           <strong>{accountLabel}</strong>
-          <small>設定</small>
         </span>
-        <span className="native-profile-chevron" aria-hidden="true">⌃</span>
       </button>
       {open ? <div id={menuId} className="native-profile-menu" role="menu" aria-label="設定メニューの内容">
         <div className="native-profile-menu-account">

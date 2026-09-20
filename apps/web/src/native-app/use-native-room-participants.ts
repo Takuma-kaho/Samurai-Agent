@@ -44,6 +44,7 @@ export function useNativeRoomParticipants({ room, target, agents = [], roomAgent
   const [members, setMembers] = useState<DesktopWorkspaceRoomMembership[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const sequence = useRef(0);
   const roomId = room?.id;
   const targetKey = target ? `${target.connectionId}\n${target.workspaceId}` : "";
@@ -54,20 +55,24 @@ export function useNativeRoomParticipants({ room, target, agents = [], roomAgent
       setMembers([]);
       setLoading(false);
       setError(null);
+      setLoaded(false);
       return;
     }
     setLoading(true);
     setError(null);
+    setLoaded(false);
     void bridge.listWorkspaceRoomMembers(roomId, target)
       .then((result) => {
         if (sequence.current !== request) return;
         const scoped = result.members.filter((member) => member.workspaceId === target.workspaceId && member.roomId === roomId && member.state === "active");
         setMembers(scoped);
+        setLoaded(true);
       })
       .catch(() => {
         if (sequence.current !== request) return;
         setMembers([]);
         setError("参加者を確認できません。");
+        setLoaded(false);
       })
       .finally(() => {
         if (sequence.current === request) setLoading(false);
@@ -106,5 +111,5 @@ export function useNativeRoomParticipants({ room, target, agents = [], roomAgent
     return [...humans, ...agentRows];
   }, [accountDisplayNames, agents, members, roomAgentMembers, roomId]);
 
-  return { participants, loading, error };
+  return { participants, loading, error, loaded };
 }

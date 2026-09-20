@@ -712,7 +712,7 @@ export function NativeApp() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
-  const sidebarWidth = useNativeSidebarWidth();
+  const sidebarWidth = useNativeSidebarWidth(() => setDesktopSidebarOpen(false));
   const [mobileViewport, setMobileViewport] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 700px)").matches === true);
   const [createKind, setCreateKind] = useState<"organization" | "workspace" | "room">();
   const [roomCreateMode, setRoomCreateMode] = useState<NativeRoomCreateMode>("full");
@@ -747,9 +747,10 @@ export function NativeApp() {
   const workspaceNavigationRestoreRef = useRef<NativeWorkspaceNavigationEntry | undefined>(undefined);
   const draftNavigationControllerRegistryRef = useRef<NativeDraftNavigationControllerRegistry | undefined>(undefined);
   const mainWindowRef = useRef<HTMLElement>(null);
+  const panelCloseRequestRef = useRef<(() => void) | undefined>(undefined);
   const roomPanelStateRef = useRef(roomPanelState);
   roomPanelStateRef.current = roomPanelState;
-  const artifactPanelWidth = useNativeArtifactPanelWidth(mainWindowRef);
+  const artifactPanelWidth = useNativeArtifactPanelWidth(mainWindowRef, () => panelCloseRequestRef.current?.());
   if (!draftNavigationControllerRegistryRef.current) {
     draftNavigationControllerRegistryRef.current = createNativeDraftNavigationControllerRegistry();
   }
@@ -1107,6 +1108,15 @@ export function NativeApp() {
     }
     return true;
   }, []);
+
+  const closeArtifactPanel = useCallback((): void => {
+    requestNativeNavigation(() => {
+      setArtifactPanelExpanded(false);
+      setRoomPanelState("closed");
+      setRoomToolOpen(undefined);
+    });
+  }, [requestNativeNavigation]);
+  panelCloseRequestRef.current = closeArtifactPanel;
 
   const primaryWorkspaceNavigationEntry = useMemo<NativeWorkspaceNavigationEntry | undefined>(() => {
     const workspaceTargetKey = model.selectedWorkspaceTargetKey;
@@ -1704,6 +1714,7 @@ export function NativeApp() {
                 participants={roomParticipants.participants}
                 participantsLoading={roomParticipants.loading}
                 participantsError={roomParticipants.error}
+                participantsLoaded={roomParticipants.loaded}
                 onOpenRoomParticipants={() => { if (model.selectedRoom) openRoomAdministrationFor(model.selectedRoom, "participants"); }}
                 roomParticipantsOpen={roomPanelState === "room_settings" && roomAdministrationView === "participants"}
                 onOpenRoomSettings={() => openRoomSettings("basic")}
@@ -1965,7 +1976,7 @@ export function NativeApp() {
               onBack={closeAccountSettings}
             />
           </div> : null}
-          {roomSettingsPanelTarget && model.selectedWorkspace && roomAdministrationRoom ? <aside className="native-room-panel" aria-label="Roomメニュー" data-panel-mode={artifactPanelWidth.isOverlay ? "overlay" : "split"} hidden={roomPanelState !== "room_settings"} inert={roomPanelState !== "room_settings"}>
+          {roomSettingsPanelTarget && model.selectedWorkspace && roomAdministrationRoom ? <aside className="native-room-panel" aria-label="Roomメニュー" data-panel-mode="split" style={{ width: `${artifactPanelWidth.width}px` }} hidden={roomPanelState !== "room_settings"} inert={roomPanelState !== "room_settings"}>
             <NativeRoomAdministration
               rooms={model.rooms}
               target={roomSettingsPanelTarget}
@@ -2041,13 +2052,13 @@ export function NativeApp() {
           {artifactPanelTarget ? <aside
             className={`native-artifact-panel${artifactPanelWidth.isResizing ? " is-resizing" : ""}`}
             aria-label="成果物"
-            data-panel-mode={artifactPanelWidth.isOverlay ? "overlay" : "split"}
+            data-panel-mode="split"
             data-expanded={artifactPanelExpanded ? "true" : "false"}
             hidden={roomPanelState !== "artifacts"}
             inert={roomPanelState !== "artifacts"}
-            style={!artifactPanelWidth.isOverlay ? { width: `${artifactPanelWidth.width}px` } : undefined}
+            style={{ width: `${artifactPanelWidth.width}px` }}
           >
-            {roomPanelState === "artifacts" && !artifactPanelWidth.isOverlay ? <button
+            {roomPanelState === "artifacts" ? <button
               type="button"
               className="native-artifact-panel-resize-handle"
               role="separator"

@@ -130,9 +130,9 @@ describe("RoomWorkSurface", () => {
   it("keeps Room controls in the shared header row at a narrow content width", () => {
     const html = renderSurface({
       participants: [
-        { id: "member_a", kind: "human", label: "A" },
-        { id: "member_b", kind: "human", label: "B" },
-        { id: "member_c", kind: "agent", label: "C" }
+        { id: "member_a", kind: "account", label: "A", state: "active" },
+        { id: "member_b", kind: "account", label: "B", state: "active" },
+        { id: "member_c", kind: "agent", label: "C", state: "available" }
       ]
     });
 
@@ -456,7 +456,7 @@ describe("RoomWorkSurface", () => {
     expect(html).toContain("native-chat-header");
   });
 
-  it("renders one compact mixed participant trigger with wide and narrow overflow counts", () => {
+  it("renders one compact people icon with a numeric mixed participant count", () => {
     const html = renderSurface({
       participants: [
         { id: "account_a", kind: "account", label: "Aさん", state: "active" },
@@ -468,13 +468,11 @@ describe("RoomWorkSurface", () => {
       onOpenRoomParticipants: vi.fn()
     });
 
-    expect(html).toContain('aria-label="参加者一覧を開く"');
-    expect(html).toContain('data-participant-kind="account"');
-    expect(html).toContain('data-participant-kind="agent"');
-    expect(html).toContain('class="native-work-participant-overflow native-work-participants-overflow-wide">+1</span>');
-    expect(html).toContain('class="native-work-participant-overflow native-work-participants-overflow-narrow">+2</span>');
-    expect(html).toContain(".native-work-participant-stack .native-work-participant-avatar:nth-of-type(4) { display: none; }");
-    expect(html).toContain("参加者 5");
+    expect(html).toContain('aria-label="参加者5人の一覧を開く"');
+    expect(html).toContain('data-icon="participants"');
+    expect(html).toContain('class="native-work-participants-count">5</span>');
+    expect(html).not.toContain("native-work-participant-avatar");
+    expect(html).not.toContain("native-work-participant-overflow");
     expect(html).not.toContain('role="dialog" aria-label="Roomの参加者"');
   });
 

@@ -547,18 +547,20 @@
 .native-room-panel {
   background: var(--native-surface-soft);
   border-left: 1px solid var(--native-line);
+  box-sizing: border-box;
   display: flex;
-  flex: 0 1 410px;
+  flex: 0 0 auto;
   flex-direction: column;
-  max-width: 52%;
+  max-width: none;
   min-height: 0;
-  min-width: 360px;
+  min-width: 260px;
   overflow: auto;
 }
 
 .native-artifact-panel {
   background: var(--native-bg);
   border-left: 1px solid var(--native-line);
+  box-sizing: border-box;
   min-width: 0;
   overflow: hidden;
 }
@@ -1647,17 +1649,6 @@ input:disabled {
   white-space: nowrap;
 }
 
-.native-profile-copy small {
-  color: var(--native-dim);
-  font-size: 10px;
-}
-
-.native-profile-chevron {
-  color: var(--native-dim);
-  font-size: 15px;
-  margin-left: auto;
-}
-
 .native-profile-menu {
   background: var(--native-panel-soft);
   border: 1px solid var(--native-line-strong);
@@ -2176,9 +2167,41 @@ input:disabled {
  * prototype without changing those state transitions. */
 .native-app-shell .native-work-surface .native-work-message-list {
   gap: 0;
+  margin: 0;
+  max-width: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0;
+  scrollbar-color: var(--native-line-strong) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  width: 100%;
+}
+
+.native-app-shell .native-work-surface .native-work-message-list::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.native-app-shell .native-work-surface .native-work-message-list::-webkit-scrollbar-thumb {
+  background: var(--native-line-strong);
+  border-radius: 999px;
+}
+
+.native-app-shell .native-work-surface .native-work-message-list-content {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0 auto;
   max-width: 800px;
-  padding-bottom: 30px;
-  padding-top: 25px;
+  min-width: 0;
+  padding: 25px 24px 30px;
+  width: 100%;
 }
 
 .native-app-shell .native-work-surface .native-work-message {
@@ -2264,6 +2287,10 @@ input:disabled {
 
 @media (max-width: 700px) {
   .native-app-shell .native-work-surface .native-work-message-list {
+    padding: 0;
+  }
+
+  .native-app-shell .native-work-surface .native-work-message-list-content {
     padding: 18px 18px 22px;
   }
 
@@ -2669,32 +2696,6 @@ button {
   }
 }
 
-@media (max-width: 700px) {
-  /* On a phone the artifact panel is a temporary right-side overlay; the
-   * navigation drawer remains the only left-side overlay. */
-  .native-artifact-panel {
-    bottom: 0;
-    box-shadow: -18px 0 44px rgba(0, 0, 0, 0.42);
-    position: absolute;
-    right: 0;
-    top: 0;
-    width: min(100%, 520px);
-    z-index: 20;
-  }
-  .native-room-panel {
-    border-left: 1px solid var(--native-line);
-    bottom: 0;
-    box-shadow: -18px 0 44px rgba(0, 0, 0, 0.42);
-    max-width: none;
-    min-width: 0;
-    position: absolute;
-    right: 0;
-    top: 0;
-    width: min(100%, 560px);
-    z-index: 20;
-  }
-}
-
 /*
  * Native conversation frame
  *
@@ -2829,7 +2830,7 @@ button {
 .native-workspace-shell {
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: var(--native-sidebar-width, 300px) minmax(0, 1fr);
   height: auto;
   min-height: 0;
   position: relative;
@@ -3119,13 +3120,10 @@ button {
   width: 32px;
 }
 
-.native-profile-copy { gap: 1px; }
+.native-profile-copy { gap: 0; }
 .native-profile-copy strong { color: var(--native-sidebar-text); font-size: 14px; font-weight: 600; }
-.native-profile-copy small { color: var(--native-sidebar-muted); font-size: 12px; }
 .native-profile-workspace-name { align-items: center; display: inline-flex; gap: 5px; }
 .native-profile-workspace-icon { font-size: 11px; }
-.native-profile-chevron { color: var(--native-sidebar-muted); }
-
 .native-profile-menu {
   background: var(--native-surface-raised);
   border: 1px solid var(--native-line-strong);
@@ -3157,7 +3155,8 @@ button {
   box-shadow: none;
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: minmax(0, 1fr) auto;
+  --native-chat-min-width: 280px;
+  grid-template-columns: minmax(var(--native-chat-min-width), 1fr) auto;
   grid-template-rows: var(--native-room-header-height) minmax(0, 1fr);
   height: auto;
   min-height: 0;
@@ -3235,6 +3234,7 @@ button {
 .native-artifact-panel {
   background: var(--native-surface-soft);
   border-left: 1px solid var(--native-line);
+  box-sizing: border-box;
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
@@ -3255,19 +3255,6 @@ button {
   right: 34px;
   top: 34px;
   width: min(344px, calc(100vw - 68px));
-  z-index: 20;
-}
-
-.native-artifact-panel[data-panel-mode="overlay"],
-.native-room-panel[data-panel-mode="overlay"] {
-  bottom: 0;
-  box-shadow: -18px 0 44px rgba(0, 0, 0, .42);
-  max-width: none;
-  min-width: 0;
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: min(100%, 520px);
   z-index: 20;
 }
 
@@ -3777,7 +3764,6 @@ button {
   .native-app-shell { padding: 0 8px 8px 0; }
   .native-top-chrome { margin-right: -8px; }
   .native-workspace-shell { grid-template-columns: min(var(--native-sidebar-width, 300px), 45vw) minmax(0, 1fr); }
-  .native-artifact-panel { min-width: 300px; }
 }
 
 @media (max-width: 700px) {
@@ -3822,18 +3808,6 @@ button {
   .native-management-header { height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 24px) 0 18px; }
   .native-message-list { padding: 18px 18px 22px; }
   .native-composer-wrap { padding: 9px 12px 13px; }
-  .native-artifact-panel {
-    border-left: 1px solid var(--native-line);
-    bottom: 0;
-    max-width: none;
-    min-width: 0;
-    position: absolute;
-    right: 0;
-    top: 0;
-    width: min(100%, 520px);
-    z-index: 20;
-  }
-
   .native-artifact-workspace-header { height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding-right: var(--native-header-end-inset); }
 
   .native-artifact-panel-resize-handle { display: none; }

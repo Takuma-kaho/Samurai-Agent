@@ -40,10 +40,12 @@ type ResizeState = {
   startWidth: number;
 };
 
-export function useNativeSidebarWidth() {
+export function useNativeSidebarWidth(onClose?: () => void) {
   const [width, setWidthState] = useState(readNativeSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStateRef = useRef<ResizeState | undefined>(undefined);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   const setWidth = useCallback((next: number | ((current: number) => number)): void => {
     setWidthState((current) => {
@@ -70,10 +72,15 @@ export function useNativeSidebarWidth() {
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLButtonElement>): void => {
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      setWidth((current) => current - 10);
+      const nextWidth = width - 10;
+      if (nextWidth < nativeSidebarWidthMin) {
+        onCloseRef.current?.();
+      } else {
+        setWidth(nextWidth);
+      }
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      setWidth((current) => current + 10);
+      setWidth(width + 10);
     } else if (event.key === "Home") {
       event.preventDefault();
       setWidth(nativeSidebarWidthMin);
@@ -81,14 +88,23 @@ export function useNativeSidebarWidth() {
       event.preventDefault();
       setWidth(nativeSidebarWidthMax);
     }
-  }, [setWidth]);
+  }, [setWidth, width]);
 
   useEffect(() => {
     if (!isResizing) return undefined;
+    const previousCursor = document.documentElement.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
     const onPointerMove = (event: globalThis.PointerEvent): void => {
       const state = resizeStateRef.current;
       if (!state || event.pointerId !== state.pointerId) return;
-      setWidth(state.startWidth + event.clientX - state.startX);
+      const nextWidth = state.startWidth + event.clientX - state.startX;
+      if (nextWidth < nativeSidebarWidthMin) {
+        resizeStateRef.current = undefined;
+        setIsResizing(false);
+        onCloseRef.current?.();
+        return;
+      }
+      setWidth(nextWidth);
     };
     const finishResize = (event: globalThis.PointerEvent): void => {
       const state = resizeStateRef.current;
@@ -102,8 +118,8 @@ export function useNativeSidebarWidth() {
     document.addEventListener("pointerup", finishResize);
     document.addEventListener("pointercancel", finishResize);
     return () => {
-      document.documentElement.style.cursor = "";
-      document.body.style.userSelect = "";
+      document.documentElement.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("pointermove", onPointerMove);
       document.removeEventListener("pointerup", finishResize);
       document.removeEventListener("pointercancel", finishResize);

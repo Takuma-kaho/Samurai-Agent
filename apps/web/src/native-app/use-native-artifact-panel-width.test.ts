@@ -17,8 +17,9 @@ describe("native artifact panel width", () => {
 
   it("keeps a minimum chat width in a split layout", () => {
     expect(clampNativeArtifactPanelWidth(720, 1_100)).toBe(720);
-    expect(clampNativeArtifactPanelWidth(720, 900)).toBe(540);
-    expect(clampNativeArtifactPanelWidth(410, 650)).toBe(290);
+    expect(clampNativeArtifactPanelWidth(720, 900)).toBe(620);
+    expect(clampNativeArtifactPanelWidth(410, 650)).toBe(370);
+    expect(clampNativeArtifactPanelWidth(410, 539)).toBe(259);
   });
 
   it("normalizes browser storage values without accepting malformed input", () => {

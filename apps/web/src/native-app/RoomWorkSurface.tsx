@@ -77,6 +77,7 @@ export interface RoomWorkSurfaceProps {
   participants?: readonly NativeRoomParticipant[];
   participantsLoading?: boolean;
   participantsError?: string | null;
+  participantsLoaded?: boolean;
   /** NativeApp owns the combined participant list/menu; this surface only opens it. */
   onOpenRoomParticipants?: () => void;
   roomParticipantsOpen?: boolean;
@@ -632,6 +633,16 @@ function RoomSendIcon(): ReactNode {
   );
 }
 
+function RoomParticipantsIcon(): ReactNode {
+  return (
+    <svg className="native-work-participants-icon" data-icon="participants" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <circle cx="7" cy="7" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M2.8 15c.3-2.5 1.8-3.8 4.2-3.8s3.9 1.3 4.2 3.8" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
+      <path d="M12.4 5.1a2.3 2.3 0 0 1 0 4.2M13.2 11.4c1.8.3 2.9 1.5 3.2 3.6" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 function RoomChevronIcon(): ReactNode {
   return (
     <svg className="native-work-composer-chevron" data-icon="chevron-down" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
@@ -866,7 +877,7 @@ const roomWorkStyles = [
   ".native-work-conversation-heading p { color: var(--native-muted); font-size: 12px; line-height: 1.65; margin: 6px 0 0; max-width: 650px; white-space: pre-wrap; }",
   ".native-work-conversation-actions { align-items: center; display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }",
   ".native-work-conversation-status { align-items: center; display: flex; gap: 8px; }",
-  ".native-work-message-list { gap: 17px; padding-top: 22px; }",
+  ".native-work-message-list-content { gap: 17px; padding-top: 22px; }",
   ".native-work-message { max-width: 770px; position: relative; width: min(100%, 770px); }",
   ".native-work-message-self { align-self: flex-end; max-width: min(76%, 560px); width: auto; }",
   ".native-work-message-peer, .native-work-message-agent { align-self: flex-start; display: grid; gap: 11px; grid-template-columns: 31px minmax(0, 1fr); }",
@@ -1021,12 +1032,10 @@ const roomWorkStyles = [
   ".native-work-header-action[aria-expanded='true'] { background: var(--native-panel-soft); color: var(--native-accent); }",
   ".native-work-header-controls { align-items: center; display: inline-flex; flex-wrap: nowrap; gap: var(--native-header-control-gap, 7px); justify-content: flex-end; position: relative; }",
   ".native-work-header-icon { display: block; height: 16px; width: 16px; }",
-  ".native-work-participants-trigger { gap: 7px; }",
-  ".native-work-participant-stack { align-items: center; display: inline-flex; padding-left: 4px; }",
-  ".native-work-participant-avatar, .native-work-participant-overflow { align-items: center; background: var(--native-panel-soft); border: 2px solid var(--native-surface, var(--native-bg)); border-radius: 50%; color: var(--native-copy); display: inline-flex; font-size: 10px; font-weight: 650; height: 24px; justify-content: center; margin-left: -4px; width: 24px; }",
-  ".native-work-participant-overflow { background: var(--native-surface-raised, var(--native-panel-soft)); color: var(--native-muted); font-size: 10px; }",
-  ".native-work-participants-overflow-narrow { display: none; }",
-  ".native-work-participants-label { font-size: 12px; white-space: nowrap; }",
+  ".native-work-participants-trigger { gap: 6px; padding-inline: 6px; }",
+  ".native-work-participants-indicator { align-items: center; display: inline-flex; gap: 4px; }",
+  ".native-work-participants-icon { display: block; height: 17px; width: 17px; }",
+  ".native-work-participants-count { color: var(--native-copy); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 1ch; text-align: center; }",
   ".native-work-participant-status { color: var(--native-dim); font-size: 10px; white-space: nowrap; }",
   ".native-work-default-control { align-items: center; display: inline-flex; gap: 6px; }",
   ".native-work-agent-row { align-items: center; color: var(--native-muted); display: flex; flex: 1 1 160px; flex-wrap: nowrap; gap: 7px; min-height: 36px; min-width: 0; padding: 0; }",
@@ -1052,8 +1061,8 @@ const roomWorkStyles = [
   ".native-work-default-button:hover { background: var(--native-hover, #ffffff12); }",
   ".native-work-surface .native-banner { margin-inline: clamp(22px, 5vw, 72px); }",
   "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-thread-switcher { max-height: 112px; } .native-work-conversation-header { align-items: flex-start; flex-direction: column; } .native-work-conversation-actions { align-items: flex-start; flex-direction: row; } }",
-  "@container (max-width: 560px) { .native-work-surface .native-chat-header { gap: 8px; } .native-work-header-meta { flex: 0 0 auto; } .native-work-participants-trigger { padding-inline: 4px; } .native-work-participants-label { display: none; } .native-work-participant-stack .native-work-participant-avatar:nth-of-type(4) { display: none; } .native-work-participants-overflow-wide { display: none; } .native-work-participants-overflow-narrow { display: inline-flex; } }",
-  "@media (max-width: 560px) { .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 14px 14px; } .native-work-surface .native-composer { border-radius: 24px; padding: 12px 14px 10px; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-select-wrap { max-width: min(190px, 46vw); } }"
+  "@container (max-width: 560px) { .native-work-surface .native-chat-header { gap: 8px; } .native-work-header-meta { flex: 0 0 auto; } .native-work-participants-trigger { padding-inline: 4px; } .native-work-participants-icon { height: 16px; width: 16px; } }",
+  "@media (max-width: 560px) { .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list-content { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 14px 14px; } .native-work-surface .native-composer { border-radius: 24px; padding: 12px 14px 10px; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-select-wrap { max-width: min(190px, 46vw); } }"
 ].join("\n");
 
 export function RoomWorkSurface({
@@ -1102,6 +1111,7 @@ export function RoomWorkSurface({
   participants = [],
   participantsLoading = false,
   participantsError,
+  participantsLoaded = false,
   onOpenRoomParticipants,
   roomParticipantsOpen,
   onOpenRoomSettings,
@@ -1162,7 +1172,12 @@ export function RoomWorkSurface({
   const defaultAgentKnown = Boolean(defaultAgentId && defaultAgent && defaultAgent.status !== undefined && (roomIsDm || roomCapabilityKnown(room, "canExecute")));
   const defaultAgentReady = Boolean(defaultAgentKnown && roomExecutionAllowed(room) && agentIsAvailable(defaultAgent, agentBackends, roomAgentMembers));
   const participantRows = participantsLoading || Boolean(participantsError) ? [] : [...participants];
-  const participantCount = participantRows.length > 0 ? participantRows.length : undefined;
+  const participantCount = participantsLoading || Boolean(participantsError)
+    ? undefined
+    : participantRows.length > 0 || participantsLoaded
+      ? participantRows.length
+      : undefined;
+  const participantCountLabel = participantCount === undefined ? "—" : String(participantCount);
   const participantButtonLabel = participantsLoading
     ? "参加者を確認中…"
     : participantsError
@@ -1888,25 +1903,13 @@ export function RoomWorkSurface({
                 }}
                 {...(roomParticipantsOpen !== undefined ? { "aria-expanded": roomParticipantsOpen } : {})}
                 aria-haspopup="dialog"
-                aria-label={participantsLoading ? "参加者一覧を開く（確認中）" : participantsError ? "参加者一覧を開く（確認失敗）" : "参加者一覧を開く"}
+                aria-label={participantsLoading ? "参加者一覧を開く（確認中）" : participantsError ? "参加者一覧を開く（確認失敗）" : participantCount === undefined ? "参加者一覧を開く" : `参加者${participantCount}人の一覧を開く`}
                 title={participantButtonLabel}
               >
-                <span className="native-work-participant-stack" aria-hidden="true">
-                  {participantRows.slice(0, 4).map((participant) => (
-                    <span
-                      className="native-work-participant-avatar"
-                      data-participant-id={participant.id}
-                      data-participant-kind={participant.kind}
-                      key={`${participant.kind}:${participant.id}`}
-                      title={participant.label}
-                    >
-                      {actorInitial(participant.label)}
-                    </span>
-                  ))}
-                  {participantRows.length > 4 ? <span className="native-work-participant-overflow native-work-participants-overflow-wide">+{participantRows.length - 4}</span> : null}
-                  {participantRows.length > 3 ? <span className="native-work-participant-overflow native-work-participants-overflow-narrow">+{participantRows.length - 3}</span> : null}
+                <span className="native-work-participants-indicator" aria-hidden="true">
+                  <RoomParticipantsIcon />
+                  <span className="native-work-participants-count">{participantCountLabel}</span>
                 </span>
-                <span className="native-work-participants-label">{participantButtonLabel}</span>
               </button>
               <button
                 type="button"
@@ -1954,9 +1957,11 @@ export function RoomWorkSurface({
                 </div>
               </header> : null}
               <div className="native-message-list native-work-message-list" aria-label="Roomの会話">
-                {workDetailLoading ? <div className="native-work-conversation-loading" role="status">会話の詳細をServerから確認しています…</div> : null}
-                {!workDetailLoading && !conversationEntries.length ? <div className="native-work-conversation-empty"><p>このRoomの会話詳細はまだServerから返されていません。</p></div> : null}
-                {conversationEntries.map(renderConversationEntry)}
+                <div className="native-work-message-list-content">
+                  {workDetailLoading ? <div className="native-work-conversation-loading" role="status">会話の詳細をServerから確認しています…</div> : null}
+                  {!workDetailLoading && !conversationEntries.length ? <div className="native-work-conversation-empty"><p>このRoomの会話詳細はまだServerから返されていません。</p></div> : null}
+                  {conversationEntries.map(renderConversationEntry)}
+                </div>
               </div>
             </>
           ) : null}
