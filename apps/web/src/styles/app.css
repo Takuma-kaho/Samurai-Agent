@@ -2820,7 +2820,10 @@ button {
   -webkit-app-region: drag;
 }
 
-.native-workspace-shell.is-sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+.native-workspace-shell.is-sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+  padding-left: 8px;
+}
 .native-sidebar.is-desktop-collapsed { display: none; }
 
 .native-workspace-shell {
@@ -3522,7 +3525,12 @@ button {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.native-artifact-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .native-artifact-tabs-empty {
