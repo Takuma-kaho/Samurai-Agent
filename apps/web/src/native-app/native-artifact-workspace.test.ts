@@ -124,6 +124,32 @@ describe("NativeArtifactWorkspace", () => {
     expect(html).not.toContain('aria-label="成果物一覧"');
   });
 
+  it("keeps tabs, expansion, and the panel toggle in one Artifact header", () => {
+    const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
+      target,
+      initialResource: {
+        kind: "artifact",
+        id: "artifact-a",
+        uri: "artifacts/artifact-a",
+        label: "設計メモ",
+        connectionId: target.connectionId,
+        workspaceId: target.workspaceId,
+        roomId: target.roomId
+      },
+      onToggleExpanded: vi.fn(),
+      onTogglePanel: vi.fn(),
+      panelOpen: true
+    }));
+
+    const headerStart = html.indexOf('class="native-artifact-workspace-header native-artifact-tab-header"');
+    const headerEnd = html.indexOf("</header>", headerStart);
+    const header = html.slice(headerStart, headerEnd);
+
+    expect(header).toContain('role="tablist"');
+    expect(header).toContain('aria-label="成果物をメイン領域いっぱいに拡大"');
+    expect(header).toContain('aria-label="成果物パネルを閉じる"');
+  });
+
   it("keeps an empty Room-scoped Artifact panel free of a catalog list", () => {
     const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
       target,

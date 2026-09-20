@@ -127,6 +127,20 @@ function renderSurface(overrides: Partial<RoomWorkSurfaceProps> = {}): string {
 }
 
 describe("RoomWorkSurface", () => {
+  it("keeps Room controls in the shared header row at a narrow content width", () => {
+    const html = renderSurface({
+      participants: [
+        { id: "member_a", kind: "human", label: "A" },
+        { id: "member_b", kind: "human", label: "B" },
+        { id: "member_c", kind: "agent", label: "C" }
+      ]
+    });
+
+    expect(html).toContain("container-type: inline-size");
+    expect(html).toContain("@container (max-width: 560px)");
+    expect(html).not.toContain(".native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; }");
+  });
+
   it("pairs each direct-open result with only its Server-linked revision", () => {
     const completedWork: NativeRoomWork = {
       ...work,

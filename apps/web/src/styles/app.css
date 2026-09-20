@@ -3145,11 +3145,17 @@ button {
   background: var(--native-surface);
   border: 0;
   border-radius: 14px;
-  --native-chat-header-right-inset: 72px;
+  --native-header-control-gap: 7px;
+  --native-header-control-height: 32px;
+  --native-header-control-width: 30px;
+  --native-header-end-inset: 24px;
+  --native-chat-header-right-inset: var(--native-header-end-inset);
   --native-room-header-height: 56px;
   box-shadow: none;
-  display: flex;
+  display: grid;
   flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: var(--native-room-header-height) minmax(0, 1fr);
   height: auto;
   min-height: 0;
   min-width: 0;
@@ -3160,38 +3166,55 @@ button {
 .native-main {
   background: var(--native-surface);
   display: flex;
-  flex: 1 1 auto;
   flex-direction: column;
+  grid-column: 1;
+  grid-row: 1 / -1;
   min-height: 0;
   min-width: 0;
 }
 
+.native-main-window > .native-artifact-panel,
+.native-main-window > .native-room-panel {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+
+.native-artifact-panel-toggle-slot {
+  align-items: center;
+  align-self: stretch;
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  justify-self: end;
+  padding-right: var(--native-header-end-inset);
+  position: relative;
+  z-index: 40;
+}
+
 .native-artifact-panel-toggle-fixed {
   align-items: center;
-  background: var(--native-surface-raised);
+  background: transparent;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   color: var(--native-muted);
   cursor: pointer;
   display: inline-flex;
-  height: 32px;
+  height: var(--native-header-control-height);
   justify-content: center;
   padding: 0;
-  position: absolute;
-  right: 16px;
-  top: calc((var(--native-room-header-height, 56px) - 32px) / 2);
-  width: 32px;
-  z-index: 40;
+  width: var(--native-header-control-width);
 }
 
 .native-artifact-panel-toggle-fixed:hover,
 .native-artifact-panel-toggle-fixed:focus-visible,
-.native-artifact-panel-toggle-fixed[aria-expanded="true"] {
+.native-artifact-panel-toggle:hover,
+.native-artifact-panel-toggle:focus-visible {
   background: var(--native-panel-soft);
   color: var(--native-copy);
 }
 
-.native-artifact-panel-toggle-fixed:focus-visible {
+.native-artifact-panel-toggle-fixed:focus-visible,
+.native-artifact-panel-toggle:focus-visible {
   outline: 2px solid var(--native-accent);
   outline-offset: 2px;
 }
@@ -3300,8 +3323,16 @@ button {
   min-width: 0;
 }
 
+.native-app-shell.has-artifact-panel-toggle .native-main-window {
+  --native-chat-header-right-inset: calc(
+    var(--native-header-end-inset)
+    + var(--native-header-control-width)
+    + var(--native-header-control-gap)
+  );
+}
+
 .native-app-shell.has-artifact-panel .native-main-window {
-  --native-chat-header-right-inset: 24px;
+  --native-chat-header-right-inset: var(--native-header-end-inset);
 }
 
 .native-chat-header,
@@ -3309,7 +3340,7 @@ button {
   border-bottom: 1px solid var(--native-line);
   height: var(--native-room-header-height, 56px);
   min-height: var(--native-room-header-height, 56px);
-  padding: 0 var(--native-chat-header-right-inset, 72px) 0 24px;
+  padding: 0 var(--native-chat-header-right-inset, 24px) 0 24px;
 }
 
 .native-chat-header h1,
@@ -3455,11 +3486,13 @@ button {
   align-items: center;
   border-bottom: 1px solid var(--native-line);
   display: flex;
-  gap: 10px;
+  flex-wrap: nowrap;
+  gap: var(--native-header-control-gap);
   justify-content: space-between;
   height: var(--native-room-header-height, 56px);
   min-height: var(--native-room-header-height, 56px);
-  padding: 0 72px 0 20px;
+  min-width: 0;
+  padding: 0 var(--native-header-end-inset) 0 20px;
 }
 
 .native-artifact-workspace-header h1 {
@@ -3478,7 +3511,6 @@ button {
 }
 
 .native-artifact-tab-header {
-  gap: 12px;
   overflow: hidden;
 }
 
@@ -3570,17 +3602,22 @@ button {
   align-items: center;
   display: flex;
   flex: 0 0 auto;
-  gap: 4px;
+  gap: var(--native-header-control-gap);
 }
 
-.native-artifact-expand {
+.native-artifact-expand,
+.native-artifact-panel-toggle {
   align-items: center;
+  background: transparent;
   border: 0;
+  border-radius: 7px;
+  color: var(--native-muted);
   display: inline-flex;
-  height: 32px;
+  height: var(--native-header-control-height);
   justify-content: center;
-  min-width: 32px;
+  min-width: var(--native-header-control-width);
   padding: 0;
+  width: var(--native-header-control-width);
 }
 
 .native-artifact-expand svg {
@@ -3774,7 +3811,7 @@ button {
   }
 
   .native-chat-header,
-  .native-management-header { height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 72px) 0 18px; }
+  .native-management-header { height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 24px) 0 18px; }
   .native-message-list { padding: 18px 18px 22px; }
   .native-composer-wrap { padding: 9px 12px 13px; }
   .native-artifact-panel {
@@ -3789,7 +3826,7 @@ button {
     z-index: 20;
   }
 
-  .native-artifact-workspace-header { height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding-right: 72px; }
+  .native-artifact-workspace-header { height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding-right: var(--native-header-end-inset); }
 
   .native-artifact-panel-resize-handle { display: none; }
 

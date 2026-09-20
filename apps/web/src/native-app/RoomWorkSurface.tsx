@@ -819,14 +819,15 @@ function renderSavedRoomWorkResourceRefs(refs: ResourceRef[]): ReactNode {
 }
 
 const roomWorkStyles = [
-  ".native-work-surface { min-height: 0; }",
-  ".native-work-surface .native-chat-header { align-items: center; gap: 12px; height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 72px) 0 24px; }",
-  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: var(--native-chat-header-right-inset, 72px); } }",
+  ".native-work-surface { container-type: inline-size; min-height: 0; }",
+  ".native-work-surface .native-chat-header { align-items: center; gap: 12px; height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 24px) 0 24px; }",
+  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: var(--native-chat-header-right-inset, 24px); } }",
   ".native-work-surface .native-chat-header .native-section-eyebrow { display: none; }",
-  ".native-work-surface .native-chat-header h1 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; line-height: 1.25; margin: 0; }",
+  ".native-work-surface .native-room-heading { min-width: 0; }",
+  ".native-work-surface .native-chat-header h1 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; line-height: 1.25; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-surface .native-chat-header h1::before { color: var(--native-dim); content: '#'; font-size: 20px; font-weight: 400; margin-right: 10px; }",
   ".native-work-header-artifact-link.native-room-tool-links { border: 0; display: block; padding: 0; }",
-  ".native-work-header-meta { align-items: center; display: flex; flex: 0 1 auto; flex-direction: row; flex-wrap: wrap; gap: 8px; justify-content: flex-end; min-width: 0; }",
+  ".native-work-header-meta { align-items: center; display: flex; flex: 0 1 auto; flex-direction: row; flex-wrap: nowrap; gap: 8px; justify-content: flex-end; min-width: 0; }",
   ".native-work-default { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }",
   ".native-work-default-avatar { align-items: center; background: var(--native-panel-soft); border-radius: 8px; color: var(--native-copy); display: inline-flex; font-size: 10px; font-weight: 600; height: 25px; justify-content: center; width: 25px; }",
   ".native-work-default-label { color: var(--native-dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }",
@@ -1018,7 +1019,7 @@ const roomWorkStyles = [
   ".native-work-header-action { align-items: center; background: transparent; border: 0; border-radius: 7px; color: var(--native-muted); cursor: pointer; display: inline-flex; font: inherit; font-size: 11px; gap: 6px; min-height: 32px; padding: 0 7px; }",
   ".native-work-header-action:hover { background: var(--native-hover, #ffffff12); color: var(--native-copy); }",
   ".native-work-header-action[aria-expanded='true'] { background: var(--native-panel-soft); color: var(--native-accent); }",
-  ".native-work-header-controls { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; position: relative; }",
+  ".native-work-header-controls { align-items: center; display: inline-flex; flex-wrap: nowrap; gap: var(--native-header-control-gap, 7px); justify-content: flex-end; position: relative; }",
   ".native-work-header-icon { display: block; height: 16px; width: 16px; }",
   ".native-work-participants-trigger { gap: 7px; }",
   ".native-work-participant-stack { align-items: center; display: inline-flex; padding-left: 4px; }",
@@ -1051,7 +1052,8 @@ const roomWorkStyles = [
   ".native-work-default-button:hover { background: var(--native-hover, #ffffff12); }",
   ".native-work-surface .native-banner { margin-inline: clamp(22px, 5vw, 72px); }",
   "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-thread-switcher { max-height: 112px; } .native-work-conversation-header { align-items: flex-start; flex-direction: column; } .native-work-conversation-actions { align-items: flex-start; flex-direction: row; } }",
-  "@media (max-width: 560px) { .native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; } .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 14px 14px; } .native-work-surface .native-composer { border-radius: 24px; padding: 12px 14px 10px; } .native-work-participant-stack .native-work-participant-avatar:nth-of-type(4) { display: none; } .native-work-participants-overflow-wide { display: none; } .native-work-participants-overflow-narrow { display: inline-flex; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-select-wrap { max-width: min(190px, 46vw); } }"
+  "@container (max-width: 560px) { .native-work-surface .native-chat-header { gap: 8px; } .native-work-header-meta { flex: 0 0 auto; } .native-work-participants-trigger { padding-inline: 4px; } .native-work-participants-label { display: none; } .native-work-participant-stack .native-work-participant-avatar:nth-of-type(4) { display: none; } .native-work-participants-overflow-wide { display: none; } .native-work-participants-overflow-narrow { display: inline-flex; } }",
+  "@media (max-width: 560px) { .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 14px 14px; } .native-work-surface .native-composer { border-radius: 24px; padding: 12px 14px 10px; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-select-wrap { max-width: min(190px, 46vw); } }"
 ].join("\n");
 
 export function RoomWorkSurface({

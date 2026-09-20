@@ -39,6 +39,7 @@ import {
 } from "./native-workspace-target";
 import { useNativeDraftNavigation, type NativeDraftNavigationController } from "./use-native-draft-navigation";
 import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
+import { NativePanelToggleIcon } from "./NativeTopChrome";
 import type { NativeArtifactWorkspaceInitialResource, NativeWorkspaceTarget } from "./types";
 import type { DesktopWorkspaceInteractionRequest } from "../lib/api";
 import type { WorkspaceOperationHistoryBridge } from "../lib/workspace-browser-bridge";
@@ -130,6 +131,9 @@ export interface NativeArtifactWorkspaceProps {
   /** Toggles the main-content expansion without changing the OS window state. */
   onToggleExpanded?: () => void;
   isExpanded?: boolean;
+  /** Toggles the Room-level Artifact panel without discarding opened tabs. */
+  onTogglePanel?: () => void;
+  panelOpen?: boolean;
   /** Reports the last valid Resource shown in this Room for reopen. */
   onResourceSelectionChange?: (resource: NativeArtifactWorkspaceInitialResource | undefined) => void;
   /** Opens a related resource in the Room tab host instead of replacing this tab. */
@@ -182,6 +186,8 @@ export function NativeArtifactWorkspace({
   initialResource: initialResourceProp,
   onToggleExpanded,
   isExpanded = false,
+  onTogglePanel,
+  panelOpen = false,
   onResourceSelectionChange,
   onRequestAgentRevision,
   onDraftNavigationControllerChange,
@@ -383,6 +389,14 @@ export function NativeArtifactWorkspace({
       </nav>
       <div className="native-artifact-workspace-actions">
         <button type="button" className="native-button native-button-quiet native-artifact-expand" aria-pressed={isExpanded} aria-label={isExpanded ? "成果物を通常幅に戻す" : "成果物をメイン領域いっぱいに拡大"} title={isExpanded ? "通常幅に戻す" : "メイン領域いっぱいに拡大"} onClick={onToggleExpanded} disabled={!tabs.length || !onToggleExpanded}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d={isExpanded ? "M6 2H2v4M10 14h4v-4M2 10v4h4M14 6V2h-4" : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"} /></svg></button>
+        {onTogglePanel ? <button
+          type="button"
+          className="native-button native-button-quiet native-artifact-panel-toggle"
+          aria-expanded={panelOpen}
+          aria-label={panelOpen ? "成果物パネルを閉じる" : "成果物パネルを開く"}
+          title={panelOpen ? "成果物を閉じる" : "成果物を開く"}
+          onClick={onTogglePanel}
+        ><NativePanelToggleIcon className="native-artifact-panel-toggle-icon" dataIcon="artifacts-toggle" mirrored open={panelOpen} /></button> : null}
       </div>
     </header>
     <NativeDraftNavigationPrompt controller={aggregateDraftNavigation} />

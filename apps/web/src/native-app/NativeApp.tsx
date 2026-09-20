@@ -1731,7 +1731,7 @@ export function NativeApp() {
               />;
 
   return (
-    <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelOpenTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
+    <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelTarget ? " has-artifact-panel-toggle" : ""}${artifactPanelOpenTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
       <NativeTopChrome
         sidebarOpen={mobileViewport ? mobileSidebarOpen : desktopSidebarOpen}
         macDesktop={macDesktop}
@@ -1934,14 +1934,16 @@ export function NativeApp() {
               </div>
             </div> : null}
           </main>
-          {artifactPanelTarget ? <button
-            type="button"
-            className="native-artifact-panel-toggle-fixed"
-            aria-expanded={roomPanelState === "artifacts"}
-            aria-label={roomPanelState === "artifacts" ? "成果物パネルを閉じる" : "成果物パネルを開く"}
-            title={roomPanelState === "artifacts" ? "成果物を閉じる" : "成果物を開く"}
-            onClick={toggleRoomPanel}
-          ><NativePanelToggleIcon className="native-artifact-panel-toggle-icon" dataIcon="artifacts-toggle" mirrored open={roomPanelState === "artifacts"} /></button> : null}
+          {artifactPanelTarget && !artifactPanelOpenTarget ? <div className="native-artifact-panel-toggle-slot">
+            <button
+              type="button"
+              className="native-artifact-panel-toggle-fixed"
+              aria-expanded={false}
+              aria-label="成果物パネルを開く"
+              title="成果物を開く"
+              onClick={toggleRoomPanel}
+            ><NativePanelToggleIcon className="native-artifact-panel-toggle-icon" dataIcon="artifacts-toggle" mirrored open={false} /></button>
+          </div> : null}
           {accountSettingsRestoreError ? <div className="native-main-context-restore-error" role="alert">{accountSettingsRestoreError}</div> : null}
           {accountSettingsOpen && model.connection?.accountId ? <div className="native-main-surface-overlay native-account-settings-overlay">
             <NativeAccountSettings
@@ -2068,6 +2070,8 @@ export function NativeApp() {
               bridge={model.bridge}
               onToggleExpanded={() => setArtifactPanelExpanded((expanded) => !expanded)}
               isExpanded={artifactPanelExpanded}
+              onTogglePanel={toggleRoomPanel}
+              panelOpen={roomPanelState === "artifacts"}
               onDraftNavigationControllerChange={onArtifactPanelDraftNavigationControllerChange}
               onResourceSelectionChange={setArtifactWorkspaceLastResource}
               onRequestAgentRevision={async (target) => {
@@ -2076,6 +2080,7 @@ export function NativeApp() {
                   ? sourceWork.id
                   : undefined;
                 model.appendWorkDraft(artifactRevisionRequestDraft(target), replyWorkId);
+                setArtifactPanelExpanded(false);
                 setRoomPanelState("closed");
               }}
             />
