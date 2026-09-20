@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactRecord, ArtifactRevisionRecord, JsonValue } from "@samurai-agent/core-schemas";
 import { createIdempotencyKey, type ArtifactMutationResult } from "../lib/api";
 import { artifactContentType, isImageArtifact, isPdfArtifact, markdownPreviewHtml } from "../lib/surface-view-helpers";
-import type { NativeWorkspaceTarget } from "./types";
+import type { NativeArtifactWorkspaceInitialResource, NativeWorkspaceTarget } from "./types";
 import { useNativeDraftNavigation } from "./use-native-draft-navigation";
 import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
 
@@ -108,6 +108,7 @@ export interface ArtifactSurfacePanelProps {
   onRequestAgentRevision?: ArtifactRevisionRequestHandler;
   onOpenGeneratedSurface?: (surfaceId: string) => void;
   onClose?: () => void;
+  onSelectionChange?: (resource: NativeArtifactWorkspaceInitialResource) => void;
   onEditorControllerChange?: (controller: NativeArtifactEditorController | undefined) => void;
 }
 
@@ -207,7 +208,7 @@ type ArtifactPanelNavigation =
  * fixed gateway supplied by the active connection; this component contains no
  * cache keyed only by Artifact ID.
  */
-export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspaceTarget, initialArtifact, onRequestAgentRevision, onOpenGeneratedSurface, onClose, onEditorControllerChange }: ArtifactSurfacePanelProps) {
+export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspaceTarget, initialArtifact, onRequestAgentRevision, onOpenGeneratedSurface, onClose, onSelectionChange, onEditorControllerChange }: ArtifactSurfacePanelProps) {
   const listEpoch = useRef(0);
   const detailEpoch = useRef(0);
   const selectedArtifactIdRef = useRef<string | undefined>(undefined);
@@ -321,6 +322,15 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
       }
       setSelected(nextDetail);
       setRevisions([...history].sort((left, right) => right.revision - left.revision));
+      onSelectionChange?.({
+        kind: "artifact",
+        id: nextDetail.artifact.id,
+        uri: `artifacts/${nextDetail.artifact.id}`,
+        ...(nextDetail.revision?.id ? { revisionId: nextDetail.revision.id } : {}),
+        ...(workspaceTarget?.connectionId ? { connectionId: workspaceTarget.connectionId } : {}),
+        ...(workspaceTarget?.workspaceId ? { workspaceId: workspaceTarget.workspaceId } : {}),
+        ...(roomId ? { roomId } : {})
+      });
     } catch (cause) {
       if (epoch === detailEpoch.current) setError(errorMessage(cause, "成果物を開けませんでした。"));
     } finally {
@@ -395,10 +405,19 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     setSelected(nativeArtifactDetailFromMutation(mutation, revisionDetail));
     setRevisions(addMutationRevision(history, revision));
     setComparison(undefined);
+    onSelectionChange?.({
+      kind: "artifact",
+      id: input.artifactId,
+      uri: `artifacts/${input.artifactId}`,
+      revisionId: revision.id,
+      ...(workspaceTarget?.connectionId ? { connectionId: workspaceTarget.connectionId } : {}),
+      ...(workspaceTarget?.workspaceId ? { workspaceId: workspaceTarget.workspaceId } : {}),
+      ...(roomId ? { roomId } : {})
+    });
     await refresh();
     if (!artifactRequestIsCurrent({ requestEpoch: epoch, currentEpoch: detailEpoch.current, artifactId: input.artifactId, currentArtifactId: selectedArtifactIdRef.current })) throw new Error("artifact_navigation_changed");
     return mutation;
-  }, [gateway, refresh, roomId, selected]);
+  }, [gateway, onSelectionChange, refresh, roomId, selected, workspaceTarget]);
 
   const restore = async (input: ArtifactRestoreRequest): Promise<ArtifactMutationResult> => {
     if (!roomId || !gateway || !selected || selectedArtifactIdRef.current !== input.artifactId) throw new Error("artifact_restore_unavailable");
@@ -417,6 +436,15 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
       setSelected(nativeArtifactDetailFromMutation(mutation, revisionDetail));
       setRevisions(addMutationRevision(history, revision));
       setComparison(undefined);
+      onSelectionChange?.({
+        kind: "artifact",
+        id: input.artifactId,
+        uri: `artifacts/${input.artifactId}`,
+        revisionId: revision.id,
+        ...(workspaceTarget?.connectionId ? { connectionId: workspaceTarget.connectionId } : {}),
+        ...(workspaceTarget?.workspaceId ? { workspaceId: workspaceTarget.workspaceId } : {}),
+        ...(roomId ? { roomId } : {})
+      });
       await refresh();
       if (!artifactRequestIsCurrent({ requestEpoch: epoch, currentEpoch: detailEpoch.current, artifactId: input.artifactId, currentArtifactId: selectedArtifactIdRef.current })) throw new Error("artifact_navigation_changed");
       return mutation;

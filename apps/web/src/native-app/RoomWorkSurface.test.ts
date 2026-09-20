@@ -483,6 +483,8 @@ describe("RoomWorkSurface", () => {
 
     expect(html).toContain('data-icon="room-menu"');
     expect(html).toContain('data-icon="artifacts-toggle"');
+    expect(html).toContain('viewBox="0 0 24 22"');
+    expect(html).toContain('transform="translate(24 0) scale(-1 1)"');
     expect(html).toContain('aria-label="成果物パネルを開く"');
     expect(html).toContain('data-icon="add"');
     expect(html).toContain('data-icon="send"');

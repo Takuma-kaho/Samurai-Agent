@@ -12,20 +12,44 @@ export interface NativeTopChromeProps {
   trailing?: ReactNode;
 }
 
-function SidebarIcon({ open }: { open: boolean }) {
+export function NativePanelToggleIcon({ open, mirrored = false, className, dataIcon }: {
+  open: boolean;
+  mirrored?: boolean;
+  className?: string;
+  dataIcon?: string;
+}) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 22" focusable="false">
-      <rect height="20" rx="5" width="22" x="1" y="1" />
-      <rect
-        fill="currentColor"
-        height="14"
-        rx={open ? "2.5" : "1"}
-        width={open ? "5" : "2"}
-        x="4"
-        y="4"
-      />
+    <svg
+      aria-hidden="true"
+      className={className}
+      data-icon={dataIcon}
+      data-open={open ? "true" : "false"}
+      focusable="false"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 22"
+    >
+      <g transform={mirrored ? "translate(24 0) scale(-1 1)" : undefined}>
+        <rect fill="none" height="20" rx="5" stroke="currentColor" width="22" x="1" y="1" />
+        <rect
+          fill="currentColor"
+          height="14"
+          rx={open ? "2.5" : "1"}
+          stroke="none"
+          width={open ? "5" : "2"}
+          x="4"
+          y="4"
+        />
+      </g>
     </svg>
   );
+}
+
+function SidebarIcon({ open }: { open: boolean }) {
+  return <NativePanelToggleIcon open={open} />;
 }
 
 function HistoryChevron({ direction }: { direction: "back" | "forward" }) {

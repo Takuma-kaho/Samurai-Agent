@@ -19,6 +19,7 @@ import type {
   NativeArtifactWorkspaceInitialResource
 } from "./types";
 import type { NativeRoomParticipant } from "./use-native-room-participants";
+import { NativePanelToggleIcon } from "./NativeTopChrome";
 
 export type NativeRoomPanelState = "closed" | "artifacts" | "room_settings";
 
@@ -620,12 +621,12 @@ function RoomMenuIcon(): ReactNode {
 }
 
 function RoomArtifactIcon({ open }: { open: boolean }): ReactNode {
-  return (
-    <svg className="native-work-header-icon" data-icon="artifacts-toggle" data-open={open ? "true" : "false"} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="2.5" y="2.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.25" />
-      <path d={open ? "M5 8h6" : "M5 8h6M8 5v6"} fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.25" />
-    </svg>
-  );
+  return <NativePanelToggleIcon
+    className="native-work-header-icon"
+    dataIcon="artifacts-toggle"
+    mirrored
+    open={open}
+  />;
 }
 
 function RoomComposerAddIcon(): ReactNode {

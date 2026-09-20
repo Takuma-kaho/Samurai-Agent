@@ -563,6 +563,10 @@
   overflow: hidden;
 }
 
+.native-main-window > [hidden] {
+  display: none !important;
+}
+
 .native-artifact-panel > .native-artifact-workspace {
   height: 100%;
   min-height: 0;
@@ -3164,12 +3168,13 @@ button {
   background: var(--native-surface-soft);
   border-left: 1px solid var(--native-line);
   display: flex;
-  flex: 0 1 410px;
+  flex: 0 0 auto;
   flex-direction: column;
-  max-width: 45%;
+  max-width: none;
   min-height: 0;
-  min-width: 360px;
+  min-width: 0;
   overflow: hidden;
+  position: relative;
 }
 
 .native-evidence-inspector {
@@ -3183,6 +3188,60 @@ button {
   top: 34px;
   width: min(344px, calc(100vw - 68px));
   z-index: 20;
+}
+
+.native-artifact-panel[data-panel-mode="overlay"],
+.native-room-panel[data-panel-mode="overlay"] {
+  bottom: 0;
+  box-shadow: -18px 0 44px rgba(0, 0, 0, .42);
+  max-width: none;
+  min-width: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: min(100%, 520px);
+  z-index: 20;
+}
+
+.native-artifact-panel-resize-handle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  bottom: 0;
+  cursor: col-resize;
+  display: flex;
+  justify-content: center;
+  left: -4px;
+  padding: 0;
+  position: absolute;
+  top: 0;
+  touch-action: none;
+  width: 8px;
+  z-index: 5;
+}
+
+.native-artifact-panel-resize-handle span {
+  background: transparent;
+  height: 100%;
+  width: 1px;
+}
+
+.native-artifact-panel-resize-handle:hover span,
+.native-artifact-panel-resize-handle:focus-visible span,
+.native-artifact-panel.is-resizing .native-artifact-panel-resize-handle span {
+  background: var(--native-line-strong);
+}
+
+.native-artifact-panel-resize-handle:focus-visible {
+  outline: 2px solid var(--native-accent);
+  outline-offset: -1px;
+}
+
+.native-artifact-panel > .native-artifact-workspace {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
 }
 
 .native-chat-header,
@@ -3482,6 +3541,8 @@ button {
     width: min(100%, 520px);
     z-index: 20;
   }
+
+  .native-artifact-panel-resize-handle { display: none; }
 
   .native-evidence-inspector {
     bottom: 16px;

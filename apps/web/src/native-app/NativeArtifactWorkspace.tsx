@@ -128,6 +128,8 @@ export interface NativeArtifactWorkspaceProps {
   /** Optional result ref; when present the list is not queried before opening it. */
   initialResource?: NativeArtifactWorkspaceInitialResource;
   onClose?: () => void;
+  /** Reports the last valid Resource shown in this Room for reopen. */
+  onResourceSelectionChange?: (resource: NativeArtifactWorkspaceInitialResource | undefined) => void;
   onRequestAgentRevision?: (target: ArtifactRevisionTarget) => void | Promise<void>;
   onEditorControllerChange?: (controller: NativeArtifactEditorController | undefined) => void;
   onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
@@ -280,7 +282,7 @@ export function nativeArtifactWorkspaceGateway(
 }
 
 /** The React Room surface for Artifact preview/edit/history and direct Surface display. */
-export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, initialResource: initialResourceProp, onClose, onRequestAgentRevision, onEditorControllerChange, onDraftNavigationControllerChange, onBusyStateChange }: NativeArtifactWorkspaceProps) {
+export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, initialResource: initialResourceProp, onClose, onResourceSelectionChange, onRequestAgentRevision, onEditorControllerChange, onDraftNavigationControllerChange, onBusyStateChange }: NativeArtifactWorkspaceProps) {
   const bridge = (suppliedBridge ?? getWorkspaceClientBridge()) as NativeArtifactWorkspaceBridge | undefined;
   const targetKey = nativeArtifactWorkspaceTargetKey(target);
   const stableTarget = useMemo(() => target ? { ...target } : undefined, [target?.connectionId, target?.workspaceId, target?.roomId, target?.selectionGeneration]);
@@ -410,10 +412,19 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       }
       setSurfaceBundle(nextBundle);
       setSurface(nextDetail);
+      onResourceSelectionChange?.({
+        kind: "generated_surface",
+        id: surfaceId,
+        uri: `surfaces/${surfaceId}`,
+        revisionId: nextDetail.surface.current_revision_id,
+        connectionId: stableTarget.connectionId,
+        workspaceId: stableTarget.workspaceId,
+        roomId: stableTarget.roomId
+      });
     } catch (cause) {
       if (requestGeneration === generation.current) setSurfaceError(nativeArtifactWorkspaceError(cause));
     }
-  }, [bridge, stableTarget]);
+  }, [bridge, onResourceSelectionChange, stableTarget]);
 
   const openInitialArtifact = useCallback(async (resource: NativeArtifactWorkspaceInitialResource): Promise<void> => {
     if (!stableTarget || !gateway) {
@@ -452,12 +463,16 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       }
       setArtifact(nextDetail);
       setArtifactRevisions([...history].sort((left, right) => right.revision - left.revision));
+      onResourceSelectionChange?.({
+        ...resource,
+        ...(nextDetail.revision?.id ? { revisionId: nextDetail.revision.id } : {})
+      });
     } catch (cause) {
       if (requestEpoch === artifactEpoch.current) setArtifactError(nativeArtifactWorkspaceError(cause));
     } finally {
       if (requestEpoch === artifactEpoch.current) setArtifactLoading(false);
     }
-  }, [gateway, stableTarget]);
+  }, [gateway, onResourceSelectionChange, stableTarget]);
 
   const loadArtifactComparison = useCallback(async (revisionId: string): Promise<void> => {
     if (!stableTarget || !gateway || !artifact) return;
@@ -494,8 +509,17 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     setArtifact(nativeArtifactDetailFromMutation(mutation, revisionDetail));
     setArtifactRevisions(artifactHistoryWithMutation(history, revision));
     setArtifactComparison(undefined);
+    onResourceSelectionChange?.({
+      kind: "artifact",
+      id: input.artifactId,
+      uri: `artifacts/${input.artifactId}`,
+      revisionId: revision.id,
+      connectionId: stableTarget.connectionId,
+      workspaceId: stableTarget.workspaceId,
+      roomId: stableTarget.roomId
+    });
     return mutation;
-  }, [artifact, gateway, stableTarget, targetKey]);
+  }, [artifact, gateway, onResourceSelectionChange, stableTarget, targetKey]);
 
   const restoreInitialArtifact = useCallback(async (input: ArtifactRestoreRequest): Promise<ArtifactMutationResult> => {
     if (!stableTarget || !gateway || !artifact || input.artifactId !== artifact.artifact.id || targetKeyRef.current !== targetKey) {
@@ -517,6 +541,15 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       setArtifact(nativeArtifactDetailFromMutation(mutation, revisionDetail));
       setArtifactRevisions(artifactHistoryWithMutation(history, revision));
       setArtifactComparison(undefined);
+      onResourceSelectionChange?.({
+        kind: "artifact",
+        id: input.artifactId,
+        uri: `artifacts/${input.artifactId}`,
+        revisionId: revision.id,
+        connectionId: stableTarget.connectionId,
+        workspaceId: stableTarget.workspaceId,
+        roomId: stableTarget.roomId
+      });
       return mutation;
     } catch (cause) {
       if (requestEpoch === artifactEpoch.current && targetKeyRef.current === targetKey && artifact?.artifact.id === artifactId) setArtifactError(nativeArtifactWorkspaceError(cause));
@@ -524,13 +557,14 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     } finally {
       if (requestEpoch === artifactEpoch.current && targetKeyRef.current === targetKey && artifact?.artifact.id === artifactId) setArtifactLoading(false);
     }
-  }, [artifact, gateway, stableTarget, targetKey]);
+  }, [artifact, gateway, onResourceSelectionChange, stableTarget, targetKey]);
 
   useEffect(() => {
     if (initialResourceInvalid) {
       setSurfaceError("仕事の結果から受け取った成果物参照が無効です。");
       return;
     }
+    if (initialResource) onResourceSelectionChange?.(initialResource);
     if (initialResource?.kind === "generated_surface") {
       void openGeneratedSurface(initialResource.id, initialResource.revisionId);
       return;
@@ -539,7 +573,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       void openInitialArtifact(initialResource);
       return;
     }
-  }, [initialResource, initialResourceInvalid, openGeneratedSurface, openInitialArtifact]);
+  }, [initialResource, initialResourceInvalid, onResourceSelectionChange, openGeneratedSurface, openInitialArtifact]);
 
   const loadBundle = useCallback(async (input: { surfaceId: string; revisionId: string }): Promise<GeneratedSurfaceBundleDetail> => {
     if (!stableTarget || !bridge?.getWorkspaceGeneratedSurfaceBundle) throw new Error("generated_surface_bundle_unavailable");
@@ -559,6 +593,15 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     if (nextDetail.surface.id !== surfaceId) throw new Error("generated_surface_response_mismatch");
     if (generation.current !== requestGeneration || targetKeyRef.current !== targetKey || surfaceViewKeyRef.current?.split("\n", 1)[0] !== surfaceId) throw new Error("surface_navigation_changed");
     setSurface(nextDetail);
+    onResourceSelectionChange?.({
+      kind: "generated_surface",
+      id: surfaceId,
+      uri: `surfaces/${surfaceId}`,
+      revisionId: nextDetail.surface.current_revision_id,
+      connectionId: stableTarget.connectionId,
+      workspaceId: stableTarget.workspaceId,
+      roomId: stableTarget.roomId
+    });
     const currentBundle = surfaceBundleRef.current;
     if (currentBundle?.surface.id === surfaceId && currentBundle.revision.id === nextDetail.surface.current_revision_id) {
       setSurfaceBundle(currentBundle);
@@ -572,7 +615,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     if (generation.current !== requestGeneration || targetKeyRef.current !== targetKey || surfaceViewKeyRef.current?.split("\n", 1)[0] !== surfaceId) throw new Error("surface_navigation_changed");
     setSurfaceBundle(nextBundle);
     return nextDetail;
-  }, [bridge, loadBundle, stableTarget, targetKey]);
+  }, [bridge, loadBundle, onResourceSelectionChange, stableTarget, targetKey]);
 
   const readCompletedSurfaceApproval = useCallback(async (input: {
     action: GeneratedSurfaceActionRequest;
@@ -1099,6 +1142,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
         workspaceTarget={stableTarget}
         onRequestAgentRevision={requestAgentRevision}
         onOpenGeneratedSurface={(surfaceId) => void openGeneratedSurface(surfaceId)}
+        onSelectionChange={onResourceSelectionChange}
         onEditorControllerChange={registerEditorController}
       />
     </>}

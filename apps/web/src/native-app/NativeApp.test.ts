@@ -28,6 +28,21 @@ describe("Native draft navigation controller registry", () => {
     underlyingDetach();
     expect(registry.getCurrent()).toBeUndefined();
   });
+
+  it("ignores draft controllers belonging to hidden panels", () => {
+    const registry = createNativeDraftNavigationControllerRegistry();
+    const room = createNativeDraftNavigationController({ scopeKey: "room-settings", label: "Room設定", dirty: true, saving: false });
+    const artifact = createNativeDraftNavigationController({ scopeKey: "artifacts", label: "成果物", dirty: true, saving: false });
+    let activePanel: "room_settings" | "artifacts" = "room_settings";
+    registry.register(room, () => activePanel === "room_settings");
+    registry.register(artifact, () => activePanel === "artifacts");
+
+    expect(registry.getCurrent()).toBe(room);
+    activePanel = "artifacts";
+    expect(registry.getCurrent()).toBe(artifact);
+    activePanel = "room_settings";
+    expect(registry.getCurrent()).toBe(room);
+  });
 });
 
 describe("Native workspace navigation history", () => {

@@ -41,6 +41,7 @@ import { nativeKnowledgeResourcesErrorKind, nativeRoomKnowledgeShareResources, n
 import { useNativeShareState } from "./use-native-share-state";
 import { useNativeRoomExpansion } from "./use-native-room-expansion";
 import { useNativeSidebarWidth } from "./use-native-sidebar-width";
+import { useNativeArtifactPanelWidth } from "./use-native-artifact-panel-width";
 import { useNativeRoomParticipants } from "./use-native-room-participants";
 import { useNativeWorkspaceNavigationHistory, type NativeWorkspaceNavigationEntry } from "./use-native-workspace-navigation-history";
 import { nativeWorkspaceTargetKey } from "./types";
@@ -64,6 +65,7 @@ export type NativeRoomToolTarget = NativeWorkspaceTarget & { roomId: string };
 
 type NativeDraftNavigationControllerRegistration = {
   controller: NativeDraftNavigationController;
+  isActive?: () => boolean;
 };
 
 type NativeAccountSettingsReturnContext = {
@@ -74,7 +76,7 @@ type NativeAccountSettingsReturnContext = {
 };
 
 export interface NativeDraftNavigationControllerRegistry {
-  register: (controller: NativeDraftNavigationController) => () => void;
+  register: (controller: NativeDraftNavigationController, isActive?: () => boolean) => () => void;
   getCurrent: () => NativeDraftNavigationController | undefined;
 }
 
@@ -82,8 +84,8 @@ export interface NativeDraftNavigationControllerRegistry {
 export function createNativeDraftNavigationControllerRegistry(): NativeDraftNavigationControllerRegistry {
   const registrations: NativeDraftNavigationControllerRegistration[] = [];
   return {
-    register: (controller) => {
-      const registration: NativeDraftNavigationControllerRegistration = { controller };
+    register: (controller, isActive) => {
+      const registration: NativeDraftNavigationControllerRegistration = { controller, isActive };
       registrations.push(registration);
       let detached = false;
       return () => {
@@ -93,7 +95,13 @@ export function createNativeDraftNavigationControllerRegistry(): NativeDraftNavi
         if (index >= 0) registrations.splice(index, 1);
       };
     },
-    getCurrent: () => registrations[registrations.length - 1]?.controller
+    getCurrent: () => registrations.slice().reverse().find((registration) => {
+      try {
+        return registration.isActive?.() !== false;
+      } catch {
+        return false;
+      }
+    })?.controller
   };
 }
 
@@ -707,6 +715,7 @@ export function NativeApp() {
   const [roomAdministrationView, setRoomAdministrationView] = useState<"menu" | "participants" | "create" | "move" | "rename">("menu");
   const [knowledgeToolsInitialTab, setKnowledgeToolsInitialTab] = useState<"knowledge" | "search" | "settings" | "automation">("knowledge");
   const [artifactWorkspaceInitialResource, setArtifactWorkspaceInitialResource] = useState<NativeArtifactWorkspaceInitialResource>();
+  const [artifactWorkspaceLastResource, setArtifactWorkspaceLastResource] = useState<NativeArtifactWorkspaceInitialResource>();
   const [workResourceDrafts, setWorkResourceDrafts] = useState<Record<string, NativeRoomWorkResourceRefInput[]>>({});
   const [contextSurface, setContextSurface] = useState<"search" | "notifications">();
   const [sidebarSearchQuery, setSidebarSearchQuery] = useState("");
@@ -723,6 +732,10 @@ export function NativeApp() {
   const accountSettingsRestoreSelectionRequestedRef = useRef(false);
   const workspaceNavigationRestoreRef = useRef<NativeWorkspaceNavigationEntry | undefined>(undefined);
   const draftNavigationControllerRegistryRef = useRef<NativeDraftNavigationControllerRegistry | undefined>(undefined);
+  const mainWindowRef = useRef<HTMLElement>(null);
+  const roomPanelStateRef = useRef(roomPanelState);
+  roomPanelStateRef.current = roomPanelState;
+  const artifactPanelWidth = useNativeArtifactPanelWidth(mainWindowRef);
   if (!draftNavigationControllerRegistryRef.current) {
     draftNavigationControllerRegistryRef.current = createNativeDraftNavigationControllerRegistry();
   }
@@ -1057,10 +1070,18 @@ export function NativeApp() {
     if (!mobileViewport) setMobileSidebarOpen(false);
   }, [mobileViewport]);
 
-  const onDraftNavigationControllerChange = useCallback((controller: NativeDraftNavigationController | undefined): (() => void) | undefined => {
+  const onDraftNavigationControllerChange = useCallback((controller: NativeDraftNavigationController | undefined, isActive?: () => boolean): (() => void) | undefined => {
     if (!controller) return undefined;
-    return draftNavigationControllerRegistryRef.current?.register(controller);
+    return draftNavigationControllerRegistryRef.current?.register(controller, isActive);
   }, []);
+
+  const onRoomPanelDraftNavigationControllerChange = useCallback((controller: NativeDraftNavigationController | undefined): (() => void) | undefined => {
+    return onDraftNavigationControllerChange(controller, () => roomPanelStateRef.current === "room_settings");
+  }, [onDraftNavigationControllerChange]);
+
+  const onArtifactPanelDraftNavigationControllerChange = useCallback((controller: NativeDraftNavigationController | undefined): (() => void) | undefined => {
+    return onDraftNavigationControllerChange(controller, () => roomPanelStateRef.current === "artifacts");
+  }, [onDraftNavigationControllerChange]);
 
   const requestNativeNavigation = useCallback((target: NativeDraftNavigationTarget): boolean => {
     const controller = draftNavigationControllerRegistryRef.current?.getCurrent();
@@ -1185,6 +1206,7 @@ export function NativeApp() {
    setRoomAdministrationTarget(undefined);
    setRoomAdministrationView("menu");
    setArtifactWorkspaceInitialResource(undefined);
+   setArtifactWorkspaceLastResource(undefined);
  }, [model.selectedRoomId, model.selectedWorkspaceTargetKey]);
 
  // Search terms belong to the selected Workspace. Clear the shared sidebar
@@ -1317,7 +1339,6 @@ export function NativeApp() {
       setRoomAdministrationTarget({ ...room });
       setRoomAdministrationView(view);
       setRoomToolOpen(undefined);
-      setArtifactWorkspaceInitialResource(undefined);
       setRoomSettingsTab("basic");
       setRoomPanelState("room_settings");
       closeMobileSidebar();
@@ -1334,8 +1355,8 @@ export function NativeApp() {
   }, [closeMobileSidebar, requestNativeNavigation]);
   const openRoomTool = (tool: NativeRoomTool): void => {
     requestNativeNavigation(() => {
-      setArtifactWorkspaceInitialResource(undefined);
       if (tool === "artifacts") {
+        setArtifactWorkspaceInitialResource(artifactWorkspaceLastResource);
         setRoomToolOpen(undefined);
         setRoomPanelState("artifacts");
       } else if (tool === "administration") {
@@ -1364,16 +1385,21 @@ export function NativeApp() {
   }, [model.selectedRoom, openKnowledgeSurface, openRoomAdministrationFor, roomKnowledgeShareSelection, shareState]);
   const toggleRoomPanel = useCallback((): void => {
     requestNativeNavigation(() => {
-      setRoomPanelState((current) => current === "closed" ? "artifacts" : "closed");
+      if (roomPanelState === "artifacts") {
+        setRoomPanelState("closed");
+      } else {
+        setArtifactWorkspaceInitialResource(artifactWorkspaceLastResource);
+        setRoomPanelState("artifacts");
+      }
       setRoomToolOpen(undefined);
-      setArtifactWorkspaceInitialResource(undefined);
     });
-  }, [requestNativeNavigation]);
+  }, [artifactWorkspaceLastResource, requestNativeNavigation, roomPanelState]);
   const openResultResource = (resource: NativeArtifactWorkspaceInitialResource): void => {
     requestNativeNavigation(() => {
       const scoped = nativeRoomResultResourceTarget(model.selectedWorkspaceTarget, model.selectedRoom, resource);
       if (!scoped) return;
       setArtifactWorkspaceInitialResource(scoped);
+      setArtifactWorkspaceLastResource(scoped);
       setRoomToolOpen(undefined);
       setRoomPanelState("artifacts");
     });
@@ -1458,15 +1484,14 @@ export function NativeApp() {
   const artifactPanelTarget = model.connection
     && !model.managementOpen
     && !agentDirectoryOpen
-    && roomPanelState !== "closed"
     ? roomToolTarget
     : undefined;
   const roomSettingsPanelTarget = model.connection
     && !model.managementOpen
     && !agentDirectoryOpen
-    && roomPanelState !== "closed"
     ? roomAdministrationToolTarget
     : undefined;
+  const artifactPanelOpenTarget = artifactPanelTarget && roomPanelState === "artifacts" ? artifactPanelTarget : undefined;
 
   const openRoomFromContext = useCallback((roomId: string): void => {
     const normalizedRoomId = roomId.trim();
@@ -1691,7 +1716,7 @@ export function NativeApp() {
               />;
 
   return (
-    <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
+    <div className={`native-app-shell${model.evidenceOpen ? " has-evidence" : ""}${artifactPanelOpenTarget ? " has-artifact-panel" : ""}`} data-native-theme={theme} data-theme={theme}>
       <NativeTopChrome
         sidebarOpen={mobileViewport ? mobileSidebarOpen : desktopSidebarOpen}
         macDesktop={macDesktop}
@@ -1810,7 +1835,7 @@ export function NativeApp() {
             onOpenSettings={model.connection?.accountId ? openAccountSettings : undefined}
           />
         </aside>
-        <section className="native-main-window" aria-label="現在のRoom">
+        <section ref={mainWindowRef} className="native-main-window" aria-label="現在のRoom">
           <main className="native-main">
             {main}
             {shareState.dialog ? <div className="native-main-share-overlay" role="presentation">
@@ -1915,7 +1940,7 @@ export function NativeApp() {
               onBack={closeAccountSettings}
             />
           </div> : null}
-          {roomSettingsPanelTarget && model.selectedWorkspace && roomAdministrationRoom ? <aside className="native-room-panel" aria-label="Roomメニュー" hidden={roomPanelState !== "room_settings"}>
+          {roomSettingsPanelTarget && model.selectedWorkspace && roomAdministrationRoom ? <aside className="native-room-panel" aria-label="Roomメニュー" data-panel-mode={artifactPanelWidth.isOverlay ? "overlay" : "split"} hidden={roomPanelState !== "room_settings"} inert={roomPanelState !== "room_settings"}>
             <NativeRoomAdministration
               rooms={model.rooms}
               target={roomSettingsPanelTarget}
@@ -1937,7 +1962,7 @@ export function NativeApp() {
               onOpenKnowledge={() => openKnowledgeSurface("knowledge")}
               onOpenLearning={() => openKnowledgeSurface("settings")}
               onOpenSharing={() => { if (roomKnowledgeShareSelection) void shareState.openRoomShare(roomKnowledgeShareSelection); }}
-              onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+              onDraftNavigationControllerChange={onRoomPanelDraftNavigationControllerChange}
               agentPanel={(
                 <div>
                   <h2>Room Agent</h2>
@@ -1961,7 +1986,7 @@ export function NativeApp() {
                   roomName={roomAdministrationRoom.name}
                   initialTab="knowledge"
                   onClose={() => setRoomPanelState("closed")}
-                  onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+                  onDraftNavigationControllerChange={onRoomPanelDraftNavigationControllerChange}
                   onOpenSearchResult={openKnowledgeSearchResult}
                   onUseResource={addWorkResourceRef}
                   onOpenShare={shareState.openRoomShare}
@@ -1975,7 +2000,7 @@ export function NativeApp() {
                   roomName={roomAdministrationRoom.name}
                   initialTab="settings"
                   onClose={() => setRoomPanelState("closed")}
-                  onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+                  onDraftNavigationControllerChange={onRoomPanelDraftNavigationControllerChange}
                   bridge={model.bridge}
                 />
               ) : undefined}
@@ -1988,15 +2013,38 @@ export function NativeApp() {
               )}
             />
           </aside> : null}
-          {artifactPanelTarget ? <aside className="native-artifact-panel" aria-label="成果物" hidden={roomPanelState !== "artifacts"}>
+          {artifactPanelTarget ? <aside
+            className={`native-artifact-panel${artifactPanelWidth.isResizing ? " is-resizing" : ""}`}
+            aria-label="成果物"
+            data-panel-mode={artifactPanelWidth.isOverlay ? "overlay" : "split"}
+            hidden={roomPanelState !== "artifacts"}
+            inert={roomPanelState !== "artifacts"}
+            style={!artifactPanelWidth.isOverlay ? { width: `${artifactPanelWidth.width}px` } : undefined}
+          >
+            {roomPanelState === "artifacts" && !artifactPanelWidth.isOverlay ? <button
+              type="button"
+              className="native-artifact-panel-resize-handle"
+              role="separator"
+              aria-label="成果物パネルの幅を変更"
+              aria-orientation="vertical"
+              aria-valuemin={artifactPanelWidth.minWidth}
+              aria-valuemax={artifactPanelWidth.maxWidth}
+              aria-valuenow={artifactPanelWidth.width}
+              tabIndex={0}
+              onPointerDown={artifactPanelWidth.onPointerDown}
+              onKeyDown={artifactPanelWidth.onKeyDown}
+              onDoubleClick={artifactPanelWidth.resetWidth}
+              title="ドラッグで幅を変更。ダブルクリックで初期幅に戻す"
+            ><span aria-hidden="true" /></button> : null}
             <NativeArtifactWorkspace
               target={artifactPanelTarget}
               initialResource={artifactWorkspaceInitialResource}
               canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
               canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
               bridge={model.bridge}
-              onClose={() => { setArtifactWorkspaceInitialResource(undefined); setRoomPanelState("closed"); }}
-              onDraftNavigationControllerChange={onDraftNavigationControllerChange}
+              onClose={() => { setRoomPanelState("closed"); }}
+              onDraftNavigationControllerChange={onArtifactPanelDraftNavigationControllerChange}
+              onResourceSelectionChange={setArtifactWorkspaceLastResource}
               onRequestAgentRevision={async (target) => {
                 const sourceWork = target.sourceWorkId ? model.works.find((work) => work.id === target.sourceWorkId) : undefined;
                 const replyWorkId = sourceWork && roomWorkCanReceiveReply(sourceWork) && roomWorkControlAllowed(model.selectedRoom, sourceWork, model.connection?.accountId)
