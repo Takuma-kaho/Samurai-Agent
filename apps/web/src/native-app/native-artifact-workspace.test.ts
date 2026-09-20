@@ -159,7 +159,7 @@ describe("NativeArtifactWorkspace", () => {
 
     expect(html).toContain('aria-label="成果物を通常幅に戻す"');
     expect(html).not.toContain("disabled");
-    expect(html).toContain('d="M2 2h4v4M14 2h-4v4M2 14h4v-4M14 14h-4v-4"');
+    expect(html).toContain('d="M2 6h4V2M14 6h-4V2M2 10h4v4M14 10h-4v4"');
   });
 
   it("keeps an empty Room-scoped Artifact panel free of a catalog list", () => {

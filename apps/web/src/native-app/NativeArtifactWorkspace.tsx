@@ -379,7 +379,7 @@ export function NativeArtifactWorkspace({
         </div>)}
       </nav>
       <div className="native-artifact-workspace-actions">
-        <button type="button" className="native-button native-button-quiet native-artifact-expand" aria-pressed={isExpanded} aria-label={isExpanded ? "成果物を通常幅に戻す" : "成果物をメイン領域いっぱいに拡大"} title={isExpanded ? "通常幅に戻す" : "メイン領域いっぱいに拡大"} onClick={onToggleExpanded} disabled={!onToggleExpanded}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d={isExpanded ? "M2 2h4v4M14 2h-4v4M2 14h4v-4M14 14h-4v-4" : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"} /></svg></button>
+        <button type="button" className="native-button native-button-quiet native-artifact-expand" aria-pressed={isExpanded} aria-label={isExpanded ? "成果物を通常幅に戻す" : "成果物をメイン領域いっぱいに拡大"} title={isExpanded ? "通常幅に戻す" : "メイン領域いっぱいに拡大"} onClick={onToggleExpanded} disabled={!onToggleExpanded}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d={isExpanded ? "M2 6h4V2M14 6h-4V2M2 10h4v4M14 10h-4v4" : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"} /></svg></button>
         {onTogglePanel ? <button
           type="button"
           className="native-button native-button-quiet native-artifact-panel-toggle"
