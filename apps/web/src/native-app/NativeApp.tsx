@@ -724,6 +724,7 @@ export function NativeApp() {
   const [roomToolOpen, setRoomToolOpen] = useState<NativeRoomTool>();
   const [roomPanelState, setRoomPanelState] = useState<NativeRoomPanelState>("closed");
   const [artifactPanelExpanded, setArtifactPanelExpanded] = useState(false);
+  const [artifactPanelRestoreWidth, setArtifactPanelRestoreWidth] = useState<number>();
   const [roomSettingsTab, setRoomSettingsTab] = useState<"basic" | "participants" | "agent" | "knowledge" | "learning" | "sharing">("basic");
   const [roomAdministrationTarget, setRoomAdministrationTarget] = useState<NativeRoom>();
   const [roomAdministrationView, setRoomAdministrationView] = useState<"menu" | "participants" | "create" | "move" | "rename">("menu");
@@ -750,7 +751,26 @@ export function NativeApp() {
   const panelCloseRequestRef = useRef<(() => void) | undefined>(undefined);
   const roomPanelStateRef = useRef(roomPanelState);
   roomPanelStateRef.current = roomPanelState;
-  const artifactPanelWidth = useNativeArtifactPanelWidth(mainWindowRef, () => panelCloseRequestRef.current?.());
+  const expandArtifactPanel = useCallback((restoreWidth: number): void => {
+    setArtifactPanelRestoreWidth(Math.round(restoreWidth));
+    setArtifactPanelExpanded(true);
+  }, []);
+  const artifactPanelWidth = useNativeArtifactPanelWidth(mainWindowRef, () => panelCloseRequestRef.current?.(), expandArtifactPanel);
+  const collapseArtifactPanel = useCallback((): void => {
+    setArtifactPanelExpanded(false);
+    if (artifactPanelRestoreWidth !== undefined) artifactPanelWidth.setWidth(artifactPanelRestoreWidth);
+  }, [artifactPanelRestoreWidth, artifactPanelWidth.setWidth]);
+  const toggleArtifactPanelExpanded = useCallback((): void => {
+    if (artifactPanelExpanded) {
+      collapseArtifactPanel();
+      return;
+    }
+    expandArtifactPanel(artifactPanelWidth.width);
+  }, [artifactPanelExpanded, artifactPanelWidth.width, collapseArtifactPanel, expandArtifactPanel]);
+  useEffect(() => {
+    if (!artifactPanelExpanded || artifactPanelRestoreWidth === undefined) return;
+    if (artifactPanelRestoreWidth > artifactPanelWidth.maxWidth) setArtifactPanelRestoreWidth(artifactPanelWidth.maxWidth);
+  }, [artifactPanelExpanded, artifactPanelRestoreWidth, artifactPanelWidth.maxWidth]);
   if (!draftNavigationControllerRegistryRef.current) {
     draftNavigationControllerRegistryRef.current = createNativeDraftNavigationControllerRegistry();
   }
@@ -1111,11 +1131,11 @@ export function NativeApp() {
 
   const closeArtifactPanel = useCallback((): void => {
     requestNativeNavigation(() => {
-      setArtifactPanelExpanded(false);
+      collapseArtifactPanel();
       setRoomPanelState("closed");
       setRoomToolOpen(undefined);
     });
-  }, [requestNativeNavigation]);
+  }, [collapseArtifactPanel, requestNativeNavigation]);
   panelCloseRequestRef.current = closeArtifactPanel;
 
   const primaryWorkspaceNavigationEntry = useMemo<NativeWorkspaceNavigationEntry | undefined>(() => {
@@ -1414,7 +1434,7 @@ export function NativeApp() {
   const toggleRoomPanel = useCallback((): void => {
     requestNativeNavigation(() => {
       if (roomPanelState === "artifacts") {
-        setArtifactPanelExpanded(false);
+        collapseArtifactPanel();
         setRoomPanelState("closed");
       } else {
         setArtifactWorkspaceInitialResource(artifactWorkspaceLastResource);
@@ -1422,7 +1442,7 @@ export function NativeApp() {
       }
       setRoomToolOpen(undefined);
     });
-  }, [artifactWorkspaceLastResource, requestNativeNavigation, roomPanelState]);
+  }, [artifactWorkspaceLastResource, collapseArtifactPanel, requestNativeNavigation, roomPanelState]);
   const openResultResource = (resource: NativeArtifactWorkspaceInitialResource): void => {
     requestNativeNavigation(() => {
       const scoped = nativeRoomResultResourceTarget(model.selectedWorkspaceTarget, model.selectedRoom, resource);
@@ -2079,7 +2099,7 @@ export function NativeApp() {
               canEdit={model.selectedRoom?.canEdit === true || model.selectedRoom?.capabilities?.canEdit === true}
               canExecute={model.selectedRoom?.canExecute === true || model.selectedRoom?.capabilities?.canExecute === true}
               bridge={model.bridge}
-              onToggleExpanded={() => setArtifactPanelExpanded((expanded) => !expanded)}
+              onToggleExpanded={toggleArtifactPanelExpanded}
               isExpanded={artifactPanelExpanded}
               onTogglePanel={toggleRoomPanel}
               panelOpen={roomPanelState === "artifacts"}
@@ -2091,7 +2111,7 @@ export function NativeApp() {
                   ? sourceWork.id
                   : undefined;
                 model.appendWorkDraft(artifactRevisionRequestDraft(target), replyWorkId);
-                setArtifactPanelExpanded(false);
+                collapseArtifactPanel();
                 setRoomPanelState("closed");
               }}
             />

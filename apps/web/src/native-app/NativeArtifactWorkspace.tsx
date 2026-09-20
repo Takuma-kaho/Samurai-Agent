@@ -166,14 +166,6 @@ function nativeArtifactTabLabel(resource: NativeArtifactWorkspaceInitialResource
   return resource.kind === "generated_surface" ? "操作画面" : "成果物";
 }
 
-function NativeArtifactEmptyState() {
-  return <div className="native-artifact-empty" role="status">
-    <span className="native-artifact-empty-icon" aria-hidden="true">＋</span>
-    <strong>成果物を開くと、ここに表示されます</strong>
-    <p>会話の成果物カードや検索結果から開いたものを、タブで切り替えて確認できます。</p>
-  </div>;
-}
-
 /**
  * Room-scoped tab host. Tabs are display state only; every resource is still
  * loaded and mutated through the existing target-guarded workspace bridge.
@@ -385,10 +377,9 @@ export function NativeArtifactWorkspace({
           ><span>{tab.label}</span></button>
           <button type="button" className="native-artifact-tab-close" aria-label={`${tab.label}を閉じる`} title="タブを閉じる" onClick={() => requestTabClose(tab.key)}>×</button>
         </div>)}
-        {!tabs.length ? <span className="native-artifact-tabs-empty">開いた成果物がここに表示されます</span> : null}
       </nav>
       <div className="native-artifact-workspace-actions">
-        <button type="button" className="native-button native-button-quiet native-artifact-expand" aria-pressed={isExpanded} aria-label={isExpanded ? "成果物を通常幅に戻す" : "成果物をメイン領域いっぱいに拡大"} title={isExpanded ? "通常幅に戻す" : "メイン領域いっぱいに拡大"} onClick={onToggleExpanded} disabled={!tabs.length || !onToggleExpanded}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d={isExpanded ? "M6 2H2v4M10 14h4v-4M2 10v4h4M14 6V2h-4" : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"} /></svg></button>
+        <button type="button" className="native-button native-button-quiet native-artifact-expand" aria-pressed={isExpanded} aria-label={isExpanded ? "成果物を通常幅に戻す" : "成果物をメイン領域いっぱいに拡大"} title={isExpanded ? "通常幅に戻す" : "メイン領域いっぱいに拡大"} onClick={onToggleExpanded} disabled={!onToggleExpanded}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d={isExpanded ? "M2 2h4v4M14 2h-4v4M2 14h4v-4M14 14h-4v-4" : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"} /></svg></button>
         {onTogglePanel ? <button
           type="button"
           className="native-button native-button-quiet native-artifact-panel-toggle"
@@ -426,7 +417,6 @@ export function NativeArtifactWorkspace({
           onBusyStateChange={(state) => setTabBusy(tab.key, state)}
         />
       </div>)}
-      {!tabs.length ? <NativeArtifactEmptyState /> : null}
     </div>
   </section>;
 }

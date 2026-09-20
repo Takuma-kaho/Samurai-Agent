@@ -2371,7 +2371,6 @@ input:disabled {
 }
 
 .native-artifact-workspace-header,
-.native-artifact-surface-header,
 .native-interaction-requests__header,
 .native-artifact-card-header,
 .native-generated-surface-toolbar,
@@ -2394,7 +2393,6 @@ input:disabled {
 
 .native-artifact-workspace-header p,
 .native-interaction-requests__header p,
-.native-artifact-surface-header p,
 .native-artifact-card-header p {
   color: var(--native-muted);
   font-size: 12px;
@@ -2406,7 +2404,7 @@ input:disabled {
 .native-generated-surface,
 .native-custom-view,
 .native-interaction-request-card {
-  background: var(--native-panel-soft);
+  background: var(--native-surface);
   border: 1px solid var(--native-line);
   border-radius: 10px;
   min-width: 0;
@@ -2415,20 +2413,6 @@ input:disabled {
 .native-artifact-surface {
   container: native-artifact-surface / inline-size;
   padding: 18px;
-}
-
-.native-artifact-surface-header {
-  align-items: center;
-  min-width: 0;
-}
-
-.native-artifact-surface-header-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  justify-content: flex-end;
-  min-width: 0;
-  width: 100%;
 }
 
 .native-artifact-layout {
@@ -3232,7 +3216,7 @@ button {
 }
 
 .native-artifact-panel {
-  background: var(--native-surface-soft);
+  background: var(--native-surface);
   border-left: 1px solid var(--native-line);
   box-sizing: border-box;
   display: flex;
@@ -3265,6 +3249,8 @@ button {
   right: 0;
   top: 0;
   width: 100% !important;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
   z-index: 25;
 }
 
@@ -3459,7 +3445,7 @@ button {
 .native-send-button { border-radius: 10px; min-height: 33px; padding: 0; width: 33px; }
 
 .native-artifact-workspace {
-  background: var(--native-surface-soft);
+  background: var(--native-surface);
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -3518,14 +3504,6 @@ button {
 
 .native-artifact-tabs::-webkit-scrollbar {
   display: none;
-}
-
-.native-artifact-tabs-empty {
-  color: var(--native-muted);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .native-artifact-tab {
@@ -3651,47 +3629,10 @@ button {
   min-height: 100%;
 }
 
-.native-artifact-empty {
-  align-items: center;
-  color: var(--native-muted);
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 9px;
-  justify-content: center;
-  min-height: 220px;
-  padding: 32px;
-  text-align: center;
-}
-
-.native-artifact-empty strong {
-  color: var(--native-copy);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.native-artifact-empty p {
-  font-size: 12px;
-  line-height: 1.55;
-  margin: 0;
-  max-width: 340px;
-}
-
-.native-artifact-empty-icon {
-  align-items: center;
-  border: 1px solid var(--native-line-strong);
-  border-radius: 50%;
-  display: inline-flex;
-  font-size: 18px;
-  height: 32px;
-  justify-content: center;
-  width: 32px;
-}
-
 .native-artifact-layout,
 .native-artifact-detail,
 .native-artifact-direct {
-  background: var(--native-surface-soft);
+  background: var(--native-surface);
 }
 
 .native-app-shell[data-native-theme="light"] {
