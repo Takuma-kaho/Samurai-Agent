@@ -75,3 +75,20 @@ Buzzの上部クロームは、macOSの通常ウィンドウ時だけ信号ボ�
 
 - SamuraiにはBuzzのCommunity Rail相当がないため、BuzzのRailあり（左32px）分岐は実装していない。
 - 3テーマ・狭幅・IME入力・実Agent実行はこの配置修正では再確認していない。
+
+## 2026-09-20 ホバー時の白い枠線修正
+
+対象は、Workspace選択、Agent、検索、通知、Workspaceポップオーバー項目などのホバー状態。ホバー時に`--native-accent`／`--native-line`を枠線へ適用していた指定を外し、背景色だけで状態を示すようにした。キーボード操作時の`focus-visible`リングは残し、選択状態や既存の操作経路は変更していない。
+
+実行結果:
+
+- `git diff --check` — passed。
+- `pnpm lint` — passed（issues 0）。
+- `pnpm test -- apps/web/src/native-app/use-native-sidebar-width.test.ts apps/web/src/components/RoomNavigator.test.tsx apps/web/src/components/RoomNavigator.focused.test.ts apps/web/src/native-app/NativeApp.test.ts` — passed（4 files、29 tests）。
+- `pnpm --filter @samurai-agent/web run typecheck` — passed。
+- `pnpm --filter @samurai-agent/web run build` — passed（Viteの500KB超chunk警告のみ）。
+- ローカルElectron（`http://127.0.0.1:5187/`）でWorkspace選択を開き、トリガー周辺の白いホバー枠線が消えたことを目視確認した。
+
+未検証:
+
+- 3テーマ・狭幅・IME入力・実Agent実行はこのCSS修正では再確認していない。

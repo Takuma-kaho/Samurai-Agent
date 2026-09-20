@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import RoomNavigator from "../components/RoomNavigator";
 import ChatSurface from "../components/ChatSurface";
 import RoomWorkSurface, { roomWorkCanReceiveReply, roomWorkControlAllowed, type NativeRoomPanelState } from "./RoomWorkSurface";
@@ -40,6 +40,7 @@ import { type NativeDraftNavigationController, type NativeDraftNavigationTarget 
 import { nativeKnowledgeResourcesErrorKind, nativeRoomKnowledgeShareResources, nativeRoomKnowledgeShareSelection, type NativeRoomKnowledgeShareSelection, type NativeKnowledgeShareAvailability, type NativeRoomSearchResult } from "./use-native-knowledge-tools";
 import { useNativeShareState } from "./use-native-share-state";
 import { useNativeRoomExpansion } from "./use-native-room-expansion";
+import { useNativeSidebarWidth } from "./use-native-sidebar-width";
 import { useNativeRoomParticipants } from "./use-native-room-participants";
 import { useNativeWorkspaceNavigationHistory, type NativeWorkspaceNavigationEntry } from "./use-native-workspace-navigation-history";
 import { nativeWorkspaceTargetKey } from "./types";
@@ -133,6 +134,22 @@ export function NativeRoomToolLinks({ target, onOpen }: {
   return <div className="native-room-tool-links native-work-header-artifact-link" aria-label="現在のRoomの成果物操作">
     <button type="button" className="native-text-button" onClick={() => onOpen("artifacts")}>成果物</button>
   </div>;
+}
+
+function SidebarSearchIcon() {
+  return <svg className="native-sidebar-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3 3" /></svg>;
+}
+
+function SidebarNotificationIcon() {
+  return <svg className="native-sidebar-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.5 6.5a4.5 4.5 0 0 1 9 0c0 3 1.25 3.2 1.25 4.25H2.25C2.25 9.7 3.5 9.5 3.5 6.5Z" /><path d="M6.25 13h3.5" /></svg>;
+}
+
+function SidebarAgentIcon() {
+  return <svg className="native-sidebar-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="4.5" width="10" height="8" rx="2" /><path d="M8 2v2.5M5.5 8h.01M10.5 8h.01M5.75 10.5h4.5" /></svg>;
+}
+
+function SidebarChevronIcon({ direction = "down" }: { direction?: "down" | "right" }) {
+  return <svg className="native-sidebar-chevron" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d={direction === "down" ? "m2.5 4 3.5 3.5L9.5 4" : "m4 2.5 3.5 3.5L4 9.5"} /></svg>;
 }
 
 /**
@@ -674,6 +691,7 @@ export function NativeApp() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const sidebarWidth = useNativeSidebarWidth();
   const [mobileViewport, setMobileViewport] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 700px)").matches === true);
   const [createKind, setCreateKind] = useState<"organization" | "workspace" | "room">();
   const [roomCreateMode, setRoomCreateMode] = useState<NativeRoomCreateMode>("full");
@@ -695,7 +713,7 @@ export function NativeApp() {
   const [workspacePopoverOpen, setWorkspacePopoverOpen] = useState(false);
   const [accountSettingsRestoreError, setAccountSettingsRestoreError] = useState<string | null>(null);
   const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
-  const contextSearchTriggerRef = useRef<HTMLInputElement>(null);
+  const contextSearchTriggerRef = useRef<HTMLButtonElement>(null);
   const contextNotificationTriggerRef = useRef<HTMLButtonElement>(null);
   const contextReturnTriggerRef = useRef<HTMLElement | null>(null);
   const contextWasMobileSidebarOpenRef = useRef(false);
@@ -748,6 +766,7 @@ export function NativeApp() {
     () => nativeWorkspaceContextTarget(model.selectedWorkspaceTarget),
     [model.selectedWorkspaceTarget?.connectionId, model.selectedWorkspaceTarget?.workspaceId]
   );
+  const searchApiAvailable = Boolean(model.bridge?.searchWorkspaceContext && currentContextTarget);
   const [accountPreferencesDisplayName, setAccountPreferencesDisplayName] = useState<string>();
   useEffect(() => {
     const accountId = model.connection?.accountId;
@@ -909,6 +928,26 @@ export function NativeApp() {
     setMobileSidebarOpen(false);
     setContextSurface(surface);
   }, [mobileSidebarOpen]);
+
+  useEffect(() => {
+    if (contextSurface !== "search") return undefined;
+    const focusSearchInput = (): void => {
+      document.getElementById("native-workspace-context-search-input")?.focus();
+    };
+    const timer = window.setTimeout(focusSearchInput, 0);
+    return () => window.clearTimeout(timer);
+  }, [contextSurface]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.isComposing || (!event.metaKey && !event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+      if (!searchApiAvailable) return;
+      event.preventDefault();
+      openContextSurface("search");
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [openContextSurface, searchApiAvailable]);
   const closeContextSurface = useCallback((restoreFocus = true): void => {
     const restoreMobileSidebar = contextWasMobileSidebarOpenRef.current;
     setContextSurface(undefined);
@@ -1444,7 +1483,6 @@ export function NativeApp() {
       return model.openRoom(room);
     });
   }, [closeContextSurface, closeMobileSidebar, currentContextTarget, model.openRoom, model.rooms, requestNativeNavigation]);
-  const searchApiAvailable = Boolean(model.bridge?.searchWorkspaceContext && currentContextTarget);
   const notificationApiAvailable = Boolean(
     model.bridge?.listWorkspaceNotifications
       || model.bridge?.listAccountInvitationNotifications
@@ -1670,8 +1708,25 @@ export function NativeApp() {
         onGoBack={goBackInWorkspace}
         onGoForward={goForwardInWorkspace}
       />
-      <div className={`native-workspace-shell${!mobileViewport && !desktopSidebarOpen ? " is-sidebar-collapsed" : ""}`}>
+      <div
+        className={`native-workspace-shell${!mobileViewport && !desktopSidebarOpen ? " is-sidebar-collapsed" : ""}`}
+        style={{ "--native-sidebar-width": `${sidebarWidth.width}px` } as CSSProperties}
+      >
         <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}${!mobileViewport && !desktopSidebarOpen ? " is-desktop-collapsed" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen) || accountSettingsOpen || contextSurface !== undefined ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen) || accountSettingsOpen || contextSurface !== undefined} aria-label="Workspace navigation">
+          {!mobileViewport && desktopSidebarOpen ? <button
+            type="button"
+            className={`native-sidebar-resize-handle${sidebarWidth.isResizing ? " is-resizing" : ""}`}
+            role="separator"
+            aria-label="サイドバーの幅を変更"
+            aria-orientation="vertical"
+            aria-valuemin={220}
+            aria-valuemax={420}
+            aria-valuenow={sidebarWidth.width}
+            tabIndex={0}
+            onPointerDown={sidebarWidth.onPointerDown}
+            onKeyDown={sidebarWidth.onKeyDown}
+            onDoubleClick={sidebarWidth.resetWidth}
+          /> : null}
           <div className="native-sidebar-context-tools" aria-label="Workspaceコンテキスト">
             <div className="native-workspace-picker">
               <button
@@ -1684,7 +1739,7 @@ export function NativeApp() {
                 disabled={workspaceSwitcherEntries.length === 0 || model.workspaceLoading}
               >
                 <span>{model.selectedWorkspace?.name ?? (workspaceSwitcherEntries.length ? "Workspaceを選択" : "Workspaceなし")}</span>
-                <span aria-hidden="true">⌄</span>
+                <SidebarChevronIcon />
               </button>
               {workspacePopoverOpen ? (
                 <div className="native-workspace-popover" role="dialog" aria-label="Workspaceを選択">
@@ -1700,26 +1755,22 @@ export function NativeApp() {
                 </div>
               ) : null}
             </div>
-            {contextSurface !== "search" ? <form className="native-sidebar-search" role="search" onSubmit={(event) => { event.preventDefault(); if (searchApiAvailable && sidebarSearchQuery.trim()) openContextSurface("search"); }}>
-              <label className="native-sidebar-search__label" htmlFor="native-sidebar-search-input">検索</label>
-              <input
-                ref={(element) => {
-                  contextSearchTriggerRef.current = element;
-                  if (element) contextReturnTriggerRef.current = element;
-                }}
-                id="native-sidebar-search-input"
-                className="native-sidebar-search__input"
-                type="search"
-                aria-label="現在のWorkspaceを検索"
-                value={sidebarSearchQuery}
-                onChange={(event) => setSidebarSearchQuery(event.currentTarget.value)}
-                placeholder="検索"
-                autoComplete="off"
-                disabled={!searchApiAvailable}
-                title={searchApiAvailable ? "現在のWorkspaceを検索" : "Workspace検索は利用できません"}
-              />
-              <button type="submit" className="native-sidebar-search__submit" aria-label="検索結果を開く" disabled={!searchApiAvailable || !sidebarSearchQuery.trim()}>検索</button>
-            </form> : null}
+            {contextSurface !== "search" ? <button
+              ref={(element) => {
+                contextSearchTriggerRef.current = element;
+                if (element) contextReturnTriggerRef.current = element;
+              }}
+              type="button"
+              className="native-sidebar-search"
+              aria-label="現在のWorkspaceを検索"
+              onClick={() => openContextSurface("search")}
+              disabled={!searchApiAvailable}
+              title={searchApiAvailable ? "現在のWorkspaceを検索（⌘K / Ctrl+K）" : "Workspace検索は利用できません"}
+            >
+              <SidebarSearchIcon />
+              <span>検索</span>
+              <kbd>⌘K</kbd>
+            </button> : null}
             <div className="native-sidebar-context-links">
               <button
                 ref={contextNotificationTriggerRef}
@@ -1729,10 +1780,16 @@ export function NativeApp() {
                 onClick={() => openContextSurface("notifications")}
                 disabled={!notificationApiAvailable}
                 title={notificationApiAvailable ? "Workspace通知を開く" : "通知は利用できません"}
-              ><span aria-hidden="true">◌</span><span>通知</span></button>
+              ><SidebarNotificationIcon /><span>通知</span></button>
             </div>
           </div>
-          {model.selectedWorkspace ? <button type="button" className="native-sidebar-agent-link" onClick={() => { requestNativeNavigation(() => { setAgentDirectoryOpen(true); closeMobileSidebar(); }); }} disabled={model.agentLoading}>✦<span>Agent</span></button> : null}
+          {model.selectedWorkspace ? <button
+            type="button"
+            className={`native-sidebar-agent-link${agentDirectoryOpen ? " is-selected" : ""}`}
+            aria-current={agentDirectoryOpen ? "page" : undefined}
+            onClick={() => { requestNativeNavigation(() => { setAgentDirectoryOpen(true); closeMobileSidebar(); }); }}
+            disabled={model.agentLoading}
+          ><SidebarAgentIcon /><span>Agents</span></button> : null}
           <RoomNavigator
             rooms={model.rooms}
             selectedRoomId={model.selectedRoomId}
