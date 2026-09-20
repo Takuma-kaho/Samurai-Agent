@@ -100,7 +100,31 @@ function artifactDetail(overrides: Partial<ArtifactDetail> = {}): ArtifactDetail
 }
 
 describe("NativeArtifactWorkspace", () => {
-  it("opens the regular entry on the Room-scoped Artifact panel without a Surface management list", () => {
+  it("renders an opened resource as a tab with a non-destructive close control", () => {
+    const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
+      target,
+      initialResource: {
+        kind: "artifact",
+        id: "artifact-a",
+        uri: "artifacts/artifact-a",
+        label: "設計メモ",
+        connectionId: target.connectionId,
+        workspaceId: target.workspaceId,
+        roomId: target.roomId
+      },
+      onToggleExpanded: vi.fn()
+    }));
+
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('role="tab"');
+    expect(html).toContain('aria-selected="true"');
+    expect(html).toContain("設計メモ");
+    expect(html).toContain('aria-label="設計メモを閉じる"');
+    expect(html).not.toContain("仕事へ戻る");
+    expect(html).not.toContain('aria-label="成果物一覧"');
+  });
+
+  it("keeps an empty Room-scoped Artifact panel free of a catalog list", () => {
     const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
       target,
       bridge: {
@@ -115,11 +139,11 @@ describe("NativeArtifactWorkspace", () => {
     }));
 
     expect(html).toContain('aria-label="Roomの成果物"');
-    expect(html).toContain(">成果物<");
-    expect(html.match(/>成果物</g) ?? []).toHaveLength(1);
-    expect(html).toContain('aria-label="成果物一覧"');
-    expect(html).not.toContain('native-artifact-workspace-header"><div><span class="native-section-eyebrow">Artifacts');
-    expect(html).not.toContain("現在のRoomで認可された文書を確認・編集します。");
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain("開いた成果物がここに表示されます");
+    expect(html).toContain("成果物を開くと、ここに表示されます");
+    expect(html).not.toContain('aria-label="成果物一覧"');
+    expect(html).not.toContain("仕事へ戻る");
     expect(html).not.toContain("Generated surfaces");
     expect(html).not.toContain("保存済みの操作画面");
   });

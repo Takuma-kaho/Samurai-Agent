@@ -474,18 +474,13 @@ describe("RoomWorkSurface", () => {
     expect(failed).not.toContain("参加者 0");
   });
 
-  it("keeps Room menu, artifact toggle, and composer controls as separate SVG actions", () => {
+  it("keeps Room menu and composer controls while the artifact toggle lives in the app shell", () => {
     const html = renderSurface({
-      onOpenRoomParticipants: vi.fn(),
-      onToggleRoomPanel: vi.fn(),
-      roomPanelState: "closed"
+      onOpenRoomParticipants: vi.fn()
     });
 
     expect(html).toContain('data-icon="room-menu"');
-    expect(html).toContain('data-icon="artifacts-toggle"');
-    expect(html).toContain('viewBox="0 0 24 22"');
-    expect(html).toContain('transform="translate(24 0) scale(-1 1)"');
-    expect(html).toContain('aria-label="成果物パネルを開く"');
+    expect(html).not.toContain('data-icon="artifacts-toggle"');
     expect(html).toContain('data-icon="add"');
     expect(html).toContain('data-icon="send"');
     expect(html).not.toContain("⌘/Ctrl + Enter");

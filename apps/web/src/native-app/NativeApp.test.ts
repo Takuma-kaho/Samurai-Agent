@@ -43,6 +43,14 @@ describe("Native draft navigation controller registry", () => {
     activePanel = "room_settings";
     expect(registry.getCurrent()).toBe(room);
   });
+
+  it("keeps a dirty hidden panel in the navigation guard", () => {
+    const registry = createNativeDraftNavigationControllerRegistry();
+    const hiddenArtifact = createNativeDraftNavigationController({ scopeKey: "artifacts", label: "成果物", dirty: true, saving: false });
+    registry.register(hiddenArtifact, () => false);
+
+    expect(registry.getCurrent()).toBe(hiddenArtifact);
+  });
 });
 
 describe("Native workspace navigation history", () => {

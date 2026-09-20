@@ -19,7 +19,6 @@ import type {
   NativeArtifactWorkspaceInitialResource
 } from "./types";
 import type { NativeRoomParticipant } from "./use-native-room-participants";
-import { NativePanelToggleIcon } from "./NativeTopChrome";
 
 export type NativeRoomPanelState = "closed" | "artifacts" | "room_settings";
 
@@ -81,9 +80,6 @@ export interface RoomWorkSurfaceProps {
   /** NativeApp owns the combined participant list/menu; this surface only opens it. */
   onOpenRoomParticipants?: () => void;
   roomParticipantsOpen?: boolean;
-  roomPanelState?: NativeRoomPanelState;
-  onToggleRoomPanel?: () => void;
-  onOpenRoomArtifacts?: () => void;
   onOpenRoomSettings?: () => void;
   onOpenRoomKnowledge?: () => void;
   onOpenRoomShare?: () => void;
@@ -620,15 +616,6 @@ function RoomMenuIcon(): ReactNode {
   );
 }
 
-function RoomArtifactIcon({ open }: { open: boolean }): ReactNode {
-  return <NativePanelToggleIcon
-    className="native-work-header-icon"
-    dataIcon="artifacts-toggle"
-    mirrored
-    open={open}
-  />;
-}
-
 function RoomComposerAddIcon(): ReactNode {
   return (
     <svg className="native-work-composer-icon" data-icon="add" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -833,8 +820,8 @@ function renderSavedRoomWorkResourceRefs(refs: ResourceRef[]): ReactNode {
 
 const roomWorkStyles = [
   ".native-work-surface { min-height: 0; }",
-  ".native-work-surface .native-chat-header { align-items: center; gap: 12px; min-height: 56px; padding: 0 24px; }",
-  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: 18px; } }",
+  ".native-work-surface .native-chat-header { align-items: center; gap: 12px; height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 72px) 0 24px; }",
+  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: var(--native-chat-header-right-inset, 72px); } }",
   ".native-work-surface .native-chat-header .native-section-eyebrow { display: none; }",
   ".native-work-surface .native-chat-header h1 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; line-height: 1.25; margin: 0; }",
   ".native-work-surface .native-chat-header h1::before { color: var(--native-dim); content: '#'; font-size: 20px; font-weight: 400; margin-right: 10px; }",
@@ -1115,9 +1102,6 @@ export function RoomWorkSurface({
   participantsError,
   onOpenRoomParticipants,
   roomParticipantsOpen,
-  roomPanelState = "closed",
-  onToggleRoomPanel,
-  onOpenRoomArtifacts,
   onOpenRoomSettings,
   onOpenRoomKnowledge,
   onOpenRoomShare,
@@ -1931,32 +1915,16 @@ export function RoomWorkSurface({
                 aria-label="Roomメニューを開く"
                 title="Roomメニュー"
               ><RoomMenuIcon /></button>
-              {onToggleRoomPanel || onOpenRoomArtifacts ? (
-                <button
-                  type="button"
-                  className="native-work-header-action native-work-panel-toggle"
-                  onClick={() => {
-                    setRoomMenuOpen(false);
-                    if (roomPanelState === "artifacts") onToggleRoomPanel?.();
-                    else if (onOpenRoomArtifacts) onOpenRoomArtifacts();
-                    else onToggleRoomPanel?.();
-                  }}
-                  aria-expanded={roomPanelState === "artifacts"}
-                  aria-label={roomPanelState === "artifacts" ? "成果物パネルを閉じる" : "成果物パネルを開く"}
-                  title={roomPanelState === "artifacts" ? "成果物を閉じる" : "成果物を開く"}
-                ><RoomArtifactIcon open={roomPanelState === "artifacts"} /></button>
-              ) : null}
               {roomMenuOpen ? (
                 <div className="native-work-header-popover native-work-room-menu" role="menu" aria-label="Roomメニュー">
                   {onOpenRoomSettings ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomSettings(); }}>Room設定</button> : null}
-                  {onToggleRoomPanel || onOpenRoomArtifacts ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); if (roomPanelState === "artifacts") onToggleRoomPanel?.(); else onOpenRoomArtifacts?.(); }}>{roomPanelState === "artifacts" ? "成果物パネルを閉じる" : "成果物を開く"}</button> : null}
                   {onOpenRoomKnowledge ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomKnowledge(); }}>Room Knowledge</button> : null}
                   {roomKnowledgeShareAvailable && onOpenRoomShare ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomShare(); }}>Room Knowledgeを共有</button> : null}
                 </div>
               ) : null}
             </div>
           ) : null}
-          {!onToggleRoomPanel ? roomToolLinks : null}
+          {roomToolLinks}
         </div>
       </header>
 
