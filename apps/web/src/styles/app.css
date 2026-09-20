@@ -2678,7 +2678,7 @@ button {
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
-  padding: 0 18px 18px 0;
+  padding: 0 8px 8px 0;
 }
 
 .native-app-shell.has-evidence,
@@ -3303,8 +3303,8 @@ button {
 .native-app-shell[data-native-theme="special"] .native-work-conversation { background-color: transparent; }
 
 @media (max-width: 980px) {
-  .native-app-shell { padding: 0 12px 12px 0; }
-  .native-top-chrome { margin-right: -12px; }
+  .native-app-shell { padding: 0 8px 8px 0; }
+  .native-top-chrome { margin-right: -8px; }
   .native-workspace-shell { grid-template-columns: 238px minmax(0, 1fr); }
   .native-artifact-panel { min-width: 300px; }
 }
