@@ -39,6 +39,7 @@ import {
 } from "./native-workspace-target";
 import { useNativeDraftNavigation, type NativeDraftNavigationController } from "./use-native-draft-navigation";
 import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
+import { NativePanelToggleIcon } from "./NativeTopChrome";
 import type { NativeArtifactWorkspaceInitialResource, NativeWorkspaceTarget } from "./types";
 import type { DesktopWorkspaceInteractionRequest } from "../lib/api";
 import type { WorkspaceOperationHistoryBridge } from "../lib/workspace-browser-bridge";
@@ -127,7 +128,16 @@ export interface NativeArtifactWorkspaceProps {
   bridge?: NativeArtifactWorkspaceBridge;
   /** Optional result ref; when present the list is not queried before opening it. */
   initialResource?: NativeArtifactWorkspaceInitialResource;
-  onClose?: () => void;
+  /** Toggles the main-content expansion without changing the OS window state. */
+  onToggleExpanded?: () => void;
+  isExpanded?: boolean;
+  /** Toggles the Room-level Artifact panel without discarding opened tabs. */
+  onTogglePanel?: () => void;
+  panelOpen?: boolean;
+  /** Reports the last valid Resource shown in this Room for reopen. */
+  onResourceSelectionChange?: (resource: NativeArtifactWorkspaceInitialResource | undefined) => void;
+  /** Opens a related resource in the Room tab host instead of replacing this tab. */
+  onOpenResource?: (resource: NativeArtifactWorkspaceInitialResource) => void;
   onRequestAgentRevision?: (target: ArtifactRevisionTarget) => void | Promise<void>;
   onEditorControllerChange?: (controller: NativeArtifactEditorController | undefined) => void;
   onDraftNavigationControllerChange?: (controller: NativeDraftNavigationController | undefined) => void;
@@ -138,6 +148,277 @@ export interface NativeArtifactWorkspaceProps {
 export interface NativeArtifactWorkspaceBusyState {
   target: NativeArtifactWorkspaceTarget;
   busy: boolean;
+}
+
+interface NativeArtifactTab {
+  key: string;
+  resource: NativeArtifactWorkspaceInitialResource;
+  label: string;
+}
+
+function nativeArtifactTabKey(resource: NativeArtifactWorkspaceInitialResource): string {
+  return `${resource.kind}\n${resource.id}`;
+}
+
+function nativeArtifactTabLabel(resource: NativeArtifactWorkspaceInitialResource): string {
+  const label = resource.label?.trim();
+  if (label) return label;
+  return resource.kind === "generated_surface" ? "操作画面" : "成果物";
+}
+
+/**
+ * Room-scoped tab host. Tabs are display state only; every resource is still
+ * loaded and mutated through the existing target-guarded workspace bridge.
+ */
+export function NativeArtifactWorkspace({
+  target,
+  canEdit = false,
+  canExecute = false,
+  bridge,
+  initialResource: initialResourceProp,
+  onToggleExpanded,
+  isExpanded = false,
+  onTogglePanel,
+  panelOpen = false,
+  onResourceSelectionChange,
+  onRequestAgentRevision,
+  onDraftNavigationControllerChange,
+  onBusyStateChange
+}: NativeArtifactWorkspaceProps) {
+  const targetKey = nativeArtifactWorkspaceTargetKey(target);
+  const normalizedInitialResource = useMemo(
+    () => nativeArtifactWorkspaceInitialResourceFromUnknown(initialResourceProp, target),
+    [initialResourceProp?.connectionId, initialResourceProp?.id, initialResourceProp?.kind, initialResourceProp?.revisionId, initialResourceProp?.roomId, initialResourceProp?.uri, initialResourceProp?.workspaceId, targetKey]
+  );
+  const [tabs, setTabs] = useState<NativeArtifactTab[]>(() => normalizedInitialResource
+    ? [{ key: nativeArtifactTabKey(normalizedInitialResource), resource: normalizedInitialResource, label: nativeArtifactTabLabel(normalizedInitialResource) }]
+    : []);
+  const [activeTabKey, setActiveTabKey] = useState<string | undefined>(() => normalizedInitialResource ? nativeArtifactTabKey(normalizedInitialResource) : undefined);
+  const tabsRef = useRef<NativeArtifactTab[]>([]);
+  tabsRef.current = tabs;
+  const lastTargetKeyRef = useRef(targetKey);
+  const controllersRef = useRef(new Map<string, NativeDraftNavigationController>());
+  const editorsRef = useRef(new Map<string, NativeArtifactEditorController>());
+  const busyRef = useRef(new Map<string, boolean>());
+  const [pendingTabCloseKey, setPendingTabCloseKey] = useState<string>();
+  const [, forceUpdate] = useState(0);
+
+  useEffect(() => {
+    if (lastTargetKeyRef.current === targetKey) return;
+    lastTargetKeyRef.current = targetKey;
+    controllersRef.current.clear();
+    editorsRef.current.clear();
+    busyRef.current.clear();
+    setTabs([]);
+    setActiveTabKey(undefined);
+    setPendingTabCloseKey(undefined);
+  }, [targetKey]);
+
+  useEffect(() => {
+    const resource = normalizedInitialResource;
+    if (!resource) return;
+    const key = nativeArtifactTabKey(resource);
+    setTabs((current) => {
+      const existing = current.find((tab) => tab.key === key);
+      if (existing) {
+        if (existing.resource.revisionId === resource.revisionId && existing.resource.uri === resource.uri) return current;
+        if (editorsRef.current.get(key)?.dirty) return current;
+        return current.map((tab) => tab.key === key
+          ? { ...tab, resource: { ...tab.resource, ...resource }, label: resource.label ? nativeArtifactTabLabel(resource) : tab.label }
+          : tab);
+      }
+      return [...current, { key, resource, label: nativeArtifactTabLabel(resource) }];
+    });
+    setActiveTabKey(key);
+  }, [normalizedInitialResource, targetKey]);
+
+  const setTabController = useCallback((key: string, controller: NativeDraftNavigationController | undefined): void => {
+    if (controller) controllersRef.current.set(key, controller);
+    else controllersRef.current.delete(key);
+    forceUpdate((value) => value + 1);
+  }, []);
+
+  const setTabEditor = useCallback((key: string, controller: NativeArtifactEditorController | undefined): void => {
+    if (controller) editorsRef.current.set(key, controller);
+    else editorsRef.current.delete(key);
+    forceUpdate((value) => value + 1);
+  }, []);
+
+  const setTabBusy = useCallback((key: string, state: NativeArtifactWorkspaceBusyState): void => {
+    busyRef.current.set(key, state.busy);
+    onBusyStateChange?.({ ...state, busy: [...busyRef.current.values()].some(Boolean) });
+    forceUpdate((value) => value + 1);
+  }, [onBusyStateChange]);
+
+  const handleResourceSelection = useCallback((key: string, resource: NativeArtifactWorkspaceInitialResource | undefined): void => {
+    if (!resource) return;
+    setTabs((current) => current.map((tab) => tab.key === key
+      ? { ...tab, resource: { ...tab.resource, ...resource }, label: resource.label ? nativeArtifactTabLabel(resource) : tab.label }
+      : tab));
+    onResourceSelectionChange?.(resource);
+  }, [onResourceSelectionChange]);
+
+  const openResourceInTab = useCallback((resource: NativeArtifactWorkspaceInitialResource): void => {
+    const key = nativeArtifactTabKey(resource);
+    const existing = tabsRef.current.find((tab) => tab.key === key);
+    if (existing
+      && (existing.resource.revisionId !== resource.revisionId || existing.resource.uri !== resource.uri)
+      && editorsRef.current.get(key)?.dirty) {
+      setActiveTabKey(key);
+      return;
+    }
+    setTabs((current) => {
+      const currentTab = current.find((tab) => tab.key === key);
+      if (currentTab) {
+        if (currentTab.resource.revisionId === resource.revisionId && currentTab.resource.uri === resource.uri) return current;
+        if (editorsRef.current.get(key)?.dirty) return current;
+        return current.map((tab) => tab.key === key
+          ? { ...tab, resource: { ...tab.resource, ...resource }, label: resource.label ? nativeArtifactTabLabel(resource) : tab.label }
+          : tab);
+      }
+      return [...current, { key, resource, label: nativeArtifactTabLabel(resource) }];
+    });
+    setActiveTabKey(key);
+    onResourceSelectionChange?.(resource);
+  }, [onResourceSelectionChange]);
+
+  const dirty = [...editorsRef.current.values()].some((controller) => controller.dirty);
+  const saving = [...editorsRef.current.values()].some((controller) => controller.saving);
+  const saveAll = useCallback(async (): Promise<boolean> => {
+    let succeeded = true;
+    for (const tab of tabs) {
+      const controller = editorsRef.current.get(tab.key);
+      if (!controller?.dirty) continue;
+      if (!await controller.save()) succeeded = false;
+    }
+    return succeeded;
+  }, [tabs]);
+  const discardAll = useCallback((): void => {
+    for (const controller of editorsRef.current.values()) {
+      if (controller.dirty) controller.discard();
+    }
+  }, []);
+  const aggregateDraftNavigation = useNativeDraftNavigation({
+    scopeKey: `artifact-tabs\n${targetKey}`,
+    label: "成果物",
+    dirty,
+    saving,
+    canSave: canEdit,
+    saveUnavailableMessage: "このRoomでは成果物を保存できません。破棄するか、編集権限を確認してください。",
+    save: saveAll,
+    discard: discardAll,
+    onControllerChange: onDraftNavigationControllerChange
+  });
+
+  const closeTab = useCallback((key: string): void => {
+    controllersRef.current.delete(key);
+    editorsRef.current.delete(key);
+    busyRef.current.delete(key);
+    const current = tabsRef.current;
+    const index = current.findIndex((tab) => tab.key === key);
+    if (index < 0) return;
+    const next = current.filter((tab) => tab.key !== key);
+    const nextActiveKey = activeTabKey === key ? next[index]?.key ?? next[index - 1]?.key : activeTabKey;
+    const nextActiveTab = next.find((tab) => tab.key === nextActiveKey);
+    setTabs(next);
+    setActiveTabKey(nextActiveKey);
+    onResourceSelectionChange?.(nextActiveTab?.resource);
+    setPendingTabCloseKey(undefined);
+    forceUpdate((value) => value + 1);
+  }, [activeTabKey, onResourceSelectionChange]);
+
+  const requestTabClose = useCallback((key: string): void => {
+    if (busyRef.current.get(key)) return;
+    const controller = controllersRef.current.get(key);
+    if (!controller || controller.getState().phase === "clean") {
+      closeTab(key);
+      return;
+    }
+    setPendingTabCloseKey(key);
+    controller.requestNavigation(() => closeTab(key));
+  }, [closeTab]);
+
+  const tabCloseController = pendingTabCloseKey ? controllersRef.current.get(pendingTabCloseKey) : undefined;
+  const pendingHiddenController = tabs
+    .filter((tab) => tab.key !== activeTabKey)
+    .map((tab) => controllersRef.current.get(tab.key))
+    .find((controller) => controller?.getState().pending);
+
+  return <section className={`native-artifact-workspace native-artifact-tab-host${isExpanded ? " is-expanded" : ""}`} aria-label="Roomの成果物">
+    <header className="native-artifact-workspace-header native-artifact-tab-header">
+      <nav className="native-artifact-tabs" role="tablist" aria-label="開いている成果物">
+        {tabs.map((tab) => <div key={tab.key} className={`native-artifact-tab${activeTabKey === tab.key ? " is-active" : ""}`}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTabKey === tab.key}
+            aria-controls={`native-artifact-tabpanel-${tab.key.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+            title={tab.label}
+            onClick={() => {
+              setActiveTabKey(tab.key);
+              onResourceSelectionChange?.(tab.resource);
+            }}
+            onKeyDown={(event) => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const currentIndex = tabs.findIndex((candidate) => candidate.key === tab.key);
+              const nextIndex = event.key === "Home"
+                ? 0
+                : event.key === "End"
+                  ? tabs.length - 1
+                  : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+              const next = tabs[nextIndex];
+              if (!next) return;
+              setActiveTabKey(next.key);
+              onResourceSelectionChange?.(next.resource);
+              globalThis.setTimeout(() => document.getElementById(`native-artifact-tab-${next.key.replace(/[^A-Za-z0-9_-]/g, "-")}`)?.focus(), 0);
+            }}
+            id={`native-artifact-tab-${tab.key.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+          ><span>{tab.label}</span></button>
+          <button type="button" className="native-artifact-tab-close" aria-label={`${tab.label}を閉じる`} title="タブを閉じる" onClick={() => requestTabClose(tab.key)}>×</button>
+        </div>)}
+      </nav>
+      <div className="native-artifact-workspace-actions">
+        <button type="button" className="native-button native-button-quiet native-artifact-expand" aria-pressed={isExpanded} aria-label={isExpanded ? "成果物を通常幅に戻す" : "成果物をメイン領域いっぱいに拡大"} title={isExpanded ? "通常幅に戻す" : "メイン領域いっぱいに拡大"} onClick={onToggleExpanded} disabled={!onToggleExpanded}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d={isExpanded ? "M2 6h4V2M14 6h-4V2M2 10h4v4M14 10h-4v4" : "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"} /></svg></button>
+        {onTogglePanel ? <button
+          type="button"
+          className="native-button native-button-quiet native-artifact-panel-toggle"
+          aria-expanded={panelOpen}
+          aria-label={panelOpen ? "成果物パネルを閉じる" : "成果物パネルを開く"}
+          title={panelOpen ? "成果物を閉じる" : "成果物を開く"}
+          onClick={onTogglePanel}
+        ><NativePanelToggleIcon className="native-artifact-panel-toggle-icon" dataIcon="artifacts-toggle" mirrored open={panelOpen} /></button> : null}
+      </div>
+    </header>
+    <NativeDraftNavigationPrompt controller={aggregateDraftNavigation} />
+    {tabCloseController && pendingTabCloseKey !== activeTabKey ? <NativeDraftNavigationPrompt controller={tabCloseController} /> : null}
+    {pendingHiddenController && pendingHiddenController !== tabCloseController ? <NativeDraftNavigationPrompt controller={pendingHiddenController} /> : null}
+    <div className="native-artifact-tab-panels">
+      {tabs.map((tab) => <div
+        key={tab.key}
+        id={`native-artifact-tabpanel-${tab.key.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+        role="tabpanel"
+        aria-label={tab.label}
+        hidden={activeTabKey !== tab.key}
+        inert={activeTabKey !== tab.key}
+        className="native-artifact-tab-panel"
+      >
+        <NativeArtifactResourceWorkspace
+          target={target}
+          canEdit={canEdit}
+          canExecute={canExecute}
+          bridge={bridge}
+          initialResource={tab.resource}
+          onResourceSelectionChange={(resource) => handleResourceSelection(tab.key, resource)}
+          onOpenResource={openResourceInTab}
+          onRequestAgentRevision={onRequestAgentRevision}
+          onEditorControllerChange={(controller) => setTabEditor(tab.key, controller)}
+          onDraftNavigationControllerChange={(controller) => setTabController(tab.key, controller)}
+          onBusyStateChange={(state) => setTabBusy(tab.key, state)}
+        />
+      </div>)}
+    </div>
+  </section>;
 }
 
 /** Room-specific key; Artifact IDs alone are intentionally never enough. */
@@ -280,7 +561,7 @@ export function nativeArtifactWorkspaceGateway(
 }
 
 /** The React Room surface for Artifact preview/edit/history and direct Surface display. */
-export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, initialResource: initialResourceProp, onClose, onRequestAgentRevision, onEditorControllerChange, onDraftNavigationControllerChange, onBusyStateChange }: NativeArtifactWorkspaceProps) {
+function NativeArtifactResourceWorkspace({ target, canEdit = false, canExecute = false, bridge: suppliedBridge, initialResource: initialResourceProp, onResourceSelectionChange, onOpenResource, onRequestAgentRevision, onEditorControllerChange, onDraftNavigationControllerChange, onBusyStateChange }: NativeArtifactWorkspaceProps) {
   const bridge = (suppliedBridge ?? getWorkspaceClientBridge()) as NativeArtifactWorkspaceBridge | undefined;
   const targetKey = nativeArtifactWorkspaceTargetKey(target);
   const stableTarget = useMemo(() => target ? { ...target } : undefined, [target?.connectionId, target?.workspaceId, target?.roomId, target?.selectionGeneration]);
@@ -410,10 +691,20 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       }
       setSurfaceBundle(nextBundle);
       setSurface(nextDetail);
+      onResourceSelectionChange?.({
+        kind: "generated_surface",
+        id: surfaceId,
+        uri: `surfaces/${surfaceId}`,
+        label: nextDetail.surface.title,
+        revisionId: nextDetail.surface.current_revision_id,
+        connectionId: stableTarget.connectionId,
+        workspaceId: stableTarget.workspaceId,
+        roomId: stableTarget.roomId
+      });
     } catch (cause) {
       if (requestGeneration === generation.current) setSurfaceError(nativeArtifactWorkspaceError(cause));
     }
-  }, [bridge, stableTarget]);
+  }, [bridge, onResourceSelectionChange, stableTarget]);
 
   const openInitialArtifact = useCallback(async (resource: NativeArtifactWorkspaceInitialResource): Promise<void> => {
     if (!stableTarget || !gateway) {
@@ -452,12 +743,17 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       }
       setArtifact(nextDetail);
       setArtifactRevisions([...history].sort((left, right) => right.revision - left.revision));
+      onResourceSelectionChange?.({
+        ...resource,
+        label: nextDetail.artifact.title,
+        ...(nextDetail.revision?.id ? { revisionId: nextDetail.revision.id } : {})
+      });
     } catch (cause) {
       if (requestEpoch === artifactEpoch.current) setArtifactError(nativeArtifactWorkspaceError(cause));
     } finally {
       if (requestEpoch === artifactEpoch.current) setArtifactLoading(false);
     }
-  }, [gateway, stableTarget]);
+  }, [gateway, onResourceSelectionChange, stableTarget]);
 
   const loadArtifactComparison = useCallback(async (revisionId: string): Promise<void> => {
     if (!stableTarget || !gateway || !artifact) return;
@@ -494,8 +790,18 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     setArtifact(nativeArtifactDetailFromMutation(mutation, revisionDetail));
     setArtifactRevisions(artifactHistoryWithMutation(history, revision));
     setArtifactComparison(undefined);
+    onResourceSelectionChange?.({
+      kind: "artifact",
+      id: input.artifactId,
+      uri: `artifacts/${input.artifactId}`,
+      label: artifact.artifact.title,
+      revisionId: revision.id,
+      connectionId: stableTarget.connectionId,
+      workspaceId: stableTarget.workspaceId,
+      roomId: stableTarget.roomId
+    });
     return mutation;
-  }, [artifact, gateway, stableTarget, targetKey]);
+  }, [artifact, gateway, onResourceSelectionChange, stableTarget, targetKey]);
 
   const restoreInitialArtifact = useCallback(async (input: ArtifactRestoreRequest): Promise<ArtifactMutationResult> => {
     if (!stableTarget || !gateway || !artifact || input.artifactId !== artifact.artifact.id || targetKeyRef.current !== targetKey) {
@@ -517,6 +823,16 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       setArtifact(nativeArtifactDetailFromMutation(mutation, revisionDetail));
       setArtifactRevisions(artifactHistoryWithMutation(history, revision));
       setArtifactComparison(undefined);
+      onResourceSelectionChange?.({
+        kind: "artifact",
+        id: input.artifactId,
+        uri: `artifacts/${input.artifactId}`,
+        label: artifact.artifact.title,
+        revisionId: revision.id,
+        connectionId: stableTarget.connectionId,
+        workspaceId: stableTarget.workspaceId,
+        roomId: stableTarget.roomId
+      });
       return mutation;
     } catch (cause) {
       if (requestEpoch === artifactEpoch.current && targetKeyRef.current === targetKey && artifact?.artifact.id === artifactId) setArtifactError(nativeArtifactWorkspaceError(cause));
@@ -524,13 +840,14 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     } finally {
       if (requestEpoch === artifactEpoch.current && targetKeyRef.current === targetKey && artifact?.artifact.id === artifactId) setArtifactLoading(false);
     }
-  }, [artifact, gateway, stableTarget, targetKey]);
+  }, [artifact, gateway, onResourceSelectionChange, stableTarget, targetKey]);
 
   useEffect(() => {
     if (initialResourceInvalid) {
       setSurfaceError("仕事の結果から受け取った成果物参照が無効です。");
       return;
     }
+    if (initialResource) onResourceSelectionChange?.(initialResource);
     if (initialResource?.kind === "generated_surface") {
       void openGeneratedSurface(initialResource.id, initialResource.revisionId);
       return;
@@ -539,7 +856,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       void openInitialArtifact(initialResource);
       return;
     }
-  }, [initialResource, initialResourceInvalid, openGeneratedSurface, openInitialArtifact]);
+  }, [initialResource, initialResourceInvalid, onResourceSelectionChange, openGeneratedSurface, openInitialArtifact]);
 
   const loadBundle = useCallback(async (input: { surfaceId: string; revisionId: string }): Promise<GeneratedSurfaceBundleDetail> => {
     if (!stableTarget || !bridge?.getWorkspaceGeneratedSurfaceBundle) throw new Error("generated_surface_bundle_unavailable");
@@ -559,6 +876,15 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     if (nextDetail.surface.id !== surfaceId) throw new Error("generated_surface_response_mismatch");
     if (generation.current !== requestGeneration || targetKeyRef.current !== targetKey || surfaceViewKeyRef.current?.split("\n", 1)[0] !== surfaceId) throw new Error("surface_navigation_changed");
     setSurface(nextDetail);
+    onResourceSelectionChange?.({
+      kind: "generated_surface",
+      id: surfaceId,
+      uri: `surfaces/${surfaceId}`,
+      revisionId: nextDetail.surface.current_revision_id,
+      connectionId: stableTarget.connectionId,
+      workspaceId: stableTarget.workspaceId,
+      roomId: stableTarget.roomId
+    });
     const currentBundle = surfaceBundleRef.current;
     if (currentBundle?.surface.id === surfaceId && currentBundle.revision.id === nextDetail.surface.current_revision_id) {
       setSurfaceBundle(currentBundle);
@@ -572,7 +898,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     if (generation.current !== requestGeneration || targetKeyRef.current !== targetKey || surfaceViewKeyRef.current?.split("\n", 1)[0] !== surfaceId) throw new Error("surface_navigation_changed");
     setSurfaceBundle(nextBundle);
     return nextDetail;
-  }, [bridge, loadBundle, stableTarget, targetKey]);
+  }, [bridge, loadBundle, onResourceSelectionChange, stableTarget, targetKey]);
 
   const readCompletedSurfaceApproval = useCallback(async (input: {
     action: GeneratedSurfaceActionRequest;
@@ -1029,24 +1355,24 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
     onControllerChange: onDraftNavigationControllerChange
   });
 
-  const performLeave = useCallback((action: "close" | { kind: "surface"; surfaceId: string }): void => {
-    if (action === "close") {
-      onClose?.();
-      return;
-    }
-    void openGeneratedSurface(action.surfaceId);
-  }, [onClose, openGeneratedSurface]);
-
-  const requestLeave = useCallback((action: "close" | { kind: "surface"; surfaceId: string }): void => {
+  const requestLeave = useCallback((surfaceId: string): void => {
     if (surfaceBusyRef.current) return;
-    draftNavigation.requestNavigation(() => performLeave(action));
-  }, [draftNavigation, performLeave]);
+    const resource: NativeArtifactWorkspaceInitialResource = {
+      kind: "generated_surface",
+      id: surfaceId,
+      uri: `surfaces/${surfaceId}`,
+      ...(stableTarget ? { connectionId: stableTarget.connectionId, workspaceId: stableTarget.workspaceId, roomId: stableTarget.roomId } : {})
+    };
+    draftNavigation.requestNavigation(() => {
+      if (onOpenResource && stableTarget) {
+        onOpenResource(resource);
+        return;
+      }
+      void openGeneratedSurface(surfaceId);
+    });
+  }, [draftNavigation, onOpenResource, openGeneratedSurface, stableTarget]);
 
   return <section className="native-artifact-workspace" aria-label="Roomの成果物">
-    <header className="native-artifact-workspace-header">
-      <div><h1>成果物</h1></div>
-      {onClose ? <button type="button" className="native-button native-button-quiet" onClick={() => requestLeave("close")}>仕事へ戻る</button> : null}
-    </header>
     <NativeDraftNavigationPrompt controller={draftNavigation} />
     {surfaceError ? <p className="native-inline-error" role="alert">{surfaceError}</p> : null}
     {surface ? <GeneratedSurfaceFrame
@@ -1062,15 +1388,6 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
       approvalRecoveries={surfaceApprovalRecoveries}
       {...(canEdit ? { onSetState: setSurfaceState } : {})}
       onExport={exportSurface}
-      onClose={() => {
-        reportSurfaceBusyState(false);
-        generation.current += 1;
-        setSurface(undefined);
-        setSurfaceBundle(undefined);
-        setSurfaceApprovalResolution(undefined);
-        setSurfaceApprovalRecoveries([]);
-        if (initialResource) onClose?.();
-      }}
     /> : initialResource?.kind === "artifact" ? <section className="native-artifact-direct" aria-label="結果の成果物">
       {artifactLoading ? <p className="native-inline-note" role="status">成果物と版履歴を確認しています…</p> : null}
       {artifactError ? <p className="native-inline-error" role="alert">{artifactError}</p> : null}
@@ -1085,7 +1402,7 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
         onCloseComparison={() => setArtifactComparison(undefined)}
         workspaceTarget={stableTarget}
         onRequestAgentRevision={requestAgentRevision}
-        onOpenGeneratedSurface={(surfaceId) => requestLeave({ kind: "surface", surfaceId })}
+        onOpenGeneratedSurface={(surfaceId) => requestLeave(surfaceId)}
         onEditorControllerChange={registerEditorController}
       /> : !artifactLoading && !artifactError ? <p className="native-inline-note">結果の成果物を確認しています…</p> : null}
     </section> : initialResource?.kind === "generated_surface" ? <section className="native-generated-surface-direct" aria-label="結果の操作画面">
@@ -1098,7 +1415,8 @@ export function NativeArtifactWorkspace({ target, canEdit = false, canExecute = 
         canEdit={canEdit}
         workspaceTarget={stableTarget}
         onRequestAgentRevision={requestAgentRevision}
-        onOpenGeneratedSurface={(surfaceId) => void openGeneratedSurface(surfaceId)}
+        onOpenGeneratedSurface={(surfaceId) => requestLeave(surfaceId)}
+        onSelectionChange={onResourceSelectionChange}
         onEditorControllerChange={registerEditorController}
       />
     </>}

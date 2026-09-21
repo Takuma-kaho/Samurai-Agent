@@ -63,18 +63,16 @@ function artifactGateway(): ArtifactSurfaceGateway {
 }
 
 describe("ArtifactSurfacePanel", () => {
-  it("keeps the regular list header focused on the Artifact entry", () => {
+  it("keeps the regular Artifact content free of a nested header and empty guidance", () => {
     const html = renderToStaticMarkup(createElement(ArtifactSurfacePanel, {
       roomId: "room_a",
       gateway: artifactGateway()
     }));
 
     expect(html).toContain('<section class="native-artifact-surface" aria-label="Roomの成果物">');
-    expect(html).toContain('aria-label="成果物操作"');
-    expect(html).toContain(">再読込<");
-    expect(html).not.toContain(">成果物</h2>");
-    expect(html).not.toContain('native-section-eyebrow">Artifacts');
-    expect(html).not.toContain("このRoomで認可された文書・表・画像・PDF・操作画面を確認します。");
+    expect(html).not.toContain('class="native-artifact-surface-header"');
+    expect(html).not.toContain(">再読込<");
+    expect(html).not.toContain("このRoomには、まだ確認できる成果物がありません。");
   });
 });
 

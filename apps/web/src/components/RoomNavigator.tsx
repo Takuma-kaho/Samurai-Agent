@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { NativeRoom } from "../native-app/types";
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
+import RoomContextMenu, { type RoomContextMenuAction, type RoomContextMenuPosition } from "./RoomContextMenu";
 
 export interface RoomNavigatorProps {
   rooms: NativeRoom[];
@@ -11,26 +12,34 @@ export interface RoomNavigatorProps {
   error?: string | null;
   onSelect: (room: NativeRoom) => void;
   onCreate?: () => void;
+  /** Open the ordinary Room creation flow without selecting a Room. */
+  onCreateChild?: (room: NativeRoom) => void;
+  /** Open the existing Room move flow for this Room without selecting it. */
+  onMove?: (room: NativeRoom) => void;
+  /** Open the existing Room rename flow for this Room without selecting it. */
+  onRename?: (room: NativeRoom) => void;
   /** Controlled expanded Room IDs. When omitted, the navigator starts fully expanded. */
   expandedRoomIds?: ReadonlySet<string>;
   /** Notify the parent so expanded state can be persisted by the owning screen. */
   onToggleExpanded?: (room: NativeRoom) => void;
 }
 
-function roomDepth(room: NativeRoom, byId: Map<string, NativeRoom>): number {
-  let depth = 0;
-  const visited = new Set<string>();
-  let parentId = room.parentRoomId;
-  while (parentId && !visited.has(parentId)) {
-    visited.add(parentId);
-    depth += 1;
-    parentId = byId.get(parentId)?.parentRoomId;
-  }
-  return depth;
-}
-
 function roomOrder(left: NativeRoom, right: NativeRoom): number {
   return left.name.localeCompare(right.name, "ja") || left.id.localeCompare(right.id);
+}
+
+function RoomMark({ directMessage }: { directMessage: boolean }) {
+  return directMessage
+    ? <svg className="native-room-icon native-room-dm-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 3.5h10v7H7l-3 2v-2H3z" /><path d="M5.5 7.25h.01M8 7.25h.01M10.5 7.25h.01" /></svg>
+    : <svg className="native-room-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 8h10M8 3v10" /></svg>;
+}
+
+function RoomToggleIcon({ expanded }: { expanded: boolean }) {
+  return <svg className="native-room-toggle-icon" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d={expanded ? "m2.5 4 3.5 3.5L9.5 4" : "m4 2.5 3.5 3.5L4 9.5"} /></svg>;
+}
+
+function RoomCreateIcon() {
+  return <svg className="native-sidebar-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v10M3 8h10" /></svg>;
 }
 
 /**
@@ -78,10 +87,50 @@ export function RoomNavigator({
   error,
   onSelect,
   onCreate,
+  onCreateChild,
+  onMove,
+  onRename,
   expandedRoomIds,
   onToggleExpanded
 }: RoomNavigatorProps) {
   const [locallyCollapsedRoomIds, setLocallyCollapsedRoomIds] = useState<Set<string>>(() => new Set());
+  const [contextMenu, setContextMenu] = useState<{ room: NativeRoom; position: RoomContextMenuPosition }>();
+  const roomButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const contextMenuRoomId = useRef<string | undefined>(undefined);
+
+  const closeContextMenu = (): void => {
+    const roomId = contextMenuRoomId.current;
+    contextMenuRoomId.current = undefined;
+    setContextMenu(undefined);
+    if (roomId) {
+      window.setTimeout(() => roomButtonRefs.current.get(roomId)?.focus(), 0);
+    }
+  };
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const closeOnViewportChange = (): void => closeContextMenu();
+    window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnViewportChange, true);
+    return () => {
+      window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnViewportChange, true);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (room: NativeRoom, position: RoomContextMenuPosition): void => {
+    if (room.kind === "agent_dm") return;
+    contextMenuRoomId.current = room.id;
+    setContextMenu({ room, position });
+  };
+
+  const handleContextMenuAction = (action: RoomContextMenuAction, room: NativeRoom): void => {
+    closeContextMenu();
+    if (action === "create" && onCreate) onCreate();
+    if (action === "create-child" && onCreateChild) onCreateChild(room);
+    if (action === "move" && onMove) onMove(room);
+    if (action === "rename" && onRename) onRename(room);
+  };
   const normalRooms = rooms.filter((room) => room.kind !== "agent_dm");
   const agentDmRooms = rooms.filter((room) => room.kind === "agent_dm");
   const byId = new Map(normalRooms.map((room) => [room.id, room]));
@@ -123,19 +172,30 @@ export function RoomNavigator({
     const permissionLabel = room.canView === false ? "閲覧不可" : room.canExecute === false ? "読み取り専用" : undefined;
     const ariaLabel = `${room.name}${isAgentDm ? "（Agent DM・非公開）" : ""}${permissionLabel ? `・${permissionLabel}` : ""}`;
     const roomButton = <button
+      ref={(element) => {
+        if (element) roomButtonRefs.current.set(room.id, element);
+        else roomButtonRefs.current.delete(room.id);
+      }}
       className={`native-room-item native-room-item-${isAgentDm ? "dm" : "normal"}${hasChildren ? " native-room-item-parent" : ""}${active ? " is-selected" : ""}${roomDisabled ? " is-muted" : ""}`}
       type="button"
       onClick={() => onSelect(room)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        openContextMenu(room, { x: event.clientX, y: event.clientY });
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
+        event.preventDefault();
+        const rect = event.currentTarget.getBoundingClientRect();
+        openContextMenu(room, { x: rect.left, y: rect.bottom });
+      }}
       disabled={roomDisabled}
       aria-current={active ? "page" : undefined}
       aria-label={ariaLabel}
       title={permissionLabel}
-      style={{
-        "--native-room-depth": isAgentDm ? 0 : roomDepth(room, byId),
-        ...(hasChildren ? { flex: "1 1 auto", minWidth: 0, width: "auto" } : {})
-      } as CSSProperties}
+      style={hasChildren ? { flex: "1 1 auto", minWidth: 0, width: "auto" } : undefined}
     >
-      <span className={isAgentDm ? "native-room-dm-mark" : "native-room-mark"} aria-hidden="true">{isAgentDm ? "◉" : "#"}</span>
+      <RoomMark directMessage={isAgentDm} />
       <span className="native-room-name">{room.name}</span>
     </button>;
 
@@ -143,7 +203,7 @@ export function RoomNavigator({
 
     const expanded = isRoomExpanded(room);
     const toggleLabel = `${room.name}を${expanded ? "折りたたむ" : "展開する"}`;
-    return <div className="native-room-item-row" style={{ display: "flex", minWidth: 0 }}>
+    return <div className="native-room-item-row">
       <button
         className="native-icon-button native-room-toggle"
         type="button"
@@ -152,9 +212,8 @@ export function RoomNavigator({
         aria-label={toggleLabel}
         aria-expanded={expanded}
         title={toggleLabel}
-        style={{ flex: "0 0 27px", minWidth: "27px", height: "auto", padding: 0 }}
       >
-        <span aria-hidden="true">{expanded ? "⌄" : "›"}</span>
+        <RoomToggleIcon expanded={expanded} />
       </button>
       {roomButton}
     </div>;
@@ -199,18 +258,22 @@ export function RoomNavigator({
     <section className="native-room-navigator" aria-labelledby="native-room-heading">
       <div className="native-subsection-heading">
         <span className="native-section-eyebrow" id="native-room-heading">Room</span>
-        {onCreate ? <button className="native-icon-button native-icon-button-small" type="button" onClick={onCreate} disabled={disabled || archived || loading} aria-label="Roomを作成">＋</button> : null}
+        {onCreate ? <button className="native-icon-button native-icon-button-small" type="button" onClick={onCreate} disabled={disabled || archived || loading} aria-label="Roomを作成"><RoomCreateIcon /></button> : null}
       </div>
       {loading ? <div className="native-loading-line" role="status">Roomsを確認中…</div> : null}
       {!loading && normalRooms.length === 0 && agentDmRooms.length === 0 ? <div className="native-empty-copy">Roomがありません。新しいRoomを作成できます。</div> : null}
       {roomTree.length ? <ul className="native-room-list" aria-label="Room">{roomTree}</ul> : null}
-      {visibleAgentDmRooms.length ? (
-        <div className="native-room-dm-section">
-          <div className="native-room-section-heading">ダイレクトメッセージ</div>
-          <ul className="native-room-list native-room-dm-list" aria-label="ダイレクトメッセージ">{visibleAgentDmRooms.map(renderAgentDm)}</ul>
-        </div>
-      ) : null}
+      <div className="native-room-dm-section">
+        <div className="native-room-section-heading">ダイレクトメッセージ</div>
+        {visibleAgentDmRooms.length ? <ul className="native-room-list native-room-dm-list" aria-label="ダイレクトメッセージ">{visibleAgentDmRooms.map(renderAgentDm)}</ul> : <p className="native-empty-copy native-room-dm-empty">まだありません</p>}
+      </div>
       {error ? <p className="native-inline-error" role="alert">{error}</p> : null}
+      {contextMenu ? <RoomContextMenu
+        room={contextMenu.room}
+        position={contextMenu.position}
+        onAction={handleContextMenuAction}
+        onClose={closeContextMenu}
+      /> : null}
     </section>
   );
 }

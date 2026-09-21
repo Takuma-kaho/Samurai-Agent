@@ -7,6 +7,8 @@ export interface DesktopArtifactRawContentHeaders {
   contentType?: string;
   contentLength?: string;
   contentEncoding?: string;
+  fileVersion?: string;
+  fileSha256?: string;
 }
 
 export interface DesktopArtifactRawContent {

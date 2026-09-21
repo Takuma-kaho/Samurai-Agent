@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState, type ChangeEvent, type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { createIdempotencyKey, getWorkspaceClientBridge, type WorkspaceAttachmentUploadResult } from "../lib/api";
 import { WorkspaceFileResourceRefSchema, type ResourceRef } from "@samurai-agent/core-schemas";
 import { nativeRoomAgentIsAvailable, nativeRoomWorkErrorIsExplicitServerFailure, type NativeRoomWorkMutationResult } from "./use-native-app";
+import { RoomDefaultAgentPicker, type RoomDefaultAgentOption } from "./RoomDefaultAgentPicker";
+import NativeMarkdown from "./NativeMarkdown";
+import RoomWorkspaceAttachment from "./RoomWorkspaceAttachment";
 import type {
   NativeAgent,
   NativeAgentBackend,
@@ -16,7 +19,8 @@ import type {
   NativeRoomWorkResourceRefInput,
   NativeRoomWorkInstructionStatus,
   NativeRoomWorkStatus,
-  NativeArtifactWorkspaceInitialResource
+  NativeArtifactWorkspaceInitialResource,
+  NativeWorkspaceTarget
 } from "./types";
 import type { NativeRoomParticipant } from "./use-native-room-participants";
 
@@ -24,6 +28,7 @@ export type NativeRoomPanelState = "closed" | "artifacts" | "room_settings";
 
 export interface RoomWorkSurfaceProps {
   room?: NativeRoom;
+  workspaceTarget?: NativeWorkspaceTarget;
   currentAccountId?: string;
   agents: NativeAgent[];
   agentBackends?: NativeAgentBackend[];
@@ -77,9 +82,10 @@ export interface RoomWorkSurfaceProps {
   participants?: readonly NativeRoomParticipant[];
   participantsLoading?: boolean;
   participantsError?: string | null;
-  roomPanelState?: NativeRoomPanelState;
-  onToggleRoomPanel?: () => void;
-  onOpenRoomArtifacts?: () => void;
+  participantsLoaded?: boolean;
+  /** NativeApp owns the combined participant list/menu; this surface only opens it. */
+  onOpenRoomParticipants?: () => void;
+  roomParticipantsOpen?: boolean;
   onOpenRoomSettings?: () => void;
   onOpenRoomKnowledge?: () => void;
   onOpenRoomShare?: () => void;
@@ -116,6 +122,7 @@ interface RoomAttachmentDraft {
   status: AttachmentDraftStatus;
   resourceRef?: ResourceRef;
   error?: string;
+  previewUrl?: string;
 }
 
 type RoomWorkActionOutcome<T> =
@@ -565,6 +572,83 @@ function actorInitial(label: string): string {
   return label.trim().slice(0, 1) || "?";
 }
 
+export interface RoomWorkComposerKeyEvent {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  isComposing?: boolean;
+}
+
+/** Keep IME composition confirmation from being treated as a send shortcut. */
+export function roomWorkShouldSubmitOnKeyDown(event: RoomWorkComposerKeyEvent): boolean {
+  return event.key === "Enter"
+    && (event.metaKey || event.ctrlKey)
+    && !event.shiftKey
+    && !event.isComposing;
+}
+
+export const roomWorkComposerMaxHeight = 168;
+export const roomWorkComposerMinHeight = 40;
+
+export interface RoomWorkComposerResizeTarget {
+  readonly scrollHeight: number;
+  style: {
+    height: string;
+    overflowY: string;
+  };
+}
+
+/** Grow with the draft until the transcript still has useful room to remain visible. */
+export function resizeRoomWorkComposer(
+  input: RoomWorkComposerResizeTarget,
+  maxHeight = roomWorkComposerMaxHeight
+): void {
+  // Reset first so deletions shrink the field too; flex sizing must not decide its height.
+  input.style.overflowY = "hidden";
+  input.style.height = "0px";
+  const contentHeight = input.scrollHeight;
+  const height = Math.min(Math.max(contentHeight, roomWorkComposerMinHeight), maxHeight);
+  input.style.height = `${height}px`;
+  input.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+}
+
+function RoomMenuIcon(): ReactNode {
+  return (
+    <svg className="native-work-header-icon" data-icon="room-menu" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <circle cx="3" cy="8" r="1.2" fill="currentColor" />
+      <circle cx="8" cy="8" r="1.2" fill="currentColor" />
+      <circle cx="13" cy="8" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function RoomComposerAddIcon(): ReactNode {
+  return (
+    <svg className="native-work-composer-icon" data-icon="add" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4v16M4 12h16" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.75" />
+    </svg>
+  );
+}
+
+function RoomSendIcon(): ReactNode {
+  return (
+    <svg className="native-work-composer-icon" data-icon="send" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 18V6M7.5 10.5 12 6l4.5 4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.75" />
+    </svg>
+  );
+}
+
+function RoomParticipantsIcon(): ReactNode {
+  return (
+    <svg className="native-work-participants-icon" data-icon="participants" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <circle cx="7" cy="7" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M2.8 15c.3-2.5 1.8-3.8 4.2-3.8s3.9 1.3 4.2 3.8" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
+      <path d="M12.4 5.1a2.3 2.3 0 0 1 0 4.2M13.2 11.4c1.8.3 2.9 1.5 3.2 3.6" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 function roomCapability(room: NativeRoom | undefined, capability: "canEdit" | "canExecute" | "canManage" | "canStop"): boolean {
   return room?.[capability] === true || room?.capabilities?.[capability] === true;
 }
@@ -660,15 +744,20 @@ function formatTimestamp(value: string | undefined): string {
 
 const attachmentPathPattern = /^attachments\/[A-Za-z0-9._-]{1,220}$/;
 
-function safeAttachmentName(value: string): string {
+function attachmentDisplayName(value: string): string {
   const basename = value.split(/[\\/]/).pop() ?? "file";
-  return basename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "file";
+  const normalized = basename.replace(/[\u0000-\u001f\u007f]/g, "_").trim();
+  return normalized || "file";
+}
+
+function safeAttachmentName(value: string): string {
+  return attachmentDisplayName(value).slice(0, 120) || "file";
 }
 
 function attachmentPath(id: string, name: string): string {
   const safeId = id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 96) || "attachment";
-  const safeName = safeAttachmentName(name);
-  const path = `attachments/${safeId}-${safeName}`;
+  const extension = safeAttachmentName(name).match(/\.([A-Za-z0-9]{1,16})$/)?.[1];
+  const path = `attachments/${safeId}${extension ? `.${extension.toLowerCase()}` : ""}`;
   if (!attachmentPathPattern.test(path)) throw new Error("workspace_attachment_path_invalid");
   return path;
 }
@@ -705,7 +794,38 @@ function attachmentErrorMessage(): string {
   return "アップロードに失敗しました。再試行するか、添付を外してください。";
 }
 
-function renderSavedAttachmentRefs(refs: ResourceRef[]): ReactNode {
+function revokeAttachmentDrafts(drafts: RoomAttachmentDraft[]): void {
+  for (const draft of drafts) {
+    if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl);
+  }
+}
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1_024) return `${size} B`;
+  if (size < 1_024 * 1_024) return `${(size / 1_024).toFixed(size < 10 * 1_024 ? 1 : 0)} KiB`;
+  return `${(size / (1_024 * 1_024)).toFixed(size < 10 * 1_024 * 1_024 ? 1 : 0)} MiB`;
+}
+
+function attachmentKindLabel(file: File): string {
+  if (file.type.startsWith("image/")) return "画像";
+  if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) return "PDF";
+  const extension = file.name.split(".").pop()?.trim();
+  if (extension && extension !== file.name && /^[a-z0-9]{1,12}$/i.test(extension)) return extension.toUpperCase();
+  return file.type || "ファイル";
+}
+
+function savedAttachmentAnchorId(ref: ResourceRef): string {
+  return `native-room-attachment-${ref.id}`;
+}
+
+function focusSavedAttachment(ref: ResourceRef): void {
+  const element = document.getElementById(savedAttachmentAnchorId(ref));
+  if (!(element instanceof HTMLElement)) return;
+  element.scrollIntoView({ block: "nearest" });
+  element.focus({ preventScroll: true });
+}
+
+function renderSavedAttachmentRefs(refs: ResourceRef[], roomId?: string, target?: NativeWorkspaceTarget): ReactNode {
   const safeRefs = refs.flatMap((ref) => {
     const safe = safeAttachmentRef(ref);
     return safe ? [safe] : [];
@@ -713,7 +833,7 @@ function renderSavedAttachmentRefs(refs: ResourceRef[]): ReactNode {
   if (!safeRefs.length) return null;
   return (
     <div className="native-work-attachment-list" aria-label="添付">
-      {safeRefs.map((ref) => <span className="native-work-attachment-item" key={`${ref.id}:${ref.version ?? ""}`}>{ref.label ?? ref.uri}{ref.version ? <span className="native-work-attachment-action">v{ref.version}</span> : null}</span>)}
+      {safeRefs.map((ref) => <RoomWorkspaceAttachment key={`${ref.id}:${ref.version ?? ""}`} resourceRef={ref} roomId={roomId ?? ""} target={target} anchorId={savedAttachmentAnchorId(ref)} />)}
     </div>
   );
 }
@@ -744,14 +864,15 @@ function renderSavedRoomWorkResourceRefs(refs: ResourceRef[]): ReactNode {
 }
 
 const roomWorkStyles = [
-  ".native-work-surface { min-height: 0; }",
-  ".native-work-surface .native-chat-header { align-items: center; gap: 14px; min-height: 78px; padding: 0 30px; }",
-  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: 18px; } }",
+  ".native-work-surface { --native-room-thread-max-width: 800px; --native-room-thread-gutter: 24px; container-type: inline-size; min-height: 0; }",
+  ".native-work-surface .native-chat-header { align-items: center; gap: 12px; height: var(--native-room-header-height, 56px); min-height: var(--native-room-header-height, 56px); padding: 0 var(--native-chat-header-right-inset, 24px) 0 24px; }",
+  "@media (max-width: 700px) { .native-work-surface .native-chat-header { padding-left: 56px; padding-right: var(--native-chat-header-right-inset, 24px); } }",
   ".native-work-surface .native-chat-header .native-section-eyebrow { display: none; }",
-  ".native-work-surface .native-chat-header h1 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; line-height: 1.25; margin: 0; }",
+  ".native-work-surface .native-room-heading { min-width: 0; }",
+  ".native-work-surface .native-chat-header h1 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; line-height: 1.25; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-surface .native-chat-header h1::before { color: var(--native-dim); content: '#'; font-size: 20px; font-weight: 400; margin-right: 10px; }",
   ".native-work-header-artifact-link.native-room-tool-links { border: 0; display: block; padding: 0; }",
-  ".native-work-header-meta { align-items: center; display: flex; flex: 0 1 auto; flex-direction: row; flex-wrap: wrap; gap: 8px; justify-content: flex-end; min-width: 0; }",
+  ".native-work-header-meta { align-items: center; display: flex; flex: 0 1 auto; flex-direction: row; flex-wrap: nowrap; gap: 8px; justify-content: flex-end; min-width: 0; }",
   ".native-work-default { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }",
   ".native-work-default-avatar { align-items: center; background: var(--native-panel-soft); border-radius: 8px; color: var(--native-copy); display: inline-flex; font-size: 10px; font-weight: 600; height: 25px; justify-content: center; width: 25px; }",
   ".native-work-default-label { color: var(--native-dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }",
@@ -783,14 +904,14 @@ const roomWorkStyles = [
   ".native-work-thread-switcher button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-thread-switcher button:disabled { cursor: default; opacity: .6; }",
   ".native-work-thread-switcher-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-  ".native-work-conversation-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin: 14px auto 0; max-width: 800px; padding: 0 30px; width: 100%; }",
+  ".native-work-conversation-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin: 14px auto 0; max-width: var(--native-room-thread-max-width); padding: 0 var(--native-room-thread-gutter); width: 100%; }",
   ".native-work-conversation-header.is-compact { align-items: center; justify-content: flex-end; margin-top: 10px; min-height: 26px; }",
   ".native-work-conversation-heading { min-width: 0; }",
   ".native-work-conversation-heading h2 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 17px; font-weight: 600; letter-spacing: .02em; margin: 0; }",
   ".native-work-conversation-heading p { color: var(--native-muted); font-size: 12px; line-height: 1.65; margin: 6px 0 0; max-width: 650px; white-space: pre-wrap; }",
   ".native-work-conversation-actions { align-items: center; display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }",
   ".native-work-conversation-status { align-items: center; display: flex; gap: 8px; }",
-  ".native-work-message-list { gap: 17px; padding-top: 22px; }",
+  ".native-work-message-list-content { gap: 17px; padding-top: 22px; }",
   ".native-work-message { max-width: 770px; position: relative; width: min(100%, 770px); }",
   ".native-work-message-self { align-self: flex-end; max-width: min(76%, 560px); width: auto; }",
   ".native-work-message-peer, .native-work-message-agent { align-self: flex-start; display: grid; gap: 11px; grid-template-columns: 31px minmax(0, 1fr); }",
@@ -812,18 +933,30 @@ const roomWorkStyles = [
   ".native-work-message-reply { color: var(--native-muted); font-size: 10px; margin-top: 8px; }",
   ".native-work-message-reply:hover:not(:disabled) { color: var(--native-copy); }",
   ".native-work-message-result-card { margin-top: 10px; max-width: 560px; }",
+  ".native-markdown { color: inherit; font-size: inherit; line-height: 1.7; min-width: 0; overflow-wrap: anywhere; }",
+  ".native-markdown > :first-child { margin-top: 0; } .native-markdown > :last-child { margin-bottom: 0; }",
+  ".native-markdown h1, .native-markdown h2, .native-markdown h3, .native-markdown h4 { color: var(--native-copy); line-height: 1.35; margin: 14px 0 7px; }",
+  ".native-markdown h1 { font-size: 1.25em; } .native-markdown h2 { font-size: 1.15em; } .native-markdown h3, .native-markdown h4 { font-size: 1.05em; }",
+  ".native-markdown p, .native-markdown ul, .native-markdown ol, .native-markdown blockquote, .native-markdown table { margin: 8px 0; }",
+  ".native-markdown ul, .native-markdown ol { padding-left: 1.4em; } .native-markdown li + li { margin-top: 3px; }",
+  ".native-markdown blockquote { border-left: 2px solid var(--native-accent); color: var(--native-muted); padding-left: 12px; }",
+  ".native-markdown a { color: var(--native-accent); text-decoration: underline; text-decoration-color: var(--native-line-strong); text-underline-offset: 2px; }",
+  ".native-markdown-attachment-link { background: transparent; border: 0; color: var(--native-accent); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }",
+  ".native-markdown table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; width: max-content; } .native-markdown th, .native-markdown td { border: 1px solid var(--native-line-strong); padding: 5px 8px; text-align: left; white-space: nowrap; } .native-markdown th { color: var(--native-copy); }",
+  ".native-markdown code { background: var(--native-panel-soft); border-radius: 4px; color: var(--native-copy); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; padding: 2px 4px; }",
+  ".native-markdown-code-block { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 8px; margin: 9px 0; max-width: 100%; overflow: hidden; } .native-markdown-code-toolbar { align-items: center; border-bottom: 1px solid var(--native-line); color: var(--native-dim); display: flex; font-size: 9px; justify-content: space-between; padding: 5px 8px; text-transform: lowercase; } .native-markdown-code-toolbar button { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; } .native-markdown-code-toolbar button:hover { color: var(--native-copy); } .native-markdown-code-block pre { margin: 0; max-width: 100%; overflow-x: auto; padding: 10px; } .native-markdown-code-block pre code { background: transparent; padding: 0; }",
   ".native-work-conversation-loading { color: var(--native-muted); margin: auto; text-align: center; }",
   ".native-work-conversation-empty { color: var(--native-muted); margin: auto; max-width: 420px; padding: 36px 22px; text-align: center; }",
   ".native-work-conversation-empty p { line-height: 1.7; margin: 9px 0 0; }",
   ".native-work-list { border-right: 1px solid var(--native-line); min-height: 0; overflow: auto; padding: 20px; }",
   ".native-work-list-heading { align-items: baseline; display: flex; justify-content: space-between; margin: 0 0 14px; }",
-  ".native-work-list-heading h2, .native-work-detail-heading h2 { color: var(--native-copy); font-family: Georgia, Times New Roman, serif; font-size: 20px; font-weight: 400; letter-spacing: -.025em; margin: 0; }",
+  ".native-work-list-heading h2, .native-work-detail-heading h2 { color: var(--native-copy); font-family: Avenir Next, Hiragino Sans, ui-sans-serif, sans-serif; font-size: 16px; font-weight: 600; letter-spacing: .01em; margin: 0; }",
   ".native-work-list-count { color: var(--native-dim); font-size: 10px; letter-spacing: .08em; }",
   ".native-work-list-items { display: grid; gap: 9px; list-style: none; margin: 0; padding: 0; }",
   ".native-work-card { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 10px; color: inherit; cursor: pointer; display: block; padding: 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
   ".native-work-card:hover:not(:disabled) { background: var(--native-panel); border-color: var(--native-line-strong); transform: translateY(-1px); }",
   ".native-work-card:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
-  ".native-work-card.is-selected { background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel-soft)); border-color: var(--native-accent); box-shadow: inset 3px 0 0 var(--native-accent); }",
+  ".native-work-card.is-selected { background: var(--native-accent-soft); border-color: var(--native-accent); box-shadow: inset 3px 0 0 var(--native-accent); }",
   ".native-work-card:disabled { cursor: default; }",
   ".native-work-card-top, .native-work-card-meta, .native-work-assignee-row, .native-work-control-row, .native-work-comment-head, .native-work-detail-actions { align-items: center; display: flex; gap: 8px; }",
   ".native-work-card-top { justify-content: space-between; }",
@@ -854,7 +987,7 @@ const roomWorkStyles = [
   ".native-work-assignee-main span { color: var(--native-dim); font-size: 9px; }",
   ".native-work-assignee-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; }",
   ".native-work-assignee-actions select { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-copy); font: inherit; font-size: 10px; min-height: 26px; padding: 0 6px; }",
-  ".native-work-delegation { background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel-soft)); border: 1px solid var(--native-line-strong); border-radius: 10px; display: grid; gap: 12px; padding: 14px; }",
+  ".native-work-delegation { background: var(--native-panel-soft); border: 1px solid var(--native-line-strong); border-radius: 10px; display: grid; gap: 12px; padding: 14px; }",
   ".native-work-delegation-help { color: var(--native-muted); font-size: 10px; line-height: 1.6; margin: -4px 0 0; }",
   ".native-work-delegation-grid { display: grid; gap: 10px; grid-template-columns: minmax(150px, .85fr) minmax(210px, 1.15fr); }",
   ".native-work-delegation-field { display: grid; gap: 6px; }",
@@ -896,17 +1029,18 @@ const roomWorkStyles = [
   ".native-work-composer-block { margin-top: 28px; }",
   ".native-work-composer-label { color: var(--native-accent); display: block; font-size: 10px; letter-spacing: .1em; margin-bottom: 9px; text-transform: uppercase; }",
   ".native-work-composer-help { color: var(--native-dim); font-size: 10px; line-height: 1.6; margin: 8px 0 0; }",
-  ".native-work-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 3px; }",
-  ".native-work-attachment { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; display: inline-flex; gap: 7px; max-width: 100%; padding: 6px 8px; }",
-  ".native-work-attachment-name { color: var(--native-copy); font-size: 10px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-  ".native-work-attachment-state { color: var(--native-dim); font-size: 9px; }",
+  ".native-work-attachments { display: flex; flex-wrap: nowrap; gap: 8px; margin: 0 0 2px; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 2px 1px 5px; scrollbar-width: thin; }",
+  ".native-work-attachment { align-items: center; border-radius: 8px; display: inline-flex; flex: 0 0 auto; gap: 7px; max-width: 100%; min-height: 64px; padding: 0; position: relative; }",
+  ".native-work-attachment.is-file { background: var(--native-panel-soft); border: 1px solid var(--native-line); min-width: 200px; padding: 7px 34px 7px 8px; }",
+  ".native-work-attachment-name { color: var(--native-copy); display: block; font-size: 10px; max-width: 146px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-attachment-state { color: var(--native-dim); display: block; font-size: 9px; line-height: 1.35; max-width: 146px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-resource-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 3px; }",
   ".native-work-resource-item { align-items: center; background: var(--native-accent-soft); border: 1px solid var(--native-line-strong); border-radius: 7px; color: var(--native-copy); display: inline-flex; font-size: 10px; gap: 6px; max-width: 100%; padding: 6px 8px; }",
   ".native-work-resource-item > span:first-child { color: var(--native-accent); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }",
   ".native-work-resource-version { color: var(--native-dim); font-size: 9px; }",
   ".native-work-result-cards { display: grid; gap: 9px; margin-top: 10px; }",
-  ".native-work-result-card { align-items: center; background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel-soft)); border: 1px solid var(--native-success); border-radius: 10px; color: inherit; cursor: pointer; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; padding: 12px 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease, transform 150ms ease; width: 100%; }",
-  ".native-work-result-card:hover { background: linear-gradient(135deg, var(--native-accent-soft), var(--native-panel)); border-color: var(--native-success); transform: translateY(-1px); }",
+  ".native-work-result-card { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 10px; color: inherit; cursor: pointer; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; padding: 12px 13px; text-align: left; transition: background 150ms ease, border-color 150ms ease; width: 100%; }",
+  ".native-work-result-card:hover { background: var(--native-panel); border-color: var(--native-line-strong); }",
   ".native-work-result-card:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-result-card-main { display: grid; gap: 5px; min-width: 0; }",
   ".native-work-result-card-title { color: var(--native-copy); font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
@@ -915,25 +1049,67 @@ const roomWorkStyles = [
   ".native-work-result-card-open { color: var(--native-accent); font-size: 10px; white-space: nowrap; }",
   ".native-work-resource-remove { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 12px; line-height: 1; padding: 0 0 0 2px; }",
   ".native-work-resource-remove:hover { color: var(--native-copy); }",
-  ".native-work-attachment.is-ready { border-color: var(--native-success); }",
-  ".native-work-attachment.is-ready .native-work-attachment-state { color: var(--native-success); }",
-  ".native-work-attachment.is-failed { border-color: var(--native-danger); }",
-  ".native-work-attachment.is-failed .native-work-attachment-state { color: var(--native-danger); }",
+  ".native-work-attachment.is-failed { box-shadow: inset 0 0 0 1px var(--native-danger); }",
+  ".native-work-attachment-thumbnail { border-radius: 8px; display: block; height: 64px; object-fit: cover; width: 64px; }",
+  ".native-work-attachment-image-state { align-items: center; background: var(--native-overlay, #000000c2); border-radius: 8px; color: var(--native-copy); display: flex; font-size: 9px; inset: 0; justify-content: center; position: absolute; }",
+  ".native-work-attachment-file-icon, .native-work-attachment-icon { align-items: center; color: var(--native-accent); display: inline-flex; flex: 0 0 auto; font-size: 10px; font-weight: 700; height: 32px; justify-content: center; width: 32px; }",
+  ".native-work-attachment-main, .native-work-attachment-card-main { display: grid; gap: 2px; min-width: 0; }",
+  ".native-work-attachment-meta { color: var(--native-dim); font-size: 9px; }",
   ".native-work-attachment button { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; padding: 2px; }",
   ".native-work-attachment button:hover { color: var(--native-copy); }",
-  ".native-work-attachment-list { color: var(--native-muted); display: grid; gap: 5px; margin: 8px 0 0; }",
+  ".native-work-attachment button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-attachment-remove { align-items: center; background: var(--native-panel) !important; border: 0; border-radius: 50%; display: inline-flex; font-size: 15px !important; height: 22px; justify-content: center; line-height: 1; padding: 0 !important; position: absolute; right: 4px; top: 4px; width: 22px; z-index: 1; }",
+  ".native-work-attachment.is-image .native-work-attachment-remove { background: var(--native-overlay, #000000c2) !important; color: var(--native-copy); }",
+  ".native-work-attachment-retry { color: var(--native-accent) !important; font-size: 9px !important; margin-left: 2px; padding: 2px 4px !important; } .native-work-attachment.is-image .native-work-attachment-retry { background: var(--native-panel) !important; border-radius: 999px; bottom: 4px; left: 4px; margin: 0; position: absolute; z-index: 2; }",
+  ".native-work-attachment-list { align-items: flex-start; color: var(--native-muted); display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 0; }",
   ".native-work-attachment-item { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; font-size: 10px; }",
   ".native-work-attachment-item::before { color: var(--native-accent); content: '↳'; }",
   ".native-work-attachment-action { color: var(--native-accent); font-size: 9px; }",
-  ".native-work-attachment-button { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 6px; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; min-height: 27px; padding: 0 9px; }",
-  ".native-work-attachment-button:hover:not(:disabled) { border-color: var(--native-line-strong); color: var(--native-copy); }",
+  ".native-work-attachment-card { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 8px; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 8px 10px; } .native-work-attachment-card.is-failed, .native-work-attachment-card.is-version-mismatch { border-color: var(--native-danger); } .native-work-attachment-card small { color: var(--native-dim); font-size: 9px; overflow-wrap: anywhere; } .native-work-attachment-card button { background: transparent; border: 0; color: var(--native-accent); cursor: pointer; font: inherit; font-size: 10px; padding: 3px 5px; } .native-work-attachment-card-actions { display: inline-flex; gap: 4px; margin-left: auto; }",
+  ".native-work-attachment-media { margin: 0; max-width: min(320px, 100%); } .native-work-attachment-media-button { background: transparent; border: 0; cursor: zoom-in; display: block; max-width: 100%; padding: 0; } .native-work-attachment-media-button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 3px; } .native-work-attachment-media-button img { border-radius: 8px; display: block; max-height: 240px; max-width: min(320px, 100%); object-fit: contain; width: auto; }",
+  ".native-work-attachment-viewer-dialog { align-items: center; background: var(--native-overlay, #000000c2); display: flex; inset: 0; justify-content: center; padding: 24px; position: fixed; z-index: 80; } .native-work-attachment-viewer-panel { background: var(--native-panel); border: 1px solid var(--native-line-strong); border-radius: 10px; display: grid; gap: 12px; max-height: 90vh; max-width: min(760px, 100%); min-width: min(320px, 100%); overflow: auto; padding: 14px; position: relative; } .native-work-attachment-viewer-header { align-items: center; display: flex; gap: 12px; justify-content: space-between; } .native-work-attachment-viewer-header strong { color: var(--native-copy); font-size: 12px; max-width: 560px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .native-work-attachment-viewer-header small { color: var(--native-dim); display: block; font-size: 9px; margin-top: 3px; } .native-work-attachment-viewer-close { color: var(--native-muted) !important; font-size: 20px !important; padding: 0 !important; } .native-work-attachment-viewer-image { border-radius: 8px; display: block; max-height: 70vh; max-width: min(720px, 80vw); object-fit: contain; } .native-work-attachment-viewer { border: 1px solid var(--native-line); border-radius: 5px; height: min(70vh, 560px); max-width: 100%; width: min(720px, 80vw); } .native-work-attachment-text-viewer { background: var(--native-panel); border: 1px solid var(--native-line); border-radius: 5px; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: min(70vh, 560px); max-width: 100%; min-height: 120px; overflow: auto; padding: 10px; white-space: pre-wrap; width: min(720px, 80vw); }",
+  ".native-work-attachment-lightbox-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; } .native-work-attachment-lightbox-actions button { background: transparent; border: 1px solid var(--native-line-strong); border-radius: 999px; color: var(--native-copy); cursor: pointer; font: inherit; font-size: 10px; padding: 5px 10px; } .native-work-attachment-lightbox-actions button:hover { background: var(--native-panel-soft); } .native-work-attachment-lightbox-actions button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-surface .native-composer-wrap { box-sizing: border-box; max-width: var(--native-room-thread-max-width); padding: 14px var(--native-room-thread-gutter) 18px; }",
+  ".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0; border-radius: 22px; box-shadow: none; display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 14px 16px 12px; position: relative; }",
+  ".native-work-surface .native-composer:focus-within { border: 0; box-shadow: none; outline: 0; }",
+  `.native-work-surface .native-composer .native-room-work-composer-input { background: transparent; border: 0; box-sizing: border-box; color: var(--native-copy); flex: 0 0 auto; font-size: 15px; line-height: 1.5; max-height: ${roomWorkComposerMaxHeight}px; min-height: 0; overflow-x: hidden; overflow-y: hidden; padding: 0 2px; resize: none; width: 100%; }`,
+  ".native-work-surface .native-composer .native-room-work-composer-input:focus-visible { outline: 0; }",
+  ".native-work-surface .native-composer-footer { align-items: center; display: flex; gap: 8px; min-height: 32px; padding: 0; }",
+  ".native-work-attachment-button { align-items: center; background: transparent; border: 0; border-radius: 50%; color: var(--native-copy); cursor: pointer; display: inline-flex; font: inherit; font-size: 10px; height: 32px; justify-content: center; min-width: 32px; padding: 0; transition: background-color 120ms ease, color 120ms ease; width: 32px; }",
+  ".native-work-attachment-button:hover:not(:disabled) { background: var(--native-accent-soft); color: var(--native-copy); }",
   ".native-work-attachment-button:disabled { cursor: default; opacity: .55; }",
+  ".native-composer-actions { align-items: center; display: inline-flex; flex: none; gap: 4px; }",
+  ".native-work-surface .native-work-composer-add .native-work-composer-icon { height: 20px; width: 20px; }",
+  ".native-work-surface .native-send-button .native-work-composer-icon { height: 20px; width: 20px; }",
+  ".native-work-surface .native-send-button { align-items: center; background: var(--native-accent); border: 0; border-radius: 50%; color: var(--native-accent-ink); display: inline-flex; height: 32px; justify-content: center; margin-left: auto; min-height: 32px; padding: 0; transition: background-color 120ms ease, color 120ms ease; width: 32px; }",
+  ".native-work-surface .native-send-button:hover:not(:disabled) { background: var(--native-accent); border: 0; color: var(--native-accent-ink); filter: brightness(1.08); }",
+  ".native-work-surface .native-send-button:disabled { background: var(--native-panel-soft); color: var(--native-dim); }",
   ".native-work-reconnect { margin-left: auto; }",
   ".native-work-recovery { margin-left: 8px; }",
-  ".native-work-header-action { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 11px; min-height: 30px; padding: 0 9px; }",
-  ".native-work-header-action:hover { border-color: var(--native-line-strong); color: var(--native-copy); }",
-  ".native-work-header-action[aria-expanded='true'] { border-color: var(--native-accent); color: var(--native-accent); }",
-  ".native-work-header-controls { align-items: center; display: inline-flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; position: relative; }",
+  ".native-work-header-action { align-items: center; background: transparent; border: 0; border-radius: 7px; color: var(--native-muted); cursor: pointer; display: inline-flex; font: inherit; font-size: 11px; gap: 6px; min-height: 32px; padding: 0 7px; }",
+  ".native-work-header-action:hover { background: var(--native-hover, #ffffff12); color: var(--native-copy); }",
+  ".native-work-header-action[aria-expanded='true'] { background: var(--native-panel-soft); color: var(--native-accent); }",
+  ".native-work-header-controls { align-items: center; display: inline-flex; flex-wrap: nowrap; gap: var(--native-header-control-gap, 7px); justify-content: flex-end; position: relative; }",
+  ".native-work-header-icon { display: block; height: 16px; width: 16px; }",
+  ".native-work-participants-trigger { gap: 6px; padding-inline: 6px; }",
+  ".native-work-participants-indicator { align-items: center; display: inline-flex; gap: 4px; }",
+  ".native-work-participants-icon { display: block; height: 17px; width: 17px; }",
+  ".native-work-participants-count { color: var(--native-copy); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 1ch; text-align: center; }",
+  ".native-work-participant-status { color: var(--native-dim); font-size: 10px; white-space: nowrap; }",
+  ".native-work-default-control { align-items: center; display: inline-flex; gap: 6px; }",
+  ".native-work-agent-row { align-items: center; color: var(--native-muted); display: flex; flex: 1 1 160px; flex-wrap: nowrap; gap: 7px; min-height: 32px; min-width: 0; padding: 0; }",
+  ".native-work-agent-row .native-work-default-avatar { background: var(--native-panel-soft); border-radius: 50%; flex: none; font-size: 10px; height: 22px; width: 22px; }",
+  ".native-work-agent-row .native-work-default-label { display: none; }",
+  ".native-work-agent-row .native-work-default-value { font-size: 13px; }",
+  ".native-work-agent-picker { align-items: center; display: inline-flex; gap: 7px; min-width: 0; position: relative; }",
+  ".native-work-agent-trigger { align-items: center; background: transparent; border: 0; border-radius: 999px; color: var(--native-copy); cursor: pointer; display: inline-flex; flex: 0 1 auto; font: inherit; font-size: 13px; font-weight: 500; gap: 7px; min-height: 32px; min-width: 0; max-width: min(280px, 100%); padding: 3px 8px 3px 5px; text-align: left; transition: background-color 120ms ease, color 120ms ease; }",
+  ".native-work-agent-trigger:hover:not(:disabled), .native-work-agent-trigger[aria-expanded='true'] { background: var(--native-accent-soft); color: var(--native-copy); }",
+  ".native-work-agent-trigger:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-agent-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-agent-trigger:disabled { cursor: not-allowed; }",
+  ".native-work-agent-status { color: var(--native-accent); font-size: 12px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-composer-icon { display: block; height: 18px; width: 18px; }",
+  ".native-work-composer-chevron { color: var(--native-dim); display: block; flex: none; height: 10px; pointer-events: none; width: 10px; }",
   ".native-work-header-popover { background: var(--native-panel, #18211c); border: 1px solid var(--native-line-strong); border-radius: 10px; box-shadow: 0 12px 28px var(--native-shadow, #0000003d); color: var(--native-copy); min-width: 245px; padding: 11px; position: absolute; right: 0; top: calc(100% + 8px); z-index: 20; }",
   ".native-work-header-popover h2 { color: var(--native-muted); font-size: 11px; letter-spacing: .08em; margin: 0 0 8px; text-transform: uppercase; }",
   ".native-work-header-popover ul { display: grid; gap: 5px; list-style: none; margin: 0; padding: 0; }",
@@ -945,13 +1121,24 @@ const roomWorkStyles = [
   ".native-work-room-menu button:hover { background: var(--native-hover, #ffffff12); }",
   ".native-work-default-button { align-items: center; background: transparent; border: 0; border-radius: 7px; color: inherit; cursor: pointer; display: inline-flex; gap: 7px; padding: 3px 5px; }",
   ".native-work-default-button:hover { background: var(--native-hover, #ffffff12); }",
+  ".native-work-agent-menu { background: var(--native-panel-soft); border: 1px solid var(--native-line-strong); border-radius: 12px; bottom: calc(100% + 8px); display: grid; gap: 2px; left: 0; max-height: min(280px, calc(100dvh - 32px)); max-width: min(280px, calc(100vw - 16px)); min-width: min(280px, calc(100vw - 16px)); overflow: auto; padding: 7px; position: absolute; width: min(280px, calc(100vw - 16px)); z-index: 40; }",
+  ".native-work-agent-option { align-items: center; background: transparent; border: 0; border-radius: 8px; color: var(--native-muted); cursor: pointer; display: flex; font: inherit; gap: 8px; min-height: 34px; min-width: 0; padding: 6px 8px; text-align: left; width: 100%; }",
+  ".native-work-agent-option:hover:not(:disabled), .native-work-agent-option.is-active:not(:disabled), .native-work-agent-option.is-selected { background: var(--native-accent-soft); color: var(--native-copy); }",
+  ".native-work-agent-option:focus-visible { outline: 2px solid var(--native-accent); outline-offset: -2px; }",
+  ".native-work-agent-option:disabled { color: var(--native-dim); cursor: not-allowed; opacity: .58; }",
+  ".native-work-agent-option-avatar { align-items: center; background: var(--native-panel); border-radius: 50%; display: inline-flex; flex: 0 0 auto; font-size: 10px; height: 22px; justify-content: center; width: 22px; }",
+  ".native-work-agent-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-agent-option-check { color: var(--native-accent); font-size: 13px; margin-left: auto; }",
   ".native-work-surface .native-banner { margin-inline: clamp(22px, 5vw, 72px); }",
   "@media (max-width: 820px) { .native-work-header-meta { align-items: flex-start; min-width: 0; } .native-work-default, .native-work-private-note { justify-content: flex-start; text-align: left; } .native-work-thread-switcher { max-height: 112px; } .native-work-conversation-header { align-items: flex-start; flex-direction: column; } .native-work-conversation-actions { align-items: flex-start; flex-direction: row; } }",
-  "@media (max-width: 560px) { .native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; } .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-message-list { padding-inline: 18px; } }"
+  "@container (max-width: 560px) { .native-work-surface .native-chat-header { gap: 8px; } .native-work-header-meta { flex: 0 0 auto; } .native-work-participants-trigger { padding-inline: 4px; } .native-work-participants-icon { height: 16px; width: 16px; } }",
+  "@container (max-width: 700px) { .native-work-message-list-content, .native-work-conversation-header { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding-inline: 18px; } }",
+  "@media (max-width: 560px) { .native-work-thread-switcher { padding-inline: 18px; } .native-work-conversation-header { padding-inline: 18px; } .native-work-surface .native-composer-wrap { padding: 12px 18px 14px; } .native-work-surface .native-composer { border-radius: 22px; padding: 12px 14px 10px; } .native-work-agent-row { flex-basis: 0; } .native-work-agent-trigger { max-width: min(240px, 100%); } }"
 ].join("\n");
 
 export function RoomWorkSurface({
   room,
+  workspaceTarget,
   currentAccountId,
   agents,
   agentBackends,
@@ -996,9 +1183,9 @@ export function RoomWorkSurface({
   participants = [],
   participantsLoading = false,
   participantsError,
-  roomPanelState = "closed",
-  onToggleRoomPanel,
-  onOpenRoomArtifacts,
+  participantsLoaded = false,
+  onOpenRoomParticipants,
+  roomParticipantsOpen,
   onOpenRoomSettings,
   onOpenRoomKnowledge,
   onOpenRoomShare,
@@ -1022,10 +1209,12 @@ export function RoomWorkSurface({
   const [delegateReceipt, setDelegateReceipt] = useState<string>();
   const [workAttachmentDrafts, setWorkAttachmentDrafts] = useState<RoomAttachmentDraft[]>([]);
   const [commentAttachmentDrafts, setCommentAttachmentDrafts] = useState<RoomAttachmentDraft[]>([]);
-  const [participantsOpen, setParticipantsOpen] = useState(false);
   const [roomMenuOpen, setRoomMenuOpen] = useState(false);
   const workAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const workComposerInputRef = useRef<HTMLTextAreaElement>(null);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const workAttachmentDraftsRef = useRef<RoomAttachmentDraft[]>([]);
+  const commentAttachmentDraftsRef = useRef<RoomAttachmentDraft[]>([]);
   const attachmentContextRef = useRef("");
   const attachmentContextGenerationRef = useRef(0);
 
@@ -1056,6 +1245,20 @@ export function RoomWorkSurface({
   const defaultAgent = defaultAgentId ? agents.find((agent) => agent.id === defaultAgentId) : undefined;
   const defaultAgentKnown = Boolean(defaultAgentId && defaultAgent && defaultAgent.status !== undefined && (roomIsDm || roomCapabilityKnown(room, "canExecute")));
   const defaultAgentReady = Boolean(defaultAgentKnown && roomExecutionAllowed(room) && agentIsAvailable(defaultAgent, agentBackends, roomAgentMembers));
+  const participantRows = participantsLoading || Boolean(participantsError) ? [] : [...participants];
+  const participantCount = participantsLoading || Boolean(participantsError)
+    ? undefined
+    : participantRows.length > 0 || participantsLoaded
+      ? participantRows.length
+      : undefined;
+  const participantCountLabel = participantCount === undefined ? "—" : String(participantCount);
+  const participantButtonLabel = participantsLoading
+    ? "参加者を確認中…"
+    : participantsError
+      ? "参加者を確認できません"
+      : participantCount === undefined
+        ? "参加者"
+        : `参加者 ${participantCount}`;
   const writeBlocked = archived || readOnly || connectionState === "offline";
   const executeBlocked = writeBlocked || !roomExecutionAllowed(room);
   const replyActive = Boolean(replyTargetWork);
@@ -1074,6 +1277,8 @@ export function RoomWorkSurface({
   const attachmentContextKey = `${room?.workspaceId ?? "none"}\n${room?.id ?? "none"}\n${replyWorkId ?? "new"}\n${selectedWorkId ?? "none"}`;
   const workAttachmentRefs = attachmentRefs(workAttachmentDrafts);
   const commentAttachmentRefs = attachmentRefs(commentAttachmentDrafts);
+  workAttachmentDraftsRef.current = workAttachmentDrafts;
+  commentAttachmentDraftsRef.current = commentAttachmentDrafts;
   const workResourceRefsForSend = workResourceRefs.filter((ref, index) => {
     if ((ref.kind !== "knowledge" && ref.kind !== "skill")
       || !/^[a-z][a-z0-9_:-]{0,127}$/.test(ref.id)
@@ -1160,9 +1365,26 @@ export function RoomWorkSurface({
   }, [room?.id, room?.workspaceId, selectedWork?.id]);
 
   useEffect(() => {
-    setWorkAttachmentDrafts([]);
-    setCommentAttachmentDrafts([]);
+    setWorkAttachmentDrafts((current) => {
+      revokeAttachmentDrafts(current);
+      return [];
+    });
+    setCommentAttachmentDrafts((current) => {
+      revokeAttachmentDrafts(current);
+      return [];
+    });
   }, [attachmentContextKey]);
+
+  useEffect(() => () => {
+    revokeAttachmentDrafts(workAttachmentDraftsRef.current);
+    revokeAttachmentDrafts(commentAttachmentDraftsRef.current);
+  }, []);
+
+  useEffect(() => {
+    const input = workComposerInputRef.current;
+    if (!input) return;
+    resizeRoomWorkComposer(input);
+  }, [workDraft]);
 
   useEffect(() => {
     setDelegateParentAssigneeId((current) => delegateActiveAssignees.some((assignee) => assignee.id === current)
@@ -1219,19 +1441,41 @@ export function RoomWorkSurface({
         contentBase64,
         expectedVersion: 0,
         operationId: draft.operationId,
-        ...(target ? { target } : {})
+        ...(target ? { target: { ...target, roomId: room?.id } } : {})
       });
       const resourceRef = safeAttachmentRef(uploaded.resource_ref);
       if (!resourceRef) throw new Error("workspace_attachment_response_invalid");
       if (!requestContextIsCurrent()) return;
       setDrafts((current) => current.map((item) => item.id === draft.id
-        ? { ...item, status: "ready", resourceRef, error: undefined }
+        ? { ...item, status: "ready", resourceRef: { ...resourceRef, label: item.name }, error: undefined }
         : item));
-    } catch {
+    } catch (error) {
       if (!requestContextIsCurrent()) return;
       setDrafts((current) => current.map((item) => item.id === draft.id
-        ? { ...item, status: "failed", error: attachmentErrorMessage() }
+        ? { ...item, status: "failed", error: error instanceof Error && error.message === "attachment_too_large" ? "8MiBを超えるため添付できません" : attachmentErrorMessage() }
         : item));
+    }
+  };
+
+  const addAttachmentFiles = (
+    files: readonly File[],
+    setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
+  ): void => {
+    for (const file of files) {
+      const id = createIdempotencyKey();
+      const name = attachmentDisplayName(file.name);
+      const draft: RoomAttachmentDraft = {
+        id,
+        name,
+        size: file.size,
+        file,
+        path: attachmentPath(id, name),
+        operationId: `room_attachment_${id}`,
+        status: "uploading",
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined
+      };
+      setDrafts((current) => [...current, draft]);
+      void uploadAttachment(draft, setDrafts);
     }
   };
 
@@ -1241,25 +1485,40 @@ export function RoomWorkSurface({
   ): void => {
     const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-    for (const file of files) {
-      const id = createIdempotencyKey();
-      const name = safeAttachmentName(file.name);
-      const draft: RoomAttachmentDraft = {
-        id,
-        name,
-        size: file.size,
-        file,
-        path: attachmentPath(id, name),
-        operationId: `room_attachment_${id}`,
-        status: "uploading"
-      };
-      setDrafts((current) => [...current, draft]);
-      void uploadAttachment(draft, setDrafts);
-    }
+    addAttachmentFiles(files, setDrafts);
+  };
+
+  const dropAttachments = (
+    event: DragEvent<HTMLElement>,
+    setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
+  ): void => {
+    event.preventDefault();
+    if (event.dataTransfer.files.length) addAttachmentFiles(Array.from(event.dataTransfer.files), setDrafts);
+  };
+
+  const pasteAttachments = (
+    event: ClipboardEvent<HTMLTextAreaElement>,
+    setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
+  ): void => {
+    const files = Array.from(event.clipboardData.files ?? []);
+    const itemFiles = files.length
+      ? []
+      : Array.from(event.clipboardData.items ?? [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+    const pastedFiles = files.length ? files : itemFiles;
+    if (!pastedFiles.length) return;
+    event.preventDefault();
+    addAttachmentFiles(pastedFiles, setDrafts);
   };
 
   const removeAttachment = (id: string, setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>): void => {
-    setDrafts((current) => current.filter((item) => item.id !== id));
+    setDrafts((current) => {
+      const removed = current.find((item) => item.id === id);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return current.filter((item) => item.id !== id);
+    });
   };
 
   const renderAttachmentDrafts = (
@@ -1268,13 +1527,17 @@ export function RoomWorkSurface({
   ) => drafts.length ? (
     <div className="native-work-attachments" aria-label="添付ファイル">
       {drafts.map((draft) => (
-        <div className={`native-work-attachment is-${draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "failed" : draft.status}`} key={draft.id}>
-          <span className="native-work-attachment-name" title={draft.name}>{draft.name}</span>
-          <span className="native-work-attachment-state">
-            {draft.status === "uploading" ? "アップロード中…" : draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "参照が無効" : draft.status === "ready" ? "添付済み" : "アップロード失敗"}
-          </span>
-          {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <button type="button" onClick={() => void uploadAttachment(draft, setDrafts)}>再試行</button> : null}
-          <button type="button" aria-label={`${draft.name}を外す`} onClick={() => removeAttachment(draft.id, setDrafts)}>外す</button>
+        <div className={`native-work-attachment ${draft.previewUrl ? "is-image" : "is-file"} is-${draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "failed" : draft.status}`} key={draft.id} role="group" aria-label={`${draft.name} ${attachmentKindLabel(draft.file)}`} title={draft.name}>
+          {draft.previewUrl ? (
+            <>
+              <img className="native-work-attachment-thumbnail" src={draft.previewUrl} alt={draft.name} />
+              {draft.status === "uploading" ? <span className="native-work-attachment-image-state" role="status">アップロード中…</span> : null}
+              {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <span className="native-work-attachment-image-state" role="alert">失敗</span> : null}
+            </>
+          ) : <span className="native-work-attachment-file-icon" aria-hidden="true">{attachmentKindLabel(draft.file) === "PDF" ? "PDF" : "↧"}</span>}
+          {!draft.previewUrl ? <span className="native-work-attachment-main"><span className="native-work-attachment-name" title={draft.name}>{draft.name}</span><span className="native-work-attachment-meta">{attachmentKindLabel(draft.file)} · {formatAttachmentSize(draft.size)}</span><span className="native-work-attachment-state">{draft.status === "uploading" ? "アップロード中…" : draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "参照が無効" : draft.status === "failed" ? draft.error ?? "アップロード失敗" : null}</span></span> : null}
+          {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <button className="native-work-attachment-retry" type="button" onClick={() => void uploadAttachment(draft, setDrafts)}>再試行</button> : null}
+          <button className="native-work-attachment-remove" type="button" aria-label={`${draft.name}を外す`} title="添付を外す" onClick={() => removeAttachment(draft.id, setDrafts)}>×</button>
         </div>
       ))}
     </div>
@@ -1299,6 +1562,7 @@ export function RoomWorkSurface({
     if (!outcome.ok || roomWorkMutationNeedsRetry(outcome.value)) return;
     setReplyOperation((current) => current?.key === operationKey ? undefined : current);
     onClearWorkDraft();
+    revokeAttachmentDrafts(workAttachmentDraftsRef.current);
     setWorkAttachmentDrafts([]);
     onClearWorkResourceRefs?.();
     if (targetWorkId) onSetReplyWorkId(undefined);
@@ -1368,10 +1632,24 @@ export function RoomWorkSurface({
   };
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
-    }
+    if (!roomWorkShouldSubmitOnKeyDown({
+      key: event.key,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      isComposing: event.nativeEvent.isComposing
+    })) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  };
+
+  const handleComposerChange = (event: ChangeEvent<HTMLTextAreaElement>): void => {
+    resizeRoomWorkComposer(event.currentTarget);
+    onSetWorkDraft(event.currentTarget.value);
+  };
+
+  const handleComposerInput = (event: FormEvent<HTMLTextAreaElement>): void => {
+    resizeRoomWorkComposer(event.currentTarget);
   };
 
   const renderDefaultAgentState = () => {
@@ -1388,28 +1666,46 @@ export function RoomWorkSurface({
   };
 
   const renderDefaultAgentSelector = () => {
-    if (roomIsDm || !roomCapability(room, "canManage") || !roomCapability(room, "canExecute") || !onSetDefaultAgent) return null;
+    if (roomIsDm) return null;
+    const canChangeDefaultAgent = Boolean(
+      onSetDefaultAgent
+        && roomCapability(room, "canManage")
+        && roomCapability(room, "canExecute")
+        && !writeBlocked
+    );
+    const defaultAgentOptions: RoomDefaultAgentOption[] = agents.map((agent) => {
+      const selectable = agentIsAvailable(agent, agentBackends, roomAgentMembers);
+      return {
+        id: agent.id,
+        label: agent.displayName + (selectable ? "" : "（利用不可）"),
+        disabled: !selectable
+      };
+    });
     return (
-      <label className="native-work-default-control">
-        <span className="native-work-default-label">既定Agent</span>
-        <select
-          className="native-work-default-select"
-          value={defaultAgentId ?? ""}
-          disabled={Boolean(busyAction?.startsWith("default-agent")) || agentLoading || agents.length === 0 || writeBlocked}
-          onChange={(event) => {
-            const agentId = event.currentTarget.value;
-            if (!agentId) return;
-            void runAction("default-agent:" + agentId, () => onSetDefaultAgent(agentId));
-          }}
-          aria-label="Roomの既定Agent"
-        >
-          <option value="" disabled>{agentLoading ? "Agentを確認中…" : "Agentを選択"}</option>
-          {agents.map((agent) => {
-            const selectable = agentIsAvailable(agent, agentBackends, roomAgentMembers);
-            return <option key={agent.id} value={agent.id} disabled={!selectable}>{agent.displayName + (selectable ? "" : "（利用不可）")}</option>;
-          })}
-        </select>
-      </label>
+      <div className="native-work-agent-row" aria-label="担当Agent">
+        <span className="native-work-default-label">担当Agent</span>
+        {canChangeDefaultAgent ? (
+          <RoomDefaultAgentPicker
+            key={`${room?.id ?? "none"}:${defaultAgentId ?? "none"}`}
+            ariaLabel="Roomの既定Agent"
+            avatarLabel={actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}
+            disabled={Boolean(busyAction?.startsWith("default-agent")) || agentLoading}
+            label={defaultAgentId ? agentLabel(defaultAgentId, agents) : agentLoading ? "Agentを確認中…" : "既定Agent未設定"}
+            options={defaultAgentOptions}
+            status={defaultAgentId && !defaultAgentReady ? renderDefaultAgentState() : undefined}
+            value={defaultAgentId}
+            onSelect={(agentId) => {
+              if (!onSetDefaultAgent) return;
+              void runAction("default-agent:" + agentId, () => onSetDefaultAgent(agentId));
+            }}
+          />
+        ) : (
+          <>
+            <span className="native-work-default-avatar" aria-hidden="true">{actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}</span>
+            <span className="native-work-default-value">{renderDefaultAgentState()}</span>
+          </>
+        )}
+      </div>
     );
   };
 
@@ -1424,9 +1720,6 @@ export function RoomWorkSurface({
     if (readOnly) return warning("このWorkspaceは読み取り専用です。", "仕事の書き込みはできません。");
     if (!roomIsDm && roomCapabilityKnown(room, "canExecute") && !roomCapability(room, "canExecute")) return warning("このRoomへの実行権限がありません。", "権限が付与されるまで新しい仕事を依頼できません。", true);
     if (!roomIsDm && !roomCapabilityKnown(room, "canExecute")) return warning("このRoomの実行権限を確認できません。", "Serverから権限を受け取るまで仕事の依頼・返信・反映はできません。", true);
-    if (!defaultAgentId && !roomIsDm) return warning("既定Agent未設定。", "Roomに既定Agentを設定すると新しい仕事を依頼できます。", true);
-    if (defaultAgentId && !defaultAgentKnown && !roomIsDm) return warning("既定Agentの状態を確認できません。", "Serverから実行可否を受け取るまで送信できません。", true);
-    if (defaultAgentId && defaultAgentKnown && !defaultAgentReady) return warning("既定Agentは無効または実行不可です。", "別のAgentをRoomの既定に設定してください。", true);
     if (connectionState === "offline") return warning("Serverに接続できません。", "送信前に再接続してください。");
     return null;
   };
@@ -1437,11 +1730,8 @@ export function RoomWorkSurface({
         <span className="native-work-instruction-kind">{instruction.kind === "comment_apply" ? "コメント反映" : instruction.kind === "reply" ? "返信" : instruction.kind === "delegated" ? "委任" : "新規依頼"}</span>
         <span className={"native-work-instruction-status " + instructionTone(instruction.status)}>{roomWorkInstructionStatusLabel(instruction.status)}</span>
       </div>
-      <p className="native-work-instruction-body">
-        {instruction.instruction
-          || (instruction.attachments.length > 0 ? "添付のみの指示" : instruction.resourceRefs?.length ? "Knowledge/Skillのみの指示" : "本文なしの指示")}
-      </p>
-      {renderSavedAttachmentRefs(instruction.attachments)}
+      <NativeMarkdown value={instruction.instruction || (instruction.attachments.length > 0 ? "添付のみの指示" : instruction.resourceRefs?.length ? "Knowledge/Skillのみの指示" : "本文なしの指示")} attachmentRefs={instruction.attachments} onOpenAttachment={focusSavedAttachment} />
+      {renderSavedAttachmentRefs(instruction.attachments, room?.id, workspaceTarget)}
       {renderSavedRoomWorkResourceRefs(instruction.resourceRefs ?? [])}
       <div className="native-work-instruction-foot">
         <span>指示 v{instruction.version}</span>
@@ -1575,8 +1865,8 @@ export function RoomWorkSurface({
           <span className="native-work-comment-author">{actorLabel(comment.authorId, currentAccountId)}</span>
           <span className="native-work-comment-time">{formatTimestamp(comment.createdAt) || "時刻未確認"}</span>
         </div>
-        <p className="native-work-comment-body">{comment.body || "添付のみのコメント"}</p>
-        {renderSavedAttachmentRefs(comment.attachments)}
+        <NativeMarkdown value={comment.body || "添付のみのコメント"} attachmentRefs={comment.attachments} onOpenAttachment={focusSavedAttachment} />
+        {renderSavedAttachmentRefs(comment.attachments, room?.id, workspaceTarget)}
         <div className="native-work-comment-actions">
           <button
             type="button"
@@ -1691,8 +1981,8 @@ export function RoomWorkSurface({
             {formatTimestamp(entry.createdAt) ? <span className="native-work-message-time">{formatTimestamp(entry.createdAt)}</span> : null}
           </div> : null}
           <div className="native-work-message-bubble">
-            <div className="native-message-content">{entry.text}</div>
-            {renderSavedAttachmentRefs(entry.attachments)}
+            <NativeMarkdown value={entry.text} attachmentRefs={entry.attachments} onOpenAttachment={focusSavedAttachment} />
+            {renderSavedAttachmentRefs(entry.attachments, room?.id, workspaceTarget)}
             {renderSavedRoomWorkResourceRefs(entry.resourceRefs)}
             {entry.resultCards.length ? (
               <div className="native-work-result-cards native-work-message-result-card" aria-label="仕事の成果物">
@@ -1729,25 +2019,26 @@ export function RoomWorkSurface({
           <h1 id="native-work-heading">{room?.name ?? "Roomを選択"}</h1>
         </div>
         <div className="native-work-header-meta">
-          <div className="native-work-default">
-            <span className="native-work-default-avatar" aria-hidden="true">{actorInitial(defaultAgent ? defaultAgent.displayName : "AI")}</span>
-            {onOpenAgentSettings && !roomIsDm ? (
-              <button type="button" className="native-work-default-button" onClick={onOpenAgentSettings} aria-label="既定Agentの設定を開く">
-                {renderDefaultAgentState()}
-              </button>
-            ) : renderDefaultAgentState()}
-          </div>
           {roomIsDm ? <div className="native-work-private-note">Private Room · あなたとこのAgentだけが参加できます</div> : null}
           {!roomIsDm ? (
             <div className="native-work-header-controls" aria-label="Room操作">
               <button
                 type="button"
-                className="native-work-header-action"
-                onClick={() => setParticipantsOpen((open) => !open)}
-                aria-expanded={participantsOpen}
+                className="native-work-header-action native-work-participants-trigger"
+                onClick={() => {
+                  setRoomMenuOpen(false);
+                  onOpenRoomParticipants?.();
+                }}
+                {...(roomParticipantsOpen !== undefined ? { "aria-expanded": roomParticipantsOpen } : {})}
                 aria-haspopup="dialog"
-                aria-label="Roomの参加者を表示"
-              >参加者{participants.length > 0 ? ` ${participants.length}` : ""}</button>
+                aria-label={participantsLoading ? "参加者一覧を開く（確認中）" : participantsError ? "参加者一覧を開く（確認失敗）" : participantCount === undefined ? "参加者一覧を開く" : `参加者${participantCount}人の一覧を開く`}
+                title={participantButtonLabel}
+              >
+                <span className="native-work-participants-indicator" aria-hidden="true">
+                  <RoomParticipantsIcon />
+                  <span className="native-work-participants-count">{participantCountLabel}</span>
+                </span>
+              </button>
               <button
                 type="button"
                 className="native-work-header-action"
@@ -1755,43 +2046,18 @@ export function RoomWorkSurface({
                 aria-expanded={roomMenuOpen}
                 aria-haspopup="menu"
                 aria-label="Roomメニューを開く"
-              >•••</button>
-              {onToggleRoomPanel ? (
-                <button
-                  type="button"
-                  className="native-work-header-action"
-                  onClick={onToggleRoomPanel}
-                  aria-expanded={roomPanelState !== "closed"}
-                  aria-label={roomPanelState === "closed" ? "Roomの右パネルを開く" : "Roomの右パネルを閉じる"}
-                >{roomPanelState === "closed" ? "パネル" : "閉じる"}</button>
-              ) : null}
-              {participantsOpen ? (
-                <div className="native-work-header-popover" role="dialog" aria-label="Roomの参加者">
-                  <h2>参加者</h2>
-                  {participantsLoading ? <p className="native-work-header-participant-state" role="status">確認中…</p> : null}
-                  {participantsError ? <p className="native-work-header-participant-state" role="alert">{participantsError}</p> : null}
-                  {!participantsLoading && !participantsError && participants.length === 0 ? <p className="native-work-header-participant-state">参加者を確認できません。</p> : null}
-                  <ul>
-                    {participants.map((participant) => (
-                      <li className="native-work-header-participant" key={`${participant.kind}:${participant.id}`}>
-                        <span className="native-work-header-participant-name">{participant.label}</span>
-                        <span className="native-work-header-participant-state">{participant.kind === "agent" ? "Agent" : participant.role ?? "参加者"}・{participant.state === "active" || participant.state === "available" ? "利用可能" : participant.state === "revoked" ? "解除済み" : "利用不可"}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
+                title="Roomメニュー"
+              ><RoomMenuIcon /></button>
               {roomMenuOpen ? (
                 <div className="native-work-header-popover native-work-room-menu" role="menu" aria-label="Roomメニュー">
                   {onOpenRoomSettings ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomSettings(); }}>Room設定</button> : null}
-                  {onToggleRoomPanel || onOpenRoomArtifacts ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); if (roomPanelState === "artifacts") onToggleRoomPanel?.(); else onOpenRoomArtifacts?.(); }}>{roomPanelState === "artifacts" ? "成果物パネルを閉じる" : "成果物を開く"}</button> : null}
                   {onOpenRoomKnowledge ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomKnowledge(); }}>Room Knowledge</button> : null}
                   {roomKnowledgeShareAvailable && onOpenRoomShare ? <button type="button" role="menuitem" onClick={() => { setRoomMenuOpen(false); onOpenRoomShare(); }}>Room Knowledgeを共有</button> : null}
                 </div>
               ) : null}
             </div>
           ) : null}
-          {!onToggleRoomPanel ? roomToolLinks : null}
+          {roomToolLinks}
         </div>
       </header>
 
@@ -1819,9 +2085,11 @@ export function RoomWorkSurface({
                 </div>
               </header> : null}
               <div className="native-message-list native-work-message-list" aria-label="Roomの会話">
-                {workDetailLoading ? <div className="native-work-conversation-loading" role="status">会話の詳細をServerから確認しています…</div> : null}
-                {!workDetailLoading && !conversationEntries.length ? <div className="native-work-conversation-empty"><p>このRoomの会話詳細はまだServerから返されていません。</p></div> : null}
-                {conversationEntries.map(renderConversationEntry)}
+                <div className="native-work-message-list-content">
+                  {workDetailLoading ? <div className="native-work-conversation-loading" role="status">会話の詳細をServerから確認しています…</div> : null}
+                  {!workDetailLoading && !conversationEntries.length ? <div className="native-work-conversation-empty"><p>このRoomの会話詳細はまだServerから返されていません。</p></div> : null}
+                  {conversationEntries.map(renderConversationEntry)}
+                </div>
               </div>
             </>
           ) : null}
@@ -1830,7 +2098,7 @@ export function RoomWorkSurface({
 
       <footer className="native-composer-wrap">
         {sending ? <div className="native-streaming-row" role="status"><span className="native-streaming-bars" aria-hidden="true"><i /><i /><i /></span>Serverが依頼を受け付けています</div> : null}
-        <form className="native-composer" onSubmit={(event) => void handleSend(event)}>
+        <form className="native-composer" onSubmit={(event) => void handleSend(event)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => dropAttachments(event, setWorkAttachmentDrafts)}>
           <label className="native-visually-hidden" htmlFor="native-room-work-input">新しい依頼または同じ仕事への返信</label>
           {replyActive && replyTargetWork ? (
             <div className="native-work-reply-target" aria-live="polite">
@@ -1862,8 +2130,8 @@ export function RoomWorkSurface({
               {replyAssigneeRequired ? <span id="native-work-reply-assignee-help" className="native-work-reply-note is-required">未終端の担当が複数あるため、返信先を指定してから送信してください。</span> : null}
             </div>
           ) : null}
-          <textarea id="native-room-work-input" rows={2} value={workDraft} onChange={(event) => onSetWorkDraft(event.currentTarget.value)} onKeyDown={handleComposerKeyDown} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
           {renderAttachmentDrafts(workAttachmentDrafts, setWorkAttachmentDrafts)}
+          <textarea ref={workComposerInputRef} className="native-room-work-composer-input" id="native-room-work-input" rows={1} value={workDraft} onInput={handleComposerInput} onChange={handleComposerChange} onKeyDown={handleComposerKeyDown} onPaste={(event) => pasteAttachments(event, setWorkAttachmentDrafts)} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
           {workResourceRefsForSend.length ? (
             <div className="native-work-resource-list" aria-label="仕事で使うKnowledgeとSkill">
               {workResourceRefsForSend.map((ref) => (
@@ -1885,11 +2153,11 @@ export function RoomWorkSurface({
             aria-label="依頼に添付"
           />
           <div className="native-composer-footer">
-            <span>
-              ⌘/Ctrl + Enter で送信
-              <button type="button" className="native-work-attachment-button" aria-label="ファイルを添付" title="ファイルを添付" disabled={writeBlocked || Boolean(busyAction) || sending} onClick={() => workAttachmentInputRef.current?.click()}><span aria-hidden="true">▤</span></button>
+            <span className="native-composer-actions">
+              <button type="button" className="native-work-attachment-button native-work-composer-add" aria-label="ファイルを添付" title="ファイルを添付" disabled={writeBlocked || Boolean(busyAction) || sending} onClick={() => workAttachmentInputRef.current?.click()}><RoomComposerAddIcon /></button>
             </span>
-            <button className="native-send-button" type="submit" aria-label={busyAction === "send" ? "Server確認中" : replyActive ? "返信を送信" : "依頼を送信"} disabled={composerBlocked || !workComposerHasInput}><span aria-hidden="true">↑</span></button>
+            {renderDefaultAgentSelector()}
+            <button className="native-send-button" type="submit" aria-label={busyAction === "send" ? "Server確認中" : replyActive ? "返信を送信" : "依頼を送信"} disabled={composerBlocked || !workComposerHasInput}><RoomSendIcon /></button>
           </div>
         </form>
       </footer>

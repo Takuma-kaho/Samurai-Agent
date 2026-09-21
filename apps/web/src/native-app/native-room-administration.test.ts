@@ -109,7 +109,7 @@ describe("NativeRoomAdministration", () => {
     expect(nativeRoomAdministrationDraftSnapshotHasNewerChanges(snapshot, "other-room-context", draft, "member")).toBe(true);
   });
 
-  it("通常RoomではR13の補助パネルを表示し、R15の偽ボタンを表示しない", () => {
+  it("通常Roomのメニューでは管理フォームを常設せず、偽ボタンを表示しない", () => {
     const markup = renderToStaticMarkup(createElement(NativeRoomAdministration, {
       rooms,
       target,
@@ -119,12 +119,29 @@ describe("NativeRoomAdministration", () => {
       bridge: {}
     }));
 
-    expect(markup).toContain("子Roomを作成");
-    expect(markup).toContain("Roomを移動");
-    expect(markup).toContain("現在の人間membership");
-    expect(markup).toContain("条件を確認");
+    expect(markup).toContain("Roomメニュー");
+    expect(markup).not.toContain("子Roomを作成");
+    expect(markup).not.toContain("Roomを移動");
+    expect(markup).not.toContain("現在の人間membership");
     expect(markup).not.toContain("承認");
     expect(markup).not.toContain("入力を送信");
+  });
+
+  it("context menu向けのcreate viewは指定した親Roomを表示する", () => {
+    const markup = renderToStaticMarkup(createElement(NativeRoomAdministration, {
+      rooms,
+      target,
+      workspaceVersion: 12,
+      currentRoomId: "room-current",
+      createParentRoomId: "room-parent",
+      workspaceRole: "admin",
+      view: "create",
+      bridge: {}
+    }));
+
+    expect(markup).toContain("子Roomを作成");
+    expect(markup).toContain("作成先: 親Room");
+    expect(markup).not.toContain("Roomを移動");
   });
 
   it("Agent DMでは通常Room化や人間追加のUIを表示しない", () => {

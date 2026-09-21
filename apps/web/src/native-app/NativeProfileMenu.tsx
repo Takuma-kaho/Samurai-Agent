@@ -71,7 +71,7 @@ export function NativeProfileMenu({
         type="button"
         className="native-profile-trigger"
         data-native-profile-trigger="true"
-        aria-label={`${accountLabel}の本人メニュー`}
+        aria-label={`${accountLabel}の設定メニュー`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -80,11 +80,9 @@ export function NativeProfileMenu({
         <span className="native-profile-avatar" aria-hidden="true">{accountLabel.slice(0, 1) || "本"}</span>
         <span className="native-profile-copy">
           <strong>{accountLabel}</strong>
-          <small>本人設定</small>
         </span>
-        <span className="native-profile-chevron" aria-hidden="true">⌃</span>
       </button>
-      {open ? <div id={menuId} className="native-profile-menu" role="menu" aria-label="本人メニューの内容">
+      {open ? <div id={menuId} className="native-profile-menu" role="menu" aria-label="設定メニューの内容">
         <div className="native-profile-menu-account">
           <span className="native-profile-avatar" aria-hidden="true">{accountLabel.slice(0, 1) || "本"}</span>
           <span><strong>{accountLabel}</strong><small>自分のプロフィール</small></span>
@@ -94,14 +92,14 @@ export function NativeProfileMenu({
             type="button"
             role="menuitem"
             className="native-profile-settings-entry"
-            aria-label="本人設定を開く"
+            aria-label="設定を開く"
             onClick={openSettings}
           >
             <span aria-hidden="true">⚙</span>
-            <span><strong>本人設定</strong><small>プロフィール・回答設定・外観</small></span>
+            <span><strong>設定</strong><small>プロフィール・回答設定・外観</small></span>
             <span aria-hidden="true">↗</span>
           </button>
-          : <p className="native-profile-menu-empty">Account接続後に本人設定を利用できます。</p>}
+          : <p className="native-profile-menu-empty">Account接続後に設定を利用できます。</p>}
       </div> : null}
     </div>
   );

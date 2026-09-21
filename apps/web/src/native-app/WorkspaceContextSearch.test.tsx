@@ -55,6 +55,19 @@ describe("WorkspaceContextSearch", () => {
     expect(markup).toContain("設計");
   });
 
+  it("accepts a shared query so the sidebar and result surface do not need separate search state", () => {
+    const markup = renderToStaticMarkup(createElement(WorkspaceContextSearch, {
+      search: vi.fn(async () => ({ items: [], nextCursor: null })),
+      target,
+      query: "共有文脈",
+      onQueryChange: vi.fn(),
+      onOpenRoom: vi.fn()
+    }));
+
+    expect(markup).toContain('value="共有文脈"');
+    expect(markup).toContain('id="native-workspace-context-search-input"');
+  });
+
   it("supports all, multi-type, empty, loading, and error states without broadening target scope", () => {
     expect(searchTypesAreAllSelected(undefined)).toBe(true);
     expect(searchTypesAreAllSelected(["room", "knowledge"])).toBe(false);

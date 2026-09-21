@@ -19,6 +19,9 @@ export interface WorkspaceContextSearchProps {
   target?: DesktopWorkspaceTarget;
   workspaceName?: string;
   initialQuery?: string;
+  /** Optional controlled query so the sidebar and result surface share one input state. */
+  query?: string;
+  onQueryChange?: (query: string) => void;
   initialTypes?: WorkspaceContextSearchType[];
   open?: boolean;
   onClose?: () => void;
@@ -37,12 +40,19 @@ export function WorkspaceContextSearch({
   target,
   workspaceName = "現在のWorkspace",
   initialQuery = "",
+  query: controlledQuery,
+  onQueryChange,
   initialTypes,
   open = true,
   onClose,
   onOpenRoom
 }: WorkspaceContextSearchProps) {
-  const [query, setQuery] = useState(initialQuery);
+  const [localQuery, setLocalQuery] = useState(initialQuery);
+  const query = controlledQuery ?? localQuery;
+  const setQuery = useCallback((nextQuery: string): void => {
+    if (controlledQuery === undefined) setLocalQuery(nextQuery);
+    onQueryChange?.(nextQuery);
+  }, [controlledQuery, onQueryChange]);
   const [selectedTypes, setSelectedTypes] = useState<WorkspaceContextSearchType[] | undefined>(
     initialTypes?.length ? initialTypes : undefined
   );
@@ -102,7 +112,7 @@ export function WorkspaceContextSearch({
     setPage(null);
     setError(null);
     setQuery("");
-  }, [targetKey]);
+  }, [setQuery, targetKey]);
 
   useEffect(() => {
     if (!open) {
@@ -239,28 +249,28 @@ function mergeSearchItems(
 }
 
 const workspaceContextSearchStyles = `
-.native-workspace-context-search { width: min(720px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 32px)); overflow: auto; padding: 28px; border: 1px solid rgba(255,255,255,.12); border-radius: 24px; background: rgba(17,19,27,.96); color: var(--native-text, #f2eee9); box-shadow: 0 24px 80px rgba(0,0,0,.36); }
-.native-workspace-context-search__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.native-workspace-context-search h2 { margin: 5px 0 4px; font-size: clamp(1.45rem, 2.4vw, 2rem); }
-.native-workspace-context-search__scope, .native-workspace-context-search__note { margin: 0; color: rgba(242,238,233,.68); font-size: .9rem; }
-.native-workspace-context-search__form { display: grid; gap: 9px; margin-top: 24px; }
-.native-workspace-context-search__input-row { display: flex; gap: 9px; }
-.native-workspace-context-search__input-row input { min-width: 0; flex: 1; padding: 12px 14px; border: 1px solid rgba(255,255,255,.18); border-radius: 12px; background: rgba(255,255,255,.06); color: inherit; font: inherit; }
-.native-workspace-context-search__input-row input:focus-visible, .native-workspace-context-search__filter:focus-visible, .native-workspace-context-search__checkbox input:focus-visible, .native-workspace-context-search__result:focus-visible, .native-workspace-context-search__more:focus-visible { outline: 2px solid var(--native-accent, #f1a65c); outline-offset: 2px; }
-.native-workspace-context-search__filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0; border: 0; }
-.native-workspace-context-search__filters legend { width: 100%; padding: 0; color: rgba(242,238,233,.68); font-size: .8rem; }
-.native-workspace-context-search__filter, .native-workspace-context-search__checkbox { min-height: 34px; padding: 6px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.native-workspace-context-search__filter[aria-pressed="true"] { border-color: var(--native-accent, #f1a65c); background: rgba(241,166,92,.14); }
+.native-workspace-context-search { width: min(640px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; padding: 20px; border: 1px solid var(--native-line); border-radius: 12px; background: var(--native-bg); color: var(--native-copy); }
+.native-workspace-context-search__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.native-workspace-context-search h2 { margin: 4px 0; font-size: 1.125rem; line-height: 1.3; }
+.native-workspace-context-search__scope, .native-workspace-context-search__note { margin: 0; color: var(--native-muted); font-size: .8125rem; }
+.native-workspace-context-search__form { display: grid; gap: 8px; margin-top: 16px; }
+.native-workspace-context-search__input-row { display: flex; gap: 8px; }
+.native-workspace-context-search__input-row input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid var(--native-line); border-radius: 8px; background: rgba(var(--native-accent-rgb), .06); color: inherit; font: inherit; }
+.native-workspace-context-search__input-row input:focus-visible, .native-workspace-context-search__filter:focus-visible, .native-workspace-context-search__checkbox input:focus-visible, .native-workspace-context-search__result:focus-visible, .native-workspace-context-search__more:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }
+.native-workspace-context-search__filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0; border: 0; }
+.native-workspace-context-search__filters legend { width: 100%; padding: 0; color: var(--native-muted); font-size: .75rem; }
+.native-workspace-context-search__filter, .native-workspace-context-search__checkbox { min-height: 32px; padding: 5px 9px; border: 1px solid var(--native-line); border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.native-workspace-context-search__filter[aria-pressed="true"] { border-color: var(--native-accent); background: var(--native-accent-soft); }
 .native-workspace-context-search__checkbox { display: inline-flex; align-items: center; gap: 6px; }
-.native-workspace-context-search__status { min-height: 28px; margin-top: 16px; }
+.native-workspace-context-search__status { min-height: 24px; margin-top: 12px; }
 .native-workspace-context-search__status p { margin: 0; }
-.native-workspace-context-search__results { display: grid; gap: 8px; padding: 0; margin: 8px 0 0; list-style: none; }
-.native-workspace-context-search__result { display: grid; width: 100%; gap: 5px; padding: 14px; text-align: left; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; background: rgba(255,255,255,.045); color: inherit; cursor: pointer; }
-.native-workspace-context-search__result:hover { border-color: rgba(241,166,92,.6); background: rgba(241,166,92,.08); }
-.native-workspace-context-search__result-kind { color: var(--native-accent, #f1a65c); font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.native-workspace-context-search__result-room, .native-workspace-context-search__result-snippet, .native-workspace-context-search__result time { color: rgba(242,238,233,.68); font-size: .86rem; }
-.native-workspace-context-search__more { width: 100%; margin-top: 14px; }
-@media (max-width: 620px) { .native-workspace-context-search { padding: 20px; border-radius: 18px; } .native-workspace-context-search__input-row { align-items: stretch; flex-direction: column; } }
+.native-workspace-context-search__results { display: grid; gap: 6px; padding: 0; margin: 8px 0 0; list-style: none; }
+.native-workspace-context-search__result { display: grid; width: 100%; gap: 4px; padding: 11px; text-align: left; border: 1px solid var(--native-line); border-radius: 10px; background: rgba(var(--native-accent-rgb), .045); color: inherit; cursor: pointer; }
+.native-workspace-context-search__result:hover { border-color: rgba(var(--native-accent-rgb), .6); background: rgba(var(--native-accent-rgb), .08); }
+.native-workspace-context-search__result-kind { color: var(--native-accent); font-size: .6875rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.native-workspace-context-search__result-room, .native-workspace-context-search__result-snippet, .native-workspace-context-search__result time { color: var(--native-muted); font-size: .8125rem; }
+.native-workspace-context-search__more { width: 100%; margin-top: 12px; }
+@media (max-width: 620px) { .native-workspace-context-search { padding: 16px; border-radius: 10px; } .native-workspace-context-search__input-row { align-items: stretch; flex-direction: column; } }
 `;
 
 export default WorkspaceContextSearch;

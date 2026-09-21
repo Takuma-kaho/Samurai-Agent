@@ -27,6 +27,23 @@ export type WorkspaceAttachmentUploadResult = {
   replayed?: boolean;
 };
 
+export type WorkspaceAttachmentReadRequest = {
+  roomId: string;
+  resourceRef: WorkspaceAttachmentResourceRef;
+  target?: WorkspaceTargetRequest;
+};
+
+export type WorkspaceAttachmentReadResult = {
+  file: {
+    path: string;
+    version: number;
+    sha256: string;
+    size: number;
+  };
+  bytes: number[];
+  mimeType?: string;
+};
+
 export type WorkspaceAttachmentResourceRef = {
   kind: "file";
   id: string;
@@ -117,6 +134,56 @@ export function workspaceAttachmentRequest(input: unknown): WorkspaceAttachmentR
     ...(target ? { target } : {}),
     body: { room_id: roomId, content_base64: contentBase64, expected_version: expectedVersion }
   };
+}
+
+export function workspaceAttachmentReadRequest(input: unknown): WorkspaceAttachmentReadRequest {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_attachment_read_request_invalid");
+  const value = input as Record<string, unknown>;
+  const roomId = requiredOpaque(value, "roomId");
+  let resourceRef: WorkspaceAttachmentResourceRef;
+  try {
+    resourceRef = workspaceAttachmentResourceRef(value.resourceRef);
+  } catch {
+    throw new Error("workspace_attachment_read_request_invalid");
+  }
+  const target = workspaceTargetRequest(value.target);
+  return { roomId, resourceRef, ...(target ? { target } : {}) };
+}
+
+export function workspaceAttachmentReadResult(input: unknown): WorkspaceAttachmentReadResult {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("workspace_attachment_read_response_invalid");
+  const value = input as Record<string, unknown>;
+  const file = value.file && typeof value.file === "object" && !Array.isArray(value.file) ? value.file as Record<string, unknown> : {};
+  const filePath = safeWorkspaceFilePath(file.path);
+  const sha256 = typeof file.sha256 === "string" && /^[a-f0-9]{64}$/.test(file.sha256) ? file.sha256 : undefined;
+  const version = typeof file.version === "number" && Number.isSafeInteger(file.version) && file.version > 0 ? file.version : undefined;
+  const size = typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0 && file.size <= 8 * 1024 * 1024 ? file.size : undefined;
+  const bytes = Array.isArray(value.bytes) && value.bytes.length <= 8 * 1024 * 1024 && value.bytes.every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255)
+    ? value.bytes as number[]
+    : undefined;
+  const mimeType = value.mimeType === undefined
+    ? undefined
+    : typeof value.mimeType === "string" && /^[\x20-\x7e]{1,255}$/.test(value.mimeType)
+      ? value.mimeType
+      : undefined;
+  if (!filePath || !sha256 || version === undefined || size === undefined || !bytes || bytes.length !== size) {
+    throw new Error("workspace_attachment_read_response_invalid");
+  }
+  if (value.mimeType !== undefined && mimeType === undefined) throw new Error("workspace_attachment_read_response_invalid");
+  return {
+    file: { path: filePath, version, sha256, size },
+    bytes,
+    ...(mimeType ? { mimeType } : {})
+  };
+}
+
+/**
+ * Compare bytes after the privileged Main process has calculated their hash.
+ * Keep Node crypto out of this shared request module because it is bundled
+ * into the sandboxed preload, where Node's crypto module is unavailable.
+ */
+export function assertWorkspaceAttachmentReadHash(result: WorkspaceAttachmentReadResult, actualSha256: string): void {
+  if (actualSha256 !== result.file.sha256) throw new Error("workspace_attachment_read_hash_mismatch");
 }
 
 function requiredOpaque(value: Record<string, unknown>, key: string): string {

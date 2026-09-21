@@ -100,7 +100,69 @@ function artifactDetail(overrides: Partial<ArtifactDetail> = {}): ArtifactDetail
 }
 
 describe("NativeArtifactWorkspace", () => {
-  it("opens the regular entry on the Room-scoped Artifact panel without a Surface management list", () => {
+  it("renders an opened resource as a tab with a non-destructive close control", () => {
+    const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
+      target,
+      initialResource: {
+        kind: "artifact",
+        id: "artifact-a",
+        uri: "artifacts/artifact-a",
+        label: "設計メモ",
+        connectionId: target.connectionId,
+        workspaceId: target.workspaceId,
+        roomId: target.roomId
+      },
+      onToggleExpanded: vi.fn()
+    }));
+
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('role="tab"');
+    expect(html).toContain('aria-selected="true"');
+    expect(html).toContain("設計メモ");
+    expect(html).toContain('aria-label="設計メモを閉じる"');
+    expect(html).not.toContain("仕事へ戻る");
+    expect(html).not.toContain('aria-label="成果物一覧"');
+  });
+
+  it("keeps tabs, expansion, and the panel toggle in one Artifact header", () => {
+    const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
+      target,
+      initialResource: {
+        kind: "artifact",
+        id: "artifact-a",
+        uri: "artifacts/artifact-a",
+        label: "設計メモ",
+        connectionId: target.connectionId,
+        workspaceId: target.workspaceId,
+        roomId: target.roomId
+      },
+      onToggleExpanded: vi.fn(),
+      onTogglePanel: vi.fn(),
+      panelOpen: true
+    }));
+
+    const headerStart = html.indexOf('class="native-artifact-workspace-header native-artifact-tab-header"');
+    const headerEnd = html.indexOf("</header>", headerStart);
+    const header = html.slice(headerStart, headerEnd);
+
+    expect(header).toContain('role="tablist"');
+    expect(header).toContain('aria-label="成果物をメイン領域いっぱいに拡大"');
+    expect(header).toContain('aria-label="成果物パネルを閉じる"');
+  });
+
+  it("keeps the expansion control available without tabs and points inward when expanded", () => {
+    const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
+      target,
+      onToggleExpanded: vi.fn(),
+      isExpanded: true
+    }));
+
+    expect(html).toContain('aria-label="成果物を通常幅に戻す"');
+    expect(html).not.toContain("disabled");
+    expect(html).toContain('d="M2 6h4V2M14 6h-4V2M2 10h4v4M14 10h-4v4"');
+  });
+
+  it("keeps an empty Room-scoped Artifact panel free of a catalog list", () => {
     const html = renderToStaticMarkup(createElement(NativeArtifactWorkspace, {
       target,
       bridge: {
@@ -115,11 +177,12 @@ describe("NativeArtifactWorkspace", () => {
     }));
 
     expect(html).toContain('aria-label="Roomの成果物"');
-    expect(html).toContain(">成果物<");
-    expect(html.match(/>成果物</g) ?? []).toHaveLength(1);
-    expect(html).toContain('aria-label="成果物一覧"');
-    expect(html).not.toContain('native-artifact-workspace-header"><div><span class="native-section-eyebrow">Artifacts');
-    expect(html).not.toContain("現在のRoomで認可された文書を確認・編集します。");
+    expect(html).toContain('role="tablist"');
+    expect(html).not.toContain("開いた成果物がここに表示されます");
+    expect(html).not.toContain("成果物を開くと、ここに表示されます");
+    expect(html).not.toContain("＋");
+    expect(html).not.toContain('aria-label="成果物一覧"');
+    expect(html).not.toContain("仕事へ戻る");
     expect(html).not.toContain("Generated surfaces");
     expect(html).not.toContain("保存済みの操作画面");
   });

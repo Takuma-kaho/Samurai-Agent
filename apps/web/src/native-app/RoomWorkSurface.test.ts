@@ -7,11 +7,14 @@ import {
   nativeRoomWorkConversationEntriesForRoom,
   nativeRoomWorkConversationWorks,
   nativeRoomWorkResultCards,
+  resizeRoomWorkComposer,
+  roomWorkShouldSubmitOnKeyDown,
   roomWorkControlStatusLabel,
   roomWorkInstructionStatusLabel,
   roomWorkMutationNeedsRetry,
   roomWorkStatusLabel
 } from "./RoomWorkSurface";
+import { roomDefaultAgentPickerNextIndex } from "./RoomDefaultAgentPicker";
 import type { RoomWorkSurfaceProps } from "./RoomWorkSurface";
 import type { NativeRoom, NativeRoomWork } from "./types";
 
@@ -125,6 +128,20 @@ function renderSurface(overrides: Partial<RoomWorkSurfaceProps> = {}): string {
 }
 
 describe("RoomWorkSurface", () => {
+  it("keeps Room controls in the shared header row at a narrow content width", () => {
+    const html = renderSurface({
+      participants: [
+        { id: "member_a", kind: "account", label: "A", state: "active" },
+        { id: "member_b", kind: "account", label: "B", state: "active" },
+        { id: "member_c", kind: "agent", label: "C", state: "available" }
+      ]
+    });
+
+    expect(html).toContain("container-type: inline-size");
+    expect(html).toContain("@container (max-width: 560px)");
+    expect(html).not.toContain(".native-work-surface .native-chat-header { align-items: flex-start; flex-direction: column; }");
+  });
+
   it("pairs each direct-open result with only its Server-linked revision", () => {
     const completedWork: NativeRoomWork = {
       ...work,
@@ -440,6 +457,100 @@ describe("RoomWorkSurface", () => {
     expect(html).toContain("native-chat-header");
   });
 
+  it("renders one compact people icon with a numeric mixed participant count", () => {
+    const html = renderSurface({
+      participants: [
+        { id: "account_a", kind: "account", label: "Aさん", state: "active" },
+        { id: "agent_a", kind: "agent", label: "Research Agent", state: "available" },
+        { id: "account_b", kind: "account", label: "Bさん", state: "active" },
+        { id: "agent_b", kind: "agent", label: "Review Agent", state: "available" },
+        { id: "account_c", kind: "account", label: "Cさん", state: "active" }
+      ],
+      onOpenRoomParticipants: vi.fn()
+    });
+
+    expect(html).toContain('aria-label="参加者5人の一覧を開く"');
+    expect(html).toContain('data-icon="participants"');
+    expect(html).toContain('class="native-work-participants-count">5</span>');
+    expect(html).not.toContain("native-work-participant-avatar");
+    expect(html).not.toContain("native-work-participant-overflow");
+    expect(html).not.toContain('role="dialog" aria-label="Roomの参加者"');
+  });
+
+  it("keeps participant loading and failure states from looking like zero people", () => {
+    const loading = renderSurface({ participantsLoading: true });
+    const failed = renderSurface({ participantsError: "参加者を確認できません。" });
+
+    expect(loading).toContain("参加者を確認中…");
+    expect(loading).not.toContain("参加者 0");
+    expect(failed).toContain("参加者を確認できません");
+    expect(failed).not.toContain("参加者 0");
+  });
+
+  it("keeps Room menu and composer controls while the artifact toggle lives in the app shell", () => {
+    const html = renderSurface({
+      onOpenRoomParticipants: vi.fn()
+    });
+
+    expect(html).toContain('data-icon="room-menu"');
+    expect(html).not.toContain('data-icon="artifacts-toggle"');
+    expect(html).toContain('data-icon="add"');
+    expect(html).toContain('data-icon="send"');
+    expect(html).not.toContain("⌘/Ctrl + Enter");
+  });
+
+  it("places the default Agent selector between the add control and send control", () => {
+    const html = renderSurface({ onSetDefaultAgent: vi.fn() });
+    const composerFooterIndex = html.indexOf('class="native-composer-footer"');
+    const addControlIndex = html.indexOf('data-icon="add"');
+    const agentRowIndex = html.indexOf('class="native-work-agent-row"');
+    const sendControlIndex = html.indexOf('data-icon="send"');
+    const headerEnd = html.indexOf("</header>");
+
+    expect(agentRowIndex).toBeGreaterThan(composerFooterIndex);
+    expect(agentRowIndex).toBeGreaterThan(addControlIndex);
+    expect(agentRowIndex).toBeLessThan(sendControlIndex);
+    expect(agentRowIndex).toBeGreaterThan(headerEnd);
+    expect(html.slice(0, headerEnd)).not.toContain("Research Agent");
+    expect(html).toContain('aria-label="Roomの既定Agent"');
+    expect(html).toContain("border-radius: 22px");
+    expect(html).toContain(".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0;");
+    expect(html).toContain(".native-work-agent-row .native-work-default-label { display: none; }");
+    expect(html).toContain("class=\"native-work-agent-trigger\"");
+    expect(html).not.toContain("native-work-agent-select");
+  });
+
+  it("does not submit the composer while an IME is composing", () => {
+    const base = { key: "Enter", metaKey: true, ctrlKey: false, shiftKey: false };
+    expect(roomWorkShouldSubmitOnKeyDown(base)).toBe(true);
+    expect(roomWorkShouldSubmitOnKeyDown({ ...base, isComposing: true })).toBe(false);
+    expect(roomWorkShouldSubmitOnKeyDown({ ...base, shiftKey: true })).toBe(false);
+    expect(roomWorkShouldSubmitOnKeyDown({ ...base, metaKey: false, ctrlKey: false })).toBe(false);
+  });
+
+  it("grows the composer until its cap, then keeps overflow inside the input", () => {
+    const input = { scrollHeight: 90, style: { height: "", overflowY: "" } };
+
+    resizeRoomWorkComposer(input);
+    expect(input.style).toEqual({ height: "90px", overflowY: "hidden" });
+
+    Object.assign(input, { scrollHeight: 300 });
+    resizeRoomWorkComposer(input);
+    expect(input.style).toEqual({ height: "168px", overflowY: "auto" });
+  });
+
+  it("moves the Agent picker through enabled options only", () => {
+    const options = [
+      { id: "research", label: "Research" },
+      { id: "disabled", label: "Disabled", disabled: true },
+      { id: "review", label: "Review" }
+    ];
+
+    expect(roomDefaultAgentPickerNextIndex(options, 0, 1)).toBe(2);
+    expect(roomDefaultAgentPickerNextIndex(options, 2, 1)).toBe(0);
+    expect(roomDefaultAgentPickerNextIndex(options, 0, -1)).toBe(2);
+  });
+
   it("uses shared native theme tokens for work status and resource colors", () => {
     const html = renderSurface();
 
@@ -481,9 +592,12 @@ describe("RoomWorkSurface", () => {
     });
 
     expect(missingDefault).toContain("既定Agent未設定");
-    expect(missingDefault).toContain("既定Agentを設定すると新しい依頼を送れます");
+    expect(missingDefault).toContain('class="native-work-agent-row"');
+    expect(missingDefault).toContain("既定Agent未設定");
+    expect(missingDefault).toContain('class="native-work-agent-trigger"');
     expect(disabledDefault).toContain("無効または実行不可");
-    expect(disabledDefault).toContain("別のAgentをRoomの既定に設定してください");
+    expect(disabledDefault).toContain('class="native-work-agent-status"');
+    expect(disabledDefault).not.toContain("別のAgentをRoomの既定に設定してください");
     expect(disabledDefault).toContain("disabled=\"\"");
   });
 
@@ -491,7 +605,7 @@ describe("RoomWorkSurface", () => {
     const missingAgentStatus = renderSurface({ agents: [{ id: "agent_research", displayName: "Research Agent", enabled: true }] });
     const missingRoomCapability = renderSurface({ room: { ...room, canExecute: undefined } });
 
-    expect(missingAgentStatus).toContain("既定Agentの状態を確認できません");
+    expect(missingAgentStatus).toContain("実行可否を確認できません");
     expect(missingRoomCapability).toContain("このRoomの実行権限を確認できません");
   });
 
@@ -564,7 +678,8 @@ describe("RoomWorkSurface", () => {
     });
     const composerIndex = completedReplyHtml.indexOf('id="native-room-work-input"');
     expect(composerIndex).toBeGreaterThan(0);
-    expect(completedReplyHtml.slice(composerIndex, composerIndex + 520)).not.toContain("disabled");
+    const composerOpeningTag = completedReplyHtml.slice(composerIndex, completedReplyHtml.indexOf(">", composerIndex) + 1);
+    expect(composerOpeningTag).not.toContain("disabled");
     expect(completedReplyHtml).toContain("返信を送信");
     expect(completedReplyHtml).toContain("前回の担当をServerが引き継ぎます（未終端担当なし）");
 

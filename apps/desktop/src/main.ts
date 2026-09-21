@@ -135,7 +135,7 @@ import {
   workspaceOrganizationWorkspacesRequest,
   workspaceOrganizationListRequest
 } from "./workspace-organization-requests.js";
-import { workspaceAttachmentRequest } from "./workspace-attachment-requests.js";
+import { assertWorkspaceAttachmentReadHash, workspaceAttachmentReadRequest, workspaceAttachmentReadResult, workspaceAttachmentRequest } from "./workspace-attachment-requests.js";
 import {
   workspaceMemoryArchiveRequest,
   workspaceMemoryIdRequest,
@@ -400,6 +400,10 @@ async function createMainWindow(): Promise<void> {
     minHeight: 640,
     show: false,
     title: "Samurai Agent",
+    ...(process.platform === "darwin" ? {
+      titleBarStyle: "hidden" as const,
+      trafficLightPosition: { x: 16, y: 12 }
+    } : {}),
     webPreferences: {
       preload: preloadPath,
       additionalArguments: desktopArguments(config),
@@ -422,6 +426,15 @@ async function createMainWindow(): Promise<void> {
   });
   mainWindow.on("closed", () => {
     mainWindow = undefined;
+  });
+  // Native fullscreen hides macOS traffic lights. Keep the renderer's
+  // top-chrome clearance in sync so its navigation controls use the same
+  // compact placement as the reference UI in fullscreen.
+  mainWindow.on("enter-full-screen", () => {
+    mainWindow?.webContents.send("samurai:window:fullscreen:changed", true);
+  });
+  mainWindow.on("leave-full-screen", () => {
+    mainWindow?.webContents.send("samurai:window:fullscreen:changed", false);
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
@@ -606,6 +619,9 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("samurai:window:reload", async () => {
     await loadMainWindow();
+  });
+  ipcMain.handle("samurai:window:fullscreen:get", (event) => {
+    return BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false;
   });
   ipcMain.handle("samurai:workspace-connections:list", () => publicWorkspaceConnections());
   ipcMain.handle("samurai:workspace-connections:upsert", async (_event, input: unknown) => {
@@ -1305,6 +1321,33 @@ function registerIpcHandlers(): void {
     });
     assertActiveWorkspaceSnapshot(workspaceSnapshot);
     return result;
+  });
+  ipcMain.handle("samurai:workspace-server:files:attachment:read", async (_event, input: unknown) => {
+    const request = workspaceAttachmentReadRequest(input);
+    const workspaceSnapshot = captureWorkspaceTargetSnapshot(request.target);
+    const resource = request.resourceRef;
+    const result = await snapshotWorkspaceServerRequest(workspaceSnapshot, {
+      method: "GET",
+      path: `${workspaceFilesPath(workspaceSnapshot.workspaceId)}/${resource.uri.split("/").map((part) => encodeURIComponent(part)).join("/")}?room_id=${encodeURIComponent(request.roomId)}&version=${encodeURIComponent(resource.version)}&sha256=${encodeURIComponent(resource.id)}`,
+      workspaceScoped: true,
+      requestRoomId: request.roomId,
+      responseType: "bytes"
+    });
+    assertActiveWorkspaceSnapshot(workspaceSnapshot);
+    const raw = result as { bytes?: unknown; headers?: { contentType?: string; fileVersion?: string; fileSha256?: string } };
+    if (raw.headers?.fileVersion !== undefined && raw.headers.fileVersion !== String(resource.version)) {
+      throw new Error("workspace_attachment_read_version_mismatch");
+    }
+    if (raw.headers?.fileSha256 !== undefined && raw.headers.fileSha256 !== resource.id) {
+      throw new Error("workspace_attachment_read_hash_mismatch");
+    }
+    const response = workspaceAttachmentReadResult({
+      file: { path: resource.uri, version: Number(resource.version), sha256: resource.id, size: Array.isArray(raw.bytes) ? raw.bytes.length : -1 },
+      bytes: raw.bytes,
+      ...(raw.headers?.contentType ? { mimeType: raw.headers.contentType } : {})
+    });
+    assertWorkspaceAttachmentReadHash(response, createHash("sha256").update(Buffer.from(response.bytes)).digest("hex"));
+    return response;
   });
   ipcMain.handle("samurai:workspace-server:chat:search", async (_event, input: unknown) => {
     const roomId = requiredWorkspaceOpaqueField(input, "roomId");
@@ -5235,7 +5278,9 @@ async function signedWorkspaceServerRequest(
   const headers: DesktopArtifactRawContent["headers"] = {
     contentType: response.headers.get("content-type") ?? undefined,
     contentLength: response.headers.get("content-length") ?? undefined,
-    contentEncoding: response.headers.get("x-content-encoding") ?? undefined
+    contentEncoding: response.headers.get("x-content-encoding") ?? undefined,
+    fileVersion: response.headers.get("x-samurai-file-version") ?? undefined,
+    fileSha256: response.headers.get("x-samurai-file-sha256") ?? undefined
   };
   if (input.responseType === "bytes" && response.ok) {
     return { status: response.status, body: await readBoundedWorkspaceArtifactBytes(response), headers };

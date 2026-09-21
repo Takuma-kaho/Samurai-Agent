@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactRecord, ArtifactRevisionRecord, JsonValue } from "@samurai-agent/core-schemas";
 import { createIdempotencyKey, type ArtifactMutationResult } from "../lib/api";
 import { artifactContentType, isImageArtifact, isPdfArtifact, markdownPreviewHtml } from "../lib/surface-view-helpers";
-import type { NativeWorkspaceTarget } from "./types";
+import type { NativeArtifactWorkspaceInitialResource, NativeWorkspaceTarget } from "./types";
 import { useNativeDraftNavigation } from "./use-native-draft-navigation";
 import { NativeDraftNavigationPrompt } from "./NativeDraftNavigationPrompt";
 
@@ -108,6 +108,7 @@ export interface ArtifactSurfacePanelProps {
   onRequestAgentRevision?: ArtifactRevisionRequestHandler;
   onOpenGeneratedSurface?: (surfaceId: string) => void;
   onClose?: () => void;
+  onSelectionChange?: (resource: NativeArtifactWorkspaceInitialResource) => void;
   onEditorControllerChange?: (controller: NativeArtifactEditorController | undefined) => void;
 }
 
@@ -207,7 +208,7 @@ type ArtifactPanelNavigation =
  * fixed gateway supplied by the active connection; this component contains no
  * cache keyed only by Artifact ID.
  */
-export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspaceTarget, initialArtifact, onRequestAgentRevision, onOpenGeneratedSurface, onClose, onEditorControllerChange }: ArtifactSurfacePanelProps) {
+export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspaceTarget, initialArtifact, onRequestAgentRevision, onOpenGeneratedSurface, onClose, onSelectionChange, onEditorControllerChange }: ArtifactSurfacePanelProps) {
   const listEpoch = useRef(0);
   const detailEpoch = useRef(0);
   const selectedArtifactIdRef = useRef<string | undefined>(undefined);
@@ -235,7 +236,6 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     onEditorControllerChange?.(undefined);
   }, [onEditorControllerChange]);
 
-  const unavailable = !roomId || !gateway;
   const draftNavigation = useNativeDraftNavigation({
     scopeKey: "artifact-panel\n" + (workspaceTarget?.connectionId ?? "") + "\n" + (workspaceTarget?.workspaceId ?? "") + "\n" + (roomId ?? ""),
     label: "成果物",
@@ -321,6 +321,15 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
       }
       setSelected(nextDetail);
       setRevisions([...history].sort((left, right) => right.revision - left.revision));
+      onSelectionChange?.({
+        kind: "artifact",
+        id: nextDetail.artifact.id,
+        uri: `artifacts/${nextDetail.artifact.id}`,
+        ...(nextDetail.revision?.id ? { revisionId: nextDetail.revision.id } : {}),
+        ...(workspaceTarget?.connectionId ? { connectionId: workspaceTarget.connectionId } : {}),
+        ...(workspaceTarget?.workspaceId ? { workspaceId: workspaceTarget.workspaceId } : {}),
+        ...(roomId ? { roomId } : {})
+      });
     } catch (cause) {
       if (epoch === detailEpoch.current) setError(errorMessage(cause, "成果物を開けませんでした。"));
     } finally {
@@ -395,10 +404,19 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
     setSelected(nativeArtifactDetailFromMutation(mutation, revisionDetail));
     setRevisions(addMutationRevision(history, revision));
     setComparison(undefined);
+    onSelectionChange?.({
+      kind: "artifact",
+      id: input.artifactId,
+      uri: `artifacts/${input.artifactId}`,
+      revisionId: revision.id,
+      ...(workspaceTarget?.connectionId ? { connectionId: workspaceTarget.connectionId } : {}),
+      ...(workspaceTarget?.workspaceId ? { workspaceId: workspaceTarget.workspaceId } : {}),
+      ...(roomId ? { roomId } : {})
+    });
     await refresh();
     if (!artifactRequestIsCurrent({ requestEpoch: epoch, currentEpoch: detailEpoch.current, artifactId: input.artifactId, currentArtifactId: selectedArtifactIdRef.current })) throw new Error("artifact_navigation_changed");
     return mutation;
-  }, [gateway, refresh, roomId, selected]);
+  }, [gateway, onSelectionChange, refresh, roomId, selected, workspaceTarget]);
 
   const restore = async (input: ArtifactRestoreRequest): Promise<ArtifactMutationResult> => {
     if (!roomId || !gateway || !selected || selectedArtifactIdRef.current !== input.artifactId) throw new Error("artifact_restore_unavailable");
@@ -417,6 +435,15 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
       setSelected(nativeArtifactDetailFromMutation(mutation, revisionDetail));
       setRevisions(addMutationRevision(history, revision));
       setComparison(undefined);
+      onSelectionChange?.({
+        kind: "artifact",
+        id: input.artifactId,
+        uri: `artifacts/${input.artifactId}`,
+        revisionId: revision.id,
+        ...(workspaceTarget?.connectionId ? { connectionId: workspaceTarget.connectionId } : {}),
+        ...(workspaceTarget?.workspaceId ? { workspaceId: workspaceTarget.workspaceId } : {}),
+        ...(roomId ? { roomId } : {})
+      });
       await refresh();
       if (!artifactRequestIsCurrent({ requestEpoch: epoch, currentEpoch: detailEpoch.current, artifactId: input.artifactId, currentArtifactId: selectedArtifactIdRef.current })) throw new Error("artifact_navigation_changed");
       return mutation;
@@ -429,13 +456,8 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
   };
 
   return <section className="native-artifact-surface" aria-label="Roomの成果物">
-    <header className="native-artifact-surface-header" aria-label="成果物操作">
-      <div className="native-artifact-surface-header-actions"><button type="button" className="native-button native-button-quiet" onClick={() => void refresh()} disabled={unavailable || loading}>{loading ? "再読込中…" : "再読込"}</button>{onClose ? <button type="button" className="native-button native-button-quiet" onClick={() => requestArtifactNavigation({ kind: "close" })}>閉じる</button> : null}</div>
-    </header>
-    {unavailable ? <p className="native-inline-note">Roomを選択すると、認可された成果物を表示します。</p> : null}
     {error ? <p className="native-inline-error" role="alert">{error}</p> : null}
     {loading ? <p className="native-inline-note" role="status">成果物を確認しています…</p> : null}
-    {!loading && !unavailable && artifacts.length === 0 ? <p className="native-inline-note">このRoomには、まだ確認できる成果物がありません。</p> : null}
     <NativeDraftNavigationPrompt controller={draftNavigation} />
     <div className="native-artifact-layout">
       <nav className="native-artifact-list" aria-label="成果物一覧">{artifacts.map((artifact) => <button key={artifact.id} type="button" className={`native-artifact-list-item${selected?.artifact.id === artifact.id ? " is-active" : ""}`} onClick={() => requestArtifactNavigation({ kind: "artifact", artifactId: artifact.id })} aria-pressed={selected?.artifact.id === artifact.id}>
@@ -456,7 +478,7 @@ export function ArtifactSurfacePanel({ roomId, gateway, canEdit = false, workspa
           workspaceTarget={workspaceTarget}
           onOpenGeneratedSurface={(surfaceId) => requestArtifactNavigation({ kind: "surface", surfaceId })}
           onEditorControllerChange={registerEditorController}
-        /> : !detailLoading && artifacts.length > 0 ? <p className="native-inline-note">成果物を選択すると内容と版履歴を開きます。</p> : null}
+        /> : null}
       </div>
     </div>
   </section>;

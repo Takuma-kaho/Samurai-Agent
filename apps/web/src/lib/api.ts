@@ -1300,6 +1300,17 @@ export interface WorkspaceAttachmentUploadResult {
   replayed?: boolean;
 }
 
+export interface WorkspaceAttachmentReadResult {
+  file: {
+    path: string;
+    version: number;
+    sha256: string;
+    size: number;
+  };
+  bytes: number[];
+  mimeType?: string;
+}
+
 declare global {
   interface Window {
     samuraiDesktop?: {
@@ -1307,6 +1318,9 @@ declare global {
       workspaceServerUrl?: string;
       workspaceId?: string;
       accountId?: string;
+      /** Native fullscreen state for renderer-only chrome placement. */
+      getWindowFullscreen?: () => Promise<boolean>;
+      onWindowFullscreenChange?: (callback: (fullscreen: boolean) => void) => () => void;
       listWorkspaceConnections?: () => Promise<DesktopWorkspaceConnectionState>;
       /** Account-scoped, sanitized Workspace directory across connections. */
       listWorkspaceDirectory?: () => Promise<DesktopWorkspaceDirectoryResult>;
@@ -1431,6 +1445,11 @@ declare global {
         operationId: string;
         target?: DesktopWorkspaceTarget;
       }) => Promise<WorkspaceAttachmentUploadResult>;
+      readWorkspaceAttachment?: (input: {
+        roomId: string;
+        resourceRef: ResourceRef;
+        target?: DesktopWorkspaceTarget;
+      }) => Promise<WorkspaceAttachmentReadResult>;
       listWorkspaceCompletionResources?: (input: { scopeKind: "workspace" | "room" | "agent"; roomId?: string; agentId?: string; kind?: "knowledge" | "skill"; includeArchived?: boolean; cursor?: string; target?: DesktopWorkspaceTarget }) => Promise<{ resources: WorkspaceCompletionResourceView[]; next_cursor?: string }>;
       getWorkspaceCompletionResource?: (input: { resourceId: string; scopeKind?: "room" | "agent"; roomId?: string; agentId?: string; kind?: "knowledge" | "skill"; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceDetail>;
       getWorkspaceCompletionResourceBody?: (input: { resourceId: string; scopeKind?: "room" | "agent"; roomId?: string; agentId?: string; kind?: "knowledge" | "skill"; version?: number; target?: DesktopWorkspaceTarget }) => Promise<WorkspaceCompletionResourceBody>;

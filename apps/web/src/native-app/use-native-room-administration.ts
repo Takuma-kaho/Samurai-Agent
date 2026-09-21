@@ -148,6 +148,8 @@ export interface UseNativeRoomAdministrationOptions {
   currentRoom?: NativeRoom;
   /** Alias accepted for callers that pass the selected Room as `room`. */
   room?: NativeRoom;
+  /** Room targeted by a context-menu child creation flow. */
+  createParentRoomId?: string;
   workspaceRole?: NativeRoomAdministrationRole;
   bridge?: NativeRoomAdministrationBridgeSource;
   onSelectRoom?: (room: NativeRoom) => void | Promise<void>;
@@ -365,10 +367,12 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   const target = options.target ?? options.workspaceTarget;
   const activeRoom = options.currentRoom ?? options.room ?? options.rooms.find((room) => room.id === options.currentRoomId);
   const currentRoomId = activeRoom?.id ?? options.currentRoomId;
+  const createParentRoomId = options.createParentRoomId ?? currentRoomId;
+  const createParentRoom = options.rooms.find((room) => room.id === createParentRoomId && room.workspaceId === target?.workspaceId);
   const currentRoomIsDm = activeRoom?.kind === "agent_dm";
   const roomCanManage = canManageRoom(activeRoom);
   const targetScopeKey = targetKey(target);
-  const contextKey = `${targetScopeKey}\n${options.workspaceVersion ?? ""}\n${currentRoomId ?? ""}\n${activeRoom?.kind ?? "normal"}\n${activeRoom?.version ?? ""}`;
+  const contextKey = `${targetScopeKey}\n${options.workspaceVersion ?? ""}\n${currentRoomId ?? ""}\n${createParentRoomId ?? ""}\n${activeRoom?.kind ?? "normal"}\n${activeRoom?.version ?? ""}`;
 
   const [members, setMembers] = useState<DesktopWorkspaceRoomMembership[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
@@ -617,7 +621,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
   }, [currentRoomIsDm, refreshMembers, roomCanManage]);
 
   const createChildRoom = useCallback(async (input?: { name?: string }): Promise<unknown> => {
-    const roomId = currentRoomId;
+    const roomId = createParentRoomId;
     const submittedCreateName = input?.name ?? createName;
     const name = submittedCreateName.trim();
     const stamp = currentContextStamp();
@@ -625,7 +629,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
       setActionError("agent_dm_room_administration_unavailable");
       return undefined;
     }
-    if (!roomCanManage) {
+    if (!roomCanManage || !createParentRoom || !canManageRoom(createParentRoom) || createParentRoom.kind === "agent_dm") {
       setActionError("room_manage_permission_required");
       return undefined;
     }
@@ -683,7 +687,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
     } finally {
       if (isCurrentContext(stamp)) setBusyAction(null);
     }
-  }, [bridge, createName, currentContextStamp, currentRoomId, currentRoomIsDm, isCurrentContext, operationIdFor, options.onRefresh, options.workspaceVersion, roomCanManage, target, targetScopeKey]);
+  }, [bridge, createName, createParentRoom, createParentRoomId, currentContextStamp, currentRoomIsDm, isCurrentContext, operationIdFor, options.onRefresh, options.workspaceVersion, roomCanManage, target, targetScopeKey]);
 
   const previewRoomMove = useCallback(async (input?: { parentRoomId?: string }): Promise<DesktopRoomMovePreview | undefined> => {
     const roomId = currentRoomId;
@@ -988,6 +992,7 @@ export function useNativeRoomAdministration(options: UseNativeRoomAdministration
     currentRoomIsDm,
     roomCanManage,
     workspaceVersion: options.workspaceVersion,
+    createParentRoomId,
     parentRooms,
     canMoveToRoot,
     hasMoveDestination,

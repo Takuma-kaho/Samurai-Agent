@@ -20,7 +20,7 @@ import {
   sanitizeWorkspaceOperationHistoryInput,
   sanitizeWorkspaceRoomWorkResourceRefs
 } from "./preload-sanitizers.js";
-import { workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests.js";
+import { workspaceAttachmentReadResult, workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests.js";
 import {
   accountInvitationNotificationListRequest,
   accountInvitationNotificationReadRequest,
@@ -55,6 +55,14 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   workspaceId,
   accountId,
   getStatus: () => ipcRenderer.invoke("samurai:get-status"),
+  getWindowFullscreen: () => ipcRenderer.invoke("samurai:window:fullscreen:get"),
+  onWindowFullscreenChange: (callback: (fullscreen: boolean) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, fullscreen: unknown) => {
+      callback(fullscreen === true);
+    };
+    ipcRenderer.on("samurai:window:fullscreen:changed", listener);
+    return () => ipcRenderer.removeListener("samurai:window:fullscreen:changed", listener);
+  },
   listWorkspaceConnections: () => ipcRenderer.invoke("samurai:workspace-connections:list"),
   listWorkspaceDirectory: () => ipcRenderer.invoke("samurai:workspace-directory:list"),
   createWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:workspace:create", sanitizeWorkspaceCreateInput(input)),
@@ -120,6 +128,7 @@ contextBridge.exposeInMainWorld("samuraiDesktop", {
   getWorkspaceChatSession: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:session:get", sanitizeWorkspaceChatSessionIdInput(input)),
   sendWorkspaceChatMessage: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:message:send", sanitizeWorkspaceChatTurnInput(input)),
   writeWorkspaceAttachment: async (input: unknown) => workspaceAttachmentUploadResult(await ipcRenderer.invoke("samurai:workspace-server:files:attachment:write", sanitizeWorkspaceAttachmentInput(input))),
+  readWorkspaceAttachment: async (input: unknown) => workspaceAttachmentReadResult(await ipcRenderer.invoke("samurai:workspace-server:files:attachment:read", sanitizeWorkspaceAttachmentReadInput(input))),
   searchWorkspace: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:chat:search", sanitizeWorkspaceRuntimeQuery(input)),
   searchWorkspaceContext: (input: unknown) => ipcRenderer.invoke("samurai:workspace-server:context:search", workspaceContextSearchRequest(input)),
   listWorkspaceNotifications: (input?: unknown) => ipcRenderer.invoke("samurai:workspace-server:notifications:list", workspaceNotificationListRequest(input)),
@@ -599,6 +608,19 @@ function sanitizeWorkspaceAttachmentInput(input: unknown): Record<string, unknow
     expectedVersion: typeof value.expectedVersion === "number" && Number.isSafeInteger(value.expectedVersion) ? value.expectedVersion : -1,
     operationId: typeof value.operationId === "string" ? value.operationId.slice(0, 128) : ""
   };
+  copyWorkspaceTargetInput(value, output);
+  return output;
+}
+
+function sanitizeWorkspaceAttachmentReadInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const value = input as Record<string, unknown>;
+  const output: Record<string, unknown> = {
+    roomId: typeof value.roomId === "string" ? value.roomId.slice(0, 128) : ""
+  };
+  if (value.resourceRef && typeof value.resourceRef === "object" && !Array.isArray(value.resourceRef)) {
+    output.resourceRef = workspaceAttachmentResourceRef(value.resourceRef);
+  }
   copyWorkspaceTargetInput(value, output);
   return output;
 }
