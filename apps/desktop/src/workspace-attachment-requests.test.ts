@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workspaceAttachmentRequest, workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests";
+import { assertWorkspaceAttachmentReadHash, workspaceAttachmentReadRequest, workspaceAttachmentReadResult, workspaceAttachmentRequest, workspaceAttachmentResourceRef, workspaceAttachmentUploadResult } from "./workspace-attachment-requests";
 
 describe("Desktop workspace attachment boundary", () => {
   it("accepts only an attachment path and preserves the Room write contract", () => {
@@ -100,5 +100,30 @@ describe("Desktop workspace attachment boundary", () => {
       file: { path: "../secret.md", version: 2, sha256, size: 2 },
       resource_ref: { kind: "file", id: sha256, uri: "../secret.md", version: "2" }
     })).toThrow("workspace_attachment_response_invalid");
+  });
+
+  it("requires the saved Room reference for reads and verifies the returned bytes", () => {
+    const bytes = Array.from(new TextEncoder().encode("hello"));
+    const sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const resourceRef = { kind: "file" as const, id: sha256, uri: "attachments/hello.txt", version: "1", label: "こんにちは.txt" };
+    expect(workspaceAttachmentReadRequest({ roomId: "room_product", resourceRef, target: { connectionId: "server_a", workspaceId: "workspace_a" } })).toEqual({
+      roomId: "room_product",
+      resourceRef,
+      target: { connectionId: "server_a", workspaceId: "workspace_a" }
+    });
+    const result = workspaceAttachmentReadResult({
+      file: { path: resourceRef.uri, version: 1, sha256, size: bytes.length },
+      bytes,
+      mimeType: "text/plain"
+    });
+    expect(result).toMatchObject({ file: { path: resourceRef.uri, version: 1, sha256 }, bytes, mimeType: "text/plain" });
+    expect(() => assertWorkspaceAttachmentReadHash(result, sha256)).not.toThrow();
+    expect(() => workspaceAttachmentReadResult({
+      file: { path: resourceRef.uri, version: 1, sha256, size: bytes.length },
+      bytes,
+      mimeType: "text/plain\ncorrupted"
+    })).toThrow("workspace_attachment_read_response_invalid");
+    expect(() => workspaceAttachmentReadRequest({ roomId: "room_product", resourceRef: { ...resourceRef, version: undefined } })).toThrow("workspace_attachment_read_request_invalid");
+    expect(() => assertWorkspaceAttachmentReadHash(result, "0".repeat(64))).toThrow("workspace_attachment_read_hash_mismatch");
   });
 });

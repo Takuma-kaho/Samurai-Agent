@@ -36,6 +36,8 @@ export interface BrowserWorkspaceBinaryResponse {
   bytes: number[];
   mimeType?: string;
   encoding?: string;
+  fileVersion?: string;
+  fileSha256?: string;
 }
 
 /**
@@ -419,10 +421,14 @@ export async function browserWorkspaceBinaryRequest(input: BrowserWorkspaceReque
   if (bytes.byteLength > 50_000_000) throw new Error("workspace_server_response_too_large");
   const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim();
   const encoding = response.headers.get("x-content-encoding") ?? undefined;
+  const fileVersion = response.headers.get("x-samurai-file-version") ?? undefined;
+  const fileSha256 = response.headers.get("x-samurai-file-sha256") ?? undefined;
   return {
     bytes: Array.from(bytes),
     ...(mimeType ? { mimeType } : {}),
-    ...(encoding ? { encoding } : {})
+    ...(encoding ? { encoding } : {}),
+    ...(fileVersion ? { fileVersion } : {}),
+    ...(fileSha256 ? { fileSha256 } : {})
   };
 }
 

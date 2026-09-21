@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  browserWorkspaceBinaryRequest,
   browserShareSourceRequest,
   browserWorkspaceRequest,
   createBrowserShareDelegation,
@@ -11,6 +12,7 @@ import { updateActiveWorkspaceRoomId } from "./workspace-navigation-state";
 
 vi.mock("./workspace-browser-auth", () => ({
   browserWorkspaceHealth: vi.fn(),
+  browserWorkspaceBinaryRequest: vi.fn(),
   browserShareSourceRequest: vi.fn(),
   browserWorkspaceRequest: vi.fn(),
   createBrowserWorkspaceConnectionState: vi.fn(),
@@ -124,6 +126,21 @@ describe("Browser Room Work resource-ref transport", () => {
       result: { summary: expectedSummary }
     });
     expect(JSON.stringify(projected)).not.toContain("output_summary");
+  });
+
+  it("reads a saved attachment with the Room, version, and hash bound to the signed request", async () => {
+    updateActiveWorkspaceRoomId("room_1");
+    const bytes = Array.from(new TextEncoder().encode("hello"));
+    vi.mocked(browserWorkspaceBinaryRequest).mockResolvedValue({ bytes, mimeType: "text/plain" });
+    const bridge = createBrowserWorkspaceBridge();
+    const resourceRef = { kind: "file" as const, id: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", uri: "attachments/hello.txt", version: "1", label: "こんにちは.txt" };
+    const result = await bridge.readWorkspaceAttachment!({ roomId: "room_1", resourceRef });
+
+    expect(result).toMatchObject({ file: { path: resourceRef.uri, version: 1, sha256: resourceRef.id, size: 5 }, bytes, mimeType: "text/plain" });
+    expect(vi.mocked(browserWorkspaceBinaryRequest).mock.calls[0]?.[0]).toMatchObject({
+      method: "GET",
+      path: expect.stringContaining("room_id=room_1&version=1&sha256=2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    });
   });
 
   it("sends only Knowledge/Skill selectors and never client display metadata", async () => {

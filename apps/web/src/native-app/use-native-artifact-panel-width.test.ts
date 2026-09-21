@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   clampNativeArtifactPanelWidth,
   nativeArtifactPanelWidthDefault,
+  nativeArtifactPanelCloseDragDistance,
+  nativeArtifactPanelExpandDragDistance,
   nativeArtifactPanelWidthMin,
   nativeArtifactPanelSplitMaxWidth,
   nativeArtifactPanelWidthTransition,
@@ -28,14 +30,19 @@ describe("native artifact panel width", () => {
   });
 
   it("keeps the split layout at the maximum and expands only after crossing it", () => {
-    expect(nativeArtifactPanelWidthTransition(410, 259, 900)).toEqual({ kind: "close" });
+    expect(nativeArtifactPanelWidthTransition(410, 129, 900)).toEqual({ kind: "close" });
+    expect(nativeArtifactPanelWidthTransition(410, 130, 900)).toEqual({ kind: "split", width: 260 });
     expect(nativeArtifactPanelWidthTransition(410, 260, 900)).toEqual({ kind: "split", width: 260 });
     expect(nativeArtifactPanelWidthTransition(410, 261, 900)).toEqual({ kind: "split", width: 261 });
     expect(nativeArtifactPanelWidthTransition(620, 619, 900)).toEqual({ kind: "split", width: 619 });
     expect(nativeArtifactPanelWidthTransition(620, 620, 900)).toEqual({ kind: "split", width: 620 });
-    expect(nativeArtifactPanelWidthTransition(620, 621, 900)).toEqual({ kind: "expand", restoreWidth: 620 });
+    expect(nativeArtifactPanelWidthTransition(620, 760, 900)).toEqual({ kind: "split", width: 620 });
+    expect(nativeArtifactPanelWidthTransition(620, 761, 900)).toEqual({ kind: "expand", restoreWidth: 620 });
     expect(nativeArtifactPanelWidthTransition(410, 1_220, 1_500)).toEqual({ kind: "split", width: 1_220 });
-    expect(nativeArtifactPanelWidthTransition(1_220, 1_221, 1_500)).toEqual({ kind: "expand", restoreWidth: 1_220 });
+    expect(nativeArtifactPanelWidthTransition(1_220, 1_360, 1_500)).toEqual({ kind: "split", width: 1_220 });
+    expect(nativeArtifactPanelWidthTransition(1_220, 1_361, 1_500)).toEqual({ kind: "expand", restoreWidth: 1_220 });
+    expect(nativeArtifactPanelCloseDragDistance).toBe(130);
+    expect(nativeArtifactPanelExpandDragDistance).toBe(140);
   });
 
   it("normalizes browser storage values without accepting malformed input", () => {

@@ -101,6 +101,30 @@ describe("Workspace file transaction recovery", () => {
   });
 });
 
+describe("Workspace file immutable reads", () => {
+  it("accepts a matching version and hash and rejects stale references", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "samurai-workspace-file-read-"));
+    roots.push(root);
+    const workspaceId = "workspace_file_read";
+    const roomId = "room_file_read";
+    const filePath = "attachments/hello.txt";
+    const content = Buffer.from("hello", "utf8");
+    const digest = sha256(content);
+    await mkdir(path.join(root, "workspaces", workspaceId, "files", "attachments"), { recursive: true });
+    await writeFile(path.join(root, "workspaces", workspaceId, "files", filePath), content);
+    const query = vi.fn(async (text: string) => text.includes("FROM workspace_files") ? {
+      rows: [{ workspace_id: workspaceId, room_id: roomId, path: filePath, version: 1, sha256: digest, size: content.byteLength, created_at: "2026-09-03T00:00:00.000Z", updated_at: "2026-09-03T00:00:00.000Z" }]
+    } : { rows: [] });
+    const database = { withContext: vi.fn(async (_context: unknown, action: (sql: { query: typeof query }) => Promise<unknown>) => action({ query })) };
+    const service = new WorkspaceFileStore({ storageRoot: root, database } as never);
+    const context = { workspaceId, accountId: "account_file_read" };
+
+    await expect(service.read(context, { roomId, path: filePath, expectedVersion: 1, expectedSha256: digest })).resolves.toMatchObject({ file: { version: 1, sha256: digest }, content });
+    await expect(service.read(context, { roomId, path: filePath, expectedVersion: 2, expectedSha256: digest })).rejects.toMatchObject({ code: "workspace_file_version_mismatch" });
+    await expect(service.read(context, { roomId, path: filePath, expectedVersion: 1 })).rejects.toMatchObject({ code: "workspace_file_reference_requirements_invalid" });
+  });
+});
+
 async function createHarness(input: {
   previous: Buffer | undefined;
   next: Buffer;

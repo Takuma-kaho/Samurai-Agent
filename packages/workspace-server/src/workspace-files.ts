@@ -30,6 +30,14 @@ export interface RemoveWorkspaceFileInput {
   expectedVersion: number;
 }
 
+export interface ReadWorkspaceFileInput {
+  roomId: string;
+  path: string;
+  /** When present, both values must match the durable file row and bytes. */
+  expectedVersion?: number;
+  expectedSha256?: string;
+}
+
 export interface RemoveWorkspaceFileResult {
   event: WorkspaceEvent;
   transactionId: string;
@@ -139,10 +147,21 @@ export class WorkspaceFileStore {
 
   async read(
     context: Pick<WorkspaceRequestContext, "workspaceId" | "accountId">,
-    input: { roomId: string; path: string }
+    input: ReadWorkspaceFileInput
   ): Promise<{ file: WorkspaceFile; content: Buffer }> {
     assertOpaqueId(input.roomId, "room_id_invalid");
     const safePath = assertSafeRelativePath(input.path);
+    const hasExpectedVersion = input.expectedVersion !== undefined;
+    const hasExpectedSha256 = input.expectedSha256 !== undefined;
+    if (hasExpectedVersion !== hasExpectedSha256) {
+      throw new WorkspaceServerError("workspace_file_reference_requirements_invalid", 400);
+    }
+    if (hasExpectedVersion && (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion! < 1)) {
+      throw new WorkspaceServerError("workspace_file_reference_version_invalid", 400);
+    }
+    if (hasExpectedSha256 && !/^[a-f0-9]{64}$/.test(input.expectedSha256!)) {
+      throw new WorkspaceServerError("workspace_file_reference_sha256_invalid", 400);
+    }
     const file = await this.workspaceStore.database.withContext(context, async (sql) => {
       const result = await sql.query<FileRow>(
         `SELECT workspace_id, room_id, path, version, sha256, size, created_at, updated_at
@@ -151,7 +170,14 @@ export class WorkspaceFileStore {
       );
       const row = result.rows[0];
       if (!row) throw new WorkspaceServerError("workspace_file_not_found", 404);
-      return fileFromRow(row);
+      const stored = fileFromRow(row);
+      if (hasExpectedVersion && stored.version !== input.expectedVersion) {
+        throw new WorkspaceServerError("workspace_file_version_mismatch", 409, { latest_version: stored.version });
+      }
+      if (hasExpectedSha256 && stored.sha256 !== input.expectedSha256) {
+        throw new WorkspaceServerError("workspace_file_hash_mismatch", 409);
+      }
+      return stored;
     });
     const root = this.workspaceRoot(context.workspaceId);
     await assertNoSymlinkPath(root, `files/${safePath}`);

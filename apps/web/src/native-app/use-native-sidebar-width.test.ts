@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampNativeSidebarWidth,
   nativeSidebarWidthDefault,
+  nativeSidebarCloseDragDistance,
   nativeSidebarWidthMax,
   nativeSidebarWidthMin,
   normalizeNativeSidebarWidth
@@ -20,5 +21,8 @@ describe("native sidebar width", () => {
     expect(normalizeNativeSidebarWidth("not-a-width")).toBe(nativeSidebarWidthDefault);
     expect(normalizeNativeSidebarWidth(null)).toBe(nativeSidebarWidthDefault);
   });
-});
 
+  it("keeps the boundary until the deliberate close drag", () => {
+    expect(nativeSidebarCloseDragDistance).toBe(110);
+  });
+});

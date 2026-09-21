@@ -107,6 +107,7 @@ import type {
   WorkspaceCompletionResourceBody,
   WorkspaceCompletionResourceDetail,
   WorkspaceCompletionResourceView,
+  WorkspaceAttachmentReadResult,
   WorkspaceAttachmentUploadResult,
   AccountInvitationNotificationListInput,
   AccountWorkspaceNotificationSummaries,
@@ -735,6 +736,29 @@ export function createBrowserWorkspaceBridge(): DesktopBridge & RoomWorkDelegate
       });
       await assertBrowserWorkspaceSnapshot(snapshot);
       return sanitizeWorkspaceAttachmentUploadResult(result);
+    },
+    readWorkspaceAttachment: async (input) => {
+      const resource = WorkspaceFileResourceRefSchema.parse(input.resourceRef);
+      const snapshot = await captureBrowserWorkspaceSnapshot(browserTargetFromInput(input));
+      const result = await browserSnapshotWorkspaceBinaryRequest(snapshot, {
+        method: "GET",
+        path: `/api/workspaces/${encodeURIComponent(snapshot.workspaceId)}/files/${workspaceAttachmentPath(resource.uri)}?room_id=${encodeURIComponent(input.roomId)}&version=${encodeURIComponent(resource.version)}&sha256=${encodeURIComponent(resource.id)}`
+      });
+      const bytes = result.bytes;
+      if (result.fileVersion !== undefined && result.fileVersion !== String(resource.version)) {
+        throw new Error("workspace_attachment_read_version_mismatch");
+      }
+      if (result.fileSha256 !== undefined && result.fileSha256 !== resource.id) {
+        throw new Error("workspace_attachment_read_hash_mismatch");
+      }
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes)));
+      const actualSha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (actualSha256 !== resource.id) throw new Error("workspace_attachment_read_hash_mismatch");
+      return sanitizeWorkspaceAttachmentReadResult({
+        file: { path: resource.uri, version: Number(resource.version), sha256: resource.id, size: bytes.length },
+        bytes,
+        ...(result.mimeType ? { mimeType: result.mimeType } : {})
+      });
     },
     searchWorkspace: (input) => workspaceInputRequest<SearchResult[]>(input, "GET", `/chat/search?room_id=${encodeURIComponent(input.roomId)}&q=${encodeURIComponent(input.query)}`),
     searchWorkspaceContext: (input) => searchBrowserWorkspaceContext(input),
@@ -2401,6 +2425,28 @@ function sanitizeWorkspaceAttachmentUploadResult(value: unknown): WorkspaceAttac
     resource_ref: resourceRef,
     ...(body.replayed === true ? { replayed: true } : {})
   };
+}
+
+function sanitizeWorkspaceAttachmentReadResult(value: unknown): WorkspaceAttachmentReadResult {
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const file = body.file && typeof body.file === "object" && !Array.isArray(body.file) ? body.file as Record<string, unknown> : {};
+  const filePath = safeWorkspaceFilePath(file.path);
+  const sha256 = typeof file.sha256 === "string" && /^[a-f0-9]{64}$/.test(file.sha256) ? file.sha256 : undefined;
+  const version = typeof file.version === "number" && Number.isSafeInteger(file.version) && file.version > 0 ? file.version : undefined;
+  const size = typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0 && file.size <= 8 * 1024 * 1024 ? file.size : undefined;
+  const bytes = Array.isArray(body.bytes) && body.bytes.length <= 8 * 1024 * 1024 && body.bytes.every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255)
+    ? body.bytes as number[]
+    : undefined;
+  const mimeType = body.mimeType === undefined
+    ? undefined
+    : typeof body.mimeType === "string" && /^[\x20-\x7e]{1,255}$/.test(body.mimeType)
+      ? body.mimeType
+      : undefined;
+  if (!filePath || !sha256 || version === undefined || size === undefined || !bytes || bytes.length !== size) {
+    throw new Error("workspace_attachment_read_response_invalid");
+  }
+  if (body.mimeType !== undefined && mimeType === undefined) throw new Error("workspace_attachment_read_response_invalid");
+  return { file: { path: filePath, version, sha256, size }, bytes, ...(mimeType ? { mimeType } : {}) };
 }
 
 let cachedBrowserBridge: DesktopBridge | undefined;

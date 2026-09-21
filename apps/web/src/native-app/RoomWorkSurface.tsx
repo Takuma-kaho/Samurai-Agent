@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type ChangeEvent, type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type Dispatch, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { createIdempotencyKey, getWorkspaceClientBridge, type WorkspaceAttachmentUploadResult } from "../lib/api";
 import { WorkspaceFileResourceRefSchema, type ResourceRef } from "@samurai-agent/core-schemas";
 import { nativeRoomAgentIsAvailable, nativeRoomWorkErrorIsExplicitServerFailure, type NativeRoomWorkMutationResult } from "./use-native-app";
 import { RoomDefaultAgentPicker, type RoomDefaultAgentOption } from "./RoomDefaultAgentPicker";
+import NativeMarkdown from "./NativeMarkdown";
+import RoomWorkspaceAttachment from "./RoomWorkspaceAttachment";
 import type {
   NativeAgent,
   NativeAgentBackend,
@@ -17,7 +19,8 @@ import type {
   NativeRoomWorkResourceRefInput,
   NativeRoomWorkInstructionStatus,
   NativeRoomWorkStatus,
-  NativeArtifactWorkspaceInitialResource
+  NativeArtifactWorkspaceInitialResource,
+  NativeWorkspaceTarget
 } from "./types";
 import type { NativeRoomParticipant } from "./use-native-room-participants";
 
@@ -25,6 +28,7 @@ export type NativeRoomPanelState = "closed" | "artifacts" | "room_settings";
 
 export interface RoomWorkSurfaceProps {
   room?: NativeRoom;
+  workspaceTarget?: NativeWorkspaceTarget;
   currentAccountId?: string;
   agents: NativeAgent[];
   agentBackends?: NativeAgentBackend[];
@@ -118,6 +122,7 @@ interface RoomAttachmentDraft {
   status: AttachmentDraftStatus;
   resourceRef?: ResourceRef;
   error?: string;
+  previewUrl?: string;
 }
 
 type RoomWorkActionOutcome<T> =
@@ -741,13 +746,14 @@ const attachmentPathPattern = /^attachments\/[A-Za-z0-9._-]{1,220}$/;
 
 function safeAttachmentName(value: string): string {
   const basename = value.split(/[\\/]/).pop() ?? "file";
-  return basename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "file";
+  const normalized = basename.replace(/[\u0000-\u001f\u007f]/g, "_").trim().slice(0, 120);
+  return normalized || "file";
 }
 
 function attachmentPath(id: string, name: string): string {
   const safeId = id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 96) || "attachment";
-  const safeName = safeAttachmentName(name);
-  const path = `attachments/${safeId}-${safeName}`;
+  const extension = safeAttachmentName(name).match(/\.([A-Za-z0-9]{1,16})$/)?.[1];
+  const path = `attachments/${safeId}${extension ? `.${extension.toLowerCase()}` : ""}`;
   if (!attachmentPathPattern.test(path)) throw new Error("workspace_attachment_path_invalid");
   return path;
 }
@@ -784,7 +790,36 @@ function attachmentErrorMessage(): string {
   return "アップロードに失敗しました。再試行するか、添付を外してください。";
 }
 
-function renderSavedAttachmentRefs(refs: ResourceRef[]): ReactNode {
+function revokeAttachmentDrafts(drafts: RoomAttachmentDraft[]): void {
+  for (const draft of drafts) {
+    if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl);
+  }
+}
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1_024) return `${size} B`;
+  if (size < 1_024 * 1_024) return `${(size / 1_024).toFixed(size < 10 * 1_024 ? 1 : 0)} KiB`;
+  return `${(size / (1_024 * 1_024)).toFixed(size < 10 * 1_024 * 1_024 ? 1 : 0)} MiB`;
+}
+
+function attachmentKindLabel(file: File): string {
+  if (file.type.startsWith("image/")) return "画像";
+  if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) return "PDF";
+  return file.type || "ファイル";
+}
+
+function savedAttachmentAnchorId(ref: ResourceRef): string {
+  return `native-room-attachment-${ref.id}`;
+}
+
+function focusSavedAttachment(ref: ResourceRef): void {
+  const element = document.getElementById(savedAttachmentAnchorId(ref));
+  if (!(element instanceof HTMLElement)) return;
+  element.scrollIntoView({ block: "nearest" });
+  element.focus({ preventScroll: true });
+}
+
+function renderSavedAttachmentRefs(refs: ResourceRef[], roomId?: string, target?: NativeWorkspaceTarget): ReactNode {
   const safeRefs = refs.flatMap((ref) => {
     const safe = safeAttachmentRef(ref);
     return safe ? [safe] : [];
@@ -792,7 +827,7 @@ function renderSavedAttachmentRefs(refs: ResourceRef[]): ReactNode {
   if (!safeRefs.length) return null;
   return (
     <div className="native-work-attachment-list" aria-label="添付">
-      {safeRefs.map((ref) => <span className="native-work-attachment-item" key={`${ref.id}:${ref.version ?? ""}`}>{ref.label ?? ref.uri}{ref.version ? <span className="native-work-attachment-action">v{ref.version}</span> : null}</span>)}
+      {safeRefs.map((ref) => <RoomWorkspaceAttachment key={`${ref.id}:${ref.version ?? ""}`} resourceRef={ref} roomId={roomId ?? ""} target={target} anchorId={savedAttachmentAnchorId(ref)} />)}
     </div>
   );
 }
@@ -892,6 +927,18 @@ const roomWorkStyles = [
   ".native-work-message-reply { color: var(--native-muted); font-size: 10px; margin-top: 8px; }",
   ".native-work-message-reply:hover:not(:disabled) { color: var(--native-copy); }",
   ".native-work-message-result-card { margin-top: 10px; max-width: 560px; }",
+  ".native-markdown { color: inherit; font-size: inherit; line-height: 1.7; min-width: 0; overflow-wrap: anywhere; }",
+  ".native-markdown > :first-child { margin-top: 0; } .native-markdown > :last-child { margin-bottom: 0; }",
+  ".native-markdown h1, .native-markdown h2, .native-markdown h3, .native-markdown h4 { color: var(--native-copy); line-height: 1.35; margin: 14px 0 7px; }",
+  ".native-markdown h1 { font-size: 1.25em; } .native-markdown h2 { font-size: 1.15em; } .native-markdown h3, .native-markdown h4 { font-size: 1.05em; }",
+  ".native-markdown p, .native-markdown ul, .native-markdown ol, .native-markdown blockquote, .native-markdown table { margin: 8px 0; }",
+  ".native-markdown ul, .native-markdown ol { padding-left: 1.4em; } .native-markdown li + li { margin-top: 3px; }",
+  ".native-markdown blockquote { border-left: 2px solid var(--native-accent); color: var(--native-muted); padding-left: 12px; }",
+  ".native-markdown a { color: var(--native-accent); text-decoration: underline; text-decoration-color: var(--native-line-strong); text-underline-offset: 2px; }",
+  ".native-markdown-attachment-link { background: transparent; border: 0; color: var(--native-accent); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }",
+  ".native-markdown table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; width: max-content; } .native-markdown th, .native-markdown td { border: 1px solid var(--native-line-strong); padding: 5px 8px; text-align: left; white-space: nowrap; } .native-markdown th { color: var(--native-copy); }",
+  ".native-markdown code { background: var(--native-panel-soft); border-radius: 4px; color: var(--native-copy); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; padding: 2px 4px; }",
+  ".native-markdown-code-block { background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 8px; margin: 9px 0; max-width: 100%; overflow: hidden; } .native-markdown-code-toolbar { align-items: center; border-bottom: 1px solid var(--native-line); color: var(--native-dim); display: flex; font-size: 9px; justify-content: space-between; padding: 5px 8px; text-transform: lowercase; } .native-markdown-code-toolbar button { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; } .native-markdown-code-toolbar button:hover { color: var(--native-copy); } .native-markdown-code-block pre { margin: 0; max-width: 100%; overflow-x: auto; padding: 10px; } .native-markdown-code-block pre code { background: transparent; padding: 0; }",
   ".native-work-conversation-loading { color: var(--native-muted); margin: auto; text-align: center; }",
   ".native-work-conversation-empty { color: var(--native-muted); margin: auto; max-width: 420px; padding: 36px 22px; text-align: center; }",
   ".native-work-conversation-empty p { line-height: 1.7; margin: 9px 0 0; }",
@@ -999,12 +1046,19 @@ const roomWorkStyles = [
   ".native-work-attachment.is-ready .native-work-attachment-state { color: var(--native-success); }",
   ".native-work-attachment.is-failed { border-color: var(--native-danger); }",
   ".native-work-attachment.is-failed .native-work-attachment-state { color: var(--native-danger); }",
+  ".native-work-attachment-thumbnail { border-radius: 5px; height: 64px; object-fit: cover; width: 64px; }",
+  ".native-work-attachment-file-icon, .native-work-attachment-icon { align-items: center; color: var(--native-accent); display: inline-flex; flex: 0 0 auto; font-size: 10px; font-weight: 700; height: 64px; justify-content: center; width: 64px; }",
+  ".native-work-attachment-main, .native-work-attachment-card-main { display: grid; gap: 2px; min-width: 0; }",
+  ".native-work-attachment-meta { color: var(--native-dim); font-size: 9px; }",
   ".native-work-attachment button { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; padding: 2px; }",
   ".native-work-attachment button:hover { color: var(--native-copy); }",
   ".native-work-attachment-list { color: var(--native-muted); display: grid; gap: 5px; margin: 8px 0 0; }",
   ".native-work-attachment-item { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; font-size: 10px; }",
   ".native-work-attachment-item::before { color: var(--native-accent); content: '↳'; }",
   ".native-work-attachment-action { color: var(--native-accent); font-size: 9px; }",
+  ".native-work-attachment-card { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 8px; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 7px 8px; } .native-work-attachment-card.is-ready { border-color: var(--native-line-strong); } .native-work-attachment-card.is-failed, .native-work-attachment-card.is-version-mismatch { border-color: var(--native-danger); } .native-work-attachment-card small { color: var(--native-dim); font-size: 9px; overflow-wrap: anywhere; } .native-work-attachment-card button { background: transparent; border: 0; color: var(--native-accent); cursor: pointer; font: inherit; font-size: 10px; padding: 3px 5px; } .native-work-attachment-card-actions { display: inline-flex; gap: 4px; margin-left: auto; }",
+  ".native-work-attachment-preview-button { background: transparent; border: 0; cursor: zoom-in; margin-left: auto; padding: 0; } .native-work-attachment-preview-button img { border-radius: 5px; display: block; height: 48px; max-width: 80px; object-fit: contain; width: 80px; } .native-work-attachment-viewer { border: 1px solid var(--native-line); border-radius: 5px; height: 170px; max-width: 100%; width: min(360px, 100%); } .native-work-attachment-text-viewer { background: var(--native-panel); border: 1px solid var(--native-line); border-radius: 5px; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 170px; max-width: 100%; overflow: auto; padding: 7px; white-space: pre-wrap; width: min(360px, 100%); }",
+  ".native-work-attachment-lightbox { align-items: center; background: var(--native-overlay, #000000c2); display: flex; inset: 0; justify-content: center; position: fixed; z-index: 80; } .native-work-attachment-lightbox > button { color: var(--native-copy); font-size: 22px; position: absolute; right: 18px; top: 12px; } .native-work-attachment-lightbox img { max-height: 90vh; max-width: 90vw; object-fit: contain; }",
   ".native-work-surface .native-composer-wrap { box-sizing: border-box; max-width: var(--native-room-thread-max-width); padding: 14px var(--native-room-thread-gutter) 18px; }",
   ".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0; border-radius: 22px; box-shadow: none; display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 14px 16px 12px; position: relative; }",
   ".native-work-surface .native-composer:focus-within { border: 0; box-shadow: none; outline: 0; }",
@@ -1074,6 +1128,7 @@ const roomWorkStyles = [
 
 export function RoomWorkSurface({
   room,
+  workspaceTarget,
   currentAccountId,
   agents,
   agentBackends,
@@ -1148,6 +1203,8 @@ export function RoomWorkSurface({
   const workAttachmentInputRef = useRef<HTMLInputElement>(null);
   const workComposerInputRef = useRef<HTMLTextAreaElement>(null);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const workAttachmentDraftsRef = useRef<RoomAttachmentDraft[]>([]);
+  const commentAttachmentDraftsRef = useRef<RoomAttachmentDraft[]>([]);
   const attachmentContextRef = useRef("");
   const attachmentContextGenerationRef = useRef(0);
 
@@ -1210,6 +1267,8 @@ export function RoomWorkSurface({
   const attachmentContextKey = `${room?.workspaceId ?? "none"}\n${room?.id ?? "none"}\n${replyWorkId ?? "new"}\n${selectedWorkId ?? "none"}`;
   const workAttachmentRefs = attachmentRefs(workAttachmentDrafts);
   const commentAttachmentRefs = attachmentRefs(commentAttachmentDrafts);
+  workAttachmentDraftsRef.current = workAttachmentDrafts;
+  commentAttachmentDraftsRef.current = commentAttachmentDrafts;
   const workResourceRefsForSend = workResourceRefs.filter((ref, index) => {
     if ((ref.kind !== "knowledge" && ref.kind !== "skill")
       || !/^[a-z][a-z0-9_:-]{0,127}$/.test(ref.id)
@@ -1296,9 +1355,20 @@ export function RoomWorkSurface({
   }, [room?.id, room?.workspaceId, selectedWork?.id]);
 
   useEffect(() => {
-    setWorkAttachmentDrafts([]);
-    setCommentAttachmentDrafts([]);
+    setWorkAttachmentDrafts((current) => {
+      revokeAttachmentDrafts(current);
+      return [];
+    });
+    setCommentAttachmentDrafts((current) => {
+      revokeAttachmentDrafts(current);
+      return [];
+    });
   }, [attachmentContextKey]);
+
+  useEffect(() => () => {
+    revokeAttachmentDrafts(workAttachmentDraftsRef.current);
+    revokeAttachmentDrafts(commentAttachmentDraftsRef.current);
+  }, []);
 
   useEffect(() => {
     const input = workComposerInputRef.current;
@@ -1361,28 +1431,26 @@ export function RoomWorkSurface({
         contentBase64,
         expectedVersion: 0,
         operationId: draft.operationId,
-        ...(target ? { target } : {})
+        ...(target ? { target: { ...target, roomId: room?.id } } : {})
       });
       const resourceRef = safeAttachmentRef(uploaded.resource_ref);
       if (!resourceRef) throw new Error("workspace_attachment_response_invalid");
       if (!requestContextIsCurrent()) return;
       setDrafts((current) => current.map((item) => item.id === draft.id
-        ? { ...item, status: "ready", resourceRef, error: undefined }
+        ? { ...item, status: "ready", resourceRef: { ...resourceRef, label: item.name }, error: undefined }
         : item));
-    } catch {
+    } catch (error) {
       if (!requestContextIsCurrent()) return;
       setDrafts((current) => current.map((item) => item.id === draft.id
-        ? { ...item, status: "failed", error: attachmentErrorMessage() }
+        ? { ...item, status: "failed", error: error instanceof Error && error.message === "attachment_too_large" ? "8MiBを超えるため添付できません" : attachmentErrorMessage() }
         : item));
     }
   };
 
-  const selectAttachments = (
-    event: ChangeEvent<HTMLInputElement>,
+  const addAttachmentFiles = (
+    files: readonly File[],
     setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
   ): void => {
-    const files = Array.from(event.currentTarget.files ?? []);
-    event.currentTarget.value = "";
     for (const file of files) {
       const id = createIdempotencyKey();
       const name = safeAttachmentName(file.name);
@@ -1393,15 +1461,54 @@ export function RoomWorkSurface({
         file,
         path: attachmentPath(id, name),
         operationId: `room_attachment_${id}`,
-        status: "uploading"
+        status: "uploading",
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined
       };
       setDrafts((current) => [...current, draft]);
       void uploadAttachment(draft, setDrafts);
     }
   };
 
+  const selectAttachments = (
+    event: ChangeEvent<HTMLInputElement>,
+    setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
+  ): void => {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    addAttachmentFiles(files, setDrafts);
+  };
+
+  const dropAttachments = (
+    event: DragEvent<HTMLElement>,
+    setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
+  ): void => {
+    event.preventDefault();
+    if (event.dataTransfer.files.length) addAttachmentFiles(Array.from(event.dataTransfer.files), setDrafts);
+  };
+
+  const pasteAttachments = (
+    event: ClipboardEvent<HTMLTextAreaElement>,
+    setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>
+  ): void => {
+    const files = Array.from(event.clipboardData.files ?? []);
+    const itemFiles = files.length
+      ? []
+      : Array.from(event.clipboardData.items ?? [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+    const pastedFiles = files.length ? files : itemFiles;
+    if (!pastedFiles.length) return;
+    event.preventDefault();
+    addAttachmentFiles(pastedFiles, setDrafts);
+  };
+
   const removeAttachment = (id: string, setDrafts: Dispatch<SetStateAction<RoomAttachmentDraft[]>>): void => {
-    setDrafts((current) => current.filter((item) => item.id !== id));
+    setDrafts((current) => {
+      const removed = current.find((item) => item.id === id);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return current.filter((item) => item.id !== id);
+    });
   };
 
   const renderAttachmentDrafts = (
@@ -1411,9 +1518,10 @@ export function RoomWorkSurface({
     <div className="native-work-attachments" aria-label="添付ファイル">
       {drafts.map((draft) => (
         <div className={`native-work-attachment is-${draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "failed" : draft.status}`} key={draft.id}>
-          <span className="native-work-attachment-name" title={draft.name}>{draft.name}</span>
+          {draft.previewUrl ? <img className="native-work-attachment-thumbnail" src={draft.previewUrl} alt="" /> : <span className="native-work-attachment-file-icon" aria-hidden="true">{attachmentKindLabel(draft.file) === "PDF" ? "PDF" : "↧"}</span>}
+          <span className="native-work-attachment-main"><span className="native-work-attachment-name" title={draft.name}>{draft.name}</span><span className="native-work-attachment-meta">{attachmentKindLabel(draft.file)} · {formatAttachmentSize(draft.size)}</span></span>
           <span className="native-work-attachment-state">
-            {draft.status === "uploading" ? "アップロード中…" : draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "参照が無効" : draft.status === "ready" ? "添付済み" : "アップロード失敗"}
+            {draft.status === "uploading" ? "アップロード中…" : draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "参照が無効" : draft.status === "ready" ? "添付済み" : draft.error ?? "アップロード失敗"}
           </span>
           {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <button type="button" onClick={() => void uploadAttachment(draft, setDrafts)}>再試行</button> : null}
           <button type="button" aria-label={`${draft.name}を外す`} onClick={() => removeAttachment(draft.id, setDrafts)}>外す</button>
@@ -1441,6 +1549,7 @@ export function RoomWorkSurface({
     if (!outcome.ok || roomWorkMutationNeedsRetry(outcome.value)) return;
     setReplyOperation((current) => current?.key === operationKey ? undefined : current);
     onClearWorkDraft();
+    revokeAttachmentDrafts(workAttachmentDraftsRef.current);
     setWorkAttachmentDrafts([]);
     onClearWorkResourceRefs?.();
     if (targetWorkId) onSetReplyWorkId(undefined);
@@ -1608,11 +1717,8 @@ export function RoomWorkSurface({
         <span className="native-work-instruction-kind">{instruction.kind === "comment_apply" ? "コメント反映" : instruction.kind === "reply" ? "返信" : instruction.kind === "delegated" ? "委任" : "新規依頼"}</span>
         <span className={"native-work-instruction-status " + instructionTone(instruction.status)}>{roomWorkInstructionStatusLabel(instruction.status)}</span>
       </div>
-      <p className="native-work-instruction-body">
-        {instruction.instruction
-          || (instruction.attachments.length > 0 ? "添付のみの指示" : instruction.resourceRefs?.length ? "Knowledge/Skillのみの指示" : "本文なしの指示")}
-      </p>
-      {renderSavedAttachmentRefs(instruction.attachments)}
+      <NativeMarkdown value={instruction.instruction || (instruction.attachments.length > 0 ? "添付のみの指示" : instruction.resourceRefs?.length ? "Knowledge/Skillのみの指示" : "本文なしの指示")} attachmentRefs={instruction.attachments} onOpenAttachment={focusSavedAttachment} />
+      {renderSavedAttachmentRefs(instruction.attachments, room?.id, workspaceTarget)}
       {renderSavedRoomWorkResourceRefs(instruction.resourceRefs ?? [])}
       <div className="native-work-instruction-foot">
         <span>指示 v{instruction.version}</span>
@@ -1746,8 +1852,8 @@ export function RoomWorkSurface({
           <span className="native-work-comment-author">{actorLabel(comment.authorId, currentAccountId)}</span>
           <span className="native-work-comment-time">{formatTimestamp(comment.createdAt) || "時刻未確認"}</span>
         </div>
-        <p className="native-work-comment-body">{comment.body || "添付のみのコメント"}</p>
-        {renderSavedAttachmentRefs(comment.attachments)}
+        <NativeMarkdown value={comment.body || "添付のみのコメント"} attachmentRefs={comment.attachments} onOpenAttachment={focusSavedAttachment} />
+        {renderSavedAttachmentRefs(comment.attachments, room?.id, workspaceTarget)}
         <div className="native-work-comment-actions">
           <button
             type="button"
@@ -1862,8 +1968,8 @@ export function RoomWorkSurface({
             {formatTimestamp(entry.createdAt) ? <span className="native-work-message-time">{formatTimestamp(entry.createdAt)}</span> : null}
           </div> : null}
           <div className="native-work-message-bubble">
-            <div className="native-message-content">{entry.text}</div>
-            {renderSavedAttachmentRefs(entry.attachments)}
+            <NativeMarkdown value={entry.text} attachmentRefs={entry.attachments} onOpenAttachment={focusSavedAttachment} />
+            {renderSavedAttachmentRefs(entry.attachments, room?.id, workspaceTarget)}
             {renderSavedRoomWorkResourceRefs(entry.resourceRefs)}
             {entry.resultCards.length ? (
               <div className="native-work-result-cards native-work-message-result-card" aria-label="仕事の成果物">
@@ -1979,7 +2085,7 @@ export function RoomWorkSurface({
 
       <footer className="native-composer-wrap">
         {sending ? <div className="native-streaming-row" role="status"><span className="native-streaming-bars" aria-hidden="true"><i /><i /><i /></span>Serverが依頼を受け付けています</div> : null}
-        <form className="native-composer" onSubmit={(event) => void handleSend(event)}>
+        <form className="native-composer" onSubmit={(event) => void handleSend(event)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => dropAttachments(event, setWorkAttachmentDrafts)}>
           <label className="native-visually-hidden" htmlFor="native-room-work-input">新しい依頼または同じ仕事への返信</label>
           {replyActive && replyTargetWork ? (
             <div className="native-work-reply-target" aria-live="polite">
@@ -2011,7 +2117,7 @@ export function RoomWorkSurface({
               {replyAssigneeRequired ? <span id="native-work-reply-assignee-help" className="native-work-reply-note is-required">未終端の担当が複数あるため、返信先を指定してから送信してください。</span> : null}
             </div>
           ) : null}
-          <textarea ref={workComposerInputRef} className="native-room-work-composer-input" id="native-room-work-input" rows={1} value={workDraft} onInput={handleComposerInput} onChange={handleComposerChange} onKeyDown={handleComposerKeyDown} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
+          <textarea ref={workComposerInputRef} className="native-room-work-composer-input" id="native-room-work-input" rows={1} value={workDraft} onInput={handleComposerInput} onChange={handleComposerChange} onKeyDown={handleComposerKeyDown} onPaste={(event) => pasteAttachments(event, setWorkAttachmentDrafts)} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
           {renderAttachmentDrafts(workAttachmentDrafts, setWorkAttachmentDrafts)}
           {workResourceRefsForSend.length ? (
             <div className="native-work-resource-list" aria-label="仕事で使うKnowledgeとSkill">

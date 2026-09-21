@@ -712,7 +712,7 @@ export function NativeApp() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
-  const sidebarWidth = useNativeSidebarWidth(() => setDesktopSidebarOpen(false));
+  const sidebarWidth = useNativeSidebarWidth(() => setDesktopSidebarOpen(false), () => setDesktopSidebarOpen(true));
   const [mobileViewport, setMobileViewport] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 700px)").matches === true);
   const [createKind, setCreateKind] = useState<"organization" | "workspace" | "room">();
   const [roomCreateMode, setRoomCreateMode] = useState<NativeRoomCreateMode>("full");
@@ -755,11 +755,24 @@ export function NativeApp() {
     setArtifactPanelRestoreWidth(Math.round(restoreWidth));
     setArtifactPanelExpanded(true);
   }, []);
-  const artifactPanelWidth = useNativeArtifactPanelWidth(mainWindowRef, () => panelCloseRequestRef.current?.(), expandArtifactPanel);
+  const artifactPanelWidth = useNativeArtifactPanelWidth(
+    mainWindowRef,
+    () => panelCloseRequestRef.current?.(),
+    expandArtifactPanel,
+    () => setRoomPanelState("artifacts"),
+    (restoreWidth) => {
+      setArtifactPanelRestoreWidth(Math.round(restoreWidth));
+      setArtifactPanelExpanded(false);
+    }
+  );
   const collapseArtifactPanel = useCallback((): void => {
     setArtifactPanelExpanded(false);
     if (artifactPanelRestoreWidth !== undefined) artifactPanelWidth.setWidth(artifactPanelRestoreWidth);
   }, [artifactPanelRestoreWidth, artifactPanelWidth.setWidth]);
+  useEffect(() => {
+    sidebarWidth.cancelResize();
+    artifactPanelWidth.cancelResize();
+  }, [artifactPanelWidth.cancelResize, model.selectedRoomId, model.selectedWorkspaceTargetKey, sidebarWidth.cancelResize]);
   const toggleArtifactPanelExpanded = useCallback((): void => {
     if (artifactPanelExpanded) {
       collapseArtifactPanel();
@@ -1687,6 +1700,9 @@ export function NativeApp() {
             : model.roomWorkSupported
               ? <RoomWorkSurface
                 room={model.selectedRoom}
+                workspaceTarget={model.selectedWorkspaceTarget && model.selectedRoom
+                  ? { ...model.selectedWorkspaceTarget, roomId: model.selectedRoom.id }
+                  : model.selectedWorkspaceTarget}
                 currentAccountId={model.connection?.accountId}
                 agents={model.agents}
                 agentBackends={model.agentBackends}
@@ -1780,11 +1796,11 @@ export function NativeApp() {
         onGoForward={goForwardInWorkspace}
       />
       <div
-        className={`native-workspace-shell${!mobileViewport && !desktopSidebarOpen ? " is-sidebar-collapsed" : ""}`}
+        className={`native-workspace-shell${!mobileViewport && !desktopSidebarOpen && !sidebarWidth.isResizing ? " is-sidebar-collapsed" : ""}`}
         style={{ "--native-sidebar-width": `${sidebarWidth.width}px` } as CSSProperties}
       >
-        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}${!mobileViewport && !desktopSidebarOpen ? " is-desktop-collapsed" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen) || accountSettingsOpen || contextSurface !== undefined ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen) || accountSettingsOpen || contextSurface !== undefined} aria-label="Workspace navigation">
-          {!mobileViewport && desktopSidebarOpen ? <button
+        <aside className={`native-sidebar${mobileSidebarOpen ? " is-mobile-open" : ""}${!mobileViewport && !desktopSidebarOpen && !sidebarWidth.isResizing ? " is-desktop-collapsed" : ""}`} aria-hidden={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && !desktopSidebarOpen && !sidebarWidth.isResizing) || accountSettingsOpen || contextSurface !== undefined ? true : undefined} inert={(mobileViewport && !mobileSidebarOpen && !sidebarWidth.isResizing) || (!mobileViewport && !desktopSidebarOpen && !sidebarWidth.isResizing) || accountSettingsOpen || contextSurface !== undefined} aria-label="Workspace navigation">
+          {!mobileViewport && (desktopSidebarOpen || sidebarWidth.isResizing) ? <button
             type="button"
             className={`native-sidebar-resize-handle${sidebarWidth.isResizing ? " is-resizing" : ""}`}
             role="separator"
@@ -1881,6 +1897,21 @@ export function NativeApp() {
             onOpenSettings={model.connection?.accountId ? openAccountSettings : undefined}
           />
         </aside>
+        {!mobileViewport && (!desktopSidebarOpen || sidebarWidth.isResizing) ? <button
+          type="button"
+          className={`native-sidebar-edge-resize-handle${sidebarWidth.isResizing ? " is-resizing" : ""}`}
+          role="separator"
+          aria-label="閉じたサイドバーを開く"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={sidebarWidth.onClosedPointerDown}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === "ArrowRight") {
+              event.preventDefault();
+              setDesktopSidebarOpen(true);
+            }
+          }}
+        /> : null}
         <section ref={mainWindowRef} className="native-main-window" aria-label="現在のRoom">
           <main className="native-main">
             {main}
@@ -2074,11 +2105,11 @@ export function NativeApp() {
             aria-label="成果物"
             data-panel-mode="split"
             data-expanded={artifactPanelExpanded ? "true" : "false"}
-            hidden={roomPanelState !== "artifacts"}
-            inert={roomPanelState !== "artifacts"}
+            hidden={roomPanelState !== "artifacts" && !artifactPanelWidth.isResizing}
+            inert={roomPanelState !== "artifacts" && !artifactPanelWidth.isResizing}
             style={{ width: `${artifactPanelWidth.width}px` }}
           >
-            {roomPanelState === "artifacts" ? <button
+            {(roomPanelState === "artifacts" || artifactPanelWidth.isResizing) && (!artifactPanelExpanded || artifactPanelWidth.isResizing) ? <button
               type="button"
               className="native-artifact-panel-resize-handle"
               role="separator"
@@ -2116,6 +2147,22 @@ export function NativeApp() {
               }}
             />
           </aside> : null}
+          {artifactPanelTarget && !mobileViewport && (roomPanelState === "closed" || artifactPanelExpanded || artifactPanelWidth.isResizing) ? <button
+            type="button"
+            className={`native-artifact-panel-edge-handle${artifactPanelWidth.isResizing ? " is-resizing" : ""}${artifactPanelExpanded ? " is-expanded" : ""}`}
+            role="separator"
+            aria-label={artifactPanelExpanded ? "成果物パネルを分割表示に戻す" : "閉じた成果物パネルを開く"}
+            aria-orientation="vertical"
+            tabIndex={0}
+            onPointerDown={artifactPanelExpanded ? artifactPanelWidth.onExpandedPointerDown : artifactPanelWidth.onClosedPointerDown}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              if (artifactPanelExpanded) collapseArtifactPanel();
+              else setRoomPanelState("artifacts");
+            }}
+            onDoubleClick={() => { if (artifactPanelExpanded) collapseArtifactPanel(); else artifactPanelWidth.resetWidth(); }}
+          /> : null}
         </section>
       </div>
       {mobileSidebarOpen ? <button type="button" className="native-mobile-nav-backdrop" aria-label="ナビゲーションを閉じる" onClick={closeMobileSidebar} /> : null}

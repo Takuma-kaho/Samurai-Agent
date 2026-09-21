@@ -45,6 +45,32 @@ test("fails clearly for an unresolved relative chunk", () => {
   }
 });
 
+test("rejects Node modules unavailable to the sandboxed preload", () => {
+  const root = makeFixtureRoot();
+  try {
+    writeFixture(root, "apps/desktop/dist/main.js", 'import "node:crypto";');
+    writeFixture(root, "apps/desktop/dist/preload.cjs", [
+      'require("electron");',
+      'require("node:events");',
+      'require("node:crypto");'
+    ].join("\n"));
+
+    const result = verifyDesktopArtifacts(root);
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.some(({ artifact, code }) =>
+      artifact === "apps/desktop/dist/preload.cjs" && code === "non_allowlisted_external_reference"
+    ));
+    assert.ok(!result.violations.some(({ artifact, specifier }) =>
+      artifact === "apps/desktop/dist/main.js" && specifier === "node:crypto"
+    ));
+    assert.ok(!result.violations.some(({ artifact, specifier }) =>
+      artifact === "apps/desktop/dist/preload.cjs" && specifier === "node:events"
+    ));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("fails clearly for cycles and root-escaping relative chunks", () => {
   const root = makeFixtureRoot();
   try {

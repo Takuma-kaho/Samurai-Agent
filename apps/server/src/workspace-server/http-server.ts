@@ -3314,7 +3314,20 @@ export async function createWorkspaceServerHttp(
     const filePath = wildcardParam(req.params.filePath);
     const roomId = queryString(req, "room_id");
     if (!roomId) throw new WorkspaceServerError("workspace_file_room_id_required", 400);
-    const read = await files.read(workspaceContext(req), { roomId, path: filePath });
+    const version = queryNumber(req, "version");
+    const sha256 = queryString(req, "sha256");
+    if ((version === undefined) !== (sha256 === undefined)) {
+      throw new WorkspaceServerError("workspace_file_reference_requirements_invalid", 400);
+    }
+    if (sha256 !== undefined && !/^[a-f0-9]{64}$/.test(sha256)) {
+      throw new WorkspaceServerError("sha256_invalid", 400);
+    }
+    const read = await files.read(workspaceContext(req), {
+      roomId,
+      path: filePath,
+      ...(version === undefined ? {} : { expectedVersion: version }),
+      ...(sha256 === undefined ? {} : { expectedSha256: sha256 })
+    });
     res.setHeader("content-type", "application/octet-stream");
     res.setHeader("x-samurai-file-version", String(read.file.version));
     res.setHeader("x-samurai-file-sha256", read.file.sha256);

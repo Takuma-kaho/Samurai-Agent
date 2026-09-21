@@ -13,6 +13,7 @@ const artifactDefinitions = [
   { id: "preload", relativePath: "apps/desktop/dist/preload.cjs" }
 ];
 const nodeBuiltinNames = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
+const sandboxedPreloadNodeBuiltins = new Set(["events", "timers", "url", "node:events", "node:timers", "node:url"]);
 
 if (isEntrypoint()) {
   const options = parseArgs(process.argv.slice(2));
@@ -59,7 +60,7 @@ export function verifyDesktopArtifacts(root = defaultRoot) {
     }
 
     const id = entry ? entryId : `chunk-${nextChunkId++}`;
-    const record = inspectArtifact({ id, path: displayPath, absolutePath, entry, root: absoluteRoot });
+    const record = inspectArtifact({ id, path: displayPath, absolutePath, entry, entryId, root: absoluteRoot });
     records.set(absolutePath, record);
     if (!record.ok) return record;
 
@@ -139,7 +140,7 @@ export function verifyDesktopArtifacts(root = defaultRoot) {
  * declarations and calls. Text in comments, strings, or source maps is not
  * treated as a module reference.
  */
-export function analyzeDesktopArtifact(source, artifactPath, root = defaultRoot) {
+export function analyzeDesktopArtifact(source, artifactPath, root = defaultRoot, entryId = "main") {
   const sourceFile = ts.createSourceFile(artifactPath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const references = [];
 
@@ -152,7 +153,7 @@ export function analyzeDesktopArtifact(source, artifactPath, root = defaultRoot)
       specifier,
       line: position.line + 1,
       column: position.character + 1,
-      ...classifyReference(specifier, artifactPath, root)
+      ...classifyReference(specifier, artifactPath, root, entryId)
     });
   }
 
@@ -186,7 +187,7 @@ export function analyzeDesktopArtifact(source, artifactPath, root = defaultRoot)
   return { references, violations, parseError };
 }
 
-function inspectArtifact({ id, path: displayPath, absolutePath, entry, root }) {
+function inspectArtifact({ id, path: displayPath, absolutePath, entry, entryId, root }) {
   if (!isFile(absolutePath)) {
     return createFailureArtifact({
       id,
@@ -212,7 +213,7 @@ function inspectArtifact({ id, path: displayPath, absolutePath, entry, root }) {
     });
   }
 
-  const analysis = analyzeDesktopArtifact(source, absolutePath, root);
+  const analysis = analyzeDesktopArtifact(source, absolutePath, root, entryId);
   const record = {
     id,
     path: displayPath,
@@ -334,7 +335,7 @@ function isJavaScriptModuleSpecifier(specifier) {
   return extension === "" || [".js", ".mjs", ".cjs", ".jsx", ".mjsx"].includes(extension);
 }
 
-function classifyReference(specifier, artifactPath, root) {
+function classifyReference(specifier, artifactPath, root, entryId) {
   const violations = [];
   const normalizedSpecifier = stripSpecifierQuery(specifier);
 
@@ -348,13 +349,13 @@ function classifyReference(specifier, artifactPath, root) {
 
   if (isWorkspacePackageSpecifier(specifier)) {
     violations.push({ code: "workspace_bare_import", message: `Workspace package must be bundled into the Desktop artifact: ${specifier}` });
-  } else if (isExternalSpecifier(specifier) && !isAllowedExternal(specifier)) {
+  } else if (isExternalSpecifier(specifier) && !isAllowedExternal(specifier, entryId)) {
     violations.push({ code: "non_allowlisted_external_reference", message: `Non-bundled external reference is not allowed: ${specifier}` });
   }
 
   return {
     external: isExternalSpecifier(specifier),
-    allowed_external: isAllowedExternal(specifier),
+    allowed_external: isAllowedExternal(specifier, entryId),
     violations
   };
 }
@@ -400,7 +401,8 @@ function printVerification(verification, json) {
   }
 }
 
-function isAllowedExternal(specifier) {
+function isAllowedExternal(specifier, entryId) {
+  if (entryId === "preload") return specifier === "electron" || sandboxedPreloadNodeBuiltins.has(specifier);
   return specifier === "electron" || nodeBuiltinNames.has(specifier);
 }
 

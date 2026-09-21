@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { nativePanelEdgeTransition, nativePanelWidthTransition } from "./native-panel-width";
 
 export const nativeSidebarWidthStorageKey = "samurai.native.sidebar-width.v1";
 export const nativeSidebarWidthDefault = 300;
 export const nativeSidebarWidthMin = 220;
 export const nativeSidebarWidthMax = 420;
+export const nativeSidebarCloseDragDistance = 110;
 
 export function clampNativeSidebarWidth(value: number): number {
   if (!Number.isFinite(value)) return nativeSidebarWidthDefault;
@@ -35,17 +37,21 @@ function writeNativeSidebarWidth(value: number): void {
 }
 
 type ResizeState = {
+  handle?: HTMLButtonElement;
   pointerId: number;
   startX: number;
   startWidth: number;
+  mode: "closed" | "split";
 };
 
-export function useNativeSidebarWidth(onClose?: () => void) {
+export function useNativeSidebarWidth(onClose?: () => void, onOpen?: () => void) {
   const [width, setWidthState] = useState(readNativeSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStateRef = useRef<ResizeState | undefined>(undefined);
   const onCloseRef = useRef(onClose);
+  const onOpenRef = useRef(onOpen);
   onCloseRef.current = onClose;
+  onOpenRef.current = onOpen;
 
   const setWidth = useCallback((next: number | ((current: number) => number)): void => {
     setWidthState((current) => {
@@ -56,18 +62,34 @@ export function useNativeSidebarWidth(onClose?: () => void) {
   }, []);
 
   const resetWidth = useCallback((): void => setWidth(nativeSidebarWidthDefault), [setWidth]);
+  const cancelResize = useCallback((): void => {
+    const state = resizeStateRef.current;
+    if (state?.handle?.hasPointerCapture?.(state.pointerId)) state.handle.releasePointerCapture?.(state.pointerId);
+    resizeStateRef.current = undefined;
+    setIsResizing(false);
+  }, []);
 
   const onPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>): void => {
     if (event.button !== 0) return;
     event.preventDefault();
     resizeStateRef.current = {
+      handle: event.currentTarget,
       pointerId: event.pointerId,
       startX: event.clientX,
-      startWidth: width
+      startWidth: width,
+      mode: "split"
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setIsResizing(true);
   }, [width]);
+
+  const onClosedPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>): void => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizeStateRef.current = { handle: event.currentTarget, pointerId: event.pointerId, startX: event.clientX, startWidth: nativeSidebarWidthMin, mode: "closed" };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setIsResizing(true);
+  }, []);
 
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLButtonElement>): void => {
     if (event.key === "ArrowLeft") {
@@ -97,34 +119,54 @@ export function useNativeSidebarWidth(onClose?: () => void) {
     const onPointerMove = (event: globalThis.PointerEvent): void => {
       const state = resizeStateRef.current;
       if (!state || event.pointerId !== state.pointerId) return;
+      if (state.mode === "closed") {
+        const distance = event.clientX - state.startX;
+        if (nativePanelEdgeTransition(distance, nativeSidebarCloseDragDistance) === "closed") return;
+        state.mode = "split";
+        state.startWidth = nativeSidebarWidthMin;
+        state.startX = event.clientX;
+        onOpenRef.current?.();
+      }
       const nextWidth = state.startWidth + event.clientX - state.startX;
-      if (nextWidth < nativeSidebarWidthMin) {
-        resizeStateRef.current = undefined;
-        setIsResizing(false);
+      const transition = nativePanelWidthTransition(state.startWidth, nextWidth, {
+        minWidth: nativeSidebarWidthMin,
+        closeDragDistance: nativeSidebarCloseDragDistance,
+        maxWidth: nativeSidebarWidthMax,
+        clampWidth: clampNativeSidebarWidth
+      });
+      if (transition.kind === "close") {
+        state.mode = "closed";
+        state.startX = event.clientX;
+        state.startWidth = nativeSidebarWidthMin;
         onCloseRef.current?.();
         return;
       }
-      setWidth(nextWidth);
+      if (transition.kind === "split") setWidth(transition.width);
     };
-    const finishResize = (event: globalThis.PointerEvent): void => {
+    const finishResize = (event?: globalThis.PointerEvent): void => {
       const state = resizeStateRef.current;
-      if (!state || event.pointerId !== state.pointerId) return;
+      if (!state || (event && event.pointerId !== state.pointerId)) return;
+      if (state.handle?.hasPointerCapture?.(state.pointerId)) state.handle.releasePointerCapture?.(state.pointerId);
       resizeStateRef.current = undefined;
       setIsResizing(false);
     };
+    const onWindowBlur = (): void => finishResize();
     document.documentElement.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.addEventListener("pointermove", onPointerMove);
     document.addEventListener("pointerup", finishResize);
     document.addEventListener("pointercancel", finishResize);
+    window.addEventListener("blur", onWindowBlur);
     return () => {
+      cancelResize();
       document.documentElement.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("pointermove", onPointerMove);
       document.removeEventListener("pointerup", finishResize);
       document.removeEventListener("pointercancel", finishResize);
+      window.removeEventListener("blur", onWindowBlur);
     };
-  }, [isResizing, setWidth]);
+  }, [cancelResize, isResizing, setWidth]);
 
-  return { width, isResizing, setWidth, resetWidth, onPointerDown, onKeyDown };
+  return { width, isResizing, setWidth, resetWidth, cancelResize, onPointerDown, onClosedPointerDown, onKeyDown };
 }
