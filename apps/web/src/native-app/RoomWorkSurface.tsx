@@ -744,10 +744,14 @@ function formatTimestamp(value: string | undefined): string {
 
 const attachmentPathPattern = /^attachments\/[A-Za-z0-9._-]{1,220}$/;
 
-function safeAttachmentName(value: string): string {
+function attachmentDisplayName(value: string): string {
   const basename = value.split(/[\\/]/).pop() ?? "file";
-  const normalized = basename.replace(/[\u0000-\u001f\u007f]/g, "_").trim().slice(0, 120);
+  const normalized = basename.replace(/[\u0000-\u001f\u007f]/g, "_").trim();
   return normalized || "file";
+}
+
+function safeAttachmentName(value: string): string {
+  return attachmentDisplayName(value).slice(0, 120) || "file";
 }
 
 function attachmentPath(id: string, name: string): string {
@@ -805,6 +809,8 @@ function formatAttachmentSize(size: number): string {
 function attachmentKindLabel(file: File): string {
   if (file.type.startsWith("image/")) return "画像";
   if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) return "PDF";
+  const extension = file.name.split(".").pop()?.trim();
+  if (extension && extension !== file.name && /^[a-z0-9]{1,12}$/i.test(extension)) return extension.toUpperCase();
   return file.type || "ファイル";
 }
 
@@ -1023,10 +1029,11 @@ const roomWorkStyles = [
   ".native-work-composer-block { margin-top: 28px; }",
   ".native-work-composer-label { color: var(--native-accent); display: block; font-size: 10px; letter-spacing: .1em; margin-bottom: 9px; text-transform: uppercase; }",
   ".native-work-composer-help { color: var(--native-dim); font-size: 10px; line-height: 1.6; margin: 8px 0 0; }",
-  ".native-work-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 3px; }",
-  ".native-work-attachment { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 7px; display: inline-flex; gap: 7px; max-width: 100%; padding: 6px 8px; }",
-  ".native-work-attachment-name { color: var(--native-copy); font-size: 10px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-  ".native-work-attachment-state { color: var(--native-dim); font-size: 9px; }",
+  ".native-work-attachments { display: flex; flex-wrap: nowrap; gap: 8px; margin: 0 0 2px; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 2px 1px 5px; scrollbar-width: thin; }",
+  ".native-work-attachment { align-items: center; border-radius: 8px; display: inline-flex; flex: 0 0 auto; gap: 7px; max-width: 100%; min-height: 64px; padding: 0; position: relative; }",
+  ".native-work-attachment.is-file { background: var(--native-panel-soft); border: 1px solid var(--native-line); min-width: 200px; padding: 7px 34px 7px 8px; }",
+  ".native-work-attachment-name { color: var(--native-copy); display: block; font-size: 10px; max-width: 146px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+  ".native-work-attachment-state { color: var(--native-dim); display: block; font-size: 9px; line-height: 1.35; max-width: 146px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
   ".native-work-resource-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 3px; }",
   ".native-work-resource-item { align-items: center; background: var(--native-accent-soft); border: 1px solid var(--native-line-strong); border-radius: 7px; color: var(--native-copy); display: inline-flex; font-size: 10px; gap: 6px; max-width: 100%; padding: 6px 8px; }",
   ".native-work-resource-item > span:first-child { color: var(--native-accent); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }",
@@ -1042,23 +1049,26 @@ const roomWorkStyles = [
   ".native-work-result-card-open { color: var(--native-accent); font-size: 10px; white-space: nowrap; }",
   ".native-work-resource-remove { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 12px; line-height: 1; padding: 0 0 0 2px; }",
   ".native-work-resource-remove:hover { color: var(--native-copy); }",
-  ".native-work-attachment.is-ready { border-color: var(--native-success); }",
-  ".native-work-attachment.is-ready .native-work-attachment-state { color: var(--native-success); }",
-  ".native-work-attachment.is-failed { border-color: var(--native-danger); }",
-  ".native-work-attachment.is-failed .native-work-attachment-state { color: var(--native-danger); }",
-  ".native-work-attachment-thumbnail { border-radius: 5px; height: 64px; object-fit: cover; width: 64px; }",
-  ".native-work-attachment-file-icon, .native-work-attachment-icon { align-items: center; color: var(--native-accent); display: inline-flex; flex: 0 0 auto; font-size: 10px; font-weight: 700; height: 64px; justify-content: center; width: 64px; }",
+  ".native-work-attachment.is-failed { box-shadow: inset 0 0 0 1px var(--native-danger); }",
+  ".native-work-attachment-thumbnail { border-radius: 8px; display: block; height: 64px; object-fit: cover; width: 64px; }",
+  ".native-work-attachment-image-state { align-items: center; background: var(--native-overlay, #000000c2); border-radius: 8px; color: var(--native-copy); display: flex; font-size: 9px; inset: 0; justify-content: center; position: absolute; }",
+  ".native-work-attachment-file-icon, .native-work-attachment-icon { align-items: center; color: var(--native-accent); display: inline-flex; flex: 0 0 auto; font-size: 10px; font-weight: 700; height: 32px; justify-content: center; width: 32px; }",
   ".native-work-attachment-main, .native-work-attachment-card-main { display: grid; gap: 2px; min-width: 0; }",
   ".native-work-attachment-meta { color: var(--native-dim); font-size: 9px; }",
   ".native-work-attachment button { background: transparent; border: 0; color: var(--native-muted); cursor: pointer; font: inherit; font-size: 10px; padding: 2px; }",
   ".native-work-attachment button:hover { color: var(--native-copy); }",
-  ".native-work-attachment-list { color: var(--native-muted); display: grid; gap: 5px; margin: 8px 0 0; }",
+  ".native-work-attachment button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
+  ".native-work-attachment-remove { align-items: center; background: var(--native-panel) !important; border: 0; border-radius: 50%; display: inline-flex; font-size: 15px !important; height: 22px; justify-content: center; line-height: 1; padding: 0 !important; position: absolute; right: 4px; top: 4px; width: 22px; z-index: 1; }",
+  ".native-work-attachment.is-image .native-work-attachment-remove { background: var(--native-overlay, #000000c2) !important; color: var(--native-copy); }",
+  ".native-work-attachment-retry { color: var(--native-accent) !important; font-size: 9px !important; margin-left: 2px; padding: 2px 4px !important; } .native-work-attachment.is-image .native-work-attachment-retry { background: var(--native-panel) !important; border-radius: 999px; bottom: 4px; left: 4px; margin: 0; position: absolute; z-index: 2; }",
+  ".native-work-attachment-list { align-items: flex-start; color: var(--native-muted); display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 0; }",
   ".native-work-attachment-item { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; font-size: 10px; }",
   ".native-work-attachment-item::before { color: var(--native-accent); content: '↳'; }",
   ".native-work-attachment-action { color: var(--native-accent); font-size: 9px; }",
-  ".native-work-attachment-card { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 8px; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 7px 8px; } .native-work-attachment-card.is-ready { border-color: var(--native-line-strong); } .native-work-attachment-card.is-failed, .native-work-attachment-card.is-version-mismatch { border-color: var(--native-danger); } .native-work-attachment-card small { color: var(--native-dim); font-size: 9px; overflow-wrap: anywhere; } .native-work-attachment-card button { background: transparent; border: 0; color: var(--native-accent); cursor: pointer; font: inherit; font-size: 10px; padding: 3px 5px; } .native-work-attachment-card-actions { display: inline-flex; gap: 4px; margin-left: auto; }",
-  ".native-work-attachment-preview-button { background: transparent; border: 0; cursor: zoom-in; margin-left: auto; padding: 0; } .native-work-attachment-preview-button img { border-radius: 5px; display: block; height: 48px; max-width: 80px; object-fit: contain; width: 80px; } .native-work-attachment-viewer { border: 1px solid var(--native-line); border-radius: 5px; height: 170px; max-width: 100%; width: min(360px, 100%); } .native-work-attachment-text-viewer { background: var(--native-panel); border: 1px solid var(--native-line); border-radius: 5px; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 170px; max-width: 100%; overflow: auto; padding: 7px; white-space: pre-wrap; width: min(360px, 100%); }",
-  ".native-work-attachment-lightbox { align-items: center; background: var(--native-overlay, #000000c2); display: flex; inset: 0; justify-content: center; position: fixed; z-index: 80; } .native-work-attachment-lightbox > button { color: var(--native-copy); font-size: 22px; position: absolute; right: 18px; top: 12px; } .native-work-attachment-lightbox img { max-height: 90vh; max-width: 90vw; object-fit: contain; }",
+  ".native-work-attachment-card { align-items: center; background: var(--native-panel-soft); border: 1px solid var(--native-line); border-radius: 8px; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 8px 10px; } .native-work-attachment-card.is-failed, .native-work-attachment-card.is-version-mismatch { border-color: var(--native-danger); } .native-work-attachment-card small { color: var(--native-dim); font-size: 9px; overflow-wrap: anywhere; } .native-work-attachment-card button { background: transparent; border: 0; color: var(--native-accent); cursor: pointer; font: inherit; font-size: 10px; padding: 3px 5px; } .native-work-attachment-card-actions { display: inline-flex; gap: 4px; margin-left: auto; }",
+  ".native-work-attachment-media { margin: 0; max-width: min(320px, 100%); } .native-work-attachment-media-button { background: transparent; border: 0; cursor: zoom-in; display: block; max-width: 100%; padding: 0; } .native-work-attachment-media-button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 3px; } .native-work-attachment-media-button img { border-radius: 8px; display: block; max-height: 240px; max-width: min(320px, 100%); object-fit: contain; width: auto; }",
+  ".native-work-attachment-viewer-dialog { align-items: center; background: var(--native-overlay, #000000c2); display: flex; inset: 0; justify-content: center; padding: 24px; position: fixed; z-index: 80; } .native-work-attachment-viewer-panel { background: var(--native-panel); border: 1px solid var(--native-line-strong); border-radius: 10px; display: grid; gap: 12px; max-height: 90vh; max-width: min(760px, 100%); min-width: min(320px, 100%); overflow: auto; padding: 14px; position: relative; } .native-work-attachment-viewer-header { align-items: center; display: flex; gap: 12px; justify-content: space-between; } .native-work-attachment-viewer-header strong { color: var(--native-copy); font-size: 12px; max-width: 560px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .native-work-attachment-viewer-header small { color: var(--native-dim); display: block; font-size: 9px; margin-top: 3px; } .native-work-attachment-viewer-close { color: var(--native-muted) !important; font-size: 20px !important; padding: 0 !important; } .native-work-attachment-viewer-image { border-radius: 8px; display: block; max-height: 70vh; max-width: min(720px, 80vw); object-fit: contain; } .native-work-attachment-viewer { border: 1px solid var(--native-line); border-radius: 5px; height: min(70vh, 560px); max-width: 100%; width: min(720px, 80vw); } .native-work-attachment-text-viewer { background: var(--native-panel); border: 1px solid var(--native-line); border-radius: 5px; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: min(70vh, 560px); max-width: 100%; min-height: 120px; overflow: auto; padding: 10px; white-space: pre-wrap; width: min(720px, 80vw); }",
+  ".native-work-attachment-lightbox-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; } .native-work-attachment-lightbox-actions button { background: transparent; border: 1px solid var(--native-line-strong); border-radius: 999px; color: var(--native-copy); cursor: pointer; font: inherit; font-size: 10px; padding: 5px 10px; } .native-work-attachment-lightbox-actions button:hover { background: var(--native-panel-soft); } .native-work-attachment-lightbox-actions button:focus-visible { outline: 2px solid var(--native-accent); outline-offset: 2px; }",
   ".native-work-surface .native-composer-wrap { box-sizing: border-box; max-width: var(--native-room-thread-max-width); padding: 14px var(--native-room-thread-gutter) 18px; }",
   ".native-work-surface .native-composer { background: var(--native-surface-raised); border: 0; border-radius: 22px; box-shadow: none; display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 14px 16px 12px; position: relative; }",
   ".native-work-surface .native-composer:focus-within { border: 0; box-shadow: none; outline: 0; }",
@@ -1453,7 +1463,7 @@ export function RoomWorkSurface({
   ): void => {
     for (const file of files) {
       const id = createIdempotencyKey();
-      const name = safeAttachmentName(file.name);
+      const name = attachmentDisplayName(file.name);
       const draft: RoomAttachmentDraft = {
         id,
         name,
@@ -1517,14 +1527,17 @@ export function RoomWorkSurface({
   ) => drafts.length ? (
     <div className="native-work-attachments" aria-label="添付ファイル">
       {drafts.map((draft) => (
-        <div className={`native-work-attachment is-${draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "failed" : draft.status}`} key={draft.id}>
-          {draft.previewUrl ? <img className="native-work-attachment-thumbnail" src={draft.previewUrl} alt="" /> : <span className="native-work-attachment-file-icon" aria-hidden="true">{attachmentKindLabel(draft.file) === "PDF" ? "PDF" : "↧"}</span>}
-          <span className="native-work-attachment-main"><span className="native-work-attachment-name" title={draft.name}>{draft.name}</span><span className="native-work-attachment-meta">{attachmentKindLabel(draft.file)} · {formatAttachmentSize(draft.size)}</span></span>
-          <span className="native-work-attachment-state">
-            {draft.status === "uploading" ? "アップロード中…" : draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "参照が無効" : draft.status === "ready" ? "添付済み" : draft.error ?? "アップロード失敗"}
-          </span>
-          {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <button type="button" onClick={() => void uploadAttachment(draft, setDrafts)}>再試行</button> : null}
-          <button type="button" aria-label={`${draft.name}を外す`} onClick={() => removeAttachment(draft.id, setDrafts)}>外す</button>
+        <div className={`native-work-attachment ${draft.previewUrl ? "is-image" : "is-file"} is-${draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "failed" : draft.status}`} key={draft.id} role="group" aria-label={`${draft.name} ${attachmentKindLabel(draft.file)}`} title={draft.name}>
+          {draft.previewUrl ? (
+            <>
+              <img className="native-work-attachment-thumbnail" src={draft.previewUrl} alt={draft.name} />
+              {draft.status === "uploading" ? <span className="native-work-attachment-image-state" role="status">アップロード中…</span> : null}
+              {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <span className="native-work-attachment-image-state" role="alert">失敗</span> : null}
+            </>
+          ) : <span className="native-work-attachment-file-icon" aria-hidden="true">{attachmentKindLabel(draft.file) === "PDF" ? "PDF" : "↧"}</span>}
+          {!draft.previewUrl ? <span className="native-work-attachment-main"><span className="native-work-attachment-name" title={draft.name}>{draft.name}</span><span className="native-work-attachment-meta">{attachmentKindLabel(draft.file)} · {formatAttachmentSize(draft.size)}</span><span className="native-work-attachment-state">{draft.status === "uploading" ? "アップロード中…" : draft.status === "ready" && !safeAttachmentRef(draft.resourceRef) ? "参照が無効" : draft.status === "failed" ? draft.error ?? "アップロード失敗" : null}</span></span> : null}
+          {draft.status === "failed" || (draft.status === "ready" && !safeAttachmentRef(draft.resourceRef)) ? <button className="native-work-attachment-retry" type="button" onClick={() => void uploadAttachment(draft, setDrafts)}>再試行</button> : null}
+          <button className="native-work-attachment-remove" type="button" aria-label={`${draft.name}を外す`} title="添付を外す" onClick={() => removeAttachment(draft.id, setDrafts)}>×</button>
         </div>
       ))}
     </div>
@@ -2117,8 +2130,8 @@ export function RoomWorkSurface({
               {replyAssigneeRequired ? <span id="native-work-reply-assignee-help" className="native-work-reply-note is-required">未終端の担当が複数あるため、返信先を指定してから送信してください。</span> : null}
             </div>
           ) : null}
-          <textarea ref={workComposerInputRef} className="native-room-work-composer-input" id="native-room-work-input" rows={1} value={workDraft} onInput={handleComposerInput} onChange={handleComposerChange} onKeyDown={handleComposerKeyDown} onPaste={(event) => pasteAttachments(event, setWorkAttachmentDrafts)} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
           {renderAttachmentDrafts(workAttachmentDrafts, setWorkAttachmentDrafts)}
+          <textarea ref={workComposerInputRef} className="native-room-work-composer-input" id="native-room-work-input" rows={1} value={workDraft} onInput={handleComposerInput} onChange={handleComposerChange} onKeyDown={handleComposerKeyDown} onPaste={(event) => pasteAttachments(event, setWorkAttachmentDrafts)} placeholder={replyActive ? "メッセージを入力…" : !defaultAgentReady ? "既定Agentを設定すると新しい依頼を送れます" : "メッセージを入力…"} disabled={composerBlocked} />
           {workResourceRefsForSend.length ? (
             <div className="native-work-resource-list" aria-label="仕事で使うKnowledgeとSkill">
               {workResourceRefsForSend.map((ref) => (
