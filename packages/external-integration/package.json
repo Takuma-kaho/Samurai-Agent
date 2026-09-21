@@ -15,10 +15,10 @@
   "dependencies": {
     "@samurai-agent/core-schemas": "workspace:*",
     "ajv": "8.18.0",
-    "semver": "7.8.4",
+    "semver": "7.8.5",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/semver": "7.7.1"
+    "@types/semver": "7.8.0"
   }
 }
