@@ -92,3 +92,22 @@ Buzzの上部クロームは、macOSの通常ウィンドウ時だけ信号ボ�
 未検証:
 
 - 3テーマ・狭幅・IME入力・実Agent実行はこのCSS修正では再確認していない。
+
+## 2026-09-21 PR CI失敗の最小修正
+
+PR #40の失敗は、実装変更後も残ったRoomNavigatorの旧DOM期待と、`use-native-workspace-navigation-history.ts`末尾の空行だった。
+
+- 深いRoom階層は廃止済みの`--native-room-depth`ではなく、入れ子の`native-room-children`を確認するようテストを更新した。
+- Room／Agent DMの表示は廃止済みの文字マーカーではなく、現行SVGアイコンのclassを確認するようテストを更新した。
+- 末尾の余分な空行を削除した。
+
+実行結果:
+
+- `pnpm test -- apps/web/src/components/native-app-components.test.ts --pool=forks --maxWorkers=1` — passed（25 tests）。
+- `git diff --check` — passed。
+- `CI=true pnpm test -- --pool=forks --maxWorkers=4` — passed（227 files、1737 tests、6 skipped）。
+- `CI=true pnpm run backend:release:verify -- --json` — passed（required gates）。
+
+未検証:
+
+- 今回はCI失敗を直すテスト・空白だけの変更であり、実Server、Electron、3テーマの画面操作は再実行していない。

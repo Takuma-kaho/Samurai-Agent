@@ -66,4 +66,3 @@ export function useNativeWorkspaceNavigationHistory() {
     moveForward
   }), [moveBack, moveForward, record, reset, state]);
 }
-

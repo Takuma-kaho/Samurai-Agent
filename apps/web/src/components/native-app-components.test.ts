@@ -279,7 +279,7 @@ describe("Native App component states", () => {
       onSelect: vi.fn()
     }));
 
-    expect(markup).toContain("--native-room-depth:8");
+    expect((markup.match(/class="native-room-list native-room-children"/g) ?? [])).toHaveLength(8);
     expect(markup).toContain("読み取り専用");
     const readOnlyStart = markup.indexOf("Room 8");
     expect(markup.slice(readOnlyStart - 180, readOnlyStart + 160)).not.toContain("disabled");
@@ -288,7 +288,7 @@ describe("Native App component states", () => {
     expect(markup).toContain("閲覧不可");
   });
 
-  it("keeps nested Rooms beside their parent, separates Agent DM, and uses Room markers", () => {
+  it("keeps nested Rooms beside their parent, separates Agent DM, and uses Room icons", () => {
     const markup = renderToStaticMarkup(createElement(RoomNavigator, {
       rooms: [
         { id: "child", workspaceId: "workspace_1", name: "Child", parentRoomId: "parent" },
@@ -304,8 +304,8 @@ describe("Native App component states", () => {
     expect(markup).toContain("native-room-children");
     expect(markup).toContain('aria-label="Room"');
     expect(markup).toContain('aria-label="ダイレクトメッセージ"');
-    expect(markup).toContain('class="native-room-mark" aria-hidden="true">#</span>');
-    expect(markup).toContain('class="native-room-dm-mark" aria-hidden="true">◉</span>');
+    expect(markup).toContain('class="native-room-icon"');
+    expect(markup).toContain('class="native-room-icon native-room-dm-icon"');
     expect(markup).toContain("Agent DM");
     expect(markup).toContain("Agent DM・非公開");
   });
